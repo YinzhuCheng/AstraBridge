@@ -5654,7 +5654,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertNotIn("_unlock_key", created["session"])
             manager.save_key({"provider_id": "deepseek", "label": "DeepSeek main", "env_key": "DEEPSEEK_API_KEY", "secret": "unit_secret_deepseek_value"})
 
-            vault_text = (root / "manager" / "users" / "user" / "vault.lcrvault").read_text(encoding="utf-8")
+            vault_text = (root / "manager" / "users" / "user" / "vault.abvault").read_text(encoding="utf-8")
             self.assertNotIn("unit_secret_deepseek_value", vault_text)
             self.assertNotIn("correct horse", vault_text)
 
@@ -9119,6 +9119,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
