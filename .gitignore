@@ -24,3 +24,9 @@ playwright-report/
 Thumbs.db
 .vscode/
 .idea/
+
+# Local private property: never push real secrets or authorization material
+PRIVATE/**
+!PRIVATE/
+!PRIVATE/README.md
+

@@ -57,3 +57,11 @@ Recommended next test work:
 2. Rename stale `.lcr` expectations to `.astrabridge` except explicit legacy-import tests.
 3. Rewrite legacy project tests around explicit `.lcrproj/.lcr` import, not old `.codexproj` auto-migration unless the product keeps that path.
 4. Install desktop dependencies in the new repo and run `npm run build`.
+## Private credentials handoff
+
+AstraBridge can point developers to local private-property credential locations, but actual secrets must remain outside public git history.
+
+- See `PRIVATE/README.md` for local-only paths and rules.
+- Store durable provider keys in the encrypted app vault when possible: `%APPDATA%/AstraBridge/llm_api_manager/users/<username>/vault.abvault`.
+- Use environment variables for automation or CI-like local runs.
+- Never push `PRIVATE/secrets/`, real provider keys, `Authorization` headers, cookies, bearer tokens, or raw provider responses to a public remote.
