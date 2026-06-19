@@ -1,0 +1,20 @@
+﻿[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "astrabridge-sidecar"
+version = "0.1.0"
+description = "AstraBridge sidecar for projects, provider routing, tools, metadata, and Codex app-server mediation."
+requires-python = ">=3.10"
+dependencies = [
+  "cryptography>=42.0.0",
+]
+
+[project.scripts]
+astrabridge-sidecar = "astrabridge_sidecar.server:main"
+
+[tool.setuptools.packages.find]
+include = ["astrabridge_sidecar*"]
+
+

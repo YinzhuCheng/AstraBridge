@@ -1,0 +1,8 @@
+﻿{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Research OS main window with no direct shell or filesystem permissions.",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default"]
+}
+

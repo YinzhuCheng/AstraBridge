@@ -1,0 +1,36 @@
+﻿{
+    "name":  "astrabridge-desktop",
+    "private":  true,
+    "version":  "0.1.0",
+    "type":  "module",
+    "scripts":  {
+                    "dev":  "node ./node_modules/vite/bin/vite.js --host 127.0.0.1",
+                    "build":  "node ./node_modules/typescript/bin/tsc \u0026\u0026 node ./node_modules/vite/bin/vite.js build",
+                    "preview":  "node ./node_modules/vite/bin/vite.js preview --host 127.0.0.1",
+                    "test":  "node ./node_modules/vitest/vitest.mjs run",
+                    "tauri":  "tauri"
+                },
+    "dependencies":  {
+                         "@tanstack/react-query":  "^5.62.7",
+                         "@tauri-apps/api":  "^2.2.0",
+                         "lucide-react":  "^0.468.0",
+                         "react":  "^18.3.1",
+                         "react-dom":  "^18.3.1",
+                         "zustand":  "^5.0.2"
+                     },
+    "devDependencies":  {
+                            "@playwright/test":  "^1.49.1",
+                            "@tauri-apps/cli":  "^2.2.1",
+                            "@testing-library/jest-dom":  "^6.6.3",
+                            "@testing-library/react":  "^16.1.0",
+                            "@testing-library/user-event":  "^14.5.2",
+                            "@types/react":  "^18.3.18",
+                            "@types/react-dom":  "^18.3.5",
+                            "@vitejs/plugin-react":  "^4.3.4",
+                            "eslint":  "^9.17.0",
+                            "jsdom":  "^25.0.1",
+                            "typescript":  "^5.7.2",
+                            "vite":  "^6.0.5",
+                            "vitest":  "^2.1.8"
+                        }
+}

@@ -1,0 +1,42 @@
+﻿{
+  "providers": [
+    {
+      "provider_id": "yunwu",
+      "display_name": "Yunwu",
+      "source_status": "screenshot_seed",
+      "urls": [
+        "https://yunwu.apifox.cn/api-232421952",
+        "https://yunwu.apifox.cn/api-425475208",
+        "https://yunwu.apifox.cn/api-425481728",
+        "https://yunwu.ai/pricing?group=Codex%E4%B8%93%E5%B1%9E"
+      ],
+      "notes": "Machine fetch currently does not expose readable Apifox content; use screenshot seed and OpenAI-compatible capability inference."
+    },
+    {
+      "provider_id": "deepseek",
+      "display_name": "DeepSeek",
+      "source_status": "official_docs",
+      "urls": ["https://api-docs.deepseek.com/zh-cn/"]
+    },
+    {
+      "provider_id": "kimi",
+      "display_name": "Kimi",
+      "source_status": "official_docs",
+      "urls": ["https://platform.kimi.com/docs/overview", "https://platform.kimi.com/docs/models"]
+    },
+    {
+      "provider_id": "qwen",
+      "display_name": "Qwen / DashScope",
+      "source_status": "official_docs",
+      "urls": [
+        "https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions",
+        "https://help.aliyun.com/zh/model-studio/models",
+        "https://help.aliyun.com/zh/model-studio/newly-released-models",
+        "https://help.aliyun.com/zh/model-studio/qwen-api-via-dashscope",
+        "https://qwen.ai/blog?id=qwen3.7",
+        "https://qwen.ai/apiplatform"
+      ]
+    }
+  ]
+}
+

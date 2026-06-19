@@ -1,0 +1,30 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="AstraBridge icon">
+  <defs>
+    <radialGradient id="sky" cx="50%" cy="38%" r="75%">
+      <stop offset="0" stop-color="#173B78"/>
+      <stop offset="0.52" stop-color="#091C3E"/>
+      <stop offset="1" stop-color="#050A18"/>
+    </radialGradient>
+    <linearGradient id="bridge" x1="120" y1="680" x2="904" y2="330" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#70E6FF"/>
+      <stop offset="0.52" stop-color="#8AA8FF"/>
+      <stop offset="1" stop-color="#F5D47A"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" rx="220" fill="url(#sky)"/>
+  <g fill="#FFFFFF" opacity="0.78">
+    <circle cx="190" cy="220" r="6"/><circle cx="282" cy="150" r="3"/><circle cx="790" cy="205" r="5"/><circle cx="855" cy="366" r="3"/>
+  </g>
+  <path d="M150 665 C315 405, 715 405, 874 665" fill="none" stroke="url(#bridge)" stroke-width="54" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M202 675 C350 520, 670 520, 822 675" fill="none" stroke="#EAF7FF" stroke-width="16" stroke-linecap="round" opacity="0.76"/>
+  <g filter="url(#glow)">
+    <path d="M512 337 L628 512 L512 692 L396 512 Z" fill="#101B3B" stroke="#F5D47A" stroke-width="22"/>
+    <path d="M512 372 L594 512 L512 652 L430 512 Z" fill="#55D7FF" opacity="0.72"/>
+    <path d="M512 372 L594 512 L512 512 Z" fill="#F8E7A0" opacity="0.82"/>
+    <path d="M512 512 L512 652 L430 512 Z" fill="#A98BFF" opacity="0.72"/>
+  </g>
+</svg>
