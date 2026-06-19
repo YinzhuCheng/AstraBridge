@@ -35,3 +35,25 @@ Excluded: dependencies, build outputs, caches, dogfood artifacts, runtime logs, 
 - Do not write official Codex `~/.codex/config.toml` during normal use.
 - Do not create project `.codex*` files.
 - Do not reintroduce `openai_account` as a user session mode.
+
+## Validation Status From Migration Session
+
+Passed:
+
+- `openai_account`, `openai-account`, `codex_managed_auth`, and `Use OpenAI official` are absent from `apps/`.
+- Project constants smoke passed: `.abproj`, `.astrabridge`, `astrabridge-project-v1`, `AstraBridge` app data, and AstraBridge CODEX_HOME env overrides.
+- Python AST parse passed for sidecar source.
+- Tauri and package JSON parse passed.
+- Local git repository initialized and committed.
+
+Not yet green:
+
+- Full inherited sidecar unittest suite still needs migration cleanup. Current failures are mostly stale LCR assertions (`.lcr`, `vault.lcrvault`, old asset-context wording), old legacy `.codexproj` behavior, and test environment assumptions around `ASTRABRIDGE_CODEX_HOME`.
+- Windows `node` is not on the current shell PATH, so desktop TypeScript/Vite build was not run in this session.
+
+Recommended next test work:
+
+1. Add a test fixture that sets both `ASTRABRIDGE_APPDATA` and `ASTRABRIDGE_CODEX_HOME` to temp paths for every sidecar test.
+2. Rename stale `.lcr` expectations to `.astrabridge` except explicit legacy-import tests.
+3. Rewrite legacy project tests around explicit `.lcrproj/.lcr` import, not old `.codexproj` auto-migration unless the product keeps that path.
+4. Install desktop dependencies in the new repo and run `npm run build`.
