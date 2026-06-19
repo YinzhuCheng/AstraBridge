@@ -47,7 +47,7 @@ class LlmApiManagerService:
         users = []
         if self.users_root.exists():
             for path in sorted(self.users_root.iterdir()):
-                if path.is_dir() and (path / "vault.lcrvault").exists():
+                if path.is_dir() and (path / "vault.abvault").exists():
                     profile = self._user_profile(path.name)
                     users.append({"username": path.name, "has_vault": True, **profile})
         return {"users": users}
@@ -56,7 +56,7 @@ class LlmApiManagerService:
         username = self._normalize_username(payload.get("username") or "user")
         password = self._password_from_payload(payload, allow_desktop_default=username == "user")
         user_dir = self._user_dir(username)
-        vault_path = user_dir / "vault.lcrvault"
+        vault_path = user_dir / "vault.abvault"
         if vault_path.exists():
             raise ValueError(f"User vault already exists: {username}")
         vault = self._new_vault(username)
@@ -422,11 +422,11 @@ class LlmApiManagerService:
             "created_at": vault.get("created_at") or now_iso(),
             "updated_at": now_iso(),
         }
-        write_json(user_dir / "vault.lcrvault", encrypted)
+        write_json(user_dir / "vault.abvault", encrypted)
         return key.hex()
 
     def _read_encrypted_vault(self, username: str, password: str) -> tuple[dict[str, Any], str]:
-        path = self._user_dir(username) / "vault.lcrvault"
+        path = self._user_dir(username) / "vault.abvault"
         if not path.exists():
             raise ValueError(f"No vault exists for user: {username}")
         payload = read_json(path, {})
@@ -452,7 +452,7 @@ class LlmApiManagerService:
         username = str(self._session.get("username") or self._vault_plain.get("username") or "")
         if not username:
             raise ValueError("No active user.")
-        current = read_json(self._user_dir(username) / "vault.lcrvault", {})
+        current = read_json(self._user_dir(username) / "vault.abvault", {})
         crypto = dict(current.get("crypto") or {})
         if not crypto:
             raise ValueError("Active vault cannot be saved because the encrypted header is missing.")
@@ -467,7 +467,7 @@ class LlmApiManagerService:
         plaintext = json.dumps({**self._vault_plain, "updated_at": now_iso()}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ciphertext = self._aesgcm_encrypt(bytes.fromhex(str(unlock_key)), nonce, plaintext, username.encode("utf-8"))
         write_json(
-            self._user_dir(username) / "vault.lcrvault",
+            self._user_dir(username) / "vault.abvault",
             {
                 "schema_version": ENCRYPTED_VAULT_SCHEMA,
                 "username": username,
@@ -768,5 +768,6 @@ SECRET_LIKE_RE = re.compile(r"(sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9._\-]{8,
 
 def _redact_secret_like(value: str) -> str:
     return SECRET_LIKE_RE.sub("[redacted]", value)
+
 
 
