@@ -65,3 +65,6 @@ AstraBridge can point developers to local private-property credential locations,
 - Store durable provider keys in the encrypted app vault when possible: `%APPDATA%/AstraBridge/llm_api_manager/users/<username>/vault.abvault`.
 - Use environment variables for automation or CI-like local runs.
 - Never push `PRIVATE/secrets/`, real provider keys, `Authorization` headers, cookies, bearer tokens, or raw provider responses to a public remote.
+## Next required document
+
+Before feature work resumes, follow `PLAN/02_PRODUCT_STABILIZATION_HANDOFF.md`. It is the stabilization gate for tests, build, installer, secret handling, and product UI backlog.
