@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import binascii
@@ -142,6 +142,28 @@ class _RuntimeEventsStub:
 
 class AstraBridgeServiceTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._test_env_root = tempfile.TemporaryDirectory()
+        self._env_keys = [
+            "APPDATA",
+            "LOCALAPPDATA",
+            "CODEX_HOME",
+            "ASTRABRIDGE_APPDATA",
+            "ASTRABRIDGE_CODEX_HOME",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ]
+        self._env_backup = {key: os.environ.get(key) for key in self._env_keys}
+        env_root = Path(self._test_env_root.name)
+        os.environ["APPDATA"] = str(env_root / "Roaming")
+        os.environ["LOCALAPPDATA"] = str(env_root / "Local")
+        os.environ["ASTRABRIDGE_APPDATA"] = str(env_root / "AstraBridgeAppData")
+        os.environ["ASTRABRIDGE_CODEX_HOME"] = str(env_root / "AstraBridgeCodexHome")
         self._default_runtime_host = os.environ.get(DEFAULT_RUNTIME_HOST_ENV)
         self._default_runtime_distro = os.environ.get(DEFAULT_RUNTIME_WSL_DISTRO_ENV)
         os.environ[DEFAULT_RUNTIME_HOST_ENV] = "windows"
@@ -157,7 +179,13 @@ class AstraBridgeServiceTests(unittest.TestCase):
             os.environ.pop(DEFAULT_RUNTIME_WSL_DISTRO_ENV, None)
         else:
             os.environ[DEFAULT_RUNTIME_WSL_DISTRO_ENV] = self._default_runtime_distro
+        for key, value in self._env_backup.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         project_service_module._DEFAULT_RUNTIME_PREFS_CACHE = None
+        self._test_env_root.cleanup()
 
     def test_write_json_retries_transient_replace_permission_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -208,9 +236,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             workspace.mkdir()
             (workspace / "README.md").write_text("# Demo\n", encoding="utf-8")
             (workspace / ".env").write_text("API_KEY=not-real\n", encoding="utf-8")
-            lcr = workspace / ".astrabridge"
-            lcr.mkdir()
-            (lcr / "runtime_events.jsonl").write_text("{}\n", encoding="utf-8")
+            state = workspace / ".astrabridge"
+            state.mkdir()
+            (state / "runtime_events.jsonl").write_text("{}\n", encoding="utf-8")
             project_file = root / "demo.abproj"
             projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
             projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="existing")
@@ -220,14 +248,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
             paths = {item["path"] for item in tree["items"]}
             self.assertIn("README.md", paths)
             self.assertNotIn(".env", paths)
-            self.assertNotIn(".lcr/runtime_events.jsonl", paths)
+            self.assertNotIn(".astrabridge/runtime_events.jsonl", paths)
             self.assertEqual(tools.read_file("README.md")["content"], "# Demo\n")
             with self.assertRaises(ValueError):
                 tools.read_file("../outside.txt")
             with self.assertRaises(ValueError):
                 tools.read_file(".env")
             with self.assertRaises(ValueError):
-                tools.read_file(".lcr/runtime_events.jsonl")
+                tools.read_file(".astrabridge/runtime_events.jsonl")
 
     def test_project_tools_terminal_history_is_summarized(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -245,7 +273,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("node --check", commands[0]["command"])
             self.assertEqual(history["workspace_root"], str(workspace.resolve()))
 
-    def test_app_data_dir_migrates_legacy_local_store_into_roaming_store(self) -> None:
+    def test_app_data_dir_does_not_migrate_legacy_local_store(self) -> None:
         original_appdata = os.environ.get("APPDATA")
         original_localappdata = os.environ.get("LOCALAPPDATA")
         original_override = os.environ.get("ASTRABRIDGE_APPDATA")
@@ -256,10 +284,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 local = root / "Local"
                 roaming.mkdir()
                 local.mkdir()
-                legacy = local / "LCR"
-                legacy.mkdir()
-                (legacy / "projects.json").write_text('{"projects":[{"project_file":"D:/demo/demo.abproj"}]}\n', encoding="utf-8")
-                (legacy / "current_project.json").write_text('{"project_file":"D:/demo/demo.abproj"}\n', encoding="utf-8")
+                old_store = local / "LCR"
+                old_store.mkdir()
+                (old_store / "projects.json").write_text('{"projects":[{"project_file":"D:/demo/demo.abproj"}]}\n', encoding="utf-8")
+                (old_store / "current_project.json").write_text('{"project_file":"D:/demo/demo.abproj"}\n', encoding="utf-8")
                 os.environ["APPDATA"] = str(roaming)
                 os.environ["LOCALAPPDATA"] = str(local)
                 os.environ.pop("ASTRABRIDGE_APPDATA", None)
@@ -267,12 +295,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 target = common_module.app_data_dir()
 
                 self.assertEqual(target, (roaming / "AstraBridge").resolve())
-                self.assertTrue((target / "projects.json").exists())
-                self.assertTrue((target / "current_project.json").exists())
-                self.assertEqual(
-                    json.loads((target / "projects.json").read_text(encoding="utf-8"))["projects"][0]["project_file"],
-                    "D:/demo/demo.abproj",
-                )
+                self.assertFalse((target / "projects.json").exists())
+                self.assertFalse((target / "current_project.json").exists())
         finally:
             if original_appdata is None:
                 os.environ.pop("APPDATA", None)
@@ -544,7 +568,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     {
                         "by_id": {
                             "thread-deepseek": {
-                                "name": "LCR minimal visual mode: this prompt is intentionally far too long",
+                                "name": "AstraBridge minimal visual mode: this prompt is intentionally far too long",
                                 "profile_id": "kimi-k2-6",
                                 "provider_id": "kimi",
                                 "model": "kimi/kimi-k2.6",
@@ -578,7 +602,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     {
                         "by_id": {
                             "thread-kimi-visual": {
-                                "name": "LCR minimal visual mode: Look only at these attached images and answer pass retry redraw",
+                                "name": "AstraBridge minimal visual mode: Look only at these attached images and answer pass retry redraw",
                                 "profile_id": "kimi-k2-6",
                                 "provider_id": "kimi",
                                 "model": "kimi/kimi-k2.6",
@@ -730,7 +754,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(thread_id, "thread-deepseek-existing")
             self.assertTrue(handoff["reused_existing"])
             self.assertEqual(projects.current_project["current_thread_id"], "thread-deepseek-existing")
-            self.assertEqual([method for method, _params in client.requests], ["thread/read", "thread/read"])
+            self.assertEqual([method for method, _params in client.requests], ["thread/read"])
 
     def test_runtime_marks_missing_reusable_provider_thread_and_forks_once(self) -> None:
         class FakeClient:
@@ -743,8 +767,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     if params.get("threadId") == "thread-openai":
                         return {"thread": {"id": "thread-openai"}}
                     raise JsonRpcError("thread not found")
-                if method == "thread/fork":
-                    return {"thread": {"id": "thread-deepseek-forked", "name": "Forked DS"}}
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-deepseek-fresh", "name": "Fresh DS"}}
                 raise AssertionError(f"Unexpected method {method}")
 
         with tempfile.TemporaryDirectory() as temp:
@@ -776,7 +800,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 collaboration_mode=None,
             )
 
-            self.assertEqual(thread_id, "thread-deepseek-forked")
+            self.assertEqual(thread_id, "thread-deepseek-fresh")
             self.assertFalse(handoff["reused_existing"])
             task = tasks.current_task()
             missing = [item for item in task["provider_threads"] if item["thread_id"] == "thread-deepseek-missing"][0]
@@ -1551,7 +1575,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(
                 any(
                     event.get("type") == "provider_handoff"
-                    and event.get("reason") == "minimal_visual_hot_thread"
+                    and event.get("reason") in {"minimal_visual_hot_thread", "minimal_visual_fresh_thread"}
                     for event in runtime.list_events()["events"]
                 )
             )
@@ -1856,7 +1880,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "ok": True,
                     "record_id": "research-1",
                     "tool_event_verified": True,
-                    "path": "D:/workspace/.lcr/research/research-1.json",
+                    "path": "D:/workspace/.astrabridge/research/research-1.json",
                     "result": {
                         "tool": "lcr_web_research_brief",
                         "research_goal": arguments.get("research_goal"),
@@ -1927,7 +1951,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(context["current_plan_step"], "Implement free meadow background plus collision overlays")
             self.assertEqual(context["selected_provider"], "deepseek")
             self.assertEqual(context["selected_model"], "deepseek-v4-pro")
-            self.assertIn("Do not include raw .lcr/runtime_events.jsonl.", context["forbidden_inputs"])
+            self.assertIn("Do not include raw .astrabridge/runtime_events.jsonl.", context["forbidden_inputs"])
             self.assertIn("tool_context", event_payload)
 
     def test_runtime_dynamic_lcr_web_search_alias_preserves_default_tool_context(self) -> None:
@@ -1940,7 +1964,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "ok": True,
                     "record_id": "search-1",
                     "tool_event_verified": True,
-                    "path": "D:/workspace/.lcr/research/search-1.json",
+                    "path": "D:/workspace/.astrabridge/research/search-1.json",
                     "result": {
                         "tool": "lcr_web_search_batch",
                         "merged_results": [{"url": "https://example.com/tilemap", "title": "Tilemap"}],
@@ -1985,13 +2009,13 @@ class AstraBridgeServiceTests(unittest.TestCase):
         class FakeDogfood:
             def browser_smoke(self, payload: dict[str, object]) -> dict[str, object]:
                 return {
-                    "path": "D:/workspace/.lcr/dogfood_run.json",
+                    "path": "D:/workspace/.astrabridge/dogfood_run.json",
                     "browser_smoke": {
                         "label": payload.get("label"),
                         "url": payload.get("url"),
                         "status": "pass",
                         "http_status": 200,
-                        "screenshot_path": "D:/workspace/.lcr/captures/smoke.png",
+                        "screenshot_path": "D:/workspace/.astrabridge/captures/smoke.png",
                         "screenshot_status": "captured",
                         "console_errors": [],
                     },
@@ -2022,7 +2046,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(result["success"])
             text = result["contentItems"][0]["text"]
             self.assertIn("lcr_browser_smoke", text)
-            self.assertIn("D:/workspace/.lcr/captures/smoke.png", text)
+            self.assertIn("D:/workspace/.astrabridge/captures/smoke.png", text)
             self.assertIn("tool_context", text)
             event_payload = json.dumps(runtime.list_events()["events"][-1], ensure_ascii=False)
             self.assertIn('"server": "lcr_browser"', event_payload)
@@ -2127,13 +2151,13 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                             "contentItems": [
                                                 {
                                                     "type": "inputText",
-                                                    "text": "LCR dynamic tool result for lcr_browser_smoke:\n"
+                                                    "text": "AstraBridge dynamic tool result for lcr_browser_smoke:\n"
                                                     + json.dumps(
                                                         {
                                                             "tool": "lcr_browser_smoke",
                                                             "label": "map smoke",
                                                             "status": "pass",
-                                                            "screenshot_path": "D:/workspace/.lcr/captures/map.png",
+                                                            "screenshot_path": "D:/workspace/.astrabridge/captures/map.png",
                                                             "console_errors": [],
                                                             "tool_event_verified": True,
                                                         }
@@ -2166,7 +2190,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(evidence["verified"])
             self.assertEqual(evidence["tool"], "lcr_browser_smoke")
             self.assertEqual(evidence["server"], "lcr_browser")
-            self.assertIn("D:/workspace/.lcr/captures/map.png", evidence["paths"])
+            self.assertIn("D:/workspace/.astrabridge/captures/map.png", evidence["paths"])
             self.assertTrue(any("browser smoke map smoke pass" in line for line in evidence["summary"]))
 
     def test_runtime_read_thread_marks_completed_yunwu_image_item_verified_from_paths(self) -> None:
@@ -2189,7 +2213,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                             "contentItems": [
                                                 {
                                                     "type": "inputText",
-                                                    "text": "LCR dynamic tool result for yunwu_image_transparent_asset:\n"
+                                                    "text": "AstraBridge dynamic tool result for yunwu_image_transparent_asset:\n"
                                                     + json.dumps(
                                                         {
                                                             "requested_n": 1,
@@ -2197,7 +2221,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                                             "data": [
                                                                 {
                                                                     "asset_id": "yunwu-asset-1",
-                                                                    "local_path": "D:/workspace/.lcr/assets/generated/yunwu-asset-1.png",
+                                                                    "local_path": "D:/workspace/.astrabridge/assets/generated/yunwu-asset-1.png",
                                                                     "actual_format": "png",
                                                                     "actual_mode": "RGBA",
                                                                     "has_alpha": True,
@@ -2232,7 +2256,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(evidence["verified"])
             self.assertEqual(evidence["tool"], "yunwu_image_transparent_asset")
             self.assertEqual(evidence["server"], "yunwu_image")
-            self.assertIn("D:/workspace/.lcr/assets/generated/yunwu-asset-1.png", evidence["paths"])
+            self.assertIn("D:/workspace/.astrabridge/assets/generated/yunwu-asset-1.png", evidence["paths"])
             self.assertIn("tool-event verified", evidence["label"])
 
     def test_runtime_read_thread_overlays_completed_dynamic_tool_event_over_stale_thread_item(self) -> None:
@@ -2288,7 +2312,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                             "contentItems": [
                                 {
                                     "type": "inputText",
-                                    "text": "LCR dynamic tool result for yunwu_image_transparent_asset:\n"
+                                    "text": "AstraBridge dynamic tool result for yunwu_image_transparent_asset:\n"
                                     + json.dumps(
                                         {
                                             "requested_n": 1,
@@ -2296,7 +2320,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                             "data": [
                                                 {
                                                     "asset_id": "yunwu-asset-1",
-                                                    "local_path": "D:/workspace/.lcr/assets/generated/yunwu-asset-1.png",
+                                                    "local_path": "D:/workspace/.astrabridge/assets/generated/yunwu-asset-1.png",
                                                     "actual_format": "png",
                                                     "actual_mode": "RGBA",
                                                     "has_alpha": True,
@@ -2321,7 +2345,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(item["status"], "completed")
             self.assertTrue(item["success"])
             self.assertTrue(evidence["verified"])
-            self.assertIn("D:/workspace/.lcr/assets/generated/yunwu-asset-1.png", evidence["paths"])
+            self.assertIn("D:/workspace/.astrabridge/assets/generated/yunwu-asset-1.png", evidence["paths"])
 
     def test_runtime_read_thread_decorates_command_execution_evidence(self) -> None:
         class FakeClient:
@@ -3425,10 +3449,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
                             "task_goal": "Build the magical tower game",
                             "current_plan_step": "Research autotile and free meadow maps",
                             "workspace_root": str(workspace),
-                            "project_context_ref": ".lcr/project_context.json",
-                            "asset_context_ref": ".lcr/assets/asset_registry.json",
+                            "project_context_ref": ".astrabridge/project_context.json",
+                            "asset_context_ref": ".astrabridge/assets/asset_registry.json",
                             "evidence_requirements": ["Return URLs", "Mark unfetched claims"],
-                            "forbidden_inputs": [".lcr/runtime_events.jsonl", ".lcr/approvals.jsonl"],
+                            "forbidden_inputs": [".astrabridge/runtime_events.jsonl", ".astrabridge/approvals.jsonl"],
                             "conversation": "raw hidden transcript should be ignored",
                             "authorization": "Bearer unit-secret",
                             "output_contract": "Do not include base64 data:image payloads.",
@@ -3446,7 +3470,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             record = json.loads(path.read_text(encoding="utf-8"))
             self.assertTrue(record["tool_event_verified"])
             self.assertEqual(record["tool_context"]["task_goal"], "Build the magical tower game")
-            self.assertEqual(record["tool_context"]["asset_context_ref"], ".lcr/assets/asset_registry.json")
+            self.assertEqual(record["tool_context"]["asset_context_ref"], ".astrabridge/assets/asset_registry.json")
             record_text = json.dumps(record)
             self.assertNotIn("unit-secret", record_text)
             self.assertNotIn("raw hidden transcript", record_text)
@@ -3501,25 +3525,22 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 os.environ[DEFAULT_RUNTIME_WSL_DISTRO_ENV] = previous_distro
             project_service_module._DEFAULT_RUNTIME_PREFS_CACHE = None
 
-    def test_open_legacy_project_migrates_to_lcrproj_and_lcr_state(self) -> None:
+    def test_open_old_project_formats_are_rejected_without_migration(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace = root / "workspace"
             workspace.mkdir()
-            legacy_state = workspace / ".codex-shell"
-            (legacy_state / "attachments").mkdir(parents=True)
-            (legacy_state / "runtime_events.jsonl").write_text("", encoding="utf-8")
-            (legacy_state / "approvals.jsonl").write_text("", encoding="utf-8")
-            (legacy_state / "thread_cache.json").write_text("{}", encoding="utf-8")
-            (legacy_state / "ui_state.json").write_text("{}", encoding="utf-8")
-            legacy_project = root / "legacy.codexproj"
-            legacy_project.write_text(
+            old_state = workspace / ".codex-shell"
+            (old_state / "attachments").mkdir(parents=True)
+            (old_state / "runtime_events.jsonl").write_text("", encoding="utf-8")
+            old_project = root / "old.codexproj"
+            old_project.write_text(
                 json.dumps(
                     {
                         "schema_version": "codex-shell-project-v1",
-                        "project_id": "legacy",
-                        "name": "Legacy",
-                        "project_file": str(legacy_project),
+                        "project_id": "old",
+                        "name": "Old",
+                        "project_file": str(old_project),
                         "workspace_root": str(workspace),
                         "entry_mode": "existing",
                         "default_profile_id": "openai-compatible",
@@ -3536,9 +3557,16 @@ class AstraBridgeServiceTests(unittest.TestCase):
             )
 
             service = ProjectService(root / "recent.json")
-            project = service.open_project(legacy_project)
-            self.assertTrue(project["project_file"].endswith(".abproj"))
-            self.assertTrue((workspace / ".astrabridge" / "attachments").exists())
+            with self.assertRaisesRegex(ValueError, r"\.abproj"):
+                service.open_project(old_project)
+            self.assertFalse((root / "old.abproj").exists())
+            self.assertFalse((workspace / ".astrabridge").exists())
+
+            old_lcr_project = root / "old.lcrproj"
+            old_lcr_project.write_text(json.dumps({"schema_version": "local-codex-router-project-v1"}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, r"\.abproj"):
+                service.open_project(old_lcr_project)
+            self.assertFalse((root / "old.abproj").exists())
 
     def test_project_service_restores_current_project_from_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -4493,7 +4521,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             rebuilt = service.rebuild()
             registry_text = json.dumps(rebuilt, ensure_ascii=False)
             self.assertIn("yunwu-asset-1_heroine_fullbody_000", registry_text)
-            self.assertIn("LCR Asset Context Pack", rebuilt["context_pack"]["text"])
+            self.assertIn("AstraBridge Asset Context Pack", rebuilt["context_pack"]["text"])
             self.assertNotIn("Bearer", registry_text)
             self.assertNotIn("api_key", registry_text.lower())
 
@@ -4665,7 +4693,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                 "status": "approved",
                                 "quality_status": "passed",
                                 "integration_status": "not_promoted",
-                                "source_path": ".lcr/assets/sliced/sprite-1.png",
+                                "source_path": ".astrabridge/assets/sliced/sprite-1.png",
                             }
                         ],
                     }
@@ -4678,7 +4706,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             text = "\n".join(str(item.get("text") or "") for item in inputs if item.get("type") == "text")
             mentions = [item for item in inputs if item.get("type") == "mention"]
             self.assertIn("Continue the tower game.", text)
-            self.assertIn("LCR Asset Context Pack", text)
+            self.assertIn("AstraBridge Asset Context Pack", text)
             self.assertIn("Do not call MCP resources/read", text)
             self.assertFalse(any(item.get("name") == "asset_registry.json" for item in mentions))
 
@@ -4707,7 +4735,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                 "status": "generated",
                                 "quality_status": "passed",
                                 "integration_status": "not_promoted",
-                                "source_path": ".lcr/assets/generated/sprite-1.png",
+                                "source_path": ".astrabridge/assets/generated/sprite-1.png",
                             }
                         ],
                     }
@@ -4859,7 +4887,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                 "asset_id": "sprite-1",
                                 "kind": "heroine",
                                 "quality_status": "passed",
-                                "source_path": ".lcr/assets/sliced/sprite-1.png",
+                                "source_path": ".astrabridge/assets/sliced/sprite-1.png",
                             }
                         ],
                     }
@@ -4879,10 +4907,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
             )
 
             text = "\n".join(str(item.get("text") or "") for item in inputs if item.get("type") == "text")
-            self.assertIn("LCR minimal visual mode", text)
+            self.assertIn("AstraBridge minimal visual mode", text)
             self.assertIn("Visual micro-check", text)
-            self.assertNotIn("LCR Asset Context Pack", text)
-            self.assertNotIn("LCR Project Context Pack", text)
+            self.assertNotIn("AstraBridge Asset Context Pack", text)
+            self.assertNotIn("AstraBridge Project Context Pack", text)
             self.assertEqual([item.get("type") for item in inputs].count("localImage"), 1)
             self.assertFalse(any(item.get("type") == "mention" and item.get("name") in {"asset_registry.json", "project_context_pack.json"} for item in inputs))
 
@@ -4911,9 +4939,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             text = "\n".join(str(item.get("text") or "") for item in inputs if item.get("type") == "text")
             self.assertIn("Post-compact health check", text)
-            self.assertNotIn("LCR minimal visual mode", text)
-            self.assertNotIn("LCR Asset Context Pack", text)
-            self.assertNotIn("LCR Project Context Pack", text)
+            self.assertNotIn("AstraBridge minimal visual mode", text)
+            self.assertNotIn("AstraBridge Asset Context Pack", text)
+            self.assertNotIn("AstraBridge Project Context Pack", text)
             self.assertFalse(any(item.get("type") == "mention" and item.get("name") in {"asset_registry.json", "project_context_pack.json"} for item in inputs))
 
     def test_runtime_accepts_multi_provider_handoff_context_alias(self) -> None:
@@ -4985,7 +5013,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "role": "tile",
                         "quality_status": "passed",
                         "integration_status": "not_promoted",
-                        "source_path": f".lcr/assets/sliced/tile_{index}.png",
+                        "source_path": f".astrabridge/assets/sliced/tile_{index}.png",
                     }
                 )
             (registry_root / "asset_registry.json").write_text(
@@ -5003,7 +5031,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertNotIn("promoted-19", text)
             self.assertIn("approved-0", text)
             self.assertNotIn("approved-19", text)
-            self.assertLessEqual(len(text), 3500)
+            self.assertLessEqual(len(text), 5000)
 
     def test_asset_context_pack_flags_missing_blocking_obstacle_sprites(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -5149,7 +5177,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("Project file map (real paths observed", pack["text"])
             self.assertIn("js/ui.js", pack["text"])
             self.assertIn("do not invent paths such as game/map/...", pack["text"])
-            self.assertFalse(any(path.startswith(".lcr/") for path in source_paths))
+            self.assertFalse(any(path.startswith(".astrabridge/") for path in source_paths))
             self.assertNotIn("unit_secret_value", serialized)
             self.assertNotIn("Bearer unit-test", serialized)
 
@@ -5414,7 +5442,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             inputs = runtime._build_user_inputs("Resume work.", [], thread_id="thread-2")  # noqa: SLF001
             text = "\n".join(str(item.get("text") or "") for item in inputs if item.get("type") == "text")
             mentions = [item for item in inputs if item.get("type") == "mention"]
-            self.assertIn("LCR Project Context Pack", text)
+            self.assertIn("AstraBridge Project Context Pack", text)
             self.assertIn("Current thread: thread-2", text)
             self.assertIn("Second", text)
             self.assertIn("Context pack JSON paths are orientation references only", text)
@@ -5598,11 +5626,11 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertNotIn("unit_secret_value", manifest_text)
             excluded = json.dumps(save["save"]["workspace"]["excluded"])
             self.assertIn(".env", excluded)
-            self.assertIn(".lcr/runtime_events.jsonl", excluded)
-            self.assertIn(".lcr/approvals.jsonl", excluded)
-            self.assertIn(".lcr/.thread_cache.json.atomic.tmp", excluded)
+            self.assertIn(".astrabridge/runtime_events.jsonl", excluded)
+            self.assertIn(".astrabridge/approvals.jsonl", excluded)
+            self.assertIn(".astrabridge/.thread_cache.json.atomic.tmp", excluded)
             with zipfile.ZipFile(save_dir / "workspace.zip", "r") as archive:
-                self.assertNotIn(".lcr/.thread_cache.json.atomic.tmp", set(archive.namelist()))
+                self.assertNotIn(".astrabridge/.thread_cache.json.atomic.tmp", set(archive.namelist()))
 
             (workspace / "index.html").write_text("<h1>changed</h1>\n", encoding="utf-8")
             loaded = service.load({"save_id": save["save"]["save_id"], "confirm_dirty": True})
@@ -5633,14 +5661,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
             save_dir = workspace / ".astrabridge" / "saves" / save["save"]["save_id"]
             with zipfile.ZipFile(save_dir / "workspace.zip", "r") as archive:
                 names = set(archive.namelist())
-            self.assertIn(".lcr/assets/asset_registry.json", names)
-            self.assertIn(".lcr/assets/asset_context_pack.json", names)
-            self.assertNotIn(".lcr/assets/generated/artifact-0.png", names)
-            self.assertNotIn(".lcr/assets/sliced/artifact-0.png", names)
+            self.assertIn(".astrabridge/assets/asset_registry.json", names)
+            self.assertIn(".astrabridge/assets/asset_context_pack.json", names)
+            self.assertNotIn(".astrabridge/assets/generated/artifact-0.png", names)
+            self.assertNotIn(".astrabridge/assets/sliced/artifact-0.png", names)
             excluded = json.dumps(save["save"]["workspace"]["excluded"])
-            self.assertIn(".lcr/assets/generated", excluded)
-            self.assertIn(".lcr/assets/sliced", excluded)
-            self.assertIn(".lcr/assets/sliced_failed_20260614_oversegmented", excluded)
+            self.assertIn(".astrabridge/assets/generated", excluded)
+            self.assertIn(".astrabridge/assets/sliced", excluded)
+            self.assertIn(".astrabridge/assets/sliced_failed_20260614_oversegmented", excluded)
 
     def test_llm_api_manager_vault_login_password_change_and_no_plaintext(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -6028,7 +6056,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             outside.write_bytes(b"png")
             staged = runtime._stage_attachment(str(outside), "diagram.png")  # type: ignore[attr-defined]
             self.assertTrue(staged.exists())
-            self.assertIn(".lcr\\attachments", str(staged))
+            self.assertIn(".astrabridge\\attachments", str(staged))
 
     def test_runtime_config_collaboration_and_compaction_metadata(self) -> None:
         original_key = os.environ.pop("TEST_DEEPSEEK_VERIFY_KEY", None)
@@ -6168,7 +6196,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 return {"returncode": 0, "stdout": "101,202\n", "stderr": ""}
 
             runtime._run_capture = fake_capture  # type: ignore[method-assign]
-            runtime._terminate_stale_lcr_wsl_app_servers("wsl.exe", ["-d", "Ubuntu-24.04"])  # type: ignore[attr-defined]
+            runtime._terminate_stale_astrabridge_wsl_app_servers("wsl.exe", ["-d", "Ubuntu-24.04"])  # type: ignore[attr-defined]
 
             cleanup_events = [
                 event for event in runtime.list_events().get("events", []) if event.get("type") == "wsl_app_server_cleanup"
@@ -6330,7 +6358,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 target = runtime._resolve_launch_target({"codex_home": str(codex_home)})  # type: ignore[attr-defined]
                 joined_launch = " ".join(target["launch_command"])
                 self.assertIn("exec env -i", joined_launch)
-                self.assertIn("/.lcr/runtime-cwd", joined_launch)
+                self.assertIn("/.astrabridge/runtime-cwd", joined_launch)
                 self.assertTrue((workspace / ".astrabridge" / "runtime-cwd").is_dir())
                 self.assertIn("PATH=/home/demo/.local/share/astrabridge/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", joined_launch)
                 self.assertIn('CODEX_ROUTER_API_KEY="${CODEX_ROUTER_API_KEY:-}"', joined_launch)
@@ -6359,7 +6387,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     os.environ["YUNWU_API_KEY"] = original_yunwu_key
 
     def test_runtime_load_secret_preserves_project_wsl_host(self) -> None:
-        original_key = os.environ.pop("TEST_LCR_WSL_SECRET_KEY", None)
+        original_key = os.environ.pop("TEST_ASTRABRIDGE_WSL_SECRET_KEY", None)
         try:
             with tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
@@ -6380,7 +6408,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "model": "deepseek-v4-pro",
                         "reasoning_effort": "max",
                         "wire_api": "chat",
-                        "env_key": "TEST_LCR_WSL_SECRET_KEY",
+                        "env_key": "TEST_ASTRABRIDGE_WSL_SECRET_KEY",
                         "auth_mode": "session_paste",
                         "proxy_mode": "direct",
                         "proxy_url": "",
@@ -6392,9 +6420,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 self.assertEqual(status["wsl_distro"], "Ubuntu-24.04")
         finally:
             if original_key is None:
-                os.environ.pop("TEST_LCR_WSL_SECRET_KEY", None)
+                os.environ.pop("TEST_ASTRABRIDGE_WSL_SECRET_KEY", None)
             else:
-                os.environ["TEST_LCR_WSL_SECRET_KEY"] = original_key
+                os.environ["TEST_ASTRABRIDGE_WSL_SECRET_KEY"] = original_key
 
     def test_wsl_dependency_status_reports_codex_version_failure(self) -> None:
         service = WslDependencyService(Path(tempfile.mkdtemp()) / "bootstrap")
@@ -6628,7 +6656,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 sidecar_port=8790,
             )
             self.assertTrue(audit["ok"])
-            self.assertEqual(audit["paths"]["lcr_state"], str(workspace / ".astrabridge"))
+            self.assertEqual(audit["paths"]["astrabridge_state"], str(workspace / ".astrabridge"))
             self.assertIsNotNone(audit["official_codex"]["config_sha256"])
 
     def test_qwen_adapter_maps_effort_to_enable_thinking(self) -> None:

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import re
@@ -12,13 +12,13 @@ from .security import redact_sensitive
 
 
 DEFAULT_WSL_DISTRO = "Ubuntu-24.04"
-LCR_WSL_ROOT = "$HOME/.local/share/astrabridge"
-LCR_WSL_BIN = f"{LCR_WSL_ROOT}/bin/codex"
-LCR_WSL_CODEX_HOME = f"{LCR_WSL_ROOT}/codex-home"
+ASTRABRIDGE_WSL_ROOT = "$HOME/.local/share/astrabridge"
+ASTRABRIDGE_WSL_BIN = f"{ASTRABRIDGE_WSL_ROOT}/bin/codex"
+ASTRABRIDGE_WSL_CODEX_HOME = f"{ASTRABRIDGE_WSL_ROOT}/codex-home"
 
 
 class WslDependencyService:
-    """Detect and bootstrap the optional WSL runtime used by LCR."""
+    """Detect and bootstrap the optional WSL runtime used by AstraBridge."""
 
     def __init__(self, script_root: Path | None = None) -> None:
         self.script_root = (script_root or app_data_dir() / "bootstrap" / "wsl").resolve()
@@ -64,7 +64,7 @@ class WslDependencyService:
                 )
             )
 
-        codex_path = self._wsl(wsl_exe, distro_name, self._with_lcr_path("command -v codex || true"))
+        codex_path = self._wsl(wsl_exe, distro_name, self._with_astrabridge_path("command -v codex || true"))
         codex_detail = (codex_path["stdout"] or codex_path["stderr"]).strip()
         if self._looks_like_windows_codex(codex_detail):
             checks.append(
@@ -74,13 +74,13 @@ class WslDependencyService:
                     "misconfigured",
                     f"codex resolves to a Windows path inside WSL: {codex_detail}",
                     required=True,
-                    remediation="Install the LCR-managed Linux Codex CLI in WSL.",
+                    remediation="Install the AstraBridge-managed Linux Codex CLI in WSL.",
                 )
             )
         else:
             checks.append(self._check("codex_path", "Codex path", "ok" if codex_detail else "missing", codex_detail or "No codex executable found in WSL.", required=True, remediation="Run the generated WSL bootstrap script."))
 
-        codex_version = self._wsl(wsl_exe, distro_name, self._with_lcr_path("codex --version"))
+        codex_version = self._wsl(wsl_exe, distro_name, self._with_astrabridge_path("codex --version"))
         checks.append(
             self._check(
                 "codex_version",
@@ -100,7 +100,7 @@ class WslDependencyService:
                 "ok" if app_server["returncode"] == 0 else "failed",
                 (app_server["stdout"] or app_server["stderr"] or "app-server smoke failed.").strip()[:1200],
                 required=True,
-                remediation="Re-run the WSL bootstrap script, then restart LCR runtime.",
+                remediation="Re-run the WSL bootstrap script, then restart AstraBridge runtime.",
             )
         )
         return self._snapshot(distro_name, wsl_exe, distros, checks)
@@ -108,8 +108,8 @@ class WslDependencyService:
     def write_scripts(self, distro: str | None = None) -> dict[str, Any]:
         distro_name = (distro or DEFAULT_WSL_DISTRO).strip() or DEFAULT_WSL_DISTRO
         self.script_root.mkdir(parents=True, exist_ok=True)
-        windows_path = self.script_root / "install-lcr-wsl-runtime.ps1"
-        wsl_path = self.script_root / "install-lcr-wsl-runtime.sh"
+        windows_path = self.script_root / "install-astrabridge-wsl-runtime.ps1"
+        wsl_path = self.script_root / "install-astrabridge-wsl-runtime.sh"
         windows_path.write_text(self._windows_bootstrap_script(distro_name), encoding="utf-8")
         wsl_path.write_text(self._wsl_bootstrap_script(), encoding="utf-8", newline="\n")
         return {
@@ -140,8 +140,8 @@ class WslDependencyService:
             "distros": distros,
             "checks": [redact_sensitive(item) for item in checks],
             "paths": {
-                "lcr_wsl_codex_bin": LCR_WSL_BIN,
-                "lcr_wsl_codex_home": LCR_WSL_CODEX_HOME,
+                "astrabridge_wsl_codex_bin": ASTRABRIDGE_WSL_BIN,
+                "astrabridge_wsl_codex_home": ASTRABRIDGE_WSL_CODEX_HOME,
                 "script_root": str(self.script_root),
             },
         }
@@ -195,20 +195,20 @@ class WslDependencyService:
             "remediation": remediation,
         }
 
-    def _with_lcr_path(self, command: str) -> str:
+    def _with_astrabridge_path(self, command: str) -> str:
         return (
-            f'export CODEX_HOME="{LCR_WSL_CODEX_HOME}"; '
-            f'export PATH="{LCR_WSL_ROOT}/bin:$PATH"; '
+            f'export CODEX_HOME="{ASTRABRIDGE_WSL_CODEX_HOME}"; '
+            f'export PATH="{ASTRABRIDGE_WSL_ROOT}/bin:$PATH"; '
             f"{command}"
         )
 
     def _app_server_smoke_command(self) -> str:
         payload = (
-            '{"method":"initialize","id":1,"params":{"clientInfo":{"name":"lcr-dependency-check","version":"0.1.0"},'
+            '{"method":"initialize","id":1,"params":{"clientInfo":{"name":"astrabridge-dependency-check","version":"0.1.0"},'
             '"capabilities":{"experimentalApi":true,"requestAttestation":false}}}\\n'
         )
-        return self._with_lcr_path(
-            f"mkdir -p {self._wsl_shell_value(LCR_WSL_CODEX_HOME)}; "
+        return self._with_astrabridge_path(
+            f"mkdir -p {self._wsl_shell_value(ASTRABRIDGE_WSL_CODEX_HOME)}; "
             f"printf {payload!r} | timeout 8s codex app-server --listen stdio:// --disable plugins --disable plugin_sharing --disable remote_plugin | head -20 | grep -q '\"id\"'"
         )
 
@@ -225,7 +225,7 @@ class WslDependencyService:
         return value.replace("PRETTY_NAME=", "").strip().strip('"')
 
     def _windows_bootstrap_script(self, distro: str) -> str:
-        wsl_script_path = self.script_root / "install-lcr-wsl-runtime.sh"
+        wsl_script_path = self.script_root / "install-astrabridge-wsl-runtime.sh"
         return f"""# AstraBridge WSL bootstrap
 $ErrorActionPreference = "Stop"
 $Distro = "{distro}"
@@ -252,7 +252,7 @@ Read-Host "Press Enter to close"
     def _wsl_bootstrap_script(self) -> str:
         return """#!/usr/bin/env bash
 set -euo pipefail
-echo "[LCR] Installing WSL runtime dependencies"
+echo "[AstraBridge] Installing WSL runtime dependencies"
 sudo apt-get update
 sudo apt-get install -y curl ca-certificates git bubblewrap apparmor-profiles apparmor-utils nodejs npm
 if [ -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict ]; then
@@ -263,12 +263,12 @@ export LCR_ROOT="$HOME/.local/share/astrabridge"
 export CODEX_HOME="$LCR_ROOT/codex-home"
 export CODEX_INSTALL_DIR="$LCR_ROOT/bin"
 mkdir -p "$CODEX_HOME" "$CODEX_INSTALL_DIR"
-echo "[LCR] Installing Codex CLI into $CODEX_INSTALL_DIR"
+echo "[AstraBridge] Installing Codex CLI into $CODEX_INSTALL_DIR"
 curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 CODEX_HOME="$CODEX_HOME" CODEX_INSTALL_DIR="$CODEX_INSTALL_DIR" sh
 export PATH="$CODEX_INSTALL_DIR:$PATH"
-echo "[LCR] Verifying Codex"
+echo "[AstraBridge] Verifying Codex"
 codex --version
 printf '{"method":"initialize","id":1,"params":{"clientInfo":{"name":"lcr-bootstrap-check","version":"0.1.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}\n' | timeout 10s codex app-server --listen stdio:// --disable plugins --disable plugin_sharing --disable remote_plugin | head -20 | grep -q '"id"'
-echo "[LCR] WSL runtime is ready"
+echo "[AstraBridge] WSL runtime is ready"
 """
 

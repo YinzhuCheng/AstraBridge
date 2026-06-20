@@ -4,7 +4,7 @@ import { Files, GitCompare, GitFork, Globe2, ListChecks, Save, Terminal } from "
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
-import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveLcrLog } from "./features/runtime/planRendering";
+import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
 import { useAppStore } from "./store";
 import { chooseProjectSavePath, selectDirectory, selectExistingProject, selectFiles } from "./tauriDialog";
 import type {
@@ -398,8 +398,8 @@ function describeSendError(stageLabel: string, error: unknown) {
     const zh = /[\u4e00-\u9fff]/.test(stageLabel);
     if (message.includes("codex_app_server_closed") || message.includes("codex_app_server_disconnected")) {
       return zh
-        ? `${stageLabel}: Codex 运行时意外关闭。请点右侧“重启运行时”后重试；如果线程已经创建，应用会尝试从本地 .lcr 缓存恢复。`
-        : `${stageLabel}: The Codex runtime closed unexpectedly. Restart Runtime and retry; if the thread was created, the app will try to recover it from local .lcr cache.`;
+        ? `${stageLabel}: Codex 运行时意外关闭。请点右侧“重启运行时”后重试；如果线程已经创建，应用会尝试从本地 .astrabridge 缓存恢复。`
+        : `${stageLabel}: The Codex runtime closed unexpectedly. Restart Runtime and retry; if the thread was created, the app will try to recover it from local .astrabridge cache.`;
     }
     if (message.includes("runtime_secret_missing")) {
       return zh
@@ -551,7 +551,7 @@ function approvalSummary(modal: RuntimeModal) {
     command,
     paths,
     encodingRisk: hasUnsafeWindowsWrite(command),
-    lcrLogRisk: readsExplosiveLcrLog(command),
+    astrabridgeLogRisk: readsExplosiveAstraBridgeLog(command),
     reason: String(params.reason ?? params.explanation ?? params.description ?? "Codex needs your approval to continue this turn."),
   };
 }
@@ -892,9 +892,9 @@ function SaveCheckpointModal({
       <div className="modal-card checkpoint-modal">
         <div className="card-header">
           <h2>Save checkpoint</h2>
-          <span className="status-tag">.lcr/saves</span>
+          <span className="status-tag">.astrabridge/saves</span>
         </div>
-        <p className="muted">This saves local LCR project state and a workspace snapshot. It does not commit to Git and does not write official Codex config.</p>
+        <p className="muted">This saves local AstraBridge project state and a workspace snapshot. It does not commit to Git and does not write official Codex config.</p>
         <div className="checkpoint-facts">
           <div><span>Project</span><strong>{projectName}</strong></div>
           <div><span>Thread</span><strong>{threadName}</strong></div>
@@ -2208,7 +2208,7 @@ function RouterControlCenter({
             <div>
               <span className="eyebrow">WSL Runtime Setup</span>
               <h3>{wslDependencies.data?.ok ? "WSL runtime is ready" : "WSL runtime needs setup"}</h3>
-              <p className="muted">LCR uses an isolated Codex install inside WSL. The installer fetches WSL dependencies from official sources and does not bundle WSL, Node, or Codex binaries.</p>
+              <p className="muted">AstraBridge uses an isolated Codex install inside WSL. The installer fetches WSL dependencies from official sources and does not bundle WSL, Node, or Codex binaries.</p>
             </div>
             <span className={`session-badge ${wslDependencies.data?.ok ? "capability-ok" : "capability-warn"}`}>
               {wslDependencies.data?.ok ? "Ready" : "Needs setup"}
@@ -2242,8 +2242,8 @@ function RouterControlCenter({
           <div className="metadata-section">
             <h4>Managed WSL paths</h4>
             <div className="env-list">
-              <div><span>Codex bin</span><strong>{wslDependencies.data?.paths.lcr_wsl_codex_bin ?? "$HOME/.local/share/astrabridge/bin/codex"}</strong></div>
-              <div><span>CODEX_HOME</span><strong>{wslDependencies.data?.paths.lcr_wsl_codex_home ?? "$HOME/.local/share/astrabridge/codex-home"}</strong></div>
+              <div><span>Codex bin</span><strong>{wslDependencies.data?.paths.astrabridge_wsl_codex_bin ?? "$HOME/.local/share/astrabridge/bin/codex"}</strong></div>
+              <div><span>CODEX_HOME</span><strong>{wslDependencies.data?.paths.astrabridge_wsl_codex_home ?? "$HOME/.local/share/astrabridge/codex-home"}</strong></div>
               <div><span>Installed distros</span><strong>{(wslDependencies.data?.distros ?? []).map((item) => `${item.name}${item.version ? ` WSL${item.version}` : ""}`).join(", ") || "none detected"}</strong></div>
             </div>
           </div>
@@ -2257,7 +2257,7 @@ function RouterControlCenter({
             <div>
               <span className="eyebrow">Checkpoints</span>
               <h3>Save / Load</h3>
-              <p className="muted">Local checkpoints live under workspace .lcr/saves. Git is read-only here: no commits, tags, remotes, or Git config changes.</p>
+              <p className="muted">Local checkpoints live under workspace .astrabridge/saves. Git is read-only here: no commits, tags, remotes, or Git config changes.</p>
             </div>
             <span className="session-badge">{projectSaves.data?.saves.length ?? 0} saves</span>
           </div>
@@ -2320,7 +2320,7 @@ function RouterControlCenter({
             <div>
               <span className="eyebrow">Dogfood Run</span>
               <h3>{activeDogfood?.enabled ? activeDogfood.phase || "active" : "Not active"}</h3>
-              <p className="muted">Project-local supervision ledger for autonomous model runs. It records budgets, screenshots, blockers, and next steps under .lcr only.</p>
+              <p className="muted">Project-local supervision ledger for autonomous model runs. It records budgets, screenshots, blockers, and next steps under .astrabridge only.</p>
             </div>
             <span className={`session-badge ${activeDogfood?.enabled ? "capability-ok" : ""}`}>{activeDogfood?.status ?? "idle"}</span>
           </div>
@@ -2491,8 +2491,8 @@ function RouterControlCenter({
               </section>
               <section className="manager-section">
                 <h4>Autonomy rules for the next agent turn</h4>
-                <p className="muted">Paste this into the next DS/Kimi turn when the run starts or resumes. It keeps the model from reading huge .lcr logs and forces self-verification.</p>
-                <pre className="modal-json">Do not read .lcr/runtime_events.jsonl or .lcr/approvals.jsonl unless the user explicitly asks. Use project summaries, screenshots, and asset_manifest.json instead. After each milestone: run the game, inspect console errors, save a screenshot to D:\workflow\magical-girl-tower-dogfood\captures, describe the issue, then fix it. Respect budgets: Kimi 50 CNY, DeepSeek 50 CNY, Yunwu GPT 50 USD, Yunwu image 200 images. Stop at 100% and warn at 80%.</pre>
+                <p className="muted">Paste this into the next DS/Kimi turn when the run starts or resumes. It keeps the model from reading huge .astrabridge logs and forces self-verification.</p>
+                <pre className="modal-json">Do not read .astrabridge/runtime_events.jsonl or .astrabridge/approvals.jsonl unless the user explicitly asks. Use project summaries, screenshots, and asset_manifest.json instead. After each milestone: run the game, inspect console errors, save a screenshot to D:\workflow\magical-girl-tower-dogfood\captures, describe the issue, then fix it. Respect budgets: Kimi 50 CNY, DeepSeek 50 CNY, Yunwu GPT 50 USD, Yunwu image 200 images. Stop at 100% and warn at 80%.</pre>
               </section>
             </div>
           ) : (
@@ -3444,7 +3444,7 @@ function AppShell() {
         }
         setEventCursor(payload.cursor);
       } catch (error) {
-        console.warn("LCR runtime event polling failed", error);
+        console.warn("AstraBridge runtime event polling failed", error);
       } finally {
         if (!cancelled) {
           window.setTimeout(tick, 1000);
@@ -4644,10 +4644,10 @@ function ModalHost({ modal, locale, queryClient }: { modal: RuntimeModal; locale
                     <span>Windows file write command does not explicitly request UTF-8. Prefer UTF8Encoding without BOM before approving.</span>
                   </div>
                 ) : null}
-                {approval.lcrLogRisk ? (
+                {approval.astrabridgeLogRisk ? (
                   <div className="approval-warning">
                     <strong>Context risk</strong>
-                    <span>This command reads raw .lcr event logs. Prefer summaries or a small tail to avoid context explosion.</span>
+                    <span>This command reads raw .astrabridge event logs. Prefer summaries or a small tail to avoid context explosion.</span>
                   </div>
                 ) : null}
                 {approval.cwd ? (

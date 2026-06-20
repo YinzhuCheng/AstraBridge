@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import threading
 from typing import Any, Callable
@@ -286,8 +286,8 @@ class ModalService:
                 {
                     **common,
                     "cwd": "D:\\workflow",
-                    "command": "Get-Content -Path .lcr\\runtime_events.jsonl -Tail 200; Get-Content -Path .lcr\\approvals.jsonl -Tail 200",
-                    "reason": "Smoke check for raw .lcr log reads; the UI should recommend summaries instead of raw logs.",
+                    "command": "Get-Content -Path .astrabridge\\runtime_events.jsonl -Tail 200; Get-Content -Path .astrabridge\\approvals.jsonl -Tail 200",
+                    "reason": "Smoke check for raw .astrabridge log reads; the UI should recommend summaries instead of raw logs.",
                 },
             )
         if normalized in {"permission", "permissions"}:

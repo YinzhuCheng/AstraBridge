@@ -83,7 +83,7 @@ function browserSidecarBaseUrl() {
   }
   const fromStorage = normalizeSidecarBaseUrl(window.localStorage.getItem(SIDECAR_URL_STORAGE_KEY));
   if (fromStorage) return fromStorage;
-  const fromEnv = normalizeSidecarBaseUrl(import.meta.env.VITE_LCR_SIDECAR_URL);
+  const fromEnv = normalizeSidecarBaseUrl(import.meta.env.VITE_ASTRABRIDGE_SIDECAR_URL);
   if (fromEnv) return fromEnv;
   return "http://127.0.0.1:8790";
 }

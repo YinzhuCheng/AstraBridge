@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import subprocess
@@ -41,7 +41,7 @@ class ArchiveService:
                 root,
                 [
                     "-c",
-                    "user.name=Research OS Archive",
+                    "user.name=AstraBridge Archive",
                     "-c",
                     "user.email=research-os-archive@example.invalid",
                     "commit",
@@ -73,7 +73,7 @@ class ArchiveService:
             root,
             [
                 "-c",
-                "user.name=Research OS Archive",
+                "user.name=AstraBridge Archive",
                 "-c",
                 "user.email=research-os-archive@example.invalid",
                 "commit",

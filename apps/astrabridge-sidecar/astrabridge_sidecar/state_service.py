@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 from typing import Any
@@ -14,7 +14,7 @@ DEFAULT_CHOICE_PROMPTS = [
     {
         "prompt_id": "CP-INITIALIZATION-MATERIAL-SCOPE",
         "stage": "initialization_intake",
-        "question": "How should Research OS interpret this initialization material bundle?",
+        "question": "How should AstraBridge interpret this initialization material bundle?",
         "recommended_option": "whole_folder_research_plan",
         "why_recommended": "The input includes drafts, submission requirements, templates, and example papers, so the app should first generate a folder-wide research plan instead of entering final-product production.",
         "options": [
@@ -550,7 +550,7 @@ class ResearchStateService:
         return {
             "prompt_id": "CP-NEXT-RESEARCH-LOOP",
             "stage": "loop_plan_alignment",
-            "question": "What should Research OS do after the accepted audit artifacts?",
+            "question": "What should AstraBridge do after the accepted audit artifacts?",
             "recommended_option": recommended,
             "why_recommended": (
                 "The accepted audit still contains blocking or partial items, so the next loop should repair them before final-paper production."

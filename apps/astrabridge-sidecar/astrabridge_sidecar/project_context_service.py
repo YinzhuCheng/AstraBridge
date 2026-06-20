@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -255,9 +255,9 @@ class ProjectContextService:
             "project_file_map": file_map,
             "rules": [
                 "Use this project context pack after thread switches, compact, fork, or sidecar restart.",
-                "Do not read .lcr/runtime_events.jsonl or .lcr/approvals.jsonl unless the user explicitly asks.",
+                "Do not read .astrabridge/runtime_events.jsonl or .astrabridge/approvals.jsonl unless the user explicitly asks.",
                 "Use compact summaries, project_context_pack.json, asset_context_pack.json, screenshots, and manifests before raw logs.",
-                "For public web research, prefer LCR built-in tools lcr_web_research_brief and lcr_web_search_batch; avoid raw curl, wget, or python urllib unless the LCR web tools fail or the user explicitly asks.",
+                "For public web research, prefer AstraBridge built-in tools lcr_web_research_brief and lcr_web_search_batch; avoid raw curl, wget, or python urllib unless the AstraBridge web tools fail or the user explicitly asks.",
                 "When resuming another thread, verify the current thread id, goal, latest plan, and project files before editing.",
             ],
             "text": text[:8000],
@@ -277,8 +277,8 @@ class ProjectContextService:
         file_map: dict[str, Any],
     ) -> str:
         lines = [
-            "LCR Project Context Pack (auto-injected, secret-free)",
-            "Freshness rule: this pack supersedes any older auto-injected LCR Project/Asset Context Pack text already present in the thread history.",
+            "AstraBridge Project Context Pack (auto-injected, secret-free)",
+            "Freshness rule: this pack supersedes any older auto-injected AstraBridge Project/Asset Context Pack text already present in the thread history.",
             "If counts, paths, goals, plans, or asset refs conflict, use this newest pack and the referenced JSON files.",
             f"Project: {project.get('name') or 'untitled'}",
             f"Workspace: {project.get('workspace_root') or ''}",
@@ -388,7 +388,7 @@ class ProjectContextService:
             [
                 "Rules:",
                 "- Treat this pack as an orientation index, not as complete truth; inspect referenced project files before editing.",
-                "- Context pack JSON paths are orientation references only; do not call MCP resources/read for them unless LCR explicitly exposes a matching MCP server.",
+                "- Context pack JSON paths are orientation references only; do not call MCP resources/read for them unless AstraBridge explicitly exposes a matching MCP server.",
                 "- Do not use generated/sliced assets in game code until they are promoted into the game manifest.",
                 "- If context seems stale after thread switching, ask for or trigger a project-context refresh before continuing.",
                 "- Ignore older auto-injected Project/Asset Context Pack blocks when this pack has a newer generated_at timestamp.",

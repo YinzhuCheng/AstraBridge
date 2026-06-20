@@ -52,7 +52,7 @@ DEFAULT_DOGFOOD_RUN: dict[str, Any] = {
 class DogfoodRunService:
     """Project-local run ledger for long autonomous app dogfooding.
 
-    This deliberately stores only coordination metadata under `.lcr`, never
+    This deliberately stores only coordination metadata under `.astrabridge`, never
     provider secrets or raw Authorization-bearing request payloads.
     """
 
@@ -579,12 +579,31 @@ class DogfoodRunService:
         target = captures_dir / f"{slugify(label, 'browser-smoke')}-{now_iso().replace(':', '').replace('.', '-')}.png"
         script = """
 const fs = require('fs');
+const path = require('path');
 let playwright;
+function tryRequireFromPnpm(baseName) {
+  const pnpmRoot = path.join(process.cwd(), 'node_modules', '.pnpm');
+  if (!fs.existsSync(pnpmRoot)) return null;
+  const match = fs.readdirSync(pnpmRoot).find(name => name.startsWith(baseName + '@'));
+  if (!match) return null;
+  const target = path.join(pnpmRoot, match, 'node_modules', baseName);
+  if (!fs.existsSync(target)) return null;
+  return require(target);
+}
 try {
   playwright = require('playwright');
 } catch (error) {
-  console.log(JSON.stringify({ ok: false, blocked: 'playwright_missing', error: String(error.message || error) }));
-  process.exit(0);
+  try {
+    playwright = require('playwright-core');
+  } catch (coreError) {
+    try {
+      playwright = tryRequireFromPnpm('playwright') || tryRequireFromPnpm('playwright-core');
+      if (!playwright) throw coreError;
+    } catch (fallbackError) {
+      console.log(JSON.stringify({ ok: false, blocked: 'playwright_missing', error: String(fallbackError.message || fallbackError) }));
+      process.exit(0);
+    }
+  }
 }
 async function launchBrowser() {
   const candidates = [
@@ -728,6 +747,13 @@ async function launchBrowser() {
             node_paths = []
             if cwd and (cwd / "node_modules").exists():
                 node_paths.append(str(cwd / "node_modules"))
+                pnpm_root = cwd / "node_modules" / ".pnpm"
+                if pnpm_root.exists():
+                    for pattern in ("playwright-core@*", "playwright@*", "@playwright+test@*"):
+                        for candidate in sorted(pnpm_root.glob(pattern)):
+                            nested = candidate / "node_modules"
+                            if nested.exists():
+                                node_paths.append(str(nested))
             bundled_node_modules = Path.home() / ".cache" / "codex-runtimes" / "codex-primary-runtime" / "dependencies" / "node" / "node_modules"
             if bundled_node_modules.exists():
                 node_paths.append(str(bundled_node_modules))

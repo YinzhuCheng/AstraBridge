@@ -1,5 +1,5 @@
-﻿import { describe, expect, it } from "vitest";
-import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveLcrLog } from "./planRendering";
+import { describe, expect, it } from "vitest";
+import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./planRendering";
 
 describe("plan rendering helpers", () => {
   it("extracts and summarizes proposed plans", () => {
@@ -25,10 +25,10 @@ describe("plan rendering helpers", () => {
     expect(contextGuardLevel(90)).toBe("pause");
   });
 
-  it("flags risky Windows write and .lcr log reads", () => {
+  it("flags risky Windows write and .astrabridge log reads", () => {
     expect(hasUnsafeWindowsWrite("Set-Content index.html $html")).toBe(true);
     expect(hasUnsafeWindowsWrite("[IO.File]::WriteAllText($p, $html, [Text.UTF8Encoding]::new($false))")).toBe(false);
-    expect(readsExplosiveLcrLog("Get-Content .lcr/runtime_events.jsonl")).toBe(true);
+    expect(readsExplosiveAstraBridgeLog("Get-Content .astrabridge/runtime_events.jsonl")).toBe(true);
   });
 });
 

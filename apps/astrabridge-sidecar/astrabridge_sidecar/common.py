@@ -4,7 +4,6 @@ import datetime as dt
 import json
 import os
 import re
-import shutil
 import time
 import uuid
 from pathlib import Path
@@ -12,16 +11,12 @@ from typing import Any
 
 
 APP_NAME = "AstraBridge"
-LEGACY_APPDATA_DIRNAME = "LocalCodexRouter"
 PROJECT_SCHEMA_VERSION = "astrabridge-project-v1"
-LEGACY_PROJECT_SCHEMA_VERSION = "local-codex-router-project-v1"
 DEFAULT_PORT = 8790
 DEFAULT_CODEX_HOME_NAME = "embedded_codex_home"
 SHORT_CODEX_HOME_DIR = ("AstraBridge", "cx")
 PROJECT_FILE_SUFFIX = ".abproj"
-LEGACY_PROJECT_FILE_SUFFIX = ".lcrproj"
 WORKSPACE_STATE_DIRNAME = ".astrabridge"
-LEGACY_WORKSPACE_STATE_DIRNAME = ".lcr"
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"^(?P<drive>[A-Za-z]):[\\/](?P<rest>.*)$")
 _WSL_MOUNT_PATH_RE = re.compile(r"^/mnt/(?P<drive>[A-Za-z])/(?P<rest>.*)$")
 _WINDOWS_DRIVE_PATH_ANYWHERE_RE = re.compile(r"(?P<drive>[A-Za-z]):[\\/](?P<rest>.*)$")
@@ -38,59 +33,17 @@ def new_id(prefix: str) -> str:
 
 
 def app_data_dir() -> Path:
-    root = os.environ.get("ASTRABRIDGE_APPDATA") or os.environ.get("ASTRABRIDGE_APPDATA")
+    root = os.environ.get("ASTRABRIDGE_APPDATA")
     if root:
         return Path(root).expanduser().resolve()
     if os.name == "nt":
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-        target = (Path(base) / APP_NAME).resolve()
-        _migrate_legacy_app_data(target)
-        return target
+        return (Path(base) / APP_NAME).resolve()
     return Path.home() / ".astrabridge"
 
 
-def legacy_app_data_dir() -> Path | None:
-    if os.name != "nt":
-        return None
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    return (Path(base) / LEGACY_APPDATA_DIRNAME).resolve()
-
-
-def _migrate_legacy_app_data(target: Path) -> None:
-    legacy = legacy_app_data_dir()
-    if legacy is None or not legacy.exists():
-        return
-    try:
-        if legacy.samefile(target):
-            return
-    except OSError:
-        pass
-    copy_names = (
-        "projects.json",
-        "current_project.json",
-        "recent_projects.json",
-        "profiles.json",
-        "router_config.json",
-        "mcp_servers.json",
-        "metadata_sources.json",
-        "bootstrap",
-        "official-codex-backups",
-        "llm_api_manager",
-    )
-    for name in copy_names:
-        source = legacy / name
-        destination = target / name
-        if not source.exists() or destination.exists():
-            continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if source.is_dir():
-            shutil.copytree(source, destination)
-        else:
-            shutil.copy2(source, destination)
-
-
 def default_codex_home() -> Path:
-    override = os.environ.get("ASTRABRIDGE_CODEX_HOME") or os.environ.get("ASTRABRIDGE_CODEX_HOME")
+    override = os.environ.get("ASTRABRIDGE_CODEX_HOME")
     if override:
         return Path(override).expanduser().resolve()
     if os.name == "nt":

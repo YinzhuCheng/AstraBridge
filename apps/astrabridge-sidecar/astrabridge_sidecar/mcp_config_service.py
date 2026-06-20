@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 import shutil
@@ -85,7 +85,7 @@ def lcr_web_preset() -> dict[str, Any]:
     server_script = str(Path(__file__).resolve().with_name("lcr_web_mcp_server.py"))
     return {
         "name": "lcr_web",
-        "display_name": "LCR Built-in Web Tools",
+        "display_name": "AstraBridge Built-in Web Tools",
         "enabled": True,
         "transport": "stdio",
         "command": sys.executable,

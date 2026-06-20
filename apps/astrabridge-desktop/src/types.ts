@@ -197,8 +197,8 @@ export type WslDependencyStatus = {
   distros: Array<{ name: string; state?: string; version?: string }>;
   checks: WslDependencyCheck[];
   paths: {
-    lcr_wsl_codex_bin: string;
-    lcr_wsl_codex_home: string;
+    astrabridge_wsl_codex_bin: string;
+    astrabridge_wsl_codex_home: string;
     script_root: string;
   };
 };

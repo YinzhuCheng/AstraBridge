@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import html
 import json
@@ -29,7 +29,7 @@ DEFAULT_PROVIDER_SOURCES: list[dict[str, Any]] = [
         "display_name": "DeepSeek",
         "urls": ["https://api-docs.deepseek.com/zh-cn/"],
         "source_status": "official_docs",
-        "notes": "OpenAI-compatible Chat Completions upstream; LCR exposes Responses to Codex.",
+        "notes": "OpenAI-compatible Chat Completions upstream; AstraBridge exposes Responses to Codex.",
     },
     {
         "provider_id": "kimi",
@@ -184,7 +184,7 @@ SEED_MODELS: list[dict[str, Any]] = [
         "web_smoke_status": "pass_direct_tool_call",
         "citation_quality": "requires_explicit_url_instruction",
         "source_status": "official_docs",
-        "verification_notes": "Uses thinking enabled and reasoning_effort for upstream Chat Completions. LCR direct mcpServer/tool/call smoke passed for lcr_web_research_brief on 2026-06-15; keep arbitrary external MCP tools conservative until model-initiated smoke passes.",
+        "verification_notes": "Uses thinking enabled and reasoning_effort for upstream Chat Completions. AstraBridge direct mcpServer/tool/call smoke passed for lcr_web_research_brief on 2026-06-15; keep arbitrary external MCP tools conservative until model-initiated smoke passes.",
     },
     {
         "id": "deepseek/deepseek-v4-flash",
@@ -509,7 +509,7 @@ class MetadataService:
             source_cards.append(f"<section><h2>{html.escape(str(provider.get('display_name') or provider.get('provider_id')))}</h2><p>{html.escape(str(provider.get('notes') or ''))}</p><ul>{links}</ul></section>")
         html_text = f"""<!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><title>LCR Model Metadata Report</title><style>
+<head><meta charset="utf-8"><title>AstraBridge Model Metadata Report</title><style>
 body{{font-family:Segoe UI,Arial,sans-serif;margin:28px;background:#f6f2eb;color:#23272f}}a{{color:#2459b8}}table{{border-collapse:collapse;width:100%;background:#fff}}td,th{{border:1px solid #ddd;padding:8px;text-align:left}}th{{background:#f0ede7}}section{{background:#fff;border:1px solid #ddd;border-radius:14px;padding:16px;margin:14px 0}}.muted{{color:#68707d}}
 </style></head>
 <body><h1>AstraBridge Model Metadata Report</h1><p class="muted">Generated at {html.escape(now_iso())}. Secrets are not included.</p>

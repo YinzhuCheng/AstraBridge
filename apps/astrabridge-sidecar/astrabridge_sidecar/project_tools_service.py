@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import mimetypes
@@ -119,8 +119,8 @@ class ProjectToolsService:
                     }
                 )
                 if len(items) >= limit:
-                    return {"workspace_root": str(root), "filter_version": "skip-lcr-v2", "items": items, "truncated": True, "updated_at": now_iso()}
-        return {"workspace_root": str(root), "filter_version": "skip-lcr-v2", "items": items, "truncated": False, "updated_at": now_iso()}
+                    return {"workspace_root": str(root), "filter_version": "skip-astrabridge-v1", "items": items, "truncated": True, "updated_at": now_iso()}
+        return {"workspace_root": str(root), "filter_version": "skip-astrabridge-v1", "items": items, "truncated": False, "updated_at": now_iso()}
 
     def read_file(self, rel_path: str) -> dict[str, Any]:
         root = self._workspace_root()
@@ -189,7 +189,7 @@ class ProjectToolsService:
         if rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME and self._skip_file(rel):
             raise ValueError("This .lcr file is intentionally summarized elsewhere and is not exposed as raw preview.")
         if not allow_lcr and rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME:
-            raise ValueError("Raw .lcr files are not exposed through the file preview.")
+            raise ValueError("Raw .astrabridge files are not exposed through the file preview.")
         if not candidate.is_file():
             raise ValueError("File does not exist or is not a regular file.")
         return candidate

@@ -7,9 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from .common import (
-    LEGACY_PROJECT_FILE_SUFFIX,
-    LEGACY_PROJECT_SCHEMA_VERSION,
-    LEGACY_WORKSPACE_STATE_DIRNAME,
     PROJECT_FILE_SUFFIX,
     PROJECT_SCHEMA_VERSION,
     WORKSPACE_STATE_DIRNAME,
@@ -19,7 +16,7 @@ from .common import (
     slugify,
     write_json,
 )
-from .wsl_dependency_service import DEFAULT_WSL_DISTRO, LCR_WSL_CODEX_HOME, LCR_WSL_ROOT
+from .wsl_dependency_service import DEFAULT_WSL_DISTRO, ASTRABRIDGE_WSL_CODEX_HOME, ASTRABRIDGE_WSL_ROOT
 
 
 DEFAULT_RUNTIME_HOST_ENV = "ASTRABRIDGE_DEFAULT_EXECUTION_HOST"
@@ -83,10 +80,8 @@ class ProjectService:
         project_path = self._normalize_existing_project_path(project_file)
         payload = read_json(project_path, {})
         schema_version = payload.get("schema_version")
-        if schema_version not in {PROJECT_SCHEMA_VERSION, LEGACY_PROJECT_SCHEMA_VERSION}:
-            raise ValueError("Unsupported or missing .codexproj schema_version.")
-        if schema_version == LEGACY_PROJECT_SCHEMA_VERSION:
-            project_path, payload = self._migrate_legacy_project(project_path, payload)
+        if schema_version != PROJECT_SCHEMA_VERSION:
+            raise ValueError("Unsupported or missing .abproj schema_version.")
         workspace_root = Path(str(payload.get("workspace_root") or "")).expanduser().resolve()
         if not workspace_root.exists() or not workspace_root.is_dir():
             raise ValueError(f"Workspace root does not exist: {workspace_root}")
@@ -310,9 +305,6 @@ class ProjectService:
 
     def _ensure_workspace_state(self, workspace_root: Path) -> None:
         shell_root = workspace_root / WORKSPACE_STATE_DIRNAME
-        legacy_shell_root = workspace_root / LEGACY_WORKSPACE_STATE_DIRNAME
-        if not shell_root.exists() and legacy_shell_root.exists():
-            shutil.copytree(legacy_shell_root, shell_root, dirs_exist_ok=True)
         for path in [
             shell_root / "attachments",
             shell_root / "runtime_events.jsonl",
@@ -379,19 +371,19 @@ class ProjectService:
 
         global _DEFAULT_RUNTIME_PREFS_CACHE
         if _DEFAULT_RUNTIME_PREFS_CACHE is None:
-            if self._lcr_wsl_quick_ready(forced_distro):
+            if self._astrabridge_wsl_quick_ready(forced_distro):
                 _DEFAULT_RUNTIME_PREFS_CACHE = {"execution_host": "wsl", "wsl_distro": forced_distro}
             else:
                 _DEFAULT_RUNTIME_PREFS_CACHE = {"execution_host": "windows", "wsl_distro": ""}
         return dict(_DEFAULT_RUNTIME_PREFS_CACHE)
 
-    def _lcr_wsl_quick_ready(self, distro: str) -> bool:
+    def _astrabridge_wsl_quick_ready(self, distro: str) -> bool:
         wsl_executable = shutil.which("wsl.exe") or shutil.which("wsl")
         if not wsl_executable:
             return False
         command = (
-            f'export CODEX_HOME="{LCR_WSL_CODEX_HOME}"; '
-            f'export PATH="{LCR_WSL_ROOT}/bin:$PATH"; '
+            f'export CODEX_HOME="{ASTRABRIDGE_WSL_CODEX_HOME}"; '
+            f'export PATH="{ASTRABRIDGE_WSL_ROOT}/bin:$PATH"; '
             "command -v codex >/dev/null 2>&1 && codex --version >/dev/null 2>&1"
         )
         try:
@@ -408,37 +400,13 @@ class ProjectService:
 
     def _normalize_project_path(self, project_file: str | Path) -> Path:
         path = Path(project_file).expanduser().resolve()
-        if path.suffix.lower() == LEGACY_PROJECT_FILE_SUFFIX:
-            path = path.with_suffix(PROJECT_FILE_SUFFIX)
-        elif path.suffix.lower() != PROJECT_FILE_SUFFIX:
-            path = path.with_suffix(PROJECT_FILE_SUFFIX)
+        if path.suffix.lower() != PROJECT_FILE_SUFFIX:
+            raise ValueError("AstraBridge projects must use the .abproj suffix.")
         return path
 
     def _normalize_existing_project_path(self, project_file: str | Path) -> Path:
         requested = Path(project_file).expanduser().resolve()
-        candidates = [requested]
-        if requested.suffix.lower() == LEGACY_PROJECT_FILE_SUFFIX:
-            candidates.insert(0, requested)
-            candidates.append(requested.with_suffix(PROJECT_FILE_SUFFIX))
-        elif requested.suffix.lower() == PROJECT_FILE_SUFFIX:
-            candidates.append(requested.with_suffix(LEGACY_PROJECT_FILE_SUFFIX))
-        else:
-            candidates.insert(0, requested.with_suffix(PROJECT_FILE_SUFFIX))
-            candidates.append(requested.with_suffix(LEGACY_PROJECT_FILE_SUFFIX))
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        return candidates[0]
-
-    def _migrate_legacy_project(self, legacy_path: Path, payload: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
-        migrated_path = legacy_path.with_suffix(PROJECT_FILE_SUFFIX)
-        migrated = {
-            **payload,
-            "schema_version": PROJECT_SCHEMA_VERSION,
-            "project_file": str(migrated_path),
-            "updated_at": now_iso(),
-        }
-        if not migrated_path.exists():
-            write_json(migrated_path, migrated)
-        return migrated_path, migrated
+        if requested.suffix.lower() != PROJECT_FILE_SUFFIX:
+            raise ValueError("AstraBridge projects must use the .abproj suffix.")
+        return requested
 

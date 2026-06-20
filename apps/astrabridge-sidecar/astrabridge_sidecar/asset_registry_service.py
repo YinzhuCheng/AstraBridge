@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import mimetypes
 import hashlib
@@ -18,7 +18,7 @@ CONTEXT_SCHEMA_VERSION = "lcr-asset-context-pack-v1"
 class AssetRegistryService:
     """Project-local asset memory for generated/sliced/promoted dogfood assets.
 
-    The registry is intentionally stored under `.lcr/assets` and contains only
+    The registry is intentionally stored under `.astrabridge/assets` and contains only
     paths, provenance, quality notes, and integration state. It never stores
     provider keys or raw Authorization-bearing request payloads.
     """
@@ -268,7 +268,7 @@ class AssetRegistryService:
         summary = self._summary(assets)
         asset_gaps = self._asset_gaps(assets)
         rules = [
-            "Use .lcr/assets/asset_registry.json as durable asset memory; do not infer from raw runtime logs.",
+            "Use .astrabridge/assets/asset_registry.json as durable asset memory; do not infer from raw runtime logs.",
             "Use promoted assets in assets/images/sprites first; promote approved generated/sliced assets before relying on them in game code.",
             "Do not use keys, doors, stairs, HUD icons, floors, or generic prop sprites as blocking walls; generate/promote dedicated tree_wall, rock_wall, ruin_wall, or forest_obstacle sprites first.",
             "Heroine movement needs distinct idle/walk_down/walk_up/walk_left/walk_right frames, at least two walk frames per direction.",
@@ -276,9 +276,9 @@ class AssetRegistryService:
             "For checkerboard or plain backgrounds, detect the background mask and remove it before connected-component slicing.",
         ]
         text_lines = [
-            "LCR Asset Context Pack (auto-injected, secret-free)",
+            "AstraBridge Asset Context Pack (auto-injected, secret-free)",
             "Freshness rule: this asset pack supersedes any older auto-injected asset summary already present in the thread history.",
-            "If promoted counts, asset_type, manifest_keys, or in_use state conflict, use this newest pack and .lcr/assets/asset_registry.json.",
+            "If promoted counts, asset_type, manifest_keys, or in_use state conflict, use this newest pack and .astrabridge/assets/asset_registry.json.",
             f"Registry: {self._relative_path(self._registry_path())}",
             f"Detailed context: {self._relative_path(self._context_pack_path())}",
             "Access note: the paths above are orientation references. Do not call MCP resources/read for them; use the injected summary unless an explicit file-reading tool is available.",
@@ -332,7 +332,7 @@ class AssetRegistryService:
             "promoted": [self._compact_entry(item) for item in promoted[:30]],
             "approved_unpromoted": [self._compact_entry(item) for item in approved[:30]],
             "needs_review": [self._compact_entry(item) for item in needs_review[:30]],
-            "text": text[:3500],
+            "text": text[:5000],
         }
 
     def context_inputs(self) -> list[dict[str, Any]]:

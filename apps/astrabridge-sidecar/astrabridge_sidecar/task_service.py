@@ -707,7 +707,7 @@ def _display_thread_name(name: Any, provider_id: Any = None) -> str | None:
     if not text:
         return None
     first_line = text.splitlines()[0].strip()
-    if first_line.lower().startswith("lcr minimal visual mode:"):
+    if first_line.lower().startswith(("astrabridge minimal visual mode:", "lcr minimal visual mode:")):
         provider = str(provider_id or "").strip()
         return f"{provider.title() or 'Provider'} visual review"
     if len(first_line) > 96:

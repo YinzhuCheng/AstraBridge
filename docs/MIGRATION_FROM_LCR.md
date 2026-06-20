@@ -10,4 +10,4 @@
 | LOCAL_CODEX_ROUTER_* / CODEX_SHELL_* | ASTRABRIDGE_* |
 | openai_account mode | removed |
 
-Legacy projects should be imported explicitly. New projects must create only `.abproj` and `.astrabridge/` state.
+Legacy projects are no longer imported. Recreate AstraBridge projects from backups when needed; AstraBridge projects must create only `.abproj` and `.astrabridge/` state.

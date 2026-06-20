@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import binascii
@@ -259,7 +259,7 @@ class YunwuImageService:
                         "required": False,
                         "type": "string",
                         "default": "japanese_anime_style",
-                        "note": "LCR applies a local prompt-guide enhancement before the request and records the category in the asset manifest.",
+                        "note": "AstraBridge applies a local prompt-guide enhancement before the request and records the category in the asset manifest.",
                     },
                 },
             },
@@ -282,7 +282,7 @@ class YunwuImageService:
                         "required": False,
                         "type": "string",
                         "default": "image_edit_recreation",
-                        "note": "LCR applies a local prompt-guide enhancement before the request and records the category in the asset manifest.",
+                        "note": "AstraBridge applies a local prompt-guide enhancement before the request and records the category in the asset manifest.",
                     },
                 },
             },
@@ -292,7 +292,7 @@ class YunwuImageService:
                 "content_type": "multipart/form-data",
                 "default_model": "gpt-image-2",
                 "default_params": {"size": "1024x1024", "n": 1, "quality": "high", "background": "transparent", "moderation": "auto"},
-                "seed_image": "LCR creates a blank transparent seed PNG and sends it as the edit image when no reference image is available.",
+                "seed_image": "AstraBridge creates a blank transparent seed PNG and sends it as the edit image when no reference image is available.",
                 "prompt_suffix": "Prompt is automatically reinforced with an alpha definition: outside-object pixels must be alpha=0, not white, black, or checkerboard.",
                 "use_for": [
                     "single character sprites",
@@ -340,7 +340,7 @@ class YunwuImageService:
                 "redraw_over_bad_slicing": "If alpha, size, semantic class, slice score, or visual review fails, redraw as a single transparent asset or a more regular sheet.",
             },
             "count_contract": {
-                "requested_n": "LCR records requested_n, actual_n, and count_mismatch because Yunwu may return a different number of assets.",
+                "requested_n": "AstraBridge records requested_n, actual_n, and count_mismatch because Yunwu may return a different number of assets.",
                 "n_greater_than_1": "Treat n>1 as an unstable batch mode until a health check proves it stable for the selected model/route.",
                 "default_batching": f"For production asset draws, prefer concurrent n=1 requests with max concurrency {MAX_YUNWU_IMAGE_CONCURRENCY}.",
                 "retry_policy": "If actual_n is smaller than requested_n, callers may retry the missing count with at most 5 concurrent requests.",

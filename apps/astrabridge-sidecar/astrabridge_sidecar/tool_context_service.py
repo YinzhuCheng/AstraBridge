@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
@@ -40,8 +40,8 @@ _SECRET_TERMS_RE = re.compile(
 )
 
 DEFAULT_FORBIDDEN_INPUTS = [
-    "Do not include raw .lcr/runtime_events.jsonl.",
-    "Do not include raw .lcr/approvals.jsonl.",
+    "Do not include raw .astrabridge/runtime_events.jsonl.",
+    "Do not include raw .astrabridge/approvals.jsonl.",
     "Do not include API keys, Authorization headers, bearer tokens, cookies, or passwords.",
     "Do not include image base64 or large raw provider responses.",
 ]
@@ -53,7 +53,7 @@ DEFAULT_EVIDENCE_REQUIREMENTS = [
 
 
 class ToolContextService:
-    """Builds the small context envelope passed to LCR built-in tools.
+    """Builds the small context envelope passed to AstraBridge built-in tools.
 
     This is intentionally not a transcript copier. It gives tools enough task,
     plan, workspace, and context-pack references to be useful while avoiding raw

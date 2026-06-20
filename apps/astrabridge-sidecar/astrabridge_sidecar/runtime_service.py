@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import mimetypes
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .app_server_client import AppServerClient, JsonRpcError
-from .common import LEGACY_WORKSPACE_STATE_DIRNAME, WORKSPACE_STATE_DIRNAME, append_jsonl, new_id, now_iso, read_json, write_json
+from .common import WORKSPACE_STATE_DIRNAME, append_jsonl, new_id, now_iso, read_json, write_json
 from .dogfood_run_service import MAX_BROWSER_SMOKE_ACTIONS
 from .lcr_web_mcp_server import _tools as lcr_web_dynamic_tools
 from .lcr_web_service import LcrWebService
@@ -28,7 +28,7 @@ from .runtime_config_service import RuntimeConfigService, codex_model_id, codex_
 from .security import SecurityError, redact_sensitive, resolve_under, scan_text_for_secrets
 from .secret_service import SecretService
 from .tool_context_service import ToolContextService, sanitize_tool_context
-from .wsl_dependency_service import LCR_WSL_BIN, LCR_WSL_CODEX_HOME, LCR_WSL_ROOT
+from .wsl_dependency_service import ASTRABRIDGE_WSL_BIN, ASTRABRIDGE_WSL_CODEX_HOME, ASTRABRIDGE_WSL_ROOT
 from .yunwu_image_mcp_server import _summarize_image_result as summarize_yunwu_image_result
 from .yunwu_image_mcp_server import _tools as yunwu_image_dynamic_tools
 from .yunwu_image_service import YunwuImageService
@@ -67,7 +67,7 @@ class RuntimeService:
         self._projects = project_service
         self._modals = modal_service
         self._secrets = secret_service or SecretService()
-        self._mcp_config = mcp_config or McpConfigService()
+        self._mcp_config = mcp_config or getattr(runtime_config, "_mcp_config", None) or McpConfigService()
         self._asset_registry = asset_registry
         self._project_context = project_context
         self._tasks = task_service
@@ -1320,10 +1320,10 @@ class RuntimeService:
             )
 
         if handoff_needed:
-            # A provider switch is not the same as an official Codex fork in LCR:
+            # A provider switch is not the same as an official Codex fork in AstraBridge:
             # the target provider's app-server cannot reliably read or fork a
             # thread owned by the source provider runtime. Keep task continuity
-            # through the LCR task/project/asset context pack, and reserve
+            # through the AstraBridge task/project/asset context pack, and reserve
             # thread/fork for same-runtime forks.
             return self._start_fresh_provider_thread_for_turn(
                 client,
@@ -2036,7 +2036,7 @@ class RuntimeService:
             arguments = {}
         try:
             if tool not in self._lcr_dynamic_tool_names():
-                raise ValueError(f"Unsupported LCR dynamic tool: {tool}")
+                raise ValueError(f"Unsupported AstraBridge dynamic tool: {tool}")
             arguments = self._arguments_with_tool_context(tool, arguments)
             result = self._call_lcr_dynamic_tool(tool, arguments)
             summary = self._summarize_lcr_dynamic_tool_result(tool, result)
@@ -2072,7 +2072,7 @@ class RuntimeService:
                     "error": message,
                 }
             )
-            return {"success": False, "contentItems": [{"type": "inputText", "text": f"LCR dynamic tool failed: {message}"}]}
+            return {"success": False, "contentItems": [{"type": "inputText", "text": f"AstraBridge dynamic tool failed: {message}"}]}
 
     def _call_lcr_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if tool == "lcr_browser_smoke":
@@ -2145,7 +2145,7 @@ class RuntimeService:
             )
         if tool == "lcr_web_fetch":
             return self._lcr_web.fetch(arguments)
-        raise ValueError(f"Unsupported LCR web dynamic tool: {tool}")
+        raise ValueError(f"Unsupported AstraBridge web dynamic tool: {tool}")
 
     def _call_yunwu_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         workspace_root = self._projects.require_workspace_root()
@@ -2194,7 +2194,7 @@ class RuntimeService:
         raise ValueError(f"Unsupported Yunwu dynamic tool: {tool}")
 
     def _dynamic_tool_text_result(self, tool: str, summary: dict[str, Any]) -> str:
-        return "LCR dynamic tool result for " + tool + ":\n" + json.dumps(summary, ensure_ascii=False, indent=2)
+        return "AstraBridge dynamic tool result for " + tool + ":\n" + json.dumps(summary, ensure_ascii=False, indent=2)
 
     def _on_stderr(self, line: str) -> None:
         self._record_event({"type": "stderr", "line": line})
@@ -2212,7 +2212,7 @@ class RuntimeService:
         include_context = normalized_context_mode in {"default", "full"}
         if normalized_context_mode == "minimal_visual":
             mode_note = (
-                "LCR minimal visual mode: answer from the attached image(s) and the user's prompt only. "
+                "AstraBridge minimal visual mode: answer from the attached image(s) and the user's prompt only. "
                 "Do not inspect repository files, run commands, or use tools unless the user explicitly asks for that in this turn."
             )
             clean_text = f"{mode_note}\n\n{clean_text}" if clean_text else mode_note
@@ -2323,7 +2323,7 @@ class RuntimeService:
         try:
             workspace_root = self._projects.require_workspace_root().resolve()
             if source == workspace_root or workspace_root in source.parents:
-                if source.parts.count(WORKSPACE_STATE_DIRNAME) or source.parts.count(LEGACY_WORKSPACE_STATE_DIRNAME):
+                if source.parts.count(WORKSPACE_STATE_DIRNAME):
                     return source
                 return resolve_under(workspace_root, source)
         except Exception:
@@ -2372,7 +2372,7 @@ class RuntimeService:
     def _launch_descriptor(self) -> str | None:
         if self._execution_host() == "wsl":
             distro = self._wsl_distro() or "default"
-            codex_binary = os.environ.get("ASTRABRIDGE_WSL_CODEX_BIN") or LCR_WSL_BIN
+            codex_binary = os.environ.get("ASTRABRIDGE_WSL_CODEX_BIN") or ASTRABRIDGE_WSL_BIN
             return f"wsl::{distro}::{codex_binary}"
         return os.environ.get("ASTRABRIDGE_CODEX_BIN") or shutil.which("codex")
 
@@ -2394,8 +2394,8 @@ class RuntimeService:
             raise RuntimeError("WSL execution host is selected, but wsl.exe was not detected on Windows.")
         workspace_root = self._projects.require_workspace_root()
         launcher_cwd_wsl = self._windows_path_to_wsl(self._app_server_launch_cwd())
-        codex_home_wsl = os.environ.get("ASTRABRIDGE_WSL_CODEX_HOME") or LCR_WSL_CODEX_HOME
-        codex_binary = os.environ.get("ASTRABRIDGE_WSL_CODEX_BIN") or LCR_WSL_BIN
+        codex_home_wsl = os.environ.get("ASTRABRIDGE_WSL_CODEX_HOME") or ASTRABRIDGE_WSL_CODEX_HOME
+        codex_binary = os.environ.get("ASTRABRIDGE_WSL_CODEX_BIN") or ASTRABRIDGE_WSL_BIN
         requested_distro = self._wsl_distro()
         installed_distros = self._list_wsl_distros(wsl_executable)
         if requested_distro and requested_distro not in installed_distros:
@@ -2410,14 +2410,14 @@ class RuntimeService:
             )
         distro = requested_distro or (installed_distros[0] if installed_distros else None)
         distro_args = ["-d", distro] if distro else []
-        self._terminate_stale_lcr_wsl_app_servers(wsl_executable, distro_args)
+        self._terminate_stale_astrabridge_wsl_app_servers(wsl_executable, distro_args)
         probe = self._run_capture([wsl_executable, *distro_args, "bash", "-lc", self._wsl_codex_probe_command(codex_binary)])
         if int(probe["returncode"]) != 0:
             detail = str(probe["stderr"] or probe["stdout"]).strip()
             suffix = f" ({detail})" if detail else ""
             raise RuntimeError(
                 "WSL execution host is selected, but a Linux-native Codex CLI is not ready inside WSL. "
-                "Install the LCR-managed WSL runtime or set ASTRABRIDGE_WSL_CODEX_BIN." + suffix
+                "Install the AstraBridge-managed WSL runtime or set ASTRABRIDGE_WSL_CODEX_BIN." + suffix
             )
         codex_home_wsl_abs = self._wsl_expand_home(wsl_executable, distro_args, codex_home_wsl)
         home_wsl_abs = self._wsl_expand_home(wsl_executable, distro_args, "$HOME")
@@ -2449,7 +2449,7 @@ class RuntimeService:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _terminate_stale_lcr_wsl_app_servers(self, wsl_executable: str, distro_args: list[str]) -> None:
+    def _terminate_stale_astrabridge_wsl_app_servers(self, wsl_executable: str, distro_args: list[str]) -> None:
         script = r'''
 import os
 import signal
@@ -2522,7 +2522,7 @@ print(",".join(str(pid) for pid in terminated))
         models_dir = windows_codex_home / "models"
         models_cache = windows_codex_home / "models_cache.json"
         if not config_path.is_file() or not models_dir.is_dir():
-            raise RuntimeError("LCR runtime config was not rendered before WSL launch.")
+            raise RuntimeError("AstraBridge runtime config was not rendered before WSL launch.")
         wsl_config_path = windows_codex_home / "config.wsl.toml"
         wsl_catalog_path = f"{codex_home_wsl_abs.rstrip('/')}/models/lcr-models.json"
         wsl_router_base_url = self._wsl_router_base_url(wsl_executable, distro_args)
@@ -2548,7 +2548,7 @@ print(",".join(str(pid) for pid in terminated))
         result = self._run_capture([wsl_executable, *distro_args, "bash", "-lc", command])
         if int(result["returncode"]) != 0:
             detail = str(result["stderr"] or result["stdout"]).strip()
-            raise RuntimeError(f"Failed to sync LCR Codex config into WSL CODEX_HOME: {detail}")
+            raise RuntimeError(f"Failed to sync AstraBridge Codex config into WSL CODEX_HOME: {detail}")
 
     def _rewrite_wsl_config_text(
         self,
@@ -2643,9 +2643,9 @@ print(",".join(str(pid) for pid in terminated))
                 "attempts": attempts[:8],
             }
         )
-        reason = "no reachable LCR router"
+        reason = "no reachable AstraBridge router"
         if expected_fingerprint:
-            reason = f"no reachable LCR router with fingerprint {expected_fingerprint}"
+            reason = f"no reachable AstraBridge router with fingerprint {expected_fingerprint}"
         raise RuntimeError(
             f"WSL execution host is selected, but WSL could not reach the current AstraBridge ({reason}). "
             "Stop stale sidecars, check Windows firewall/port forwarding, or set ASTRABRIDGE_WSL_HOST."
@@ -2744,17 +2744,17 @@ for host in candidates:
         return payload.decode("utf-8", errors="replace").replace("\x00", "").strip()
 
     def _wsl_codex_path_export(self) -> str:
-        return f'export PATH="{LCR_WSL_ROOT}/bin:$PATH"; '
+        return f'export PATH="{ASTRABRIDGE_WSL_ROOT}/bin:$PATH"; '
 
     def _wsl_codex_command(self, codex_binary: str) -> str:
-        if codex_binary in {"codex", LCR_WSL_BIN}:
+        if codex_binary in {"codex", ASTRABRIDGE_WSL_BIN}:
             return "codex"
         return self._quote_wsl_value(codex_binary)
 
     def _wsl_codex_probe_command(self, codex_binary: str) -> str:
         codex_command = self._wsl_codex_command(codex_binary)
         return (
-            f"export CODEX_HOME={self._quote_wsl_value(os.environ.get('ASTRABRIDGE_WSL_CODEX_HOME') or LCR_WSL_CODEX_HOME)}; "
+            f"export CODEX_HOME={self._quote_wsl_value(os.environ.get('ASTRABRIDGE_WSL_CODEX_HOME') or ASTRABRIDGE_WSL_CODEX_HOME)}; "
             f"{self._wsl_codex_path_export()}"
             f'if ! command -v {codex_command} > /tmp/lcr_codex_probe_path 2>/dev/null; then echo "codex executable not found: {codex_command}" >&2; exit 127; fi; '
             'if grep -q "WindowsApps" /tmp/lcr_codex_probe_path; then printf "codex resolves to WindowsApps inside WSL: " >&2; cat /tmp/lcr_codex_probe_path >&2; exit 126; fi; '
@@ -2856,7 +2856,7 @@ for host in candidates:
                     "name": "lcr_browser_smoke",
                     "description": (
                         "Run a local browser smoke test for a localhost, 127.0.0.1, or file:// URL, optionally "
-                        "performing simple UI actions, then record console errors and a screenshot in the LCR "
+                        "performing simple UI actions, then record console errors and a screenshot in the AstraBridge "
                         "dogfood ledger. WSL-style file URLs such as file:///mnt/d/... are supported and normalized "
                         "for the host browser; do not start an ad-hoc HTTP server just to capture a screenshot. "
                         "For story/tutorial screens, prefer click_text_until_absent over guessing a fixed number of clicks. "

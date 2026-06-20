@@ -1,1 +1,1 @@
-﻿{"default":{"identifier":"default","description":"Research OS main window with no direct shell or filesystem permissions.","local":true,"windows":["main"],"permissions":["core:default","dialog:default"]}}
+{"default":{"identifier":"default","description":"AstraBridge main window with no direct shell or filesystem permissions.","local":true,"windows":["main"],"permissions":["core:default","dialog:default"]}}

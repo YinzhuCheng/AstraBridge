@@ -1,4 +1,4 @@
-﻿import type { LocaleCode, PermissionMode } from "../../types";
+import type { LocaleCode, PermissionMode } from "../../types";
 
 type Dictionary = Record<string, string>;
 
@@ -159,7 +159,7 @@ const en: Dictionary = {
   official_codex_backups: "Backups",
   router_base_url: "Router base URL",
   default_router_model: "Default router model",
-  project_suffix_note: "New projects use .abproj and workspace-local .lcr state. Legacy .codexproj projects are imported once on open.",
+  project_suffix_note: "Projects use .abproj and workspace-local .astrabridge state. Legacy project files are not imported.",
   setup_first: "Configure provider routing before the first run, then open or create a project.",
   runtime_secret_loaded: "Key loaded into the sidecar process only.",
   router_profile_summary: "Profiles describe upstream providers. Secrets stay out of projects and out of Codex config.",
@@ -361,7 +361,7 @@ const zhCN: Dictionary = {
   official_codex_backups: "备份数",
   router_base_url: "Router 地址",
   default_router_model: "默认 Router 模型",
-  project_suffix_note: "新项目使用 .abproj 和工作区本地 .lcr 状态目录。旧 .codexproj 会在打开时导入一次。",
+  project_suffix_note: "项目使用 .abproj 和工作区本地 .astrabridge 状态目录。旧项目文件不再导入。",
   setup_first: "首次使用先配置 provider 路由，然后再打开或新建项目。",
   runtime_secret_loaded: "密钥只加载到 sidecar 进程内存中。",
   router_profile_summary: "Profile 只描述上游 provider。密钥不会进入项目，也不会写入 Codex 配置。",

@@ -2,7 +2,7 @@
 
 This is the first execution plan for agents continuing AstraBridge after the product split from Local Codex Router.
 
-The migration itself is complete enough to stop using the old Research OS thread for feature development. Future work should happen inside `D:\AstraBridge`.
+The split is complete enough to stop using the old Research OS thread for feature development. Future work should happen inside `D:\AstraBridge`.
 
 ## Mission
 
@@ -14,7 +14,7 @@ AstraBridge is a local multi-provider coding-agent workbench based on Codex CLI/
 
 - New project files use `.abproj`.
 - New workspace state uses `.astrabridge/`.
-- Do not create `.lcrproj`, `.lcr/`, or `.codex*` for new projects.
+- Do not create or import `.lcrproj`, `.lcr/`, `.codexproj`, `.codex-shell/`, or project `.codex*` state.
 - Do not write official Codex `~/.codex/config.toml` during normal app use.
 - Do not reintroduce `openai_account`, `openai-account`, `codex_managed_auth`, or official OpenAI account login UI.
 - Do not commit real provider keys, bearer tokens, cookies, auth headers, vault files, raw provider responses, or screenshots containing secrets.
@@ -24,7 +24,7 @@ AstraBridge is a local multi-provider coding-agent workbench based on Codex CLI/
 
 Completed in the migration session:
 
-- Active LCR source copied into:
+- Active predecessor source copied into:
   - `apps/astrabridge-desktop`
   - `apps/astrabridge-sidecar`
 - Product identity changed to `AstraBridge 星桥`.
@@ -51,14 +51,14 @@ Before changing code, run:
 cd D:\AstraBridge
 git status --short
 rg -n "openai_account|openai-account|codex_managed_auth|Use OpenAI official|OpenAI official" apps
-rg -n -- "PROJECT_FILE_SUFFIX = \"\.lcrproj\"|WORKSPACE_STATE_DIRNAME = \"\.lcr\"|vault\.lcrvault|productName.*Local|identifier.*local\.codex" apps
+rg -n -- "PROJECT_FILE_SUFFIX = \"\.lcrproj\"|WORKSPACE_STATE_DIRNAME = \"\.lcr\"|vault\.lcrvault|productName.*Local|identifier.*local\.codex|\.codexproj|\.codex-shell" apps
 ```
 
 Expected:
 
 - `git status --short` is clean unless you intentionally changed files.
 - official account login scan has no matches.
-- new-project `.lcr/.lcrproj` scan has no matches. Explicit legacy constants may mention `.lcrproj/.lcr`; new-project constants must not.
+- legacy project/state scan has no product-path matches except explicit rejection tests.
 
 If these scans fail, fix before continuing.
 
@@ -76,12 +76,12 @@ Tasks:
    - `%LOCALAPPDATA%/AstraBridge`
    - official Codex `~/.codex`
 3. Replace stale path assertions:
-   - `.lcr/` -> `.astrabridge/` for new project behavior.
+   - old state-directory expectations -> `.astrabridge/`.
    - `vault.lcrvault` -> `vault.abvault`.
-   - Keep `.lcrproj/.lcr` only in explicit legacy-import tests.
+   - Keep old project/state names only in explicit rejection tests.
 4. Update legacy project tests:
-   - Product behavior should be explicit `.lcrproj/.lcr` import.
-   - Do not keep old `.codexproj` auto-migration unless the product intentionally supports it.
+   - Product behavior should reject `.lcrproj`, `.lcr`, `.codexproj`, and `.codex-shell`; recreate AstraBridge projects from backups when needed.
+   - Do not keep old `.codexproj` auto-migration.
 5. Re-run:
 
 ```powershell
@@ -105,16 +105,16 @@ Tasks:
    - project file suffix `.abproj`
    - workspace state `.astrabridge/`
    - schema `astrabridge-project-v1`
-2. Verify old LCR projects are import-only:
-   - source `.lcrproj` input accepted only through explicit import path.
-   - imported project writes new `.abproj/.astrabridge` state.
+2. Verify old project formats are rejected:
+   - `.lcrproj` and `.codexproj` inputs fail without writing a migrated `.abproj`.
+   - `.lcr` and `.codex-shell` directories are not copied into `.astrabridge`.
 3. Verify no `.codex*` project files are created.
 4. Verify app-owned CODEX_HOME is under AstraBridge naming.
 
 Acceptance:
 
 - New project smoke passes.
-- Legacy import smoke is explicit and documented.
+- Legacy rejection smoke is explicit and documented.
 - official Codex config timestamp unchanged during smoke.
 
 ## Phase 3: Desktop Dependency And Build
@@ -164,7 +164,7 @@ pyinstaller astrabridge-sidecar.spec
 2. Confirm output path:
    - `apps/astrabridge-sidecar/dist/astrabridge-sidecar.exe`
 3. Run a minimal server launch smoke on a non-conflicting port.
-4. Confirm server reports AstraBridge app state and no old LCR appdata paths for new state.
+4. Confirm server reports AstraBridge app state and no old appdata paths for new state.
 
 Acceptance:
 
@@ -187,7 +187,7 @@ Tasks:
 4. Create a test project and verify:
    - `.abproj`
    - `.astrabridge/`
-   - no `.lcr`, `.lcrproj`, `.codex`, `.codexproj`
+   - no `.lcr`, `.lcrproj`, `.codex`, `.codexproj`, `.codex-shell`
 5. Uninstall/reinstall smoke.
 
 Acceptance:
@@ -227,7 +227,7 @@ Acceptance:
 
 ## Phase 7: Product UI Stabilization Backlog
 
-After tests/build/install are stable, implement these user-facing features from the LCR backlog:
+After tests/build/install are stable, implement these user-facing features from the product backlog:
 
 1. Right sidebar switcher:
    - Status / Goal / Plan

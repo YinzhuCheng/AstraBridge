@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from .common import LEGACY_PROJECT_FILE_SUFFIX, LEGACY_WORKSPACE_STATE_DIRNAME, PROJECT_FILE_SUFFIX, WORKSPACE_STATE_DIRNAME
+from .common import PROJECT_FILE_SUFFIX, WORKSPACE_STATE_DIRNAME
 from .security import SECRET_RE
 
 
@@ -26,11 +26,11 @@ class IsolationAuditService:
         official_config = _optional_path(official_codex_status.get("config_path"))
         checks = []
         checks.append(_check("project_file_suffix", project_file is None or project_file.suffix == PROJECT_FILE_SUFFIX, str(project_file) if project_file else None))
-        checks.append(_check("legacy_project_file_only_imported", project_file is None or project_file.suffix != LEGACY_PROJECT_FILE_SUFFIX, str(project_file) if project_file else None))
         if workspace:
-            checks.append(_check("workspace_lcr_state_exists", (workspace / WORKSPACE_STATE_DIRNAME).exists(), str(workspace / WORKSPACE_STATE_DIRNAME)))
+            checks.append(_check("workspace_astrabridge_state_exists", (workspace / WORKSPACE_STATE_DIRNAME).exists(), str(workspace / WORKSPACE_STATE_DIRNAME)))
             checks.append(_check("workspace_no_owned_codex_state", not (workspace / ".codex").exists(), str(workspace / ".codex")))
-            checks.append(_check("workspace_no_legacy_shell_state", not (workspace / LEGACY_WORKSPACE_STATE_DIRNAME).exists(), str(workspace / LEGACY_WORKSPACE_STATE_DIRNAME)))
+            checks.append(_check("workspace_no_old_lcr_state", not (workspace / ".lcr").exists(), str(workspace / ".lcr")))
+            checks.append(_check("workspace_no_old_codex_shell_state", not (workspace / ".codex-shell").exists(), str(workspace / ".codex-shell")))
         checks.append(_check("isolated_codex_home_present", codex_home is not None and codex_home.exists(), str(codex_home) if codex_home else None))
         checks.append(
             _check(
@@ -46,15 +46,15 @@ class IsolationAuditService:
                 str(codex_home / "config.toml") if codex_home else None,
             )
         )
-        secret_scan = _scan_lcr_state(project_file, workspace)
-        checks.append(_check("project_and_lcr_state_have_no_secret_like_content", not secret_scan, secret_scan[:10]))
+        secret_scan = _scan_astrabridge_state(project_file, workspace)
+        checks.append(_check("project_and_astrabridge_state_have_no_secret_like_content", not secret_scan, secret_scan[:10]))
         return {
             "ok": all(item["ok"] for item in checks),
             "checks": checks,
             "paths": {
                 "project_file": str(project_file) if project_file else None,
                 "workspace_root": str(workspace) if workspace else None,
-                "lcr_state": str(workspace / WORKSPACE_STATE_DIRNAME) if workspace else None,
+                "astrabridge_state": str(workspace / WORKSPACE_STATE_DIRNAME) if workspace else None,
                 "isolated_codex_home": str(codex_home) if codex_home else None,
                 "official_codex_config": str(official_config) if official_config else None,
             },
@@ -99,7 +99,7 @@ def _path_contains_secret(path: Path) -> bool:
         return False
 
 
-def _scan_lcr_state(project_file: Path | None, workspace: Path | None) -> list[str]:
+def _scan_astrabridge_state(project_file: Path | None, workspace: Path | None) -> list[str]:
     candidates: list[Path] = []
     if project_file and project_file.exists():
         candidates.append(project_file)

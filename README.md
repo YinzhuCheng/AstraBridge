@@ -16,7 +16,7 @@ npm run build
 npm run tauri dev
 ```
 
-New projects use `.abproj` and workspace-local `.astrabridge/` state. Legacy `.lcrproj/.lcr` projects should be imported explicitly and migrated once.
+Projects use `.abproj` and workspace-local `.astrabridge/` state. Legacy LCR and codex-shell project files are not imported; recreate AstraBridge projects from your backups when needed.
 ## Private Credentials
 
 AstraBridge supports provider keys as private operator-owned material. The repo includes `PRIVATE/README.md` to document local-only paths, while `PRIVATE/**` is ignored by git. Do not push real API keys or `Authorization` headers to a public remote.

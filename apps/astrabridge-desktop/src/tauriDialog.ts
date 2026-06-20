@@ -11,7 +11,6 @@ function normalizeDialogPath(value: DialogPath): string | null {
 
 function ensureProjectSuffix(path: string): string {
   if (path.toLowerCase().endsWith(".abproj")) return path;
-  if (path.toLowerCase().endsWith(".codexproj")) return path.replace(/\.codexproj$/i, ".abproj");
   return `${path}.abproj`;
 }
 
@@ -25,7 +24,7 @@ export async function selectExistingProject(): Promise<string | null> {
     title: "Open AstraBridge project",
     multiple: false,
     directory: false,
-    filters: [{ name: "AstraBridge Project", extensions: ["lcrproj", "codexproj"] }],
+    filters: [{ name: "AstraBridge Project", extensions: ["abproj"] }],
   });
   return normalizeDialogPath(selected);
 }
@@ -34,7 +33,7 @@ export async function chooseProjectSavePath(defaultPath: string): Promise<string
   const selected = await invokeDialog<DialogPath>("plugin:dialog|save", {
     title: "Create AstraBridge project",
     defaultPath,
-    filters: [{ name: "AstraBridge Project", extensions: ["lcrproj"] }],
+    filters: [{ name: "AstraBridge Project", extensions: ["abproj"] }],
   });
   const normalized = normalizeDialogPath(selected);
   return normalized ? ensureProjectSuffix(normalized) : null;

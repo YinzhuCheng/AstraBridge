@@ -7,7 +7,6 @@
     SetShellVarContext current
     RMDir /r "$APPDATA\AstraBridge"
     RMDir /r "$LOCALAPPDATA\AstraBridge"
-    RMDir /r "$LOCALAPPDATA\LCR"
   ${EndIf}
 !macroend
 

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import queue
 import threading
@@ -49,8 +49,8 @@ class ApprovalService:
                 return {"decision": "accept"}
             return {"decision": decision["decision"]}
         except queue.Empty:
-            self.decide(approval_id, "decline", "Timed out waiting for Research OS UI approval.")
-            return {"decision": "decline", "reason": "Timed out waiting for Research OS UI approval."}
+            self.decide(approval_id, "decline", "Timed out waiting for AstraBridge UI approval.")
+            return {"decision": "decline", "reason": "Timed out waiting for AstraBridge UI approval."}
 
     def list_pending(self) -> dict[str, Any]:
         return {"approvals": [self._sanitize(item) for item in self._pending.values()]}

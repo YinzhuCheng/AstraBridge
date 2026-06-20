@@ -1,4 +1,4 @@
-﻿export type ParsedPlanCard = {
+export type ParsedPlanCard = {
   title: string;
   summary: string[];
   steps: string[];
@@ -41,8 +41,8 @@ export function hasUnsafeWindowsWrite(command: string) {
   return !/(utf8|utf-8|UTF8Encoding|Encoding\s*=\s*['"]?utf8|NoNewline)/i.test(text);
 }
 
-export function readsExplosiveLcrLog(command: string) {
-  return /\.lcr[\\/](runtime_events|approvals)\.jsonl/i.test(String(command || ""));
+export function readsExplosiveAstraBridgeLog(command: string) {
+  return /\.astrabridge[\\/](runtime_events|approvals)\.jsonl/i.test(String(command || ""));
 }
 
 function collectSection(lines: string[], section: string) {

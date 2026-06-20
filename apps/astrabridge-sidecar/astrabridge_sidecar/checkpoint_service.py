@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import os
@@ -41,7 +41,7 @@ MAX_TEXT_SCAN_BYTES = 512 * 1024
 class CheckpointService:
     """Project-local save/load checkpoints for AstraBridge.
 
-    Checkpoints are deliberately stored under `.lcr/saves` and never create Git
+    Checkpoints are deliberately stored under `.astrabridge/saves` and never create Git
     commits/tags or write official Codex state.
     """
 
@@ -163,7 +163,7 @@ class CheckpointService:
         candidate = (self._saves_root() / str(save_id or "").strip()).resolve()
         root = self._saves_root().resolve()
         if candidate != root and root not in candidate.parents:
-            raise ValueError("Save path escapes .lcr/saves.")
+            raise ValueError("Save path escapes .astrabridge/saves.")
         return candidate
 
     def _save_id(self, description: str) -> str:
@@ -276,17 +276,17 @@ class CheckpointService:
     def _exclude_reason(self, relative: Path, path: Path) -> str | None:
         parts = [part.lower() for part in relative.parts]
         if len(parts) >= 3 and parts[0] == WORKSPACE_STATE_DIRNAME and parts[1] == "saves":
-            return "Excluded LCR checkpoint store."
+            return "Excluded AstraBridge checkpoint store."
         if len(parts) >= 3 and parts[0] == WORKSPACE_STATE_DIRNAME and parts[1] == "assets":
             asset_dir = parts[2]
             if asset_dir in EXCLUDED_LCR_ASSET_DIR_NAMES or asset_dir.startswith("sliced_failed"):
-                return "Excluded heavy LCR generated/sliced asset artifact directory; asset registry keeps references."
+                return "Excluded heavy AstraBridge generated/sliced asset artifact directory; asset registry keeps references."
         if parts and parts[0] == WORKSPACE_STATE_DIRNAME and path.is_file() and path.name.startswith(".") and path.name.endswith(".tmp"):
-            return "Excluded transient LCR atomic-write temp file."
+            return "Excluded transient AstraBridge atomic-write temp file."
         if len(parts) == 2 and parts[0] == WORKSPACE_STATE_DIRNAME and parts[1] in EXCLUDED_LCR_LOG_NAMES:
-            return "Excluded verbose LCR runtime log; source log remains in project state."
+            return "Excluded verbose AstraBridge runtime log; source log remains in project state."
         if parts and parts[0] == WORKSPACE_STATE_DIRNAME and any(part.startswith("venv") or part.endswith("-venv") for part in parts):
-            return "Excluded LCR local Python virtual environment."
+            return "Excluded AstraBridge local Python virtual environment."
         if any(part in EXCLUDED_DIR_NAMES for part in parts):
             return "Excluded build, dependency, cache, or VCS directory."
         if path.is_symlink():

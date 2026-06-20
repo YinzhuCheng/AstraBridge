@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import re
@@ -336,7 +336,7 @@ def classify_command(command: str, cwd: str | None = None) -> dict[str, Any]:
         if subcommand in SAFE_GIT_COMMANDS:
             return {"risk": "low", "decision": "allowed_in_sandbox", "reason": "Safe git operation inside project sandbox."}
         return {"risk": "medium", "decision": "requires_confirmation", "reason": "Git command can affect remotes or history."}
-    return {"risk": "medium", "decision": "requires_confirmation", "reason": "Command requires Research OS approval."}
+    return {"risk": "medium", "decision": "requires_confirmation", "reason": "Command requires AstraBridge approval."}
 
 
 def validate_changed_paths(project_root: Path, paths: list[str]) -> None:

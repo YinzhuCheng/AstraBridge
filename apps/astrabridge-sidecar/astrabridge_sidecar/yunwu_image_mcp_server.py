@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -74,7 +74,7 @@ def _tools() -> list[dict[str, Any]]:
     return [
         {
             "name": "yunwu_image_generate",
-            "description": "Generate images through Yunwu's OpenAI-compatible Images API. Rewrite prompts with the LCR image prompt guides before calling this tool. For transparent props or sprites, explicitly pass background=transparent. For background plates or scene backdrops, keep background=auto or opaque. Prefer format=png, quality=high, and n=1 with up to 5 concurrent calls instead of relying on unstable n>1 batches. A single image call can take 45-90 seconds; report each completed asset id/path/alpha check as it returns instead of claiming the whole batch is finished. API keys are read from YUNWU_API_KEY in the MCP server environment.",
+            "description": "Generate images through Yunwu's OpenAI-compatible Images API. Rewrite prompts with the AstraBridge image prompt guides before calling this tool. For transparent props or sprites, explicitly pass background=transparent. For background plates or scene backdrops, keep background=auto or opaque. Prefer format=png, quality=high, and n=1 with up to 5 concurrent calls instead of relying on unstable n>1 batches. A single image call can take 45-90 seconds; report each completed asset id/path/alpha check as it returns instead of claiming the whole batch is finished. API keys are read from YUNWU_API_KEY in the MCP server environment.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -90,7 +90,7 @@ def _tools() -> list[dict[str, Any]]:
                         "minimum": 1,
                         "maximum": 10,
                         "default": 1,
-                        "description": "Yunwu may return fewer images than requested. LCR records requested_n/actual_n/count_mismatch; production batches should usually use concurrent n=1.",
+                        "description": "Yunwu may return fewer images than requested. AstraBridge records requested_n/actual_n/count_mismatch; production batches should usually use concurrent n=1.",
                     },
                     "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"], "default": "high"},
                     "format": {"type": "string", "enum": ["png", "jpeg", "webp"], "default": "png"},
@@ -119,7 +119,7 @@ def _tools() -> list[dict[str, Any]]:
                     "purpose": {"type": "string", "description": "Short asset purpose, such as hero_sprite or monster_icon."},
                     "interface_note": {
                         "type": "string",
-                        "description": f"Yunwu image API max concurrency is {MAX_YUNWU_IMAGE_CONCURRENCY}. Use single transparent assets for characters/props; use same-category sheets only for tiles/icons with large gutters. LCR records alpha, size, format, requested_n, actual_n, and count_mismatch.",
+                        "description": f"Yunwu image API max concurrency is {MAX_YUNWU_IMAGE_CONCURRENCY}. Use single transparent assets for characters/props; use same-category sheets only for tiles/icons with large gutters. AstraBridge records alpha, size, format, requested_n, actual_n, and count_mismatch.",
                     },
                 },
                 "required": ["prompt"],
@@ -128,7 +128,7 @@ def _tools() -> list[dict[str, Any]]:
         },
         {
             "name": "yunwu_image_transparent_asset",
-            "description": "Create a transparent Japanese-anime game asset through Yunwu's /images/edits route. LCR automatically supplies a blank transparent seed PNG, repeats the alpha=0 transparency definition in the prompt, and validates alpha/size/format after saving. Use this before plain generation for sprites, props, doors, stairs, keys, gems, monsters, and HUD icons. A single transparent-asset call often takes 45-90 seconds; treat every tool result as per-asset progress and report actual_n, local_path, has_alpha, and transparency_status before starting the next visual decision.",
+            "description": "Create a transparent Japanese-anime game asset through Yunwu's /images/edits route. AstraBridge automatically supplies a blank transparent seed PNG, repeats the alpha=0 transparency definition in the prompt, and validates alpha/size/format after saving. Use this before plain generation for sprites, props, doors, stairs, keys, gems, monsters, and HUD icons. A single transparent-asset call often takes 45-90 seconds; treat every tool result as per-asset progress and report actual_n, local_path, has_alpha, and transparency_status before starting the next visual decision.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -388,7 +388,7 @@ def _debug(event: str, **fields: Any) -> None:
             local_app_data = os.environ.get("LOCALAPPDATA")
             if not local_app_data:
                 return
-            raw_path = str(Path(local_app_data) / "LCR" / "mcp" / "yunwu_image_debug.jsonl")
+            raw_path = str(Path(local_app_data) / "AstraBridge" / "mcp" / "yunwu_image_debug.jsonl")
         path = Path(raw_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         record = {

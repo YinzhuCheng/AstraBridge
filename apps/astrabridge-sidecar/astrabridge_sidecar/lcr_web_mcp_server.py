@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import html
 import ipaddress
@@ -94,7 +94,7 @@ def _handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                     "instructions": (
-                        "Use LCR web tools for batch source lookup and lightweight research briefs. "
+                        "Use AstraBridge web tools for batch source lookup and lightweight research briefs. "
                         "Return URLs with claims. Do not pass secrets, Authorization headers, cookies, or API keys."
                     ),
                 },
@@ -282,14 +282,14 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         if context:
             payload["tool_context"] = context
         return _tool_text(payload)
-    raise ValueError(f"Unknown LCR web tool: {name}")
+    raise ValueError(f"Unknown AstraBridge web tool: {name}")
 
 
 def _tool_context_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "description": (
-            "Optional LCR Tool Context Envelope. Pass only task goal, current plan step, workspace, "
+            "Optional AstraBridge Tool Context Envelope. Pass only task goal, current plan step, workspace, "
             "project/asset context references, evidence requirements, forbidden inputs, and output contract."
         ),
         "properties": {
@@ -452,7 +452,7 @@ def _research_brief(
     for url in _string_list(source_urls)[:10]:
         candidates.append({"title": "", "url": url, "snippet": "User-provided source URL.", "query": "source_urls"})
     for url in _hint_source_urls_for_goal(research_goal):
-        candidates.append({"title": "", "url": url, "snippet": "LCR hinted technical source.", "query": "hinted_sources"})
+        candidates.append({"title": "", "url": url, "snippet": "AstraBridge hinted technical source.", "query": "hinted_sources"})
     candidates.extend([dict(item) for item in list(search_payload.get("merged_results") or []) if isinstance(item, dict)])
     candidates = _dedupe_results(candidates)
     fetch_top_n = max(1, min(12, int(fetch_top_n or DEFAULT_RESEARCH_FETCH_TOP_N)))
@@ -1194,7 +1194,7 @@ def _debug(event: str, **fields: Any) -> None:
             local_app_data = os.environ.get("LOCALAPPDATA")
             if not local_app_data:
                 return
-            raw_path = str(Path(local_app_data) / "LCR" / "mcp" / "lcr_web_debug.jsonl")
+            raw_path = str(Path(local_app_data) / "AstraBridge" / "mcp" / "lcr_web_debug.jsonl")
         path = Path(raw_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         record = {"timestamp": datetime.now(timezone.utc).isoformat(), "event": event, **fields}

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import re
@@ -376,7 +376,7 @@ def prompt_guides_payload() -> dict[str, Any]:
                 "notes",
             ],
             "transparent_asset_tip": "For transparent assets, pass background=transparent as a request parameter and use format=png or webp. Prompt wording alone is not sufficient.",
-            "edit_route_tip": "When no reference image exists but a transparent cutout is required, use the LCR transparent-asset edit route: it supplies a blank transparent seed PNG, calls /images/edits with background=transparent, and validates alpha afterwards.",
+            "edit_route_tip": "When no reference image exists but a transparent cutout is required, use the AstraBridge transparent-asset edit route: it supplies a blank transparent seed PNG, calls /images/edits with background=transparent, and validates alpha afterwards.",
             "batching_tip": "Treat n>1 as unstable until health-checked; production batches should usually use concurrent n=1 draws with max concurrency 5.",
         },
         "game_asset_policy": {
