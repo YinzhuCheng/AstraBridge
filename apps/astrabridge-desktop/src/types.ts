@@ -751,6 +751,16 @@ export type RuntimeSupervisorState = {
     summary: string;
     message?: string;
     actionable_hint?: string;
+    fallback_models?: string[];
+    reasoning_downgrade_levels?: string[];
+    requires_key_check?: boolean;
+    provider_switch_recommended?: boolean;
+    recommended_actions?: Array<{
+      action: string;
+      label: string;
+      reason: string;
+      target?: string | null;
+    }>;
     thread_id?: string;
     turn_id?: string;
     last_updated_at?: string | null;

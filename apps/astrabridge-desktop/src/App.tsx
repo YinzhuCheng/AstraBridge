@@ -6,6 +6,7 @@ import { api } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
 import { composerReasoningOptions, preferredReasoningEffort } from "./features/runtime/reasoningOptions";
+import { runtimeErrorNoticeText } from "./features/runtime/runtimeErrorNotice";
 import { summarizeTaskCard } from "./features/runtime/taskSummary";
 import { hasPersistedRenderableTurnContent, itemActivityFromPayload, summarizeTurnBlocks } from "./features/runtime/threadRendering";
 import { useAppStore } from "./store";
@@ -3344,7 +3345,7 @@ function AppShell() {
     ...capabilityWarnings.map((warning, index) => ({ key: `capability-${index}`, text: warning, tone: "warning" as const })),
     ...(supervisor.data?.runtime_error?.summary ? [{
       key: "runtime-error",
-      text: `${supervisor.data.runtime_error.summary}${supervisor.data.runtime_error.actionable_hint ? ` ${supervisor.data.runtime_error.actionable_hint}` : ""}`,
+      text: runtimeErrorNoticeText(supervisor.data.runtime_error),
       tone: "danger" as const,
     }] : []),
     ...(supervisor.data?.guard.message ? [{ key: "context-guard", text: supervisor.data.guard.message, tone: supervisor.data.guard.level === "pause" ? "danger" as const : "warning" as const }] : []),
