@@ -76,7 +76,7 @@ class CheckpointService:
         files, excluded = self._write_workspace_zip(save_dir / "workspace.zip", workspace)
         project_copy = self._copy_project_file(save_dir)
         manifest = {
-            "schema_version": "lcr-checkpoint-v1",
+            "schema_version": "astrabridge-checkpoint-v1",
             "save_id": save_id,
             "created_at": now_iso(),
             "project_id": project.get("project_id"),

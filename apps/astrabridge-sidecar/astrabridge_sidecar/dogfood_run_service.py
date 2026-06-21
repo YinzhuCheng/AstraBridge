@@ -303,7 +303,10 @@ class DogfoodRunService:
             http_status = None
         screenshot_status = str(record.get("screenshot_status") or "")
         has_blocked_screenshot = screenshot_status.startswith("blocked")
-        has_failed_screenshot = screenshot_status == "captured_after_failure" or bool(record.get("screenshot_error"))
+        has_failed_screenshot = screenshot_status in {
+            "captured_after_failure",
+            "captured_viewport_fallback_after_failure",
+        } or bool(record.get("screenshot_error"))
         if (
             record.get("console_errors")
             or action_failed
@@ -637,6 +640,16 @@ async function launchBrowser() {
   page.on('pageerror', error => consoleErrors.push(`pageerror: ${String(error.message || error)}`.slice(0, 300)));
   let status = null;
   const actionResults = [];
+  async function captureScreenshot(outputPath) {
+    try {
+      await page.screenshot({ path: outputPath, fullPage: true });
+      return { path: outputPath, status: 'captured' };
+    } catch (error) {
+      consoleErrors.push(`screenshot-fullpage: ${String(error.message || error)}`.slice(0, 300));
+      await page.screenshot({ path: outputPath, fullPage: false });
+      return { path: outputPath, status: 'captured_viewport_fallback' };
+    }
+  }
   async function isVisible(locator, timeoutMs) {
     try {
       await locator.first().waitFor({ state: 'visible', timeout: timeoutMs || 500 });
@@ -710,15 +723,15 @@ async function launchBrowser() {
       }
     }
     await page.waitForTimeout(250);
-    await page.screenshot({ path: process.argv[3], fullPage: true });
-    console.log(JSON.stringify({ ok: true, status, console_errors: consoleErrors.slice(0, 20), screenshot_path: process.argv[3], browser_executable: launched.executable, action_results: actionResults }));
+    const capture = await captureScreenshot(process.argv[3]);
+    console.log(JSON.stringify({ ok: true, status, console_errors: consoleErrors.slice(0, 20), screenshot_path: capture.path, screenshot_status: capture.status, browser_executable: launched.executable, action_results: actionResults }));
   } catch (error) {
     let screenshotPath = null;
     let screenshotStatus = 'blocked_capture_failed';
     try {
-      await page.screenshot({ path: process.argv[3], fullPage: true });
-      screenshotPath = process.argv[3];
-      screenshotStatus = 'captured_after_failure';
+      const capture = await captureScreenshot(process.argv[3]);
+      screenshotPath = capture.path;
+      screenshotStatus = capture.status === 'captured_viewport_fallback' ? 'captured_viewport_fallback_after_failure' : 'captured_after_failure';
     } catch (screenshotError) {
       consoleErrors.push(`screenshot: ${String(screenshotError.message || screenshotError)}`.slice(0, 300));
     }
@@ -810,7 +823,9 @@ async function launchBrowser() {
         # Keep the outer watchdog slightly above the in-page action budget.
         # Otherwise a legitimate 30s Playwright action can be killed by the
         # Python subprocess timeout before Playwright records screenshot evidence.
-        seconds = 20.0
+        # Leave additional budget for browser startup plus full-page/viewport
+        # screenshot fallback on heavy local pages.
+        seconds = 35.0
         for action in actions:
             kind = str(action.get("type") or "")
             timeout_sec = max(float(action.get("timeout_ms") or 3000) / 1000.0, 0.1)

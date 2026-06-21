@@ -1,0 +1,577 @@
+import type { RuntimeActivityState, RuntimeDiffSummary, ThreadMessageSource, ThreadRenderBlock } from "../../types";
+
+type VerifiedEvidence = {
+  tool?: string;
+  server?: string;
+  status?: string;
+  verified?: boolean;
+  label?: string;
+  summary?: string[];
+  paths?: string[];
+  urls?: string[];
+};
+
+type CompletionQuality = {
+  status?: string;
+  reason?: string;
+  tool_item_count?: number;
+  agent_message_count?: number;
+  max_agent_chars?: number;
+  final_preview?: string;
+  recommended_action?: string;
+};
+
+type DecoratedThreadItem = ThreadMessageSource & {
+  lcrVerifiedEvidence?: VerifiedEvidence;
+};
+
+type DecoratedTurn = {
+  id?: string;
+  startedAt?: number | null;
+  completedAt?: number | null;
+  durationMs?: number | null;
+  source_thread_id?: string;
+  sourceThreadId?: string;
+  profile_id?: string;
+  profileId?: string;
+  provider_id?: string;
+  providerId?: string;
+  model?: string;
+  reasoning_effort?: string;
+  reasoningEffort?: string;
+  items?: ThreadMessageSource[];
+  lcrCompletionQuality?: CompletionQuality;
+};
+
+type FileChangeSummaryInput = {
+  path?: string;
+  newPath?: string;
+  file?: string;
+  diff?: string;
+  kind?: {
+    type?: string;
+    move_path?: string | null;
+  };
+};
+
+function safeJsonPreview(value: unknown, limit = 500) {
+  try {
+    return JSON.stringify(value ?? {}, null, 2).slice(0, limit);
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+function summarizeDiffText(diff: string) {
+  let added = 0;
+  let deleted = 0;
+  for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) added += 1;
+    if (line.startsWith("-")) deleted += 1;
+  }
+  return { added, deleted };
+}
+
+function summarizeFileChanges(changes: FileChangeSummaryInput[]) {
+  let added = 0;
+  let deleted = 0;
+  const detailLines: string[] = [];
+  const files: string[] = [];
+
+  for (const change of changes) {
+    const path = String(change.path ?? change.newPath ?? change.file ?? "file");
+    const diff = String(change.diff ?? "");
+    const kind = String(change.kind?.type ?? "update");
+    const movePath = String(change.kind?.move_path ?? "").trim();
+    const counts = summarizeDiffText(diff);
+
+    added += counts.added;
+    deleted += counts.deleted;
+    files.push(path);
+
+    const changeLabel = kind === "add" ? "新增" : kind === "delete" ? "删除" : movePath ? `更新并移动到 ${movePath}` : "更新";
+    detailLines.push(`${path} · ${changeLabel} · +${counts.added} -${counts.deleted}`);
+
+    const excerpt = diff
+      .split(/\r?\n/)
+      .filter((line) => line && !line.startsWith("@@"))
+      .slice(0, 6)
+      .join("\n")
+      .trim();
+    if (excerpt) detailLines.push(excerpt);
+  }
+
+  return {
+    files,
+    added,
+    deleted,
+    detail: detailLines.join("\n\n"),
+  };
+}
+
+function summarizeJsonLike(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  if (typeof record.text === "string" && record.text.trim()) return record.text.trim();
+  if (Array.isArray(record.content)) {
+    const joined = record.content
+      .map((entry) => summarizeJsonLike(entry))
+      .filter(Boolean)
+      .join("\n");
+    if (joined.trim()) return joined.trim();
+  }
+  return "";
+}
+
+function mcpResultDetail(result: unknown) {
+  if (!result || typeof result !== "object") return "";
+  const record = result as { content?: unknown[]; structuredContent?: unknown };
+  const detailChunks: string[] = [];
+  for (const entry of record.content ?? []) {
+    const text = summarizeJsonLike(entry);
+    if (text) detailChunks.push(text);
+  }
+  const structured = summarizeJsonLike(record.structuredContent);
+  if (structured) detailChunks.push(structured);
+  if (detailChunks.length > 0) return detailChunks.join("\n\n");
+  return safeJsonPreview(result);
+}
+
+function dynamicToolResultDetail(item: Extract<DecoratedThreadItem, { type: "dynamicToolCall" }>) {
+  const detailChunks: string[] = [];
+  const textContent = (item.contentItems ?? [])
+    .filter((entry): entry is Extract<NonNullable<typeof item.contentItems>[number], { type: "inputText" }> => entry.type === "inputText")
+    .map((entry) => entry.text.trim())
+    .filter(Boolean);
+  if (textContent.length > 0) detailChunks.push(textContent.join("\n"));
+
+  const imageCount = (item.contentItems ?? []).filter((entry) => entry.type === "inputImage").length;
+  if (imageCount > 0) detailChunks.push(`${imageCount} image item${imageCount === 1 ? "" : "s"}`);
+
+  if (detailChunks.length > 0) return detailChunks.join("\n\n");
+  return safeJsonPreview(item.arguments);
+}
+
+function toolDetail(item: DecoratedThreadItem) {
+  const detailChunks: string[] = [];
+  const evidence = item.lcrVerifiedEvidence;
+  if (evidence?.label) detailChunks.push(evidence.label);
+  if (evidence?.summary?.length) detailChunks.push(...evidence.summary);
+  if (evidence?.paths?.length) detailChunks.push(...evidence.paths.map((path) => `path: ${path}`));
+  if (evidence?.urls?.length) detailChunks.push(...evidence.urls.map((url) => `url: ${url}`));
+  if (detailChunks.length > 0) return detailChunks.join("\n");
+  if (item.type === "mcpToolCall") {
+    return item.error ? safeJsonPreview(item.error) : item.result ? mcpResultDetail(item.result) : safeJsonPreview(item.arguments);
+  }
+  if (item.type === "dynamicToolCall") {
+    return dynamicToolResultDetail(item);
+  }
+  return "";
+}
+
+function commandDetail(item: Extract<DecoratedThreadItem, { type: "commandExecution" }>) {
+  const detailChunks = [item.command];
+  if (item.lcrVerifiedEvidence?.summary?.length) detailChunks.push(...item.lcrVerifiedEvidence.summary);
+  if (item.aggregatedOutput) detailChunks.push(item.aggregatedOutput);
+  return detailChunks.filter(Boolean).join("\n\n");
+}
+
+function collabToolPreview(item: Extract<ThreadMessageSource, { type: "collabAgentToolCall" }>) {
+  const receivers = item.receiverThreadIds.length > 0 ? item.receiverThreadIds.join(", ") : "pending";
+  const prompt = item.prompt?.trim() ? item.prompt.trim() : "";
+  const detail = [
+    `sender: ${item.senderThreadId}`,
+    `receivers: ${receivers}`,
+    item.model ? `model: ${item.model}` : "",
+    item.reasoningEffort ? `effort: ${item.reasoningEffort}` : "",
+    prompt ? `prompt: ${prompt}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return {
+    title: item.tool === "spawnAgent" ? "Forked collaborator thread" : `Collab tool: ${item.tool}`,
+    detail,
+  };
+}
+
+function liveCollabPreview(item: Record<string, unknown>) {
+  const tool = String(item.tool ?? "collab");
+  const receiverThreadIds = Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds.map((value) => String(value)).filter(Boolean) : [];
+  const prompt = String(item.prompt ?? "").trim();
+  const model = String(item.model ?? "").trim();
+  const effort = String(item.reasoningEffort ?? "").trim();
+  const preview =
+    receiverThreadIds.length > 0
+      ? receiverThreadIds.slice(0, 2).join(", ")
+      : prompt
+          ? prompt.slice(0, 80)
+          : tool === "spawnAgent"
+            ? "Preparing collaborator thread"
+            : tool;
+  const detail = [
+    receiverThreadIds.length > 0 ? `receivers: ${receiverThreadIds.join(", ")}` : "",
+    model ? `model: ${model}` : "",
+    effort ? `effort: ${effort}` : "",
+    prompt ? `prompt: ${prompt}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return { preview, detail };
+}
+
+function completionQualityBlock(turn: DecoratedTurn): ThreadRenderBlock | null {
+  const quality = turn.lcrCompletionQuality;
+  if (!quality) return null;
+  const preview = quality.final_preview || "The turn ended after tool activity, but the final assistant answer still looks incomplete.";
+  const detail = [
+    quality.reason ? `reason: ${quality.reason}` : "",
+    quality.recommended_action ? `recommended action: ${quality.recommended_action}` : "",
+    quality.tool_item_count !== undefined ? `verified activity items: ${quality.tool_item_count}` : "",
+    quality.agent_message_count !== undefined ? `assistant messages: ${quality.agent_message_count}` : "",
+    quality.max_agent_chars !== undefined ? `max assistant chars: ${quality.max_agent_chars}` : "",
+    quality.final_preview ? `final preview: ${quality.final_preview}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return {
+    key: `${turn.id ?? "turn"}:completion-quality`,
+    role: "activity",
+    activity: {
+      kind: "waiting",
+      label: "Final answer may need a follow-up",
+      status: quality.status || "warning",
+      preview,
+      detail,
+    },
+  };
+}
+
+export function itemActivityFromPayload(item: Record<string, unknown>, status = "active"): RuntimeActivityState | null {
+  const itemType = String(item.type ?? "");
+  const itemId = String(item.id ?? "");
+  if (itemType === "reasoning") {
+    return { kind: "thinking", label: "正在思考", status, item_id: itemId };
+  }
+  if (itemType === "commandExecution") {
+    return {
+      kind: "command",
+      label: "正在执行命令",
+      status,
+      preview: String(item.command ?? ""),
+      detail: String(item.command ?? ""),
+      item_id: itemId,
+    };
+  }
+  if (itemType === "fileChange") {
+    return { kind: "file_change", label: "正在修改文件", status, item_id: itemId };
+  }
+  if (itemType === "webSearch") {
+    return {
+      kind: "web_search",
+      label: "正在搜索",
+      status,
+      preview: String(item.query ?? ""),
+      detail: safeJsonPreview(item.action),
+      item_id: itemId,
+    };
+  }
+  if (itemType === "mcpToolCall") {
+    return {
+      kind: "mcp",
+      label: "正在调用 MCP 工具",
+      status,
+      preview: [item.server, item.tool].filter(Boolean).join("."),
+      detail: safeJsonPreview(item.arguments),
+      item_id: itemId,
+    };
+  }
+  if (itemType === "dynamicToolCall") {
+    return {
+      kind: "tool",
+      label: "正在调用工具",
+      status,
+      preview: [item.namespace, item.tool].filter(Boolean).join("."),
+      detail: safeJsonPreview(item.arguments),
+      item_id: itemId,
+    };
+  }
+  if (itemType === "enteredReviewMode" || itemType === "exitedReviewMode") {
+    return {
+      kind: "review",
+      label: itemType === "enteredReviewMode" ? "进入审查模式" : "退出审查模式",
+      status,
+      preview: String(item.review ?? ""),
+      item_id: itemId,
+    };
+  }
+  if (itemType === "collabAgentToolCall") {
+    const collab = liveCollabPreview(item);
+    return {
+      kind: item.tool === "spawnAgent" ? "fork" : "tool",
+      label: item.tool === "spawnAgent" ? "创建协作线程" : "正在调用协作工具",
+      status,
+      preview: collab.preview,
+      detail: [collab.detail, safeJsonPreview(item.agentsStates)].filter(Boolean).join("\n\n"),
+      item_id: itemId,
+    };
+  }
+  if (itemType === "contextCompaction") {
+    return {
+      kind: "compact",
+      label: status === "completed" ? "上下文已压缩" : "正在压缩上下文",
+      status,
+      preview: "Context compaction",
+      item_id: itemId,
+    };
+  }
+  return null;
+}
+
+export function renderBlocksForItem(item: ThreadMessageSource): ThreadRenderBlock[] {
+  const decoratedItem = item as DecoratedThreadItem;
+  switch (item.type) {
+    case "userMessage": {
+      const text = item.content
+        .filter((entry) => entry.type === "text")
+        .map((entry) => entry.text)
+        .join("\n");
+      const attachments = item.content
+        .filter((entry) => entry.type !== "text")
+        .map((entry) => ("name" in entry ? entry.name : entry.type === "localImage" ? entry.path.split(/[\\/]/).pop() ?? entry.path : entry.url));
+      return [{ key: item.id, role: "user", text, attachments }];
+    }
+    case "agentMessage":
+      return [{ key: item.id, role: "assistant", text: item.text }];
+    case "plan":
+      return [{ key: item.id, role: "plan", text: item.text }];
+    case "reasoning":
+      return [{ key: item.id, role: "reasoning", text: item.summary.length > 0 ? item.summary : item.content }];
+    case "commandExecution":
+      return [
+        {
+          key: item.id,
+          role: "command",
+          command: item.command,
+          output: commandDetail(decoratedItem as Extract<DecoratedThreadItem, { type: "commandExecution" }>),
+          status: item.status,
+        },
+      ];
+    case "fileChange": {
+      const summary = summarizeFileChanges(item.changes as FileChangeSummaryInput[]);
+      return [
+        {
+          key: item.id,
+          role: "file_change",
+          files: summary.files,
+          status: item.status,
+          added: summary.added,
+          deleted: summary.deleted,
+          detail: summary.detail,
+        },
+      ];
+    }
+    case "mcpToolCall":
+      return [{
+        key: item.id,
+        role: "tool",
+        title: `${item.server}.${item.tool}`,
+        status: item.status,
+        detail: toolDetail(decoratedItem),
+      }];
+    case "dynamicToolCall":
+      return [{ key: item.id, role: "tool", title: `${item.namespace ?? "tool"}.${item.tool}`, status: item.status, detail: toolDetail(decoratedItem) }];
+    case "collabAgentToolCall": {
+      const collab = collabToolPreview(item);
+      return [{ key: item.id, role: "tool", title: collab.title, status: item.status, detail: collab.detail }];
+    }
+    case "webSearch":
+      return [{
+        key: item.id,
+        role: "activity",
+        activity: {
+          kind: "web_search",
+          label: "网页搜索",
+          status: "completed",
+          preview: item.query,
+          detail: safeJsonPreview(item.action),
+          item_id: item.id,
+        },
+      }];
+    case "imageView":
+      return [{ key: item.id, role: "image", path: item.path }];
+    case "imageGeneration":
+      return [{
+        key: item.id,
+        role: "tool",
+        title: "Image generation",
+        status: item.status,
+        detail: [item.revisedPrompt, item.savedPath, item.result].filter(Boolean).join("\n"),
+      }];
+    case "enteredReviewMode":
+      return [{
+        key: item.id,
+        role: "activity",
+        activity: {
+          kind: "review",
+          label: "进入审查模式",
+          status: "completed",
+          preview: item.review,
+          item_id: item.id,
+        },
+      }];
+    case "exitedReviewMode":
+      return [{
+        key: item.id,
+        role: "activity",
+        activity: {
+          kind: "review",
+          label: "退出审查模式",
+          status: "completed",
+          preview: item.review,
+          item_id: item.id,
+        },
+      }];
+    case "contextCompaction":
+      return [{
+        key: item.id,
+        role: "activity",
+        activity: {
+          kind: "compact",
+          label: "上下文已压缩",
+          status: "completed",
+          preview: "Context compaction completed",
+          item_id: item.id,
+        },
+      }];
+    default:
+      return [];
+  }
+}
+
+export function hasPersistedRenderableTurnContent(
+  turn?: {
+    completedAt?: number | null;
+    items?: ThreadMessageSource[];
+  } | null,
+) {
+  if (!turn?.completedAt) return false;
+  return (turn.items ?? []).some((item) =>
+    [
+      "agentMessage",
+      "plan",
+      "commandExecution",
+      "fileChange",
+      "mcpToolCall",
+      "dynamicToolCall",
+      "collabAgentToolCall",
+      "webSearch",
+      "imageView",
+      "imageGeneration",
+      "enteredReviewMode",
+      "exitedReviewMode",
+      "contextCompaction",
+    ].includes(item.type),
+  );
+}
+
+export function summarizeTurnBlocks(
+  thread?: { turns?: DecoratedTurn[] } | null,
+  liveText?: string,
+  liveReasoning?: { text: string; source: string; label: string },
+  liveActivity?: RuntimeActivityState,
+  liveDiff?: RuntimeDiffSummary,
+  liveTurnId?: string,
+): ThreadRenderBlock[] {
+  if (!thread) {
+    const liveBlocks: ThreadRenderBlock[] = [];
+    if (liveActivity) liveBlocks.push({ key: "activity-live", role: "activity", activity: liveActivity, diff: liveDiff });
+    if (liveReasoning?.text) liveBlocks.push({ key: "reasoning-live", role: "reasoning", text: [liveReasoning.text], source: liveReasoning.label || liveReasoning.source, live: true });
+    if (liveText) liveBlocks.push({ key: "live", role: "assistant_live", text: liveText });
+    return liveBlocks;
+  }
+
+  const turns = thread.turns ?? [];
+  const blocks: ThreadRenderBlock[] = [];
+  let renderedLiveTurn = false;
+  for (const turn of turns) {
+    const turnMeta = {
+      turnId: turn.id,
+      startedAt: turn.startedAt ?? null,
+      completedAt: turn.completedAt ?? null,
+      durationMs: turn.durationMs ?? null,
+      sourceThreadId: turn.source_thread_id ?? turn.sourceThreadId,
+      profileId: turn.profile_id ?? turn.profileId,
+      providerId: turn.provider_id ?? turn.providerId,
+      model: turn.model,
+      reasoningEffort: turn.reasoning_effort ?? turn.reasoningEffort,
+    };
+    for (const item of turn.items ?? []) {
+      blocks.push(...renderBlocksForItem(item).map((block) => ({ ...turnMeta, ...block })));
+    }
+    const qualityBlock = completionQualityBlock(turn);
+    if (qualityBlock) {
+      blocks.push({ ...turnMeta, ...qualityBlock });
+    }
+    const isLatest = turn.id === (turns[turns.length - 1]?.id ?? "");
+    if (liveTurnId && turn.id === liveTurnId) {
+      renderedLiveTurn = true;
+    }
+    if (liveText && isLatest) {
+      if (liveActivity) {
+        blocks.push({ ...turnMeta, key: `activity-${turn.id}`, role: "activity", activity: liveActivity, diff: liveDiff, completedAt: null, durationMs: null });
+      }
+      if (liveReasoning?.text) {
+        blocks.push({
+          ...turnMeta,
+          key: `reasoning-live-${turn.id}`,
+          role: "reasoning",
+          text: [liveReasoning.text],
+          source: liveReasoning.label || liveReasoning.source,
+          live: true,
+          completedAt: null,
+          durationMs: null,
+        });
+      }
+      blocks.push({ ...turnMeta, key: `live-${turn.id}`, role: "assistant_live", text: liveText, completedAt: null, durationMs: null });
+    } else if (!liveText && isLatest && (liveActivity || liveReasoning?.text)) {
+      if (liveActivity) {
+        blocks.push({ ...turnMeta, key: `activity-${turn.id}`, role: "activity", activity: liveActivity, diff: liveDiff, completedAt: null, durationMs: null });
+      }
+      if (liveReasoning?.text) {
+        blocks.push({
+          ...turnMeta,
+          key: `reasoning-live-${turn.id}`,
+          role: "reasoning",
+          text: [liveReasoning.text],
+          source: liveReasoning.label || liveReasoning.source,
+          live: true,
+          completedAt: null,
+          durationMs: null,
+        });
+      }
+    }
+  }
+  if ((liveText || liveActivity || liveReasoning?.text) && liveTurnId && !renderedLiveTurn) {
+    const liveMeta = { key: `live-${liveTurnId}`, turnId: liveTurnId, startedAt: null, completedAt: null, durationMs: null };
+    if (liveActivity) {
+      blocks.push({ ...liveMeta, key: `activity-${liveTurnId}`, role: "activity", activity: liveActivity, diff: liveDiff });
+    }
+    if (liveReasoning?.text) {
+      blocks.push({
+        ...liveMeta,
+        key: `reasoning-live-${liveTurnId}`,
+        role: "reasoning",
+        text: [liveReasoning.text],
+        source: liveReasoning.label || liveReasoning.source,
+        live: true,
+      });
+    }
+    if (liveText) {
+      blocks.push({ ...liveMeta, role: "assistant_live", text: liveText });
+    }
+  }
+  return blocks;
+}

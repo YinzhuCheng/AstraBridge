@@ -49,6 +49,8 @@ export type ProjectTaskProviderThread = {
   permission_mode?: PermissionMode;
   collaboration_mode?: CollaborationMode;
   name?: string;
+  missing_at?: string;
+  missing_reason?: string;
   created_at?: string;
   updated_at?: string;
 };
@@ -118,18 +120,19 @@ export type Profile = {
   auth_mode: "session_paste" | "env_ref" | "key_file" | "os_keychain";
   proxy_mode: "direct" | "system" | "custom";
   proxy_url: string;
+  supported_reasoning_levels?: string[];
+  default_reasoning_level?: string | null;
+  reasoning_policy_mode?: string;
+  capabilities?: Record<string, unknown>;
+  edit_policy?: Record<string, string>;
+  temperature_default?: number;
+  temperature_ui_min?: number;
+  temperature_ui_max?: number;
+  provider_temperature_min?: number;
+  provider_temperature_max?: number;
+  temperature_adapter_policy?: string;
   created_at?: string;
   updated_at?: string;
-};
-
-export type OfficialCodexStatus = {
-  config_path: string;
-  exists: boolean;
-  router_configured: boolean;
-  managed_by_app: boolean;
-  backup_count: number;
-  latest_backup: string | null;
-  router_env_key: string;
 };
 
 export type RuntimeEnvironment = {
@@ -231,6 +234,17 @@ export type RouterProvider = {
   logo_asset_path?: string;
   logo_license_note?: string;
   accent_color?: string;
+  supported_reasoning_levels?: string[];
+  default_reasoning_level?: string | null;
+  reasoning_policy_mode?: string;
+  capabilities?: Record<string, unknown>;
+  edit_policy?: Record<string, string>;
+  temperature_default?: number;
+  temperature_ui_min?: number;
+  temperature_ui_max?: number;
+  provider_temperature_min?: number;
+  provider_temperature_max?: number;
+  temperature_adapter_policy?: string;
   created_at?: string;
   updated_at?: string;
 };
@@ -294,6 +308,13 @@ export type RouterModelEntry = {
   ui_warnings?: string[];
   source_urls?: string[];
   source_status?: string;
+  recommended?: boolean;
+  default_for_provider?: boolean;
+  deprecated?: boolean;
+  deprecated_after?: string | null;
+  confidence?: string | null;
+  catalog_version?: string | null;
+  source_provenance?: Record<string, unknown>;
   last_verified_at?: string | null;
   verification_notes?: string;
   created_at?: string;
@@ -311,6 +332,7 @@ export type MetadataSourceRecord = {
 export type MetadataSourcesResponse = {
   providers: MetadataSourceRecord[];
   updated_at: string;
+  catalog_schema?: string;
 };
 
 export type CodexModelCatalogEntry = Record<string, unknown> & {
@@ -324,6 +346,10 @@ export type EffectiveCatalogResponse = {
   models: CodexModelCatalogEntry[];
   model_count: number;
   generated_at: string;
+  catalog_version?: string;
+  review_path?: string;
+  models_lock_path?: string;
+  sources_lock_path?: string;
 };
 
 export type LlmManagerSession = {
@@ -417,18 +443,55 @@ export type LlmHealthResultsResponse = {
 export type MetadataRefreshResponse = {
   applied: boolean;
   fetched: Array<Record<string, unknown>>;
+  source_results?: Array<Record<string, unknown>>;
+  summary?: {
+    status: "idle" | "success" | "partial" | "failed" | string;
+    total_sources: number;
+    ok_sources: number;
+    failed_sources: number;
+    by_classification: Record<string, number>;
+  };
   proposed: {
     providers: RouterProvider[];
     models: RouterModelEntry[];
     model_count: number;
   };
   updated_at: string;
+  catalog_version?: string;
+  review_path?: string;
+  models_lock_path?: string;
+  sources_lock_path?: string;
+  artifact_paths?: Record<string, string>;
+};
+
+export type MetadataRefreshJobStartResponse = {
+  job_id: string;
+  status: "running" | string;
+  apply: boolean;
+  started_at: string;
+};
+
+export type MetadataRefreshJobStatusResponse = {
+  job_id: string | null;
+  status: "idle" | "running" | "success" | "partial" | "failed" | string;
+  running: boolean;
+  apply?: boolean;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error?: string | null;
+  summary?: MetadataRefreshResponse["summary"];
+  source_results?: Array<Record<string, unknown>>;
+  artifact_paths?: Record<string, string>;
+  latest_job_id?: string | null;
 };
 
 export type MetadataReportResponse = {
   path: string;
   catalog_path: string;
   config_path: string;
+  review_path?: string;
+  models_lock_path?: string;
+  sources_lock_path?: string;
 };
 
 export type TestMatrixResponse = {
@@ -809,6 +872,10 @@ export type ShellThreadSettings = {
 export type ShellThread = Thread & {
   displayName: string;
   shellSettings: ShellThreadSettings;
+  isCompositeTaskThread?: boolean;
+  task_id?: string;
+  active_provider_thread_id?: string | null;
+  provider_threads?: ProjectTaskProviderThread[];
 };
 
 export type RuntimeModal = {
@@ -840,6 +907,11 @@ export type ThreadRenderMeta = {
   startedAt?: number | null;
   completedAt?: number | null;
   durationMs?: number | null;
+  sourceThreadId?: string;
+  profileId?: string;
+  providerId?: string;
+  model?: string;
+  reasoningEffort?: string;
 };
 
 export type ThreadRenderBlock =
@@ -850,7 +922,7 @@ export type ThreadRenderBlock =
   | (ThreadRenderMeta & { role: "plan"; text: string })
   | (ThreadRenderMeta & { role: "reasoning"; text: string[]; source?: string; live?: boolean })
   | (ThreadRenderMeta & { role: "command"; command: string; output: string; status: string })
-  | (ThreadRenderMeta & { role: "file_change"; files: string[]; status: string })
+  | (ThreadRenderMeta & { role: "file_change"; files: string[]; status: string; added?: number; deleted?: number; detail?: string })
   | (ThreadRenderMeta & { role: "tool"; title: string; status: string; detail?: string })
   | (ThreadRenderMeta & { role: "image"; path: string });
 
@@ -872,6 +944,8 @@ export type RuntimeActivityKind =
   | "command"
   | "file_change"
   | "compact"
+  | "review"
+  | "fork"
   | "mcp"
   | "tool"
   | "waiting"
@@ -892,10 +966,13 @@ export type RuntimeDiffSummary = {
   deleted: number;
   files: number;
   diff?: string;
+  file_paths?: string[];
+  detail?: string;
   updated_at?: string;
 };
 
 export type ThreadReadResponse = { thread: ShellThread; project?: ProjectFile; task?: ProjectTask };
+export type TaskConversationResponse = { thread: ShellThread; task?: ProjectTask; transcript_path?: string; updated_at?: string };
 export type ThreadListResponse = { threads: ShellThread[]; next_cursor: string | null; backwards_cursor: string | null };
 export type TurnStartResponse = { turn: { id: string; status: string }; thread_id?: string; handoff?: ProjectTaskHandoffEvent | null; project?: ProjectFile; task?: ProjectTask };
 export type GoalResponse = { goal: ThreadGoal | null };

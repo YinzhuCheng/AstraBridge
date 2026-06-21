@@ -4,27 +4,40 @@ from pathlib import Path
 from typing import Any
 
 from .common import app_data_dir, now_iso, read_json, write_json
+from .model_catalog import current_generated_catalog
+from .providers import get_provider_profile, resolve_provider_id
 
 
 KNOWN_MODEL_CATALOG: dict[str, list[dict[str, Any]]] = {
     "openai": [
         {"native_model": "gpt-5.5", "display_name": "GPT-5.5", "advertised_context_window": 1000000, "supported_reasoning_levels": ["none", "low", "medium", "high", "xhigh"]},
-        {"native_model": "gpt-5.4", "display_name": "GPT-5.4", "advertised_context_window": 1000000, "supported_reasoning_levels": ["none", "low", "medium", "high", "xhigh"]},
-        {"native_model": "gpt-5.4-mini", "display_name": "GPT-5.4 mini", "advertised_context_window": 1000000, "supported_reasoning_levels": ["none", "low", "medium", "high"]},
-        {"native_model": "gpt-5.4-nano", "display_name": "GPT-5.4 nano", "advertised_context_window": 1000000, "supported_reasoning_levels": ["none", "low", "medium"]},
-        {"native_model": "gpt-5", "display_name": "GPT-5", "advertised_context_window": 400000, "supported_reasoning_levels": ["minimal", "low", "medium", "high"]},
     ],
     "yunwu": [
         {"native_model": "gpt-5.5", "display_name": "GPT-5.5", "advertised_context_window": 1000000},
-        {"native_model": "gpt-5.4", "display_name": "GPT-5.4", "advertised_context_window": 1000000},
-        {"native_model": "gpt-5.4-mini", "display_name": "GPT-5.4 mini", "advertised_context_window": 1000000},
-        {"native_model": "gpt-5.3-codex", "display_name": "GPT-5.3 Codex", "advertised_context_window": 1000000},
     ],
     "deepseek": [
         {"native_model": "deepseek-v4-pro", "display_name": "DeepSeek V4 Pro", "advertised_context_window": 1000000},
         {"native_model": "deepseek-v4-flash", "display_name": "DeepSeek V4 Flash", "advertised_context_window": 1000000},
     ],
     "kimi": [
+        {
+            "native_model": "kimi-k2.7-code",
+            "display_name": "Kimi K2.7 Code",
+            "advertised_context_window": 256000,
+            "input_modalities": ["text", "image"],
+            "modality_limits": {
+                "image_transport": "chat_completions_base64_image_url",
+                "remote_image_url_supported": False,
+                "supported_image_formats": ["png", "jpeg", "webp", "gif"],
+                "request_body_limit_mb": 100,
+                "video_input": "provider_supported_unverified_in_astrabridge",
+            },
+            "source_urls": [
+                "https://platform.moonshot.ai/docs/overview",
+                "https://platform.kimi.com/docs/api/overview",
+                "https://platform.kimi.com/docs/guide/start-using-kimi-api",
+            ],
+        },
         {
             "native_model": "kimi-k2.6",
             "display_name": "Kimi K2.6",
@@ -35,46 +48,43 @@ KNOWN_MODEL_CATALOG: dict[str, list[dict[str, Any]]] = {
                 "remote_image_url_supported": False,
                 "supported_image_formats": ["png", "jpeg", "webp", "gif"],
                 "request_body_limit_mb": 100,
-                "video_input": "provider_supported_unverified_in_lcr",
+                "video_input": "provider_supported_unverified_in_astrabridge",
             },
             "source_urls": [
-                "https://platform.kimi.com/docs/overview",
-                "https://platform.kimi.com/docs/models",
-                "https://platform.kimi.com/docs/guide/kimi-k2-6-quickstart",
-            ],
-        },
-        {
-            "native_model": "kimi-k2.5",
-            "display_name": "Kimi K2.5",
-            "advertised_context_window": 256000,
-            "input_modalities": ["text", "image", "video"],
-            "modality_limits": {
-                "image_transport": "chat_completions_base64_image_url",
-                "remote_image_url_supported": False,
-                "supported_image_formats": ["png", "jpeg", "webp", "gif"],
-                "request_body_limit_mb": 100,
-                "video_input": "provider_supported_unverified_in_lcr",
-            },
-            "source_urls": [
-                "https://platform.kimi.com/docs/overview",
-                "https://platform.kimi.com/docs/models",
-                "https://platform.kimi.com/docs/guide/kimi-k2-6-quickstart",
+                "https://platform.moonshot.ai/docs/overview",
+                "https://platform.kimi.com/docs/api/overview",
+                "https://platform.kimi.com/docs/guide/start-using-kimi-api",
             ],
         },
     ],
     "qwen": [
-        {"native_model": "qwen3-max", "display_name": "Qwen3 Max", "advertised_context_window": 262144},
-        {"native_model": "qwen3-coder-plus", "display_name": "Qwen3 Coder Plus", "advertised_context_window": 1000000},
-        {"native_model": "qwen3.5-plus", "display_name": "Qwen3.5 Plus", "advertised_context_window": 1000000},
-        {"native_model": "qwen-long-latest", "display_name": "Qwen Long Latest", "advertised_context_window": 1000000},
+        {"native_model": "qwen3.7-plus", "display_name": "Qwen3.7 Plus", "advertised_context_window": 1000000},
+        {"native_model": "qwen3.7-max-2026-06-08", "display_name": "Qwen3.7 Max 2026-06-08", "advertised_context_window": 1000000},
+        {"native_model": "qwen3.6-flash", "display_name": "Qwen3.6 Flash", "advertised_context_window": 1000000},
     ],
     "dashscope": [
-        {"native_model": "qwen3-max", "display_name": "Qwen3 Max", "advertised_context_window": 262144},
-        {"native_model": "qwen3-coder-plus", "display_name": "Qwen3 Coder Plus", "advertised_context_window": 1000000},
-        {"native_model": "qwen3.5-plus", "display_name": "Qwen3.5 Plus", "advertised_context_window": 1000000},
-        {"native_model": "qwen-long-latest", "display_name": "Qwen Long Latest", "advertised_context_window": 1000000},
+        {"native_model": "qwen3.7-plus", "display_name": "Qwen3.7 Plus", "advertised_context_window": 1000000},
+        {"native_model": "qwen3.7-max-2026-06-08", "display_name": "Qwen3.7 Max 2026-06-08", "advertised_context_window": 1000000},
+        {"native_model": "qwen3.6-flash", "display_name": "Qwen3.6 Flash", "advertised_context_window": 1000000},
+    ],
+    "glm": [
+        {"native_model": "glm-5.2", "display_name": "GLM 5.2", "advertised_context_window": 1000000, "input_modalities": ["text", "image"], "supported_reasoning_levels": ["low", "medium", "high", "xhigh"]},
     ],
 }
+
+PROVIDER_METADATA_FIELDS = (
+    "supported_reasoning_levels",
+    "default_reasoning_level",
+    "reasoning_policy_mode",
+    "edit_policy",
+    "capabilities",
+    "temperature_default",
+    "temperature_ui_min",
+    "temperature_ui_max",
+    "provider_temperature_min",
+    "provider_temperature_max",
+    "temperature_adapter_policy",
+)
 
 
 class RouterConfigService:
@@ -110,19 +120,30 @@ class RouterConfigService:
         provider_id = str(provider.get("id") or provider.get("provider_id") or "").strip()
         if not provider_id:
             raise ValueError("Provider id is required.")
-        display_name = str(provider.get("display_name") or provider.get("label") or provider_id).strip()
-        base_url = str(provider.get("base_url") or "").strip()
-        env_key = str(provider.get("env_key") or "OPENAI_API_KEY").strip()
+        provider_family = _provider_family(
+            provider_id,
+            adapter_profile=provider.get("adapter_profile"),
+            wire_api=provider.get("adapter_type") or provider.get("wire_api"),
+            base_url=provider.get("base_url"),
+            model=provider.get("default_model") or provider.get("model"),
+        )
+        registry_profile = get_provider_profile(provider_family) if provider_family else None
+        registry_defaults = registry_profile.to_router_provider() if registry_profile else {}
+        display_name = str(provider.get("display_name") or provider.get("label") or (registry_profile.display_name if registry_profile else provider_id)).strip()
+        base_url = str(provider.get("base_url") or (registry_profile.base_url if registry_profile else "")).strip()
+        env_key = str(provider.get("env_key") or ((registry_profile.auth.env_vars[0]) if registry_profile and registry_profile.auth.env_vars else "OPENAI_API_KEY")).strip()
         auth_mode = str(provider.get("auth_mode") or "os_keychain").strip()
         merged = {
+            **registry_defaults,
             "id": provider_id,
             "provider_id": provider_id,
+            "provider_family": provider_family,
             "display_name": display_name,
             "enabled": bool(provider.get("enabled", True)),
-            "adapter_type": str(provider.get("adapter_type") or provider.get("wire_api") or "responses"),
+            "adapter_type": str(provider.get("adapter_type") or provider.get("wire_api") or ("responses" if registry_profile and registry_profile.protocol in {"responses", "qwen_responses"} else "responses")),
             "base_url": base_url,
             "auth_key_ref": provider.get("auth_key_ref"),
-            "default_model": str(provider.get("default_model") or provider.get("model") or "").strip(),
+            "default_model": str(provider.get("default_model") or provider.get("model") or (registry_profile.default_model if registry_profile else "")).strip(),
             "request_timeout_ms": int(provider.get("request_timeout_ms") or 300000),
             "stream_idle_timeout_ms": int(provider.get("stream_idle_timeout_ms") or 300000),
             "env_key": env_key,
@@ -160,17 +181,22 @@ class RouterConfigService:
         native_model = str(model.get("native_model") or "").strip()
         if not model_id or not provider or not native_model:
             raise ValueError("Model id, provider, and native_model are required.")
+        if "/" not in model_id:
+            model_id = f"{provider}/{native_model}"
+        provider_family = _provider_family(provider, model=native_model)
+        base_defaults = _profile_model_defaults(provider_family)
+        merged_model = {**base_defaults, **model}
         merged = {
             "id": model_id,
             "provider": provider,
             "native_model": native_model,
-            "display_name": str(model.get("display_name") or native_model),
-            "enabled": bool(model.get("enabled", True)),
-            "advertised_context_window": int(model.get("advertised_context_window") or 1000000),
-            "ui_context_hint_only": bool(model.get("ui_context_hint_only", True)),
-            "adapter_profile": str(model.get("adapter_profile") or "default"),
-            **_model_capability_fields(model),
-            "created_at": model.get("created_at") or now_iso(),
+            "display_name": str(merged_model.get("display_name") or native_model),
+            "enabled": bool(merged_model.get("enabled", True)),
+            "advertised_context_window": int(merged_model.get("advertised_context_window") or 1000000),
+            "ui_context_hint_only": bool(merged_model.get("ui_context_hint_only", True)),
+            "adapter_profile": str(merged_model.get("adapter_profile") or "default"),
+            **_model_capability_fields(merged_model),
+            "created_at": merged_model.get("created_at") or now_iso(),
             "updated_at": now_iso(),
         }
         existing = {str(item.get("id")): item for item in payload["models"]}
@@ -235,14 +261,19 @@ class RouterConfigService:
         profiles = list((self._profiles.list_profiles().get("profiles") or []))
         providers = [item for item in payload.get("providers") or [] if isinstance(item, dict)]
         models = [item for item in payload.get("models") or [] if isinstance(item, dict)]
+        generated = current_generated_catalog()
         if not providers:
             providers = [self._provider_from_profile(profile) for profile in profiles if profile.get("base_url")]
+        if not providers:
+            providers = [dict(item) for item in generated.providers]
         if not models:
-            models = []
-            for provider in providers:
-                default_model = str(provider.get("default_model") or "").strip()
-                if default_model:
-                    models.append(self._default_model(provider, default_model))
+            generated_models = [dict(item) for item in generated.models if isinstance(item, dict)]
+            models = generated_models or []
+            if not models:
+                for provider in providers:
+                    default_model = str(provider.get("default_model") or "").strip()
+                    if default_model:
+                        models.append(self._default_model(provider, default_model))
         models = self._merge_known_models(providers, models)
         reasoning = payload.get("reasoning")
         if not isinstance(reasoning, dict):
@@ -263,10 +294,17 @@ class RouterConfigService:
         return loaded
 
     def _provider_from_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
-        provider_id = str(profile.get("provider_id") or "")
+        provider_id = str(profile.get("provider_id") or "openai")
+        extras = {key: profile.get(key) for key in PROVIDER_METADATA_FIELDS if key in profile}
         return {
             "id": provider_id,
             "provider_id": provider_id,
+            "provider_family": _provider_family(
+                provider_id,
+                wire_api=profile.get("wire_api"),
+                base_url=profile.get("base_url"),
+                model=profile.get("model"),
+            ),
             "display_name": str(profile.get("label") or provider_id),
             "enabled": True,
             "adapter_type": str(profile.get("wire_api") or "responses"),
@@ -281,21 +319,36 @@ class RouterConfigService:
             "proxy_url": str(profile.get("proxy_url") or ""),
             "created_at": profile.get("created_at") or now_iso(),
             "updated_at": profile.get("updated_at") or now_iso(),
+            **extras,
         }
 
     def _sync_provider_profile(self, provider: dict[str, Any]) -> None:
         default_model = str(provider.get("default_model") or "").strip()
         if not default_model:
             return
+        profile_id = "openai-compatible" if provider["id"] == "openai" else f"{provider['id']}-default"
+        provider_family = _provider_family(
+            provider.get("provider_family") or provider.get("adapter_profile") or provider.get("provider_id") or provider.get("id"),
+            wire_api=provider.get("adapter_type"),
+            base_url=provider.get("base_url"),
+            model=default_model,
+        )
+        registry_profile = get_provider_profile(provider_family) if provider_family else None
+        registry_defaults = registry_profile.to_default_profile() if registry_profile else {}
         self._profiles.upsert_profile(
             {
-                "profile_id": f"{provider['id']}-default",
+                **registry_defaults,
+                "profile_id": profile_id,
                 "label": str(provider.get("display_name") or provider["id"]),
                 "type": "custom_provider",
                 "provider_id": provider["id"],
                 "base_url": provider.get("base_url"),
                 "model": default_model,
-                "reasoning_effort": self.reasoning().get("global_effort") or "high",
+                "reasoning_effort": (
+                    str(provider.get("default_reasoning_level") or "").strip()
+                    or str(registry_defaults.get("reasoning_effort") or "").strip()
+                    or str(self.reasoning().get("global_effort") or "high")
+                ),
                 "wire_api": provider.get("adapter_type") or "responses",
                 "env_key": provider.get("env_key") or "OPENAI_API_KEY",
                 "auth_mode": provider.get("auth_mode") or "env_ref",
@@ -318,45 +371,71 @@ class RouterConfigService:
         write_json(self.store_path, payload)
 
     def _default_model(self, provider: dict[str, Any], native_model: str) -> dict[str, Any]:
+        provider_family = _provider_family(
+            provider.get("provider_family") or provider.get("adapter_profile") or provider.get("id") or provider.get("provider_id"),
+            wire_api=provider.get("adapter_type"),
+            base_url=provider.get("base_url"),
+            model=native_model,
+        )
+        defaults = _profile_model_defaults(provider_family)
         return {
             "id": f"{provider['id']}/{native_model}",
             "provider": provider["id"],
             "native_model": native_model,
             "display_name": native_model,
             "enabled": True,
-            "advertised_context_window": 1000000,
+            "advertised_context_window": int(defaults.get("advertised_context_window") or 1000000),
             "ui_context_hint_only": True,
             "adapter_profile": "default",
-            **_model_capability_fields({}),
+            **_model_capability_fields(defaults),
             "created_at": now_iso(),
             "updated_at": now_iso(),
         }
 
     def _merge_known_models(self, providers: list[dict[str, Any]], models: list[dict[str, Any]]) -> list[dict[str, Any]]:
         merged = {str(item.get("id")): dict(item) for item in models if isinstance(item, dict)}
+        provider_model_counts: dict[str, int] = {}
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            provider_key = str(item.get("provider") or "")
+            if provider_key:
+                provider_model_counts[provider_key] = provider_model_counts.get(provider_key, 0) + 1
         for provider in providers:
-            provider_id = str(provider.get("id") or "")
-            normalized = provider_id.lower()
+            provider_id = str(provider.get("id") or provider.get("provider_id") or "openai")
+            if provider_model_counts.get(provider_id, 0) > 0:
+                continue
+            provider_family = _provider_family(
+                provider.get("provider_family") or provider_id,
+                adapter_profile=provider.get("adapter_profile"),
+                wire_api=provider.get("adapter_type"),
+                base_url=provider.get("base_url"),
+                model=provider.get("default_model"),
+            )
+            normalized = str(provider_family or provider_id).lower()
             known_entries = KNOWN_MODEL_CATALOG.get(normalized)
             if not known_entries:
                 known_entries = next((entries for key, entries in KNOWN_MODEL_CATALOG.items() if key in normalized), None)
             if not known_entries:
                 continue
+            base_defaults = _profile_model_defaults(provider_family)
             for entry in known_entries:
                 native_model = str(entry["native_model"])
                 model_id = f"{provider_id}/{native_model}"
                 if model_id in merged:
                     continue
+                seeded = {**base_defaults, **entry}
                 merged[model_id] = {
                     "id": model_id,
                     "provider": provider_id,
+                    "provider_family": provider_family,
                     "native_model": native_model,
-                    "display_name": str(entry.get("display_name") or native_model),
+                    "display_name": str(seeded.get("display_name") or native_model),
                     "enabled": True,
-                    "advertised_context_window": int(entry.get("advertised_context_window") or 1000000),
+                    "advertised_context_window": int(seeded.get("advertised_context_window") or 1000000),
                     "ui_context_hint_only": True,
                     "adapter_profile": "default",
-                    **_model_capability_fields(entry),
+                    **_model_capability_fields(seeded),
                     "created_at": now_iso(),
                     "updated_at": now_iso(),
                 }
@@ -423,9 +502,25 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
         "ui_warnings": list(model.get("ui_warnings") or _default_ui_warnings(model, modalities)),
         "source_urls": list(model.get("source_urls") or []),
         "source_status": str(model.get("source_status") or "seeded"),
+        "recommended": bool(model.get("recommended", False)),
+        "default_for_provider": bool(model.get("default_for_provider", False)),
+        "deprecated": bool(model.get("deprecated", False)),
+        "deprecated_after": model.get("deprecated_after"),
+        "confidence": model.get("confidence"),
+        "catalog_version": model.get("catalog_version"),
+        "source_provenance": dict(model.get("source_provenance") or {}),
         "last_verified_at": model.get("last_verified_at"),
         "verification_notes": str(model.get("verification_notes") or ""),
     }
+
+
+def _profile_model_defaults(provider_family: str | None) -> dict[str, Any]:
+    if not provider_family:
+        return {}
+    try:
+        return dict(get_provider_profile(provider_family).default_model_config())
+    except ValueError:
+        return {}
 
 
 def _optional_float(value: Any, fallback: float) -> float:
@@ -435,6 +530,39 @@ def _optional_float(value: Any, fallback: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _provider_family(
+    provider_id: Any,
+    *,
+    adapter_profile: Any = None,
+    wire_api: Any = None,
+    base_url: Any = None,
+    model: Any = None,
+) -> str | None:
+    for candidate in (adapter_profile, provider_id):
+        try:
+            return resolve_provider_id(str(candidate or "").strip())
+        except ValueError:
+            continue
+    signals = " ".join(
+        str(value or "").strip().lower()
+        for value in (provider_id, wire_api, base_url, model)
+        if str(value or "").strip()
+    )
+    if any(token in signals for token in ("deepseek",)):
+        return "deepseek"
+    if any(token in signals for token in ("moonshot", "kimi")):
+        return "kimi"
+    if any(token in signals for token in ("dashscope", "qwen")):
+        return "qwen"
+    if any(token in signals for token in ("bigmodel", "glm", "zai", "zhipu")):
+        return "glm"
+    if "yunwu" in signals:
+        return "yunwu"
+    if "openai" in signals:
+        return "openai"
+    return None
 
 
 def _default_builtin_tool_support() -> dict[str, dict[str, str]]:

@@ -7,9 +7,13 @@ from typing import Any
 
 from .common import WORKSPACE_STATE_DIRNAME, now_iso, read_json, write_json
 from .security import SECRET_RE, SecurityError, redact_sensitive
+from .task_service import _display_thread_name
 
 
-PROJECT_CONTEXT_SCHEMA_VERSION = "lcr-project-context-pack-v1"
+PROJECT_CONTEXT_SCHEMA_VERSION = "astrabridge-project-context-pack-v1"
+PROJECT_CONTEXT_STATE_SCHEMA_VERSION = "astrabridge-project-context-state-v1"
+LEGACY_PROJECT_CONTEXT_SCHEMA_VERSIONS = {"lcr-project-context-pack-v1"}
+LEGACY_PROJECT_CONTEXT_STATE_SCHEMA_VERSIONS = {"lcr-project-context-pack-v1"}
 PROJECT_FILE_MAP_MAX_FILES = 80
 PROJECT_FILE_MAP_TEXT_MAX_FILES = 36
 PROJECT_FILE_MAP_MAX_TOP_LEVEL = 60
@@ -99,11 +103,12 @@ class ProjectContextService:
     restarting the sidecar without exposing raw runtime logs or secrets.
     """
 
-    def __init__(self, project_service, dogfood_service=None, asset_registry_service=None, task_service=None) -> None:
+    def __init__(self, project_service, dogfood_service=None, asset_registry_service=None, task_service=None, task_conversation_service=None) -> None:
         self._projects = project_service
         self._dogfood = dogfood_service
         self._assets = asset_registry_service
         self._tasks = task_service
+        self._task_conversation = task_conversation_service
 
     def snapshot(self, *, thread_id: str | None = None) -> dict[str, Any]:
         pack = self._build_pack(thread_id=thread_id)
@@ -174,10 +179,10 @@ class ProjectContextService:
             entry["last_compacted_at"] = now_iso()
             entry["compact"] = dict(params)
         elif method == "thread/name/updated":
-            entry["name"] = params.get("threadName") or entry.get("name") or ""
+            entry["name"] = _display_thread_name(params.get("threadName"), entry.get("provider_id")) or entry.get("name") or ""
         elif method == "thread/started":
             thread = dict(params.get("thread") or {})
-            entry["name"] = thread.get("name") or entry.get("name") or ""
+            entry["name"] = _display_thread_name(thread.get("name"), entry.get("provider_id")) or entry.get("name") or ""
         entry["updated_at"] = now_iso()
         threads[thread_id] = entry
         current["threads"] = threads
@@ -202,7 +207,7 @@ class ProjectContextService:
         }
         for key in allowed:
             if key in patch and patch.get(key) is not None:
-                entry[key] = patch.get(key)
+                entry[key] = _display_thread_name(patch.get(key), patch.get("provider_id") or entry.get("provider_id")) if key == "name" else patch.get(key)
         entry["updated_at"] = now_iso()
         threads[thread_id] = entry
         current["threads"] = threads
@@ -228,10 +233,11 @@ class ProjectContextService:
             thread_entry = self._compact_thread_entry({**logical_thread, **thread_entry, "thread_id": selected_thread_id})
         recent_threads = self._recent_threads(project, state, thread_cache)
         task = self._task_summary(task_full)
+        task_conversation_digest = self._task_conversation_digest(task_full)
         dogfood = self._dogfood_summary(task=task)
         assets = self._asset_summary()
         file_map = self._project_file_map()
-        text = self._text(project, selected_thread_id, thread_entry, recent_threads, task, dogfood, assets, file_map)
+        text = self._text(project, selected_thread_id, thread_entry, recent_threads, task, task_conversation_digest, dogfood, assets, file_map)
         pack = {
             "schema_version": PROJECT_CONTEXT_SCHEMA_VERSION,
             "generated_at": now_iso(),
@@ -248,6 +254,7 @@ class ProjectContextService:
                 "current_task_id": project.get("current_task_id") or "",
             },
             "task": task,
+            "task_conversation_digest": task_conversation_digest,
             "selected_thread": thread_entry,
             "recent_threads": recent_threads,
             "dogfood": dogfood,
@@ -257,7 +264,7 @@ class ProjectContextService:
                 "Use this project context pack after thread switches, compact, fork, or sidecar restart.",
                 "Do not read .astrabridge/runtime_events.jsonl or .astrabridge/approvals.jsonl unless the user explicitly asks.",
                 "Use compact summaries, project_context_pack.json, asset_context_pack.json, screenshots, and manifests before raw logs.",
-                "For public web research, prefer AstraBridge built-in tools lcr_web_research_brief and lcr_web_search_batch; avoid raw curl, wget, or python urllib unless the AstraBridge web tools fail or the user explicitly asks.",
+                "For public web research, prefer AstraBridge built-in web research tools and batched search tools; avoid raw curl, wget, or python urllib unless the AstraBridge web tools fail or the user explicitly asks.",
                 "When resuming another thread, verify the current thread id, goal, latest plan, and project files before editing.",
             ],
             "text": text[:8000],
@@ -272,6 +279,7 @@ class ProjectContextService:
         thread_entry: dict[str, Any],
         recent_threads: list[dict[str, Any]],
         task: dict[str, Any],
+        task_conversation_digest: dict[str, Any],
         dogfood: dict[str, Any],
         assets: dict[str, Any],
         file_map: dict[str, Any],
@@ -341,6 +349,30 @@ class ProjectContextService:
                     f"Latest provider handoff: {latest.get('from_thread_id') or 'none'} -> {latest.get('to_thread_id') or ''} "
                     f"profile={latest.get('profile_id') or ''} model={latest.get('model') or ''} effort={latest.get('reasoning_effort') or ''}"
                 )
+        if task_conversation_digest.get("status") == "ok":
+            lines.append(
+                "Task conversation digest: "
+                f"threads={task_conversation_digest.get('thread_count') or 0} turns={task_conversation_digest.get('turn_count') or 0}"
+            )
+            for item in list(task_conversation_digest.get("items") or [])[-8:]:
+                if not isinstance(item, dict):
+                    continue
+                summary = str(item.get("summary") or "").strip().replace("\n", " ")
+                files = [str(path) for path in list(item.get("files") or [])[:4]]
+                commands = [str(command) for command in list(item.get("commands") or [])[:2]]
+                prefix = (
+                    f"- {item.get('provider_id') or ''}/{item.get('model') or ''} "
+                    f"thread={item.get('source_thread_id') or ''}"
+                ).strip()
+                details = []
+                if summary:
+                    details.append(summary[:600])
+                if files:
+                    details.append("files=" + ", ".join(files))
+                if commands:
+                    details.append("commands=" + " | ".join(commands))
+                if details:
+                    lines.append(f"{prefix}: " + " ; ".join(details))
         if thread_entry:
             lines.append(
                 "Selected thread settings: "
@@ -393,10 +425,21 @@ class ProjectContextService:
                 "- If context seems stale after thread switching, ask for or trigger a project-context refresh before continuing.",
                 "- Ignore older auto-injected Project/Asset Context Pack blocks when this pack has a newer generated_at timestamp.",
                 "- On provider handoff, continue the same task goal/plan/assets unless the user explicitly creates a new chat/task or fork branch.",
-                "- For web research, use lcr_web_research_brief for multi-source briefs and lcr_web_search_batch for one or more search queries; do not run raw curl/wget/python HTTP loops unless those tools fail and you explain why.",
+                "- For web research, use AstraBridge web research and batched search tools before raw curl/wget/python HTTP loops; only fall back when those tools fail and you explain why.",
             ]
         )
         return "\n".join(lines)
+
+    def _task_conversation_digest(self, task: dict[str, Any] | None) -> dict[str, Any]:
+        if self._task_conversation is None or not isinstance(task, dict):
+            return {"schema_version": "astrabridge-task-conversation-digest-v1", "status": "unavailable", "items": []}
+        try:
+            digest = self._task_conversation.digest(task_id=str(task.get("task_id") or ""))
+        except Exception:
+            return {"schema_version": "astrabridge-task-conversation-digest-v1", "status": "unavailable", "items": []}
+        if not isinstance(digest, dict):
+            return {"schema_version": "astrabridge-task-conversation-digest-v1", "status": "unavailable", "items": []}
+        return digest
 
     def _project_file_map(self) -> dict[str, Any]:
         try:
@@ -566,6 +609,7 @@ class ProjectContextService:
             "handoff_policy",
             "active_provider_thread_id",
             "provider_threads",
+            "fork_threads",
             "handoff_events",
             "goal",
             "plan",
@@ -578,6 +622,11 @@ class ProjectContextService:
         compact["provider_threads"] = [
             self._compact_provider_thread(item)
             for item in list(compact.get("provider_threads") or [])
+            if _provider_model_pair_is_plausible(item)
+        ][:10]
+        compact["fork_threads"] = [
+            self._compact_provider_thread(item)
+            for item in list(compact.get("fork_threads") or [])
             if _provider_model_pair_is_plausible(item)
         ][:10]
         compact["handoff_events"] = [
@@ -660,7 +709,10 @@ class ProjectContextService:
             "missing_reason",
             "updated_at",
         }
-        return {key: entry.get(key) for key in keys if key in entry}
+        compacted = {key: entry.get(key) for key in keys if key in entry}
+        if "name" in compacted:
+            compacted["name"] = _display_thread_name(compacted.get("name"), compacted.get("provider_id"))
+        return compacted
 
     def _dogfood_summary(self, *, task: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._dogfood is None:
@@ -832,7 +884,17 @@ class ProjectContextService:
         return ""
 
     def _state(self) -> dict[str, Any]:
-        return dict(read_json(self._state_path(), {"schema_version": PROJECT_CONTEXT_SCHEMA_VERSION, "threads": {}}))
+        state_path = self._state_path()
+        raw_state = read_json(state_path, {"schema_version": PROJECT_CONTEXT_STATE_SCHEMA_VERSION, "threads": {}})
+        state = dict(raw_state)
+        schema_version = str(state.get("schema_version") or "").strip()
+        if not schema_version or schema_version in LEGACY_PROJECT_CONTEXT_STATE_SCHEMA_VERSIONS:
+            state["schema_version"] = PROJECT_CONTEXT_STATE_SCHEMA_VERSION
+        state.setdefault("threads", {})
+        if state != raw_state:
+            self._reject_secret_like(state)
+            write_json(state_path, state)
+        return state
 
     def _path(self) -> Path:
         return self._shell_root() / "project_context_pack.json"

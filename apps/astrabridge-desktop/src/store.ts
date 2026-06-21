@@ -182,7 +182,20 @@ export const useAppStore = create<AppState>((set) => ({
             kind: "file_change",
             label: "正在修改文件",
             status: "active",
-            preview: `${diff.files} files, +${diff.added} -${diff.deleted}`,
+            preview:
+              diff.file_paths && diff.file_paths.length > 0
+                ? `${diff.file_paths.slice(0, 2).join(", ")}${diff.file_paths.length > 2 ? ` +${diff.file_paths.length - 2} more` : ""}`
+                : `${diff.files} files, +${diff.added} -${diff.deleted}`,
+            detail:
+              diff.detail ||
+              [
+                diff.file_paths?.length ? diff.file_paths.join("\n") : "",
+                `files: ${diff.files}`,
+                `added: ${diff.added}`,
+                `deleted: ${diff.deleted}`,
+              ]
+                .filter(Boolean)
+                .join("\n"),
             updated_at: diff.updated_at ?? new Date().toISOString(),
           },
         },

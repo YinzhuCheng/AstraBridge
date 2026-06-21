@@ -22,6 +22,7 @@ from .modal_service import ModalService
 from .metadata_service import MetadataService
 from .mcp_config_service import McpConfigService
 from .llm_api_manager_service import LlmApiManagerService
+from .official_login_guard import disabled_status
 from .official_codex_service import OfficialCodexService
 from .profile_service import ProfileService
 from .project_context_service import ProjectContextService
@@ -32,6 +33,7 @@ from .router_service import RouterService
 from .runtime_supervisor_service import RuntimeSupervisorService
 from .runtime_service import RuntimeService
 from .secret_service import SecretService
+from .task_conversation_service import TaskConversationService
 from .task_service import TaskService
 from .wsl_dependency_service import WslDependencyService
 from .yunwu_image_service import YunwuImageService
@@ -99,7 +101,8 @@ class AppContext:
         self.lcr_web = LcrWebService(self.projects)
         self.dogfood = DogfoodRunService(self.projects)
         self.checkpoints = CheckpointService(self.projects)
-        self.project_context = ProjectContextService(self.projects, self.dogfood, self.assets, self.tasks)
+        self.task_conversation = TaskConversationService(self.projects, self.tasks)
+        self.project_context = ProjectContextService(self.projects, self.dogfood, self.assets, self.tasks, self.task_conversation)
         self.runtime = RuntimeService(
             self.projects,
             self.modals,
@@ -108,6 +111,7 @@ class AppContext:
             asset_registry=self.assets,
             project_context=self.project_context,
             task_service=self.tasks,
+            task_conversation=self.task_conversation,
             dogfood_run=self.dogfood,
         )
         self.project_tools = ProjectToolsService(self.projects, self.runtime)
@@ -373,6 +377,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/router/metadata/report":
                 self.send_json(self.context.metadata.metadata_report())
                 return
+            if path == "/api/router/metadata/refresh/status":
+                self.send_json(self.context.metadata.refresh_status(self._optional_query_string(query, "job_id")))
+                return
+            if path == "/api/router/metadata/refresh/result":
+                self.send_json(self.context.metadata.refresh_result(self._optional_query_string(query, "job_id")))
+                return
             if path == "/api/router/image/prompt-guides":
                 self.send_json(prompt_guides_payload())
                 return
@@ -398,7 +408,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(self.context.router.events(limit=limit))
                 return
             if path == "/api/official-codex/status":
-                self.send_json(self.context.official_codex.status())
+                self.send_json(disabled_status())
                 return
             if path == "/api/audit/isolation":
                 self.send_json(
@@ -406,7 +416,7 @@ class Handler(BaseHTTPRequestHandler):
                         current_project=self.context.projects.current_project,
                         runtime_environment=self.context.runtime.environment(),
                         router_status=self.context.router.status(),
-                        official_codex_status=self.context.official_codex.status(),
+                        official_codex_status=disabled_status(),
                         sidecar_port=int(self.server.server_address[1]) if isinstance(self.server.server_address, tuple) else None,
                     )
                 )
@@ -471,6 +481,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/project/context":
                 self.send_json(self.context.project_context.snapshot(thread_id=self._optional_query_string(query, "thread_id")))
                 return
+            if path == "/api/project/task-conversation":
+                self.send_json(self.context.task_conversation.conversation(task_id=self._optional_query_string(query, "task_id")))
+                return
             self.send_json({"ok": False, "error": "Not found"}, status=404)
         except Exception as exc:  # noqa: BLE001
             self.send_json(public_error(exc), status=400)
@@ -496,10 +509,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path in {"/api/projects/open", "/api/project/open"}:
                 project = self.context.projects.open_project(str(payload.get("project_file") or ""))
-                self.context.tasks.ensure_default_task(
-                    thread_id=project.get("current_thread_id"),
-                    title=project.get("name") or "Default task",
+                task = self.context.tasks.reconcile_after_project_reload(
+                    preferred_thread_id=str(project.get("current_thread_id") or ""),
                 )
+                if not task:
+                    self.context.tasks.ensure_default_task(
+                        thread_id=project.get("current_thread_id"),
+                        title=project.get("name") or "Default task",
+                    )
                 project = self.context.projects.current_project
                 self.context.runtime.restart()
                 self.send_json({"project": project})
@@ -532,6 +549,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/project/saves/load":
                 response = self.context.checkpoints.load(payload)
+                self.context.tasks.reconcile_after_project_reload(
+                    preferred_thread_id=str((self.context.projects.current_project or {}).get("current_thread_id") or ""),
+                )
                 self._record_ui_state_event("checkpoint_loaded", {"save_id": str(payload.get("save_id") or "")})
                 self.send_json(response)
                 return
@@ -624,6 +644,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/router/metadata/refresh":
                 self.send_json(self.context.metadata.refresh(apply=bool(payload.get("apply"))))
+                return
+            if path == "/api/router/metadata/refresh/start":
+                self.send_json(self.context.metadata.start_refresh(apply=bool(payload.get("apply"))))
                 return
             if path == "/api/router/metadata/import-seed":
                 self.send_json(self.context.metadata.import_seed(apply=bool(payload.get("apply", True))))
@@ -856,15 +879,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             if path == "/api/official-codex/apply":
-                self.send_json(
-                    self.context.official_codex.apply_router_config(
-                        router_base_url=str(payload.get("router_base_url") or "http://127.0.0.1:8787/v1"),
-                        default_model=self._optional_string(payload, "default_model"),
-                    )
-                )
+                self.send_json(disabled_status(), status=403)
                 return
             if path == "/api/official-codex/restore":
-                self.send_json(self.context.official_codex.restore_latest_backup())
+                self.send_json(disabled_status(), status=403)
                 return
             if path == "/api/runtime/modals/resolve":
                 self.send_json({"modal": self.context.modals.resolve(str(payload.get("modal_id") or ""), payload)})

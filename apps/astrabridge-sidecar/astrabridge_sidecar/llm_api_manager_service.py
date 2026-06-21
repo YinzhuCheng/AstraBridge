@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import app_data_dir, new_id, now_iso, read_json, write_json
+from .model_catalog import current_generated_catalog
 
 
 VAULT_SCHEMA = "astrabridge-llm-vault-v1"
@@ -230,7 +231,9 @@ class LlmApiManagerService:
     def effective_catalog(self) -> dict[str, Any]:
         mode = str(self._session.get("mode") or "anonymous")
         providers = self._router_config.providers()
-        models = self._router_config.models()
+        configured_models = {str(item.get("id") or ""): dict(item) for item in self._router_config.models()}
+        generated = current_generated_catalog()
+        models = [{**item, **configured_models.get(str(item.get("id") or ""), {})} for item in generated.models]
         health = self.health_results()
         model_health = dict(health.get("model_health") or {})
         key_provider_ids = self._enabled_key_provider_ids()
@@ -662,12 +665,14 @@ class LlmApiManagerService:
             return ["https://api-docs.deepseek.com/zh-cn/"]
         if "kimi" in lowered or "moonshot" in lowered:
             return [
-                "https://platform.kimi.com/docs/overview",
-                "https://platform.kimi.com/docs/models",
-                "https://platform.kimi.com/docs/guide/kimi-k2-6-quickstart",
+                "https://platform.moonshot.ai/docs/overview",
+                "https://platform.moonshot.ai/docs/guide/start-using-kimi-api",
+                "https://platform.kimi.com/docs/pricing/chat",
             ]
         if "qwen" in lowered or "dashscope" in lowered:
             return ["https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions", "https://qwen.ai/apiplatform"]
+        if "glm" in lowered or "zai" in lowered or "zhipu" in lowered:
+            return ["https://open.bigmodel.cn/dev/api", "https://open.bigmodel.cn/pricing"]
         if "yunwu" in lowered:
             return ["https://yunwu.ai/pricing?group=Codex%E4%B8%93%E5%B1%9E"]
         return []

@@ -77,13 +77,22 @@ class ProjectToolsService:
         root = self._workspace_root()
         if rel_path:
             target = self._safe_rel_path(root, rel_path, allow_lcr=False)
-            args = ["git", "-C", str(root), "diff", "--", str(target.relative_to(root))]
+            display_path = target.relative_to(root).as_posix()
+            args = ["git", "-C", str(root), "diff", "--", display_path]
         else:
-            args = ["git", "-C", str(root), "diff", "--stat", "--"]
+            args = ["git", "-C", str(root), "diff", "--stat", "--", "."]
         result = self._run(args, timeout=10)
         if result["ok"]:
             diff = str(result["stdout"] or "")
+            if rel_path and not diff.strip():
+                synthetic = self._synthetic_file_diff(root, target)
+                if synthetic:
+                    return {"ok": True, "path": rel_path or "", "diff": synthetic[:120_000], "truncated": len(synthetic) > 120_000, "synthetic": True}
             return {"ok": True, "path": rel_path or "", "diff": diff[:120_000], "truncated": len(diff) > 120_000}
+        if rel_path:
+            synthetic = self._synthetic_file_diff(root, target)
+            if synthetic:
+                return {"ok": True, "path": rel_path or "", "diff": synthetic[:120_000], "truncated": len(synthetic) > 120_000, "synthetic": True}
         return {"ok": False, "path": rel_path or "", "diff": "", "error": result["stderr"] or result["error"]}
 
     def files_tree(self, query: str | None = None, limit: int = MAX_TREE_ITEMS) -> dict[str, Any]:
@@ -187,7 +196,7 @@ class ProjectToolsService:
         if self._looks_secret(rel):
             raise ValueError("Refusing to preview secret-like file names.")
         if rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME and self._skip_file(rel):
-            raise ValueError("This .lcr file is intentionally summarized elsewhere and is not exposed as raw preview.")
+            raise ValueError("This .astrabridge file is intentionally summarized elsewhere and is not exposed as raw preview.")
         if not allow_lcr and rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME:
             raise ValueError("Raw .astrabridge files are not exposed through the file preview.")
         if not candidate.is_file():
@@ -225,20 +234,23 @@ class ProjectToolsService:
         branch_result = self._run(["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"], timeout=5)
         if not branch_result["ok"]:
             return {"is_repo": False, "branch": "", "changed_files": 0, "added": 0, "deleted": 0, "files": []}
-        status_result = self._run(["git", "-C", str(root), "status", "--porcelain=v1"], timeout=8)
-        numstat_result = self._run(["git", "-C", str(root), "diff", "--numstat"], timeout=8)
-        files = self._parse_git_status(status_result.get("stdout") or "")
+        top_result = self._run(["git", "-C", str(root), "rev-parse", "--show-toplevel"], timeout=5)
+        repo_root = Path(str(top_result.get("stdout") or root).strip()).resolve() if top_result["ok"] else root
+        status_result = self._run(["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all", "--", "."], timeout=8)
+        numstat_result = self._run(["git", "-C", str(root), "diff", "--numstat", "--", "."], timeout=8)
+        files = self._parse_git_status(status_result.get("stdout") or "", root=root, repo_root=repo_root)
         added, deleted = self._parse_numstat(numstat_result.get("stdout") or "")
         return {
             "is_repo": True,
             "branch": str(branch_result["stdout"]).strip(),
+            "git_root": str(repo_root),
             "changed_files": len(files),
             "added": added,
             "deleted": deleted,
             "files": files,
         }
 
-    def _parse_git_status(self, text: str) -> list[dict[str, Any]]:
+    def _parse_git_status(self, text: str, *, root: Path | None = None, repo_root: Path | None = None) -> list[dict[str, Any]]:
         files = []
         for line in text.splitlines():
             if not line.strip() or len(line) < 4:
@@ -247,9 +259,52 @@ class ProjectToolsService:
             path = line[3:].strip()
             if " -> " in path:
                 path = path.split(" -> ", 1)[1].strip()
-            if path and not self._looks_secret(Path(path)):
+            path = self._workspace_relative_git_path(path, root=root, repo_root=repo_root)
+            rel = Path(path) if path else Path()
+            if path and not self._skip_file(rel):
                 files.append({"path": path, "status": status})
         return files
+
+    def _workspace_relative_git_path(self, path: str, *, root: Path | None, repo_root: Path | None) -> str:
+        normalized = path.replace("\\", "/").strip().strip('"')
+        if not normalized or not root or not repo_root:
+            return normalized
+        try:
+            root_rel = root.resolve().relative_to(repo_root.resolve()).as_posix()
+        except ValueError:
+            return normalized
+        if not root_rel or root_rel == ".":
+            return normalized
+        prefix = f"{root_rel}/"
+        if normalized == root_rel:
+            return ""
+        if normalized.startswith(prefix):
+            return normalized[len(prefix) :]
+        return normalized
+
+    def _synthetic_file_diff(self, root: Path, target: Path) -> str:
+        try:
+            rel = target.relative_to(root).as_posix()
+            if self._file_kind(target) != "text":
+                return ""
+            stat = target.stat()
+            if stat.st_size > MAX_TEXT_BYTES:
+                return ""
+            content = target.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            return ""
+        lines = content.splitlines()
+        output = [
+            f"diff --astrabridge a/{rel} b/{rel}",
+            "new file mode 100644",
+            "--- /dev/null",
+            f"+++ b/{rel}",
+            f"@@ -0,0 +1,{len(lines)} @@",
+        ]
+        output.extend(f"+{line}" for line in lines)
+        if content.endswith("\n"):
+            output.append("")
+        return "\n".join(output)
 
     def _parse_numstat(self, text: str) -> tuple[int, int]:
         added = 0

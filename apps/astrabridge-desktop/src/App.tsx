@@ -5,6 +5,9 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
+import { composerReasoningOptions, preferredReasoningEffort } from "./features/runtime/reasoningOptions";
+import { summarizeTaskCard } from "./features/runtime/taskSummary";
+import { hasPersistedRenderableTurnContent, itemActivityFromPayload, summarizeTurnBlocks } from "./features/runtime/threadRendering";
 import { useAppStore } from "./store";
 import { chooseProjectSavePath, selectDirectory, selectExistingProject, selectFiles } from "./tauriDialog";
 import type {
@@ -35,8 +38,8 @@ import type {
   RuntimeModal,
   RuntimeSupervisorState,
   ShellThread,
-  ThreadMessageSource,
   ThreadRenderBlock,
+  ProjectTask,
 } from "./types";
 
 const DEFAULT_GAMEPLAY_SMOKE_ACTIONS: Array<Record<string, unknown>> = [
@@ -96,6 +99,10 @@ function formatDuration(value: number | null | undefined) {
   return `${hours}h ${minutes % 60}m`;
 }
 
+function taskStatKey(task: ProjectTask, stat: string) {
+  return `${task.task_id}:${stat}`;
+}
+
 function inheritedGoalFrom(value: unknown, source: "task" | "dogfood") {
   if (!value) return null;
   if (typeof value === "string") {
@@ -128,7 +135,15 @@ function countDiffLines(diff: string | null | undefined): RuntimeDiffSummary {
     if (line.startsWith("+")) added += 1;
     if (line.startsWith("-")) deleted += 1;
   }
-  return { added, deleted, files: files.size, diff: text };
+  const filePaths = [...files];
+  return {
+    added,
+    deleted,
+    files: files.size,
+    diff: text,
+    file_paths: filePaths,
+    detail: filePaths.length > 0 ? filePaths.join("\n") : undefined,
+  };
 }
 
 function countFileChanges(changes: unknown): RuntimeDiffSummary {
@@ -136,6 +151,7 @@ function countFileChanges(changes: unknown): RuntimeDiffSummary {
   let added = 0;
   let deleted = 0;
   const files = new Set<string>();
+  const detailLines: string[] = [];
   for (const change of list) {
     if (!change || typeof change !== "object") continue;
     const item = change as Record<string, unknown>;
@@ -145,8 +161,18 @@ function countFileChanges(changes: unknown): RuntimeDiffSummary {
     const counted = countDiffLines(diff);
     added += counted.added;
     deleted += counted.deleted;
+    const kind = (item.kind as { type?: string; move_path?: string | null } | undefined)?.type ?? "update";
+    const movePath = (item.kind as { move_path?: string | null } | undefined)?.move_path ?? null;
+    const action = kind === "add" ? "新增" : kind === "delete" ? "删除" : movePath ? `更新并移动到 ${movePath}` : "更新";
+    if (path) detailLines.push(`${path} · ${action} · +${counted.added} -${counted.deleted}`);
   }
-  return { added, deleted, files: files.size || list.length };
+  return {
+    added,
+    deleted,
+    files: files.size || list.length,
+    file_paths: [...files],
+    detail: detailLines.join("\n"),
+  };
 }
 
 function decodeBase64Utf8(value: unknown) {
@@ -164,61 +190,6 @@ function decodeBase64Utf8(value: unknown) {
   }
 }
 
-function itemActivityFromPayload(item: Record<string, unknown>, status = "active"): RuntimeActivityState | null {
-  const itemType = String(item.type ?? "");
-  const itemId = String(item.id ?? "");
-  if (itemType === "reasoning") {
-    return { kind: "thinking", label: "正在思考", status, item_id: itemId };
-  }
-  if (itemType === "commandExecution") {
-    return {
-      kind: "command",
-      label: "正在执行命令",
-      status,
-      preview: String(item.command ?? ""),
-      detail: String(item.command ?? ""),
-      item_id: itemId,
-    };
-  }
-  if (itemType === "fileChange") {
-    return { kind: "file_change", label: "正在修改文件", status, item_id: itemId };
-  }
-  if (itemType === "webSearch") {
-    return {
-      kind: "web_search",
-      label: "正在搜索",
-      status,
-      preview: String(item.query ?? ""),
-      detail: JSON.stringify(item.action ?? {}, null, 2),
-      item_id: itemId,
-    };
-  }
-  if (itemType === "mcpToolCall") {
-    return {
-      kind: "mcp",
-      label: "正在调用 MCP 工具",
-      status,
-      preview: [item.server, item.tool].filter(Boolean).join("."),
-      detail: JSON.stringify(item.arguments ?? {}, null, 2),
-      item_id: itemId,
-    };
-  }
-  if (itemType === "dynamicToolCall") {
-    return {
-      kind: "tool",
-      label: "正在调用工具",
-      status,
-      preview: [item.namespace, item.tool].filter(Boolean).join("."),
-      detail: JSON.stringify(item.arguments ?? {}, null, 2),
-      item_id: itemId,
-    };
-  }
-  if (itemType === "contextCompaction") {
-    return { kind: "compact", label: status === "completed" ? "上下文已压缩" : "正在压缩上下文", status, preview: "Context compaction", item_id: itemId };
-  }
-  return null;
-}
-
 function initials(value: string | null | undefined) {
   const cleaned = String(value || "?").trim();
   if (!cleaned) return "?";
@@ -230,144 +201,6 @@ function initials(value: string | null | undefined) {
 function isLocalImagePath(value: string | null | undefined) {
   if (!value) return false;
   return /^[a-z]:[\\/]/i.test(value) || value.startsWith("/") || value.startsWith("\\\\") || value.startsWith("file:");
-}
-
-function summarizeTurnBlocks(
-  thread?: ShellThread | null,
-  liveText?: string,
-  liveReasoning?: { text: string; source: string; label: string },
-  liveActivity?: RuntimeActivityState,
-  liveDiff?: RuntimeDiffSummary,
-): ThreadRenderBlock[] {
-  if (!thread) {
-    const liveBlocks: ThreadRenderBlock[] = [];
-    if (liveActivity) liveBlocks.push({ key: "activity-live", role: "activity", activity: liveActivity, diff: liveDiff });
-    if (liveReasoning?.text) liveBlocks.push({ key: "reasoning-live", role: "reasoning", text: [liveReasoning.text], source: liveReasoning.label || liveReasoning.source, live: true });
-    if (liveText) liveBlocks.push({ key: "live", role: "assistant_live", text: liveText });
-    return liveBlocks;
-  }
-  const blocks: ThreadRenderBlock[] = [];
-  for (const turn of thread.turns ?? []) {
-    const turnMeta = {
-      turnId: turn.id,
-      startedAt: turn.startedAt ?? null,
-      completedAt: turn.completedAt ?? null,
-      durationMs: turn.durationMs ?? null,
-    };
-    for (const item of turn.items ?? []) {
-      blocks.push(...renderBlocksForItem(item).map((block) => ({ ...turnMeta, ...block })));
-    }
-    if (liveText && turn.id === (thread.turns[thread.turns.length - 1]?.id ?? "")) {
-      if (liveActivity) {
-        blocks.push({ ...turnMeta, key: `activity-${turn.id}`, role: "activity", activity: liveActivity, diff: liveDiff, completedAt: null, durationMs: null });
-      }
-      if (liveReasoning?.text) {
-        blocks.push({
-          ...turnMeta,
-          key: `reasoning-live-${turn.id}`,
-          role: "reasoning",
-          text: [liveReasoning.text],
-          source: liveReasoning.label || liveReasoning.source,
-          live: true,
-          completedAt: null,
-          durationMs: null,
-        });
-      }
-      blocks.push({ ...turnMeta, key: `live-${turn.id}`, role: "assistant_live", text: liveText, completedAt: null, durationMs: null });
-    } else if (!liveText && turn.id === (thread.turns[thread.turns.length - 1]?.id ?? "") && (liveActivity || liveReasoning?.text)) {
-      if (liveActivity) {
-        blocks.push({ ...turnMeta, key: `activity-${turn.id}`, role: "activity", activity: liveActivity, diff: liveDiff, completedAt: null, durationMs: null });
-      }
-      if (liveReasoning?.text) {
-        blocks.push({ ...turnMeta, key: `reasoning-live-${turn.id}`, role: "reasoning", text: [liveReasoning.text], source: liveReasoning.label || liveReasoning.source, live: true, completedAt: null, durationMs: null });
-      }
-    }
-  }
-  return blocks;
-}
-
-function renderBlocksForItem(item: ThreadMessageSource): ThreadRenderBlock[] {
-  switch (item.type) {
-    case "userMessage": {
-      const text = item.content
-        .filter((entry) => entry.type === "text")
-        .map((entry) => entry.text)
-        .join("\n");
-      const attachments = item.content
-        .filter((entry) => entry.type !== "text")
-        .map((entry) => ("name" in entry ? entry.name : entry.type === "localImage" ? entry.path.split(/[\\/]/).pop() ?? entry.path : entry.url));
-      return [{ key: item.id, role: "user", text, attachments }];
-    }
-    case "agentMessage":
-      return [{ key: item.id, role: "assistant", text: item.text }];
-    case "plan":
-      return [{ key: item.id, role: "plan", text: item.text }];
-    case "reasoning":
-      return [{ key: item.id, role: "reasoning", text: item.summary.length > 0 ? item.summary : item.content }];
-    case "commandExecution":
-      return [
-        {
-          key: item.id,
-          role: "command",
-          command: item.command,
-          output: item.aggregatedOutput ?? "",
-          status: item.status,
-        },
-      ];
-    case "fileChange": {
-      const files = (item.changes as Array<Record<string, unknown>>).map((change) =>
-        String(change.path ?? change.newPath ?? change.file ?? "file")
-      );
-      return [{ key: item.id, role: "file_change", files, status: item.status }];
-    }
-    case "mcpToolCall":
-      return [{
-        key: item.id,
-        role: "tool",
-        title: `${item.server}.${item.tool}`,
-        status: item.status,
-        detail: item.error ? JSON.stringify(item.error) : item.result ? JSON.stringify(item.result).slice(0, 500) : JSON.stringify(item.arguments ?? {}).slice(0, 500),
-      }];
-    case "dynamicToolCall":
-      return [{ key: item.id, role: "tool", title: `${item.namespace ?? "tool"}.${item.tool}`, status: item.status }];
-    case "webSearch":
-      return [{
-        key: item.id,
-        role: "activity",
-        activity: {
-          kind: "web_search",
-          label: "网页搜索",
-          status: "completed",
-          preview: item.query,
-          detail: JSON.stringify(item.action ?? {}, null, 2),
-          item_id: item.id,
-        },
-      }];
-    case "imageView":
-      return [{ key: item.id, role: "image", path: item.path }];
-    case "imageGeneration":
-      return [{
-        key: item.id,
-        role: "tool",
-        title: "Image generation",
-        status: item.status,
-        detail: [item.revisedPrompt, item.savedPath, item.result].filter(Boolean).join("\n"),
-      }];
-    case "contextCompaction":
-      return [{
-        key: item.id,
-        role: "activity",
-        activity: {
-          kind: "compact",
-          label: "上下文已压缩",
-          status: "completed",
-          preview: "Context compaction completed",
-          item_id: item.id,
-        },
-      }];
-    default:
-      return [];
-  }
 }
 
 function detectMime(path: string) {
@@ -416,6 +249,14 @@ function profileAuthGuide(locale: "en" | "zh-CN", authMode: Profile["auth_mode"]
   if (authMode === "os_keychain") return t(locale, "key_setup_mode_keychain");
   if (authMode === "session_paste") return t(locale, "key_setup_mode_session");
   return t(locale, "key_setup_mode_env");
+}
+
+function providerSetupLabel(locale: "en" | "zh-CN") {
+  return locale === "zh-CN" ? "提供方与密钥" : "Providers & keys";
+}
+
+function fallbackRouteLabel(locale: "en" | "zh-CN") {
+  return locale === "zh-CN" ? "当前路由" : "Current route";
 }
 
 function safeParseObject(text: string) {
@@ -477,6 +318,17 @@ function budgetPercent(used: number | undefined, cap: number | undefined) {
   return Math.min(100, Math.max(0, Math.round(((used ?? 0) / cap) * 100)));
 }
 
+function productStatusLabel(value: string | null | undefined) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "未知";
+  if (normalized === "ok") return "正常";
+  if (normalized === "pass") return "通过";
+  if (normalized === "fail" || normalized === "failed") return "失败";
+  if (normalized === "unknown") return "未知";
+  if (normalized === "warning") return "警告";
+  return String(value);
+}
+
 function capturePath(capture: unknown) {
   return typeof capture === "string" ? capture : String((capture as { path?: string } | null)?.path ?? "");
 }
@@ -502,18 +354,6 @@ function compactAssetLabel(asset: AssetRegistryEntry) {
   const role = asset.role || asset.kind || "asset";
   const status = asset.integration_status || asset.quality_status || asset.status;
   return `${role} · ${status}`;
-}
-
-function providerEffortOptions(providerId: string | undefined, model: string | undefined) {
-  const provider = (providerId ?? "").toLowerCase();
-  const nativeModel = (model ?? "").toLowerCase();
-  if (provider.includes("deepseek") || nativeModel.includes("deepseek")) return ["high", "max"];
-  if (provider.includes("kimi") || nativeModel.includes("kimi")) return ["low", "medium", "high", "xhigh"];
-  if (provider.includes("qwen") || provider.includes("dashscope") || nativeModel.includes("qwen")) return ["low", "medium", "high", "xhigh"];
-  if (provider.includes("openai") || provider.includes("yunwu") || nativeModel.includes("gpt-")) {
-    return ["none", "minimal", "low", "medium", "high", "xhigh"];
-  }
-  return ["minimal", "low", "medium", "high", "xhigh", "max"];
 }
 
 function permissionClass(mode: PermissionMode) {
@@ -721,6 +561,8 @@ function activityLabel(activity: RuntimeActivityState) {
   if (activity.kind === "command") return "正在执行命令";
   if (activity.kind === "file_change") return "正在修改文件";
   if (activity.kind === "compact") return "正在压缩上下文";
+  if (activity.kind === "review") return "审查模式更新";
+  if (activity.kind === "fork") return "创建协作线程";
   if (activity.kind === "mcp") return "正在调用 MCP 工具";
   if (activity.kind === "tool") return "正在调用工具";
   return activity.label || "正在等待";
@@ -766,9 +608,9 @@ function ChatMessageRow({
   const isUser = block.role === "user";
   const isLive = block.role === "assistant_live";
   const actorName = isUser ? userName : modelName || providerName || "Assistant";
-  const actorDetail = isUser ? "User" : [providerName, modelName].filter(Boolean).join(" / ");
+  const actorDetail = isUser ? "用户" : [providerName, modelName].filter(Boolean).join(" / ");
   const timeLabel = formatMessageTime(block.startedAt);
-  const duration = isLive ? "running" : formatDuration(block.durationMs);
+  const duration = isLive ? "运行中" : formatDuration(block.durationMs);
   return (
     <article className={`chat-message-row chat-message-${block.role}`}>
       <AvatarBadge
@@ -787,11 +629,11 @@ function ChatMessageRow({
         </div>
         {!isUser ? (
           <footer className="chat-message-footer">
-            {duration ? <span>{duration}</span> : <span>runtime n/a</span>}
-            <button type="button" className="message-action-button" title="Fork thread" aria-label="Fork thread" onClick={onFork}>
+            {duration ? <span>{duration}</span> : <span>运行时长未知</span>}
+            <button type="button" className="message-action-button" title="创建分支线程" aria-label="创建分支线程" onClick={onFork}>
               <GitFork size={14} strokeWidth={1.8} aria-hidden="true" />
             </button>
-            <button type="button" className="message-action-button" title="Save checkpoint" aria-label="Save checkpoint" onClick={onSave}>
+            <button type="button" className="message-action-button" title="保存检查点" aria-label="保存检查点" onClick={onSave}>
               <Save size={14} strokeWidth={1.8} aria-hidden="true" />
             </button>
           </footer>
@@ -831,19 +673,25 @@ function MessageBlockContent({ block, reasoningDisplayPolicy }: { block: ThreadR
   if (block.role === "command") {
     return (
       <div className="command-activity-card">
-        <ExpandableActivityPreview preview={block.command} detail={[block.command, block.output].filter(Boolean).join("\n\n")} label="Command" />
+        <ExpandableActivityPreview preview={block.command} detail={[block.command, block.output].filter(Boolean).join("\n\n")} label="命令" />
         <span className="status-tag">{block.status}</span>
       </div>
     );
   }
   if (block.role === "file_change") {
+    const summaryBits = [
+      typeof block.added === "number" ? `+${block.added}` : "",
+      typeof block.deleted === "number" ? `-${block.deleted}` : "",
+    ].filter(Boolean);
     return (
       <div className="change-card">
         <div className="change-card-header">
           <span className="change-card-icon">+</span>
           <strong>{block.status}</strong>
-          <span>{block.files.length} file{block.files.length === 1 ? "" : "s"}</span>
+          <span>{block.files.length} 个文件</span>
+          {summaryBits.length > 0 ? <span>{summaryBits.join(" / ")}</span> : null}
         </div>
+        {block.detail ? <ExpandableActivityPreview preview={block.files.slice(0, 3).join(", ")} detail={block.detail} label="文件变更" /> : null}
         <div className="change-file-list">
           {block.files.map((file) => (
             <a className="change-file-link" href={`#${encodeURIComponent(file)}`} onClick={(event) => event.preventDefault()} title={file} key={file}>
@@ -891,23 +739,95 @@ function SaveCheckpointModal({
     <div className="modal-scrim">
       <div className="modal-card checkpoint-modal">
         <div className="card-header">
-          <h2>Save checkpoint</h2>
+          <h2>保存检查点</h2>
           <span className="status-tag">.astrabridge/saves</span>
         </div>
-        <p className="muted">This saves local AstraBridge project state and a workspace snapshot. It does not commit to Git and does not write official Codex config.</p>
+        <p className="muted">这会保存本地 AstraBridge 项目状态和工作区快照，不会提交到 Git，也不会写入官方 Codex 配置。</p>
         <div className="checkpoint-facts">
-          <div><span>Project</span><strong>{projectName}</strong></div>
-          <div><span>Thread</span><strong>{threadName}</strong></div>
-          <div><span>Default</span><strong>{defaultDescription}</strong></div>
+          <div><span>项目</span><strong>{projectName}</strong></div>
+          <div><span>线程</span><strong>{threadName}</strong></div>
+          <div><span>默认说明</span><strong>{defaultDescription}</strong></div>
         </div>
         <label className="field">
-          <span>Description</span>
+          <span>说明</span>
           <textarea rows={3} value={description} onChange={(event) => onDescriptionChange(event.target.value)} placeholder={defaultDescription} />
         </label>
         {error ? <p className="error-text">{String((error as Error).message ?? error)}</p> : null}
         <div className="modal-actions">
           <button type="button" className="primary-button" disabled={isPending} onClick={onSave}>
-            {isPending ? "Saving..." : "Save"}
+            {isPending ? "保存中..." : "保存"}
+          </button>
+          <button type="button" className="ghost-button" onClick={onCancel}>取消</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type TextEntryRequest = {
+  title: string;
+  label: string;
+  defaultValue: string;
+  placeholder?: string;
+  description?: string;
+  submitLabel?: string;
+  multiline?: boolean;
+  resolve: (value: string | null) => void;
+};
+
+function TextEntryModal({
+  request,
+  onCancel,
+  onSubmit,
+}: {
+  request: TextEntryRequest;
+  onCancel: () => void;
+  onSubmit: (value: string) => void;
+}) {
+  const [value, setValue] = useState(request.defaultValue);
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select?.();
+  }, [request]);
+
+  return (
+    <div className="modal-scrim">
+      <div className="modal-card checkpoint-modal">
+        <div className="card-header">
+          <h2>{request.title}</h2>
+        </div>
+        {request.description ? <p className="muted">{request.description}</p> : null}
+        <label className="field">
+          <span>{request.label}</span>
+          {request.multiline ? (
+            <textarea
+              ref={inputRef as React.RefObject<HTMLTextAreaElement>}
+              rows={4}
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              placeholder={request.placeholder ?? request.defaultValue}
+            />
+          ) : (
+            <input
+              ref={inputRef as React.RefObject<HTMLInputElement>}
+              type="text"
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              placeholder={request.placeholder ?? request.defaultValue}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  onSubmit(value);
+                }
+              }}
+            />
+          )}
+        </label>
+        <div className="modal-actions">
+          <button type="button" className="primary-button" onClick={() => onSubmit(value)}>
+            {request.submitLabel ?? "Continue"}
           </button>
           <button type="button" className="ghost-button" onClick={onCancel}>Cancel</button>
         </div>
@@ -999,45 +919,45 @@ function EnvironmentStrip({ supervisor, fallback }: { supervisor?: RuntimeSuperv
     <section className={`environment-strip guard-${guardLevel}`}>
       {runtimeError ? (
         <div className="environment-strip-row environment-strip-wide environment-error-row">
-          <span>Runtime</span>
-          <strong>{runtimeError.category === "provider_timeout" ? "provider timeout" : runtimeError.category || "error"}</strong>
+          <span>运行时</span>
+          <strong>{runtimeError.category === "provider_timeout" ? "provider 超时" : runtimeError.category || "错误"}</strong>
         </div>
       ) : null}
       <div className="environment-strip-row">
-        <span>Provider</span>
+        <span>提供方</span>
         <strong>{fallback.provider || environment?.provider || "-"}</strong>
       </div>
       <div className="environment-strip-row">
-        <span>Model</span>
+        <span>模型</span>
         <strong>{environment?.model || fallback.model || "-"}</strong>
       </div>
       <div className="environment-strip-row">
-        <span>Effort</span>
+        <span>推理强度</span>
         <strong>{environment?.effort || fallback.effort || "-"}</strong>
       </div>
       <div className="environment-strip-row">
-        <span>Permission</span>
+        <span>权限</span>
         <strong>{environment?.permission || fallback.permission || "-"}</strong>
       </div>
       <div className="environment-strip-row">
-        <span>Context</span>
+        <span>上下文</span>
         <strong>{contextLabel}</strong>
       </div>
       <div className="environment-strip-row">
-        <span>Idle</span>
-        <strong>{watchdog?.idle_seconds ? `${watchdog.idle_seconds}s` : "ok"}</strong>
+        <span>空闲</span>
+        <strong>{watchdog?.idle_seconds ? `${watchdog.idle_seconds}s` : "正常"}</strong>
       </div>
       <div className="environment-strip-row">
         <span>Git</span>
-        <strong>{git?.is_repo ? `${git.branch || "repo"} · +${git.added} -${git.deleted}` : "not repo"}</strong>
+        <strong>{git?.is_repo ? `${git.branch || "repo"} · +${git.added} -${git.deleted}` : "非 Git 仓库"}</strong>
       </div>
       <div className="environment-strip-row environment-strip-wide">
-        <span>Browser</span>
-        <strong>{browser?.status === "pass" ? `pass · ${browser.label || browser.url}` : browser?.status || "not run"}</strong>
+        <span>浏览器</span>
+        <strong>{browser?.status === "pass" ? `通过 · ${browser.label || browser.url}` : browser?.status ? productStatusLabel(browser.status) : "未运行"}</strong>
       </div>
       <div className="environment-strip-row environment-strip-wide">
         <span>MCP</span>
-        <strong>{environment?.mcp?.status ?? "unknown"}</strong>
+        <strong>{productStatusLabel(environment?.mcp?.status)}</strong>
       </div>
     </section>
   );
@@ -1092,15 +1012,15 @@ function ReviewInspectorPanel({
       </div>
       <div className="tool-list">
         <div className="tool-row">
-          <span>Changed files</span>
+          <span>修改文件</span>
           <strong>{git?.changed_files ?? 0}</strong>
         </div>
         <div className="tool-row">
-          <span>Git state</span>
-          <strong>{git?.is_repo ? git.branch || "repo" : "not repo"}</strong>
+          <span>Git 状态</span>
+          <strong>{git?.is_repo ? git.branch || "repo" : "非 Git 仓库"}</strong>
         </div>
       </div>
-      <div className="inspector-list" role="list" aria-label="Changed files">
+      <div className="inspector-list" role="list" aria-label="修改文件">
         {files.length ? (
           files.slice(0, 12).map((file) => (
             <button type="button" className={`inspector-list-row ${selectedPath === file.path ? "active" : ""}`} onClick={() => onSelectPath(file.path)} key={`${file.status}:${file.path}`}>
@@ -1113,7 +1033,7 @@ function ReviewInspectorPanel({
         )}
       </div>
       {diff ? (
-        <pre className="tool-preview diff-preview">{diff.ok ? diff.diff || "No diff for this file." : diff.error || "Diff unavailable."}</pre>
+        <pre className="tool-preview diff-preview">{diff.ok ? diff.diff || "这个文件当前没有 diff。" : diff.error || "暂时无法读取 diff。"}</pre>
       ) : (
         <p className="muted compact-copy">选择文件后查看只读 diff 预览。</p>
       )}
@@ -1126,11 +1046,11 @@ function TerminalInspectorPanel({ supervisor, history }: { supervisor?: RuntimeS
     <section className="inspector-tool-panel">
       <div className="section-header">
         <h2>终端</h2>
-        <span className="status-tag">{history?.execution_host ?? (supervisor?.environment.cwd ? "attached" : "not attached")}</span>
+        <span className="status-tag">{history?.execution_host ?? (supervisor?.environment.cwd ? "已连接" : "未连接")}</span>
       </div>
       <p className="muted compact-copy">当前先显示 verified 命令历史；自由交互式 PTY 需要单独接审批、编码和会话生命周期。</p>
-      <pre className="tool-preview">{history?.workspace_root ?? supervisor?.environment.cwd ?? "No active workspace."}</pre>
-      <div className="inspector-list" role="list" aria-label="Command history">
+      <pre className="tool-preview">{history?.workspace_root ?? supervisor?.environment.cwd ?? "当前没有活动工作区。"}</pre>
+      <div className="inspector-list" role="list" aria-label="命令历史">
         {history?.commands?.length ? (
           history.commands.slice(-12).map((item, index) => (
             <div className="inspector-list-row static-row" key={`${item.timestamp}-${index}`}>
@@ -1162,12 +1082,12 @@ function BrowserInspectorPanel({
     <section className="inspector-tool-panel">
       <div className="section-header">
         <h2>浏览器</h2>
-        <span className={`status-tag ${browser?.status === "pass" ? "status-ok" : ""}`}>{browser?.status ?? "not run"}</span>
+        <span className={`status-tag ${browser?.status === "pass" ? "status-ok" : ""}`}>{browser?.status ? productStatusLabel(browser.status) : "未运行"}</span>
       </div>
       {browser ? (
         <div className="tool-list">
           <div className="tool-row">
-            <span>Label</span>
+            <span>标签</span>
             <strong>{browser.label || "-"}</strong>
           </div>
           <div className="tool-row">
@@ -1175,12 +1095,12 @@ function BrowserInspectorPanel({
             <strong>{browser.url || "-"}</strong>
           </div>
           <div className="tool-row">
-            <span>Console</span>
-            <strong>{browser.console_errors?.length ?? 0} errors</strong>
+            <span>控制台</span>
+            <strong>{browser.console_errors?.length ?? 0} 个错误</strong>
           </div>
           {browser.screenshot_path ? (
             <div className="tool-row tool-row-wide">
-              <span>Screenshot</span>
+              <span>截图</span>
               <strong title={browser.screenshot_path}>{browser.screenshot_path}</strong>
             </div>
           ) : null}
@@ -1189,7 +1109,7 @@ function BrowserInspectorPanel({
         <p className="muted compact-copy">还没有 browser smoke 结果。</p>
       )}
       <button type="button" className="ghost-button inspector-inline-action" disabled={isRunning} onClick={onRunSmoke}>
-        {isRunning ? "运行中..." : "Run browser smoke"}
+        {isRunning ? "运行中..." : "运行浏览器 smoke"}
       </button>
     </section>
   );
@@ -1219,7 +1139,7 @@ function FilesInspectorPanel({
         <span className="status-tag">{tree?.items.length ?? 0}</span>
       </div>
       <input className="inspector-search" value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="筛选文件..." aria-label="筛选文件" />
-      <div className="inspector-list inspector-file-list" role="list" aria-label="Project files">
+      <div className="inspector-list inspector-file-list" role="list" aria-label="项目文件">
         {(tree?.items ?? []).slice(0, 18).map((item) => (
           <button type="button" className={`inspector-list-row ${selectedPath === item.path ? "active" : ""}`} onClick={() => onSelectPath(item.path)} key={item.path}>
             <span>{item.path}</span>
@@ -1258,13 +1178,13 @@ function SupervisorGuardModal({
     <div className="modal-scrim">
       <div className="modal-card supervisor-modal">
         <div className="card-header">
-          <h2>Context guard</h2>
+          <h2>上下文保护</h2>
           <span className={`status-tag guard-tag-${supervisor.guard.level}`}>{supervisor.guard.level}</span>
         </div>
-        <p>{supervisor.guard.message || "This turn is approaching the configured long-task safety limit."}</p>
+        <p>{supervisor.guard.message || "当前回合已经接近长任务安全上限。"}</p>
         {supervisor.guard.auto_pause ? (
           <p className={`guard-auto-pause guard-auto-pause-${supervisor.guard.auto_pause.status}`}>
-            Auto-pause: {supervisor.guard.auto_pause.status}
+            自动暂停：{supervisor.guard.auto_pause.status}
             {supervisor.guard.auto_pause.error ? ` · ${supervisor.guard.auto_pause.error}` : ""}
           </p>
         ) : null}
@@ -1275,11 +1195,11 @@ function SupervisorGuardModal({
           {supervisor.token.total_tokens.toLocaleString()} / {supervisor.token.context_window.toLocaleString()} tokens
         </p>
         <div className="modal-actions modal-actions-wrap">
-          <button type="button" className="primary-button" onClick={() => onDecision("compact")}>Compact then continue</button>
-          <button type="button" className="ghost-button" onClick={() => onDecision("fork")}>Fork new thread</button>
-          <button type="button" className="ghost-button" onClick={() => onDecision("continue")}>Continue next turn</button>
-          <button type="button" className="danger-button" onClick={() => onDecision("interrupt")}>Interrupt</button>
-          <button type="button" className="ghost-button" onClick={onDismiss}>Dismiss</button>
+          <button type="button" className="primary-button" onClick={() => onDecision("compact")}>压缩后继续</button>
+          <button type="button" className="ghost-button" onClick={() => onDecision("fork")}>创建分支线程</button>
+          <button type="button" className="ghost-button" onClick={() => onDecision("continue")}>继续下一回合</button>
+          <button type="button" className="danger-button" onClick={() => onDecision("interrupt")}>中断</button>
+          <button type="button" className="ghost-button" onClick={onDismiss}>稍后处理</button>
         </div>
       </div>
     </div>
@@ -1326,11 +1246,9 @@ function useResizablePane(kind: "left" | "right") {
 function RouterControlCenter({
   locale,
   queryClient,
-  officialCodexDefaultModel,
 }: {
   locale: "en" | "zh-CN";
   queryClient: ReturnType<typeof useQueryClient>;
-  officialCodexDefaultModel?: string;
 }) {
   const routerConfig = useQuery({ queryKey: ["router-config"], queryFn: api.routerConfig, refetchInterval: 5000 });
   const llmSession = useQuery({ queryKey: ["llm-manager-session"], queryFn: api.llmManagerSession, refetchInterval: 5000 });
@@ -1366,6 +1284,7 @@ function RouterControlCenter({
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [testOutput, setTestOutput] = useState<string>("");
   const [metadataOutput, setMetadataOutput] = useState<string>("");
+  const [metadataRefreshJobId, setMetadataRefreshJobId] = useState<string | null>(null);
   const [mcpOutput, setMcpOutput] = useState<string>("");
   const [wslSetupOutput, setWslSetupOutput] = useState("");
   const [dogfoodDraft, setDogfoodDraft] = useState<DogfoodRun | null>(null);
@@ -1401,16 +1320,46 @@ function RouterControlCenter({
       queryClient.invalidateQueries({ queryKey: ["effective-catalog"] });
     },
   });
-  const refreshMetadata = useMutation({
-    mutationFn: (apply: boolean) => api.refreshMetadata(apply),
-    onSuccess: (data) => {
-      const readable = data.fetched.map((item) => `${item.ok ? "OK" : "WARN"} ${item.provider_id}: ${item.url}`).join("\n");
-      setMetadataOutput(`${data.applied ? "Applied" : "Previewed"} metadata refresh.\n${readable}`);
-      queryClient.invalidateQueries({ queryKey: ["router-config"] });
-      queryClient.invalidateQueries({ queryKey: ["metadata-sources"] });
-      queryClient.invalidateQueries({ queryKey: ["effective-catalog"] });
+  const metadataRefreshStatus = useQuery({
+    queryKey: ["metadata-refresh-status", metadataRefreshJobId],
+    queryFn: () => api.metadataRefreshStatus(metadataRefreshJobId),
+    enabled: Boolean(metadataRefreshJobId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "running" ? 1200 : false;
     },
   });
+  const startMetadataRefresh = useMutation({
+    mutationFn: (apply: boolean) => api.startMetadataRefresh(apply),
+    onSuccess: (data) => {
+      setMetadataRefreshJobId(data.job_id);
+      setMetadataOutput(`${data.apply ? "Apply" : "Preview"} refresh started.\nJob: ${data.job_id}`);
+    },
+  });
+  useEffect(() => {
+    const status = metadataRefreshStatus.data;
+    if (!status || !metadataRefreshJobId || status.job_id !== metadataRefreshJobId || status.status === "running" || status.status === "idle") return;
+    const summary = status.summary;
+    const rows = (status.source_results ?? []).map((item) => {
+      const record = item as Record<string, unknown>;
+      const state = String(record.classification ?? (record.ok ? "ok" : "warn"));
+      return `${String(record.provider_id ?? "-")}: ${state} ${String(record.url ?? "")}`.trim();
+    });
+    const artifactLines = Object.entries(status.artifact_paths ?? {})
+      .filter(([, value]) => Boolean(value))
+      .map(([key, value]) => `${key}: ${value}`);
+    setMetadataOutput(
+      [
+        `Refresh ${status.status}.`,
+        summary ? `Sources ${summary.ok_sources}/${summary.total_sources} ok.` : "",
+        ...rows,
+        ...artifactLines,
+      ].filter(Boolean).join("\n"),
+    );
+    queryClient.invalidateQueries({ queryKey: ["router-config"] });
+    queryClient.invalidateQueries({ queryKey: ["metadata-sources"] });
+    queryClient.invalidateQueries({ queryKey: ["effective-catalog"] });
+  }, [metadataRefreshStatus.data, metadataRefreshJobId, queryClient]);
   const runMatrix = useMutation({
     mutationFn: () => api.testMatrix({ model_ids: modelDraft?.id ? [modelDraft.id] : undefined, temperatures: [0, 0.7, 1, 2], max_cases: modelDraft?.id ? 8 : 24 }),
     onSuccess: (data) => {
@@ -1632,7 +1581,7 @@ function RouterControlCenter({
   const selectedProvider = routerConfig.data?.providers.find((item) => item.id === selectedProviderId) ?? null;
   const selectedManagedKey = (llmKeys.data?.keys ?? []).find((item) => item.key_id === selectedKeyId) ?? null;
   const managerMode = llmSession.data?.mode ?? "anonymous";
-  const managerStatusLabel = managerMode === "managed_user" ? `Managed: ${llmSession.data?.username ?? "user"}` : "Anonymous";
+  const managerStatusLabel = managerMode === "managed_user" ? `托管账户：${llmSession.data?.username ?? "user"}` : "匿名会话";
 
   useEffect(() => {
     if (!providerDraft && routerConfig.data?.providers?.[0]) setProviderDraft(routerConfig.data.providers[0]);
@@ -1895,6 +1844,8 @@ function RouterControlCenter({
                     <span>{model.provider}</span>
                     <span>{model.advertised_context_window?.toLocaleString?.() ?? model.advertised_context_window}</span>
                     <span>{model.source_status ?? "seeded"}</span>
+                    {model.recommended ? <span>recommended</span> : null}
+                    {model.deprecated ? <span>deprecated</span> : null}
                   </span>
                 </button>
               ))}
@@ -2255,56 +2206,56 @@ function RouterControlCenter({
         <div className="manager-panel">
           <div className="manager-hero">
             <div>
-              <span className="eyebrow">Checkpoints</span>
-              <h3>Save / Load</h3>
-              <p className="muted">Local checkpoints live under workspace .astrabridge/saves. Git is read-only here: no commits, tags, remotes, or Git config changes.</p>
+              <span className="eyebrow">检查点</span>
+              <h3>保存 / 载入</h3>
+              <p className="muted">本地检查点保存在工作区 `.astrabridge/saves` 下。这里对 Git 只读，不会创建 commit、tag、remote，也不会改 Git 配置。</p>
             </div>
-            <span className="session-badge">{projectSaves.data?.saves.length ?? 0} saves</span>
+            <span className="session-badge">{projectSaves.data?.saves.length ?? 0} 个检查点</span>
           </div>
           <div className="manager-grid">
             <section className="manager-section manager-section-wide">
-              <h4>Saved checkpoints</h4>
+              <h4>已保存的检查点</h4>
               <div className="checkpoint-list">
                 {(projectSaves.data?.saves ?? []).map((save) => (
                   <div className="checkpoint-row" key={save.save_id}>
                     <div className="checkpoint-copy">
                       <strong>{save.description || save.default_description}</strong>
-                      <small>{save.project_name} / {save.thread_name || "thread"} / {formatMessageTime(save.created_at)}</small>
-                      <span>{save.workspace.is_git_repo ? `Git ${save.workspace.base_commit?.slice(0, 8) ?? "unknown"}${save.workspace.dirty ? " / dirty" : ""}` : "Snapshot workspace"} / {save.workspace.file_count ?? 0} files</span>
+                      <small>{save.project_name} / {save.thread_name || "线程"} / {formatMessageTime(save.created_at)}</small>
+                      <span>{save.workspace.is_git_repo ? `Git ${save.workspace.base_commit?.slice(0, 8) ?? "unknown"}${save.workspace.dirty ? " / dirty" : ""}` : "工作区快照"} / {save.workspace.file_count ?? 0} 个文件</span>
                     </div>
                     <div className="checkpoint-actions">
-                      <button type="button" className="ghost-button" onClick={() => previewCheckpoint.mutate(save.save_id)} disabled={previewCheckpoint.isPending}>Preview</button>
+                      <button type="button" className="ghost-button" onClick={() => previewCheckpoint.mutate(save.save_id)} disabled={previewCheckpoint.isPending}>预览</button>
                       <button
                         type="button"
                         className="primary-button"
                         onClick={async () => {
                           const previewResult = await api.loadProjectSave({ save_id: save.save_id, preview: true });
                           const message = previewResult.dirty
-                            ? `Workspace is dirty. LCR will create a pre-load restore point before loading "${save.description || save.default_description}". Continue?`
-                            : `Load "${save.description || save.default_description}"?`;
+                            ? `当前工作区有未保存变化。AstraBridge 会先创建一个载入前恢复点，然后再载入“${save.description || save.default_description}”。继续吗？`
+                            : `要载入“${save.description || save.default_description}”吗？`;
                           if (window.confirm(message)) loadCheckpoint.mutate(save.save_id);
                         }}
                         disabled={loadCheckpoint.isPending}
                       >
-                        Load
+                        载入
                       </button>
-                      <button type="button" className="ghost-button" onClick={() => window.confirm("Delete this checkpoint?") && deleteCheckpoint.mutate(save.save_id)} disabled={deleteCheckpoint.isPending}>Delete</button>
+                      <button type="button" className="ghost-button" onClick={() => window.confirm("确定删除这个检查点吗？") && deleteCheckpoint.mutate(save.save_id)} disabled={deleteCheckpoint.isPending}>删除</button>
                     </div>
                   </div>
                 ))}
-                {(projectSaves.data?.saves ?? []).length === 0 ? <p className="muted">No checkpoints yet. Use Save at the bottom-right of an assistant message.</p> : null}
+                {(projectSaves.data?.saves ?? []).length === 0 ? <p className="muted">还没有检查点。可以在助手消息右下角点击“保存”。</p> : null}
               </div>
             </section>
             <section className="manager-section">
-              <h4>Preview</h4>
+              <h4>预览</h4>
               {previewCheckpoint.data ? (
                 <div className="checkpoint-preview">
                   <strong>{previewCheckpoint.data.save.description || previewCheckpoint.data.save.default_description}</strong>
-                  <span>{previewCheckpoint.data.dirty ? "Current workspace is dirty" : "Current workspace is clean enough to load"}</span>
-                  <small>{(previewCheckpoint.data.changed_files ?? []).slice(0, 8).join("\n") || "No changed files reported."}</small>
+                  <span>{previewCheckpoint.data.dirty ? "当前工作区有未保存变化" : "当前工作区状态适合直接载入"}</span>
+                  <small>{(previewCheckpoint.data.changed_files ?? []).slice(0, 8).join("\n") || "没有报告变化文件。"}</small>
                 </div>
               ) : (
-                <p className="muted">Preview a checkpoint before loading to see whether the current workspace is dirty.</p>
+                <p className="muted">载入前先预览，可以看到当前工作区是否存在未保存变化。</p>
               )}
               {previewCheckpoint.error ? <p className="error-text">{String((previewCheckpoint.error as Error).message ?? previewCheckpoint.error)}</p> : null}
               {loadCheckpoint.error ? <p className="error-text">{String((loadCheckpoint.error as Error).message ?? loadCheckpoint.error)}</p> : null}
@@ -2461,7 +2412,7 @@ function RouterControlCenter({
               </section>
               <section className="manager-section">
                 <h4>Browser smoke</h4>
-                <p className="muted">Local-only browser smoke. LCR visits the URL, tries to capture a screenshot with Playwright when available, records console issues, and writes an automatic milestone.</p>
+                <p className="muted">Local-only browser smoke. AstraBridge visits the URL, tries to capture a screenshot with Playwright when available, records console issues, and writes an automatic milestone.</p>
                 <label className="field"><span>URL</span><input value={dogfoodSmokeUrl} onChange={(event) => setDogfoodSmokeUrl(event.target.value)} /></label>
                 <div className="form-grid">
                   <label className="field"><span>Label</span><input value={dogfoodSmokeLabel} onChange={(event) => setDogfoodSmokeLabel(event.target.value)} /></label>
@@ -2507,29 +2458,48 @@ function RouterControlCenter({
             <div>
               <span className="eyebrow">Curator skill</span>
               <h3>Reports and metadata refresh</h3>
-              <p className="muted">Fetch source status, import conservative seeds, preview diffs, and generate sanitized reports. Key files are read only during test runs.</p>
+              <p className="muted">Fetch official source status, rebuild the generated catalog, preview review artifacts, and generate sanitized reports. Key files are read only during health checks.</p>
             </div>
             <div className="field-row">
               <button type="button" className="ghost-button" onClick={() => importSeed.mutate()} disabled={importSeed.isPending}>Import seed</button>
-              <button type="button" className="ghost-button" onClick={() => refreshMetadata.mutate(false)} disabled={refreshMetadata.isPending}>Dry refresh</button>
-              <button type="button" className="primary-button" onClick={() => refreshMetadata.mutate(true)} disabled={refreshMetadata.isPending}>Apply refresh</button>
+              <button type="button" className="ghost-button" onClick={() => startMetadataRefresh.mutate(false)} disabled={startMetadataRefresh.isPending || metadataRefreshStatus.data?.running}>Dry refresh</button>
+              <button type="button" className="primary-button" onClick={() => startMetadataRefresh.mutate(true)} disabled={startMetadataRefresh.isPending || metadataRefreshStatus.data?.running}>Apply refresh</button>
             </div>
           </div>
+          {metadataRefreshStatus.data ? (
+            <section className="metadata-source-card">
+              <div>
+                <strong>Latest refresh</strong>
+                <span>{metadataRefreshStatus.data.status}</span>
+              </div>
+              <p>
+                {metadataRefreshStatus.data.summary
+                  ? `${metadataRefreshStatus.data.summary.ok_sources}/${metadataRefreshStatus.data.summary.total_sources} sources ok`
+                  : "No refresh summary yet."}
+              </p>
+              {metadataRefreshStatus.data.started_at ? <p className="muted">Started: {metadataRefreshStatus.data.started_at}</p> : null}
+              {metadataRefreshStatus.data.finished_at ? <p className="muted">Finished: {metadataRefreshStatus.data.finished_at}</p> : null}
+              {metadataRefreshStatus.data.error ? <p className="error-text">{metadataRefreshStatus.data.error}</p> : null}
+            </section>
+          ) : null}
           <div className="metadata-source-list">
-            {(metadataSources.data?.providers ?? []).map((source) => (
+            {(metadataSources.data?.providers ?? []).map((source) => {
+              const latest = (metadataRefreshStatus.data?.source_results ?? []).find((item) => String((item as Record<string, unknown>).provider_id ?? "") === source.provider_id) as Record<string, unknown> | undefined;
+              return (
               <section key={source.provider_id} className="metadata-source-card">
                 <div>
                   <strong>{source.display_name}</strong>
-                  <span>{source.source_status}</span>
+                  <span>{String(latest?.classification ?? source.source_status)}</span>
                 </div>
                 <p>{source.notes}</p>
+                {latest ? <p className="muted">Latest: {String(latest.classification ?? "")} {String(latest.status_code ?? "")} {String(latest.duration_ms ?? "")}ms</p> : null}
                 <ul>
                   {source.urls.map((url) => (
                     <li key={url}><a href={url} target="_blank" rel="noreferrer">{url}</a></li>
                   ))}
                 </ul>
               </section>
-            ))}
+            )})}
           </div>
           <div className="metadata-actions metadata-actions-compact">
             <div>
@@ -2541,13 +2511,6 @@ function RouterControlCenter({
               <button type="button" className="ghost-button" onClick={() => generateReport.mutate()} disabled={generateReport.isPending}>Generate report</button>
             </div>
           </div>
-          <div className="metadata-actions metadata-actions-compact">
-            <div>
-              <h3>Codex isolation audit</h3>
-              <p className="muted">{t(locale, "official_codex_summary")}</p>
-            </div>
-            <p className="muted">Observed default model: {officialCodexDefaultModel ?? "-"}</p>
-          </div>
           {metadataOutput ? <pre className="json-preview">{metadataOutput}</pre> : null}
         </div>
       ) : null}
@@ -2558,7 +2521,7 @@ function RouterControlCenter({
             <div>
               <span className="eyebrow">Capability health</span>
               <h3>Model checks</h3>
-              <p className="muted">Short health checks update public metadata for connectivity, effort, temperature policy, web/source access, MCP/tool confidence, plan, goal, and context compaction readiness.</p>
+              <p className="muted">Short health checks update safe public metadata for connectivity, effort, temperature policy, web/source access, MCP/tool confidence, plan, goal, and context compaction readiness.</p>
             </div>
             <span className="session-badge">{llmHealth.data?.updated_at ? summarizeRelativeTime(llmHealth.data.updated_at) : "untested"}</span>
           </div>
@@ -2913,6 +2876,7 @@ function AppShell() {
   const [guardDismissedFor, setGuardDismissedFor] = useState<string | null>(null);
   const [saveModal, setSaveModal] = useState<{ open: boolean; block?: ThreadRenderBlock | null }>({ open: false });
   const [saveDescription, setSaveDescription] = useState("");
+  const [textEntryRequest, setTextEntryRequest] = useState<TextEntryRequest | null>(null);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("status");
   const [inspectorReviewPath, setInspectorReviewPath] = useState("");
   const [inspectorFileQuery, setInspectorFileQuery] = useState("");
@@ -2924,7 +2888,6 @@ function AppShell() {
   const llmCatalog = useQuery({ queryKey: ["llm-manager-catalog"], queryFn: api.llmManagerEffectiveCatalog, refetchInterval: 5000 });
   const mcpConfig = useQuery({ queryKey: ["mcp-config"], queryFn: api.mcpConfig, refetchInterval: 7000 });
   const runtime = useQuery({ queryKey: ["runtime-environment"], queryFn: api.runtimeEnvironment, refetchInterval: 5000 });
-  const officialCodex = useQuery({ queryKey: ["official-codex"], queryFn: api.officialCodexStatus, refetchInterval: 5000 });
   const newThreadDraft = threadSettingsDraft["__new__"] ?? {};
   const listProfileId = newThreadDraft.profile_id ?? project.default_profile_id;
   const threads = useQuery({
@@ -2951,6 +2914,12 @@ function AppShell() {
     enabled: Boolean(selectedThreadId),
     refetchInterval: 4000,
   });
+  const taskConversation = useQuery({
+    queryKey: ["task-conversation", project.project_id, currentTask?.task_id, selectedThreadId],
+    queryFn: () => api.taskConversation(currentTask?.task_id),
+    enabled: Boolean(currentTask?.task_id),
+    refetchInterval: 4000,
+  });
   const goal = useQuery({
     queryKey: ["goal", selectedThreadId, selectedThreadProfileId],
     queryFn: () => api.getGoal(selectedThreadId!, selectedThreadProfileId),
@@ -2972,6 +2941,7 @@ function AppShell() {
     onSuccess: (data) => {
       setProject(data.project);
       queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task-conversation"] });
       queryClient.invalidateQueries({ queryKey: ["thread"] });
       queryClient.invalidateQueries({ queryKey: ["goal"] });
     },
@@ -2986,6 +2956,7 @@ function AppShell() {
       }
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task-conversation"] });
       queryClient.invalidateQueries({ queryKey: ["thread"] });
     },
   });
@@ -2996,6 +2967,7 @@ function AppShell() {
       setProject(data.project ?? { ...project, current_thread_id: data.thread.id, recent_threads: [data.thread.id, ...project.recent_threads.filter((id) => id !== data.thread.id)].slice(0, 20) });
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task-conversation"] });
       queryClient.invalidateQueries({ queryKey: ["thread"] });
     },
   });
@@ -3038,16 +3010,6 @@ function AppShell() {
     },
   });
 
-  const applyOfficialCodex = useMutation({
-    mutationFn: api.applyOfficialCodexConfig,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["official-codex"] }),
-  });
-
-  const restoreOfficialCodex = useMutation({
-    mutationFn: api.restoreOfficialCodexConfig,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["official-codex"] }),
-  });
-
   const setGoalMutation = useMutation({
     mutationFn: api.setGoal,
     onSuccess: (data) => {
@@ -3079,6 +3041,7 @@ function AppShell() {
       queryClient.invalidateQueries({ queryKey: ["thread"] });
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task-conversation"] });
     },
   });
 
@@ -3298,7 +3261,29 @@ function AppShell() {
     const providerId = activeProfile?.provider_id || activeProviderDisplay;
     return (routerConfig.data?.providers ?? []).find((provider) => provider.id === providerId) ?? null;
   }, [activeProfile?.provider_id, activeProviderDisplay, routerConfig.data?.providers]);
-  const userDisplayName = llmSession.data?.profile?.display_name || llmSession.data?.username || (llmSession.data?.mode === "anonymous" ? "Anonymous" : "User");
+  const providerMetaById = useMemo(() => {
+    const entries = new Map<string, RouterProvider>();
+    for (const provider of routerConfig.data?.providers ?? []) {
+      entries.set(provider.id, provider);
+    }
+    return entries;
+  }, [routerConfig.data?.providers]);
+  const pickPreferredModelForProvider = (providerId: string) => {
+    const managerMode = llmSession.data?.mode ?? "anonymous";
+    const sourceModels = managerMode === "managed_user" && (llmCatalog.data?.models ?? []).length > 0
+      ? llmCatalog.data?.models ?? []
+      : routerConfig.data?.models ?? [];
+    const candidates = sourceModels
+      .filter((model) => model.enabled && model.provider === providerId)
+      .sort((left, right) => {
+        const leftRank = Number(Boolean(left.default_for_provider)) * 100 + Number(Boolean(left.recommended)) * 10 - Number(Boolean(left.deprecated));
+        const rightRank = Number(Boolean(right.default_for_provider)) * 100 + Number(Boolean(right.recommended)) * 10 - Number(Boolean(right.deprecated));
+        if (leftRank !== rightRank) return rightRank - leftRank;
+        return (left.display_name || left.native_model).localeCompare(right.display_name || right.native_model);
+      });
+    return candidates[0]?.native_model ?? null;
+  };
+  const userDisplayName = llmSession.data?.profile?.display_name || llmSession.data?.username || (llmSession.data?.mode === "anonymous" ? "匿名会话" : "用户");
   const userAvatarPath = llmSession.data?.profile?.avatar_path || "";
   const runtimeModelList = useQuery({
     queryKey: ["runtime-models", activeSettings.profile_id],
@@ -3324,15 +3309,10 @@ function AppShell() {
         values.set(id, values.get(id) ?? model.name ?? id);
       }
     }
-    if (activeProfile?.model) values.set(activeProfile.model, activeProfile.model);
-    if (activeSettings.model) values.set(activeSettings.model, activeSettings.model);
+    if (activeProfile?.model && (values.size === 0 || values.has(activeProfile.model))) values.set(activeProfile.model, values.get(activeProfile.model) ?? activeProfile.model);
+    if (activeSettings.model && (values.size === 0 || values.has(activeSettings.model))) values.set(activeSettings.model, values.get(activeSettings.model) ?? activeSettings.model);
     return Array.from(values, ([value, label]) => ({ value, label }));
   }, [activeProfile?.model, activeProfile?.provider_id, activeSettings.model, llmCatalog.data?.models, llmSession.data?.mode, routerConfig.data?.models, runtimeModelList.data?.models]);
-  const composerEffortOptions = useMemo(() => {
-    const values = new Set(providerEffortOptions(activeProfile?.provider_id, activeSettings.model));
-    if (activeSettings.reasoning_effort) values.add(activeSettings.reasoning_effort);
-    return Array.from(values);
-  }, [activeProfile?.provider_id, activeSettings.model, activeSettings.reasoning_effort]);
   const activeModelEntry = useMemo(() => {
     const providerId = activeProfile?.provider_id ?? "";
     return (
@@ -3341,6 +3321,10 @@ function AppShell() {
       null
     );
   }, [activeProfile?.provider_id, activeSettings.model, llmCatalog.data?.models, routerConfig.data?.models]);
+  const composerEffortOptions = useMemo(
+    () => composerReasoningOptions(activeModelEntry, activeProfile, activeSettings.reasoning_effort),
+    [activeModelEntry, activeProfile, activeSettings.reasoning_effort],
+  );
   const imageAttachmentUnsupported = attachments.some((attachment) => attachment.kind === "image") && !(activeModelEntry?.input_modalities ?? ["text"]).includes("image");
   const mcpEnabled = (mcpConfig.data?.servers ?? []).some((server) => server.enabled);
   const mcpUnverified = mcpEnabled && activeModelEntry && !activeModelEntry.supports_mcp_tools;
@@ -3420,6 +3404,42 @@ function AppShell() {
     }, 250);
     return () => window.clearTimeout(timer);
   }, [appearance, executionHostDraft, leftPane.width, locale, project?.project_id, rightPane.width, rightSidebarOpen, wslDistroDraft]);
+
+  useEffect(() => {
+    if (providerOptions.length === 0) return;
+    if (providerOptions.some((option) => option.profileId === activeSettings.profile_id)) return;
+    const fallbackProviderId = metadataProviderForActiveModel || activeProfile?.provider_id || providerOptions[0]?.providerId;
+    const nextProfile = providerOptions.find((option) => option.providerId === fallbackProviderId) ?? providerOptions[0];
+    if (!nextProfile || nextProfile.profileId === activeSettings.profile_id) return;
+    updateComposerSettings({ profile_id: nextProfile.profileId });
+  }, [activeProfile?.provider_id, activeSettings.profile_id, metadataProviderForActiveModel, providerOptions]);
+
+  useEffect(() => {
+    if (!activeProfile?.provider_id || composerModelOptions.length === 0) return;
+    const validModels = new Set(composerModelOptions.map((option) => option.value));
+    if (!validModels.has(activeSettings.model ?? "")) {
+      const nextModel = pickPreferredModelForProvider(activeProfile.provider_id) ?? composerModelOptions[0]?.value;
+      if (!nextModel) return;
+      const nextModelEntry =
+        (llmCatalog.data?.models ?? []).find((model) => model.provider === activeProfile.provider_id && model.native_model === nextModel) ??
+        (routerConfig.data?.models ?? []).find((model) => model.provider === activeProfile.provider_id && model.native_model === nextModel) ??
+        null;
+      const nextEfforts = composerReasoningOptions(nextModelEntry, activeProfile, activeSettings.reasoning_effort);
+      updateComposerSettings({
+        model: nextModel,
+        reasoning_effort: nextEfforts.includes(activeSettings.reasoning_effort ?? "")
+          ? activeSettings.reasoning_effort
+          : preferredReasoningEffort(nextModelEntry, activeProfile, activeSettings.reasoning_effort),
+      });
+    }
+  }, [activeProfile, activeSettings.model, activeSettings.reasoning_effort, composerModelOptions, llmCatalog.data?.models, routerConfig.data?.models]);
+
+  useEffect(() => {
+    if (composerEffortOptions.length === 0) return;
+    if (!composerEffortOptions.includes(activeSettings.reasoning_effort ?? "")) {
+      updateComposerSettings({ reasoning_effort: preferredReasoningEffort(activeModelEntry, activeProfile, activeSettings.reasoning_effort) });
+    }
+  }, [activeModelEntry, activeProfile, activeSettings.reasoning_effort, composerEffortOptions]);
 
   useEffect(() => {
     if (displayGoal?.objective) {
@@ -3593,14 +3613,27 @@ function AppShell() {
         if (activity && threadId && turnId) setTurnActivity(threadId, turnId, activity);
         if (item.type === "contextCompaction") threadRefresh = true;
       } else if (method === "turn/completed") {
-        const turn = (params.turn as Record<string, unknown>) ?? {};
-        clearLiveTurn(threadId, String(turn.id ?? ""));
         setThreadStatus(threadId, { type: "idle" });
         threadRefresh = true;
         goalRefresh = true;
       } else if (method === "thread/goal/updated" || method === "thread/goal/cleared") {
         goalRefresh = true;
-      } else if (method === "thread/started" || method === "thread/name/updated" || method === "thread/settings/updated" || method === "thread/compacted") {
+      } else if (method === "thread/compacted") {
+        const scopedThreadId = threadId || selectedThreadId || "";
+        const latestSnapshot = useAppStore.getState().eventSnapshot;
+        const scopedTurnId = turnId || (scopedThreadId ? latestSnapshot.latestTurnIdByThread[scopedThreadId] ?? "" : "");
+        if (scopedThreadId && scopedTurnId) {
+          setTurnActivity(scopedThreadId, scopedTurnId, {
+            kind: "compact",
+            label: "上下文已压缩",
+            status: "completed",
+            preview: "Context compaction completed",
+            detail: "Thread context was compacted and the surviving summary is now the active continuation point.",
+            item_id: "thread/compacted",
+          });
+        }
+        threadRefresh = true;
+      } else if (method === "thread/started" || method === "thread/name/updated" || method === "thread/settings/updated") {
         threadRefresh = true;
       } else if (method === "runtime/disconnected") {
         runtimeRefresh = true;
@@ -3710,28 +3743,66 @@ function AppShell() {
     };
   }, [project?.project_id, queryClient, setEventCursor]);
 
+  async function promptForText(options: {
+    title: string;
+    label: string;
+    defaultValue?: string;
+    placeholder?: string;
+    description?: string;
+    submitLabel?: string;
+    multiline?: boolean;
+  }) {
+    const defaultValue = options.defaultValue ?? "";
+    return await new Promise<string | null>((resolve) => {
+      setTextEntryRequest({
+        title: options.title,
+        label: options.label,
+        defaultValue,
+        placeholder: options.placeholder,
+        description: options.description,
+        submitLabel: options.submitLabel,
+        multiline: options.multiline,
+        resolve,
+      });
+    });
+  }
+
   async function handleCreateThread() {
-    const name = window.prompt(t(locale, "new_thread"), "");
+    const name = await promptForText({
+      title: t(locale, "new_thread"),
+      label: t(locale, "title_thread"),
+      defaultValue: "",
+      placeholder: t(locale, "new_thread"),
+      submitLabel: t(locale, "new_thread"),
+    });
+    if (name === null) return;
     const settings = currentComposerSettings();
     createThread.mutate({
       profile_id: settings.profile_id ?? project.default_profile_id,
       model: settings.model,
       effort: settings.reasoning_effort,
       permission_mode: settings.permission_mode,
-      name: name ?? undefined,
+      name: name.trim() || undefined,
     });
   }
 
   async function handleForkThread() {
     if (!selectedThreadId) return;
-    const name = window.prompt(t(locale, "fork_thread"), "");
+    const name = await promptForText({
+      title: locale === "zh-CN" ? "创建分支线程" : t(locale, "fork_thread"),
+      label: t(locale, "title_thread"),
+      defaultValue: "",
+      placeholder: activeThreadName,
+      submitLabel: locale === "zh-CN" ? "创建分支线程" : t(locale, "fork_thread"),
+    });
+    if (name === null) return;
     forkThread.mutate({
       thread_id: selectedThreadId,
       profile_id: activeSettings.profile_id,
       model: activeSettings.model,
       effort: activeSettings.reasoning_effort,
       permission_mode: activeSettings.permission_mode,
-      name: name ?? undefined,
+      name: name.trim() || undefined,
     });
   }
 
@@ -3751,7 +3822,13 @@ function AppShell() {
 
   async function handleRenameThread(threadId: string) {
     const current = threads.data?.threads.find((item) => item.id === threadId);
-    const name = window.prompt(t(locale, "rename_thread"), current?.displayName ?? "");
+    const name = await promptForText({
+      title: t(locale, "rename_thread"),
+      label: t(locale, "title_thread"),
+      defaultValue: current?.displayName ?? "",
+      placeholder: current?.displayName ?? "",
+      submitLabel: t(locale, "rename_thread"),
+    });
     if (name && name.trim()) {
       renameThread.mutate({ threadId, name: name.trim() });
     }
@@ -3775,8 +3852,16 @@ function AppShell() {
       setAttachments((current) => [...current, ...drafts]);
       return;
     }
-    const manual = window.prompt("Enter absolute file paths separated by semicolons", "");
-    if (!manual) return;
+      const manual = await promptForText({
+        title: t(locale, "add_files"),
+        label: "Paths",
+        defaultValue: "",
+        placeholder: "D:\\path\\to\\file.txt; D:\\path\\to\\image.png",
+        description: "Enter absolute file paths separated by semicolons.",
+        submitLabel: t(locale, "add_files"),
+        multiline: true,
+      });
+      if (!manual) return;
     const drafts = manual
       .split(";")
       .map((part) => part.trim())
@@ -3866,7 +3951,8 @@ function AppShell() {
     }
   }
 
-  const activeThread = selectedThread.data?.thread;
+  const activeThread = taskConversation.data?.thread ?? selectedThread.data?.thread;
+  const activeExecutionThread = selectedThread.data?.thread;
   const activeThreadName = activeThread?.displayName ?? selectedThreadSummary?.displayName ?? "Thread";
   const checkpointDefaultDescription = `${project.name} / ${activeThreadName} · ${new Date().toLocaleString(undefined, {
     year: "numeric",
@@ -3885,7 +3971,7 @@ function AppShell() {
   const liveDiff = liveTurnId ? eventSnapshot.diffByTurn[liveTurnId] : undefined;
   const modal = pendingModals.data?.modals?.[0] ?? null;
   const activeThreadStatus = selectedThreadId ? eventSnapshot.threadStatusByThread[selectedThreadId] : undefined;
-  const statusFromThread = activeThread?.status as { type?: string; activeFlags?: string[] } | undefined;
+  const statusFromThread = activeExecutionThread?.status as { type?: string; activeFlags?: string[] } | undefined;
   const activeStatusType = activeThreadStatus?.type ?? statusFromThread?.type ?? "idle";
   const activeFlags = activeThreadStatus?.activeFlags ?? statusFromThread?.activeFlags ?? [];
   const waitingOnApproval = activeFlags.includes("waitingOnApproval") || Boolean(modal?.kind === "approval" && modal.thread_id === selectedThreadId);
@@ -3893,7 +3979,15 @@ function AppShell() {
   const runtimeGuardVisible = Boolean(liveTurnId && activeStatusType === "active") || waitingOnApproval || startTurn.isPending;
   const supervisorGuardKey = `${selectedThreadId ?? "none"}:${liveTurnId ?? "none"}:${supervisor.data?.guard.level ?? "ok"}`;
   const supervisorGuardVisible = Boolean(supervisor.data?.guard.level === "pause" && supervisor.data.guard.should_pause && guardDismissedFor !== supervisorGuardKey);
-  const blocks = summarizeTurnBlocks(activeThread, liveText, liveReasoning, liveActivity, liveDiff);
+
+  useEffect(() => {
+    if (!selectedThreadId || !liveTurnId || !activeThread) return;
+    const persistedTurn = (activeThread.turns ?? []).find((turn) => turn.id === liveTurnId);
+    if (!hasPersistedRenderableTurnContent(persistedTurn)) return;
+    clearLiveTurn(selectedThreadId, liveTurnId);
+  }, [activeThread, clearLiveTurn, liveTurnId, selectedThreadId]);
+
+  const blocks = summarizeTurnBlocks(activeThread, liveText, liveReasoning, liveActivity, liveDiff, liveTurnId);
   const hasRenderedPlanBlock = blocks.some((block) => block.role === "plan" || (("text" in block) && typeof block.text === "string" && extractProposedPlanText(block.text)));
   const inspectorPlan = supervisor.data?.plan ?? (activePlan ? {
     thread_id: selectedThreadId ?? "",
@@ -3928,7 +4022,7 @@ function AppShell() {
           </button>
           <button type="button" className={`nav-row ${mainView === "setup" ? "nav-row-active" : ""}`} onClick={() => setMainView("setup")}>
             <span className="nav-icon" aria-hidden="true">◎</span>
-            <span>{t(locale, "provider_keys")}</span>
+            <span>{providerSetupLabel(locale)}</span>
           </button>
           <button type="button" className={`nav-row ${archivedVisible ? "nav-row-active" : ""}`} onClick={() => setArchivedVisible((value) => !value)}>
             <span className="nav-icon" aria-hidden="true">◷</span>
@@ -3957,11 +4051,10 @@ function AppShell() {
           </div>
           <div className="official-thread-list">
             {sidebarTasks.map((task) => {
-              const activeProviderThread = task.provider_threads.find((item) => item.thread_id === task.active_provider_thread_id) ?? task.provider_threads[0];
-              const latestHandoff = task.handoff_events[task.handoff_events.length - 1];
+              const summary = summarizeTaskCard(task);
               const active = task.task_id === currentTask?.task_id;
               return (
-                <div key={task.task_id} className={`codex-thread-item ${active ? "codex-thread-item-active" : ""}`}>
+                <div key={task.task_id} className={`codex-thread-item ${active ? "codex-thread-item-active" : ""} ${summary.tone === "warning" ? "codex-thread-item-warning" : ""}`}>
                   <button type="button" className="thread-select-row" onClick={() => { setMainView("chat"); switchTask.mutate(task.task_id); }}>
                     <span className="row-icon" aria-hidden="true">□</span>
                     <span className="thread-copy">
@@ -3969,15 +4062,20 @@ function AppShell() {
                         <strong>{task.title}</strong>
                         <time>{summarizeRelativeTime(task.updated_at)}</time>
                       </span>
-                      <small>
-                        {latestHandoff
-                          ? `Switched to ${latestHandoff.profile_id ?? "provider"} · ${latestHandoff.model ?? ""}`
-                          : `${task.provider_threads.length || 0} provider thread${task.provider_threads.length === 1 ? "" : "s"}`}
-                      </small>
+                      <small>{summary.subtitle}</small>
                       <span className="thread-route-line">
-                        <span>{activeProviderThread?.model ?? project.default_model}</span>
-                        <span>{activeProviderThread?.reasoning_effort ?? project.default_effort}</span>
+                        <span>{summary.routeModel || project.default_model}</span>
+                        <span>{summary.routeEffort || project.default_effort}</span>
                       </span>
+                      {summary.stats.length > 0 ? (
+                        <span className="thread-stat-row">
+                          {summary.stats.map((stat) => (
+                            <span key={taskStatKey(task, stat)} className={`thread-stat-pill ${stat.includes("异常") ? "thread-stat-pill-warning" : ""}`}>
+                              {stat}
+                            </span>
+                          ))}
+                        </span>
+                      ) : null}
                     </span>
                   </button>
                 </div>
@@ -4017,7 +4115,7 @@ function AppShell() {
           <button type="button" className="nav-row nav-row-session" onClick={() => setMainView("setup")}>
             <span className="nav-icon" aria-hidden="true">●</span>
             <span>
-              {llmSession.data?.mode === "managed_user" ? `Managed: ${llmSession.data.username ?? "user"}` : "Anonymous"}
+              {llmSession.data?.mode === "managed_user" ? `托管账户：${llmSession.data.username ?? "user"}` : "匿名会话"}
             </span>
           </button>
           <button type="button" className="nav-row" onClick={() => closeProject.mutate()}>
@@ -4032,11 +4130,11 @@ function AppShell() {
       <section className="workspace">
         <header className="workspace-topbar">
           <div className="title-stack">
-            <p className="eyebrow">{mainView === "setup" ? t(locale, "provider_keys") : t(locale, "title_thread")}</p>
+            <p className="eyebrow">{mainView === "setup" ? providerSetupLabel(locale) : t(locale, "title_thread")}</p>
             <h2>{mainView === "setup" ? t(locale, "provider_model_settings") : activeThread?.displayName ?? t(locale, "no_threads")}</h2>
             {mainView === "chat" ? (
               <p className="route-subtitle">
-                {activeProfile?.label ?? t(locale, "provider_openai_compatible")} · {activeSettings.model} · {activeSettings.reasoning_effort} · {permissionLabel(locale, activeSettings.permission_mode)}
+                {activeProfile?.label ?? fallbackRouteLabel(locale)} · {activeSettings.model} · {activeSettings.reasoning_effort} · {permissionLabel(locale, activeSettings.permission_mode)}
               </p>
             ) : (
               <p className="route-subtitle">{t(locale, "provider_settings_subtitle")}</p>
@@ -4054,7 +4152,7 @@ function AppShell() {
                   {compactThread.isPending ? t(locale, "loading") : t(locale, "compact_context")}
                 </button>
                 <button type="button" className="ghost-button" onClick={handleForkThread} disabled={!selectedThreadId}>
-                  {t(locale, "fork_thread")}
+                  {locale === "zh-CN" ? "创建分支线程" : t(locale, "fork_thread")}
                 </button>
                 <button type="button" className="ghost-button" onClick={toggleRightSidebar}>
                   {rightSidebarOpen ? t(locale, "hide_inspector") : t(locale, "show_inspector")}
@@ -4073,7 +4171,6 @@ function AppShell() {
             <RouterControlCenter
               locale={locale}
               queryClient={queryClient}
-              officialCodexDefaultModel={activeProfile ? `${activeProfile.provider_id}/${activeProfile.model}` : undefined}
             />
             <section className="settings-strip">
               <div className="settings-strip-section">
@@ -4132,36 +4229,47 @@ function AppShell() {
         ) : null}
 
         <div className="message-stream">
+          {activeThread?.forkedFromId ? (
+            <div className="task-fork-row">
+              <span>分支来源线程</span>
+              <strong>{activeThread.forkedFromId}</strong>
+              <span>{activeThread.parentThreadId ? `父线程 ${activeThread.parentThreadId}` : "独立后续分支"}</span>
+            </div>
+          ) : null}
           {latestTaskHandoff ? (
             <div className="task-handoff-row">
-              <span>Switched provider</span>
-              <strong>{latestTaskHandoff.profile_id ?? "provider"}</strong>
+              <span>已切换执行通道</span>
+              <strong>{latestTaskHandoff.profile_id ?? "默认通道"}</strong>
               <span>{latestTaskHandoff.model ?? ""}</span>
               <span>{latestTaskHandoff.reasoning_effort ?? ""}</span>
               <time>{summarizeRelativeTime(latestTaskHandoff.created_at)}</time>
             </div>
           ) : null}
-          {blocks.map((block) => (
-            <ChatMessageRow
-              key={block.key}
-              block={block}
-              providerName={activeProviderMeta?.display_name || activeProviderDisplay}
-              modelName={activeSettings.model || activeProviderMeta?.default_model || "Assistant"}
-              providerLogoPath={activeProviderMeta?.logo_asset_path}
-              providerAccent={activeProviderMeta?.accent_color}
-              userName={userDisplayName}
-              userAvatarPath={userAvatarPath}
-              reasoningDisplayPolicy={activeModelEntry?.reasoning_display_policy}
-              onFork={handleForkThread}
-              onSave={() => openSaveCheckpoint(block)}
-            />
-          ))}
+          {blocks.map((block) => {
+            const blockProviderId = block.providerId || activeProfile?.provider_id || activeProviderDisplay;
+            const blockProviderMeta = providerMetaById.get(blockProviderId) ?? activeProviderMeta;
+            return (
+              <ChatMessageRow
+                key={block.key}
+                block={block}
+                providerName={blockProviderMeta?.display_name || blockProviderId || activeProviderDisplay}
+                modelName={block.model || activeSettings.model || blockProviderMeta?.default_model || "Assistant"}
+                providerLogoPath={blockProviderMeta?.logo_asset_path}
+                providerAccent={blockProviderMeta?.accent_color}
+                userName={userDisplayName}
+                userAvatarPath={userAvatarPath}
+                reasoningDisplayPolicy={activeModelEntry?.reasoning_display_policy}
+                onFork={handleForkThread}
+                onSave={() => openSaveCheckpoint(block)}
+              />
+            );
+          })}
           {messagePlanAnchor ? (
             <article className="message-card message-plan message-plan-anchor">
               <div className="plan-anchor-head">
                 <span className="plan-anchor-dot" aria-hidden="true" />
                 <div>
-                  <strong>Plan updated</strong>
+                  <strong>计划已更新</strong>
                   <small>
                     {messagePlanAnchor.source}
                     {messagePlanAnchor.last_updated_at ? ` · ${summarizeRelativeTime(messagePlanAnchor.last_updated_at)}` : ""}
@@ -4173,7 +4281,7 @@ function AppShell() {
           ) : null}
           {createThread.error ? <div className="error-text">{describeSendError(t(locale, "new_thread"), createThread.error)}</div> : null}
           {forkThread.error ? <div className="error-text">{describeSendError(t(locale, "fork_thread"), forkThread.error)}</div> : null}
-          {!selectedThread.isLoading && blocks.length === 0 ? <div className="empty-state">{t(locale, "no_messages")}</div> : null}
+          {!selectedThread.isLoading && !taskConversation.isLoading && blocks.length === 0 ? <div className="empty-state">{t(locale, "no_messages")}</div> : null}
         </div>
 
         <footer className="composer">
@@ -4238,10 +4346,16 @@ function AppShell() {
                 onChange={(event) => {
                   const nextProfile = (profiles.data?.profiles ?? []).find((profile) => profile.profile_id === event.target.value);
                   const nextProviderId = nextProfile?.provider_id ?? "";
-                  const nextCatalogModel = (routerConfig.data?.models ?? []).find((model) => model.enabled && model.provider === nextProviderId)?.native_model;
+                  const nextCatalogModel = pickPreferredModelForProvider(nextProviderId);
                   const nextModel = nextCatalogModel ?? nextProfile?.model ?? activeSettings.model;
-                  const nextEfforts = providerEffortOptions(nextProviderId, nextModel);
-                  const nextEffort = nextEfforts.includes(nextProfile?.reasoning_effort ?? "") ? nextProfile?.reasoning_effort : nextEfforts[0];
+                  const nextModelEntry =
+                    (llmCatalog.data?.models ?? []).find((model) => model.provider === nextProviderId && model.native_model === nextModel) ??
+                    (routerConfig.data?.models ?? []).find((model) => model.provider === nextProviderId && model.native_model === nextModel) ??
+                    null;
+                  const nextEfforts = composerReasoningOptions(nextModelEntry, nextProfile, activeSettings.reasoning_effort);
+                  const nextEffort = nextEfforts.includes(nextProfile?.reasoning_effort ?? "")
+                    ? nextProfile?.reasoning_effort
+                    : preferredReasoningEffort(nextModelEntry, nextProfile, activeSettings.reasoning_effort);
                   updateComposerSettings({
                     profile_id: event.target.value,
                     model: nextModel,
@@ -4261,10 +4375,16 @@ function AppShell() {
                 data-composer="model"
                 value={activeSettings.model ?? ""}
                 onChange={(event) => {
-                  const nextEfforts = providerEffortOptions(activeProfile?.provider_id, event.target.value);
+                  const nextModelEntry =
+                    (llmCatalog.data?.models ?? []).find((model) => model.provider === activeProfile?.provider_id && model.native_model === event.target.value) ??
+                    (routerConfig.data?.models ?? []).find((model) => model.provider === activeProfile?.provider_id && model.native_model === event.target.value) ??
+                    null;
+                  const nextEfforts = composerReasoningOptions(nextModelEntry, activeProfile, activeSettings.reasoning_effort);
                   updateComposerSettings({
                     model: event.target.value,
-                    reasoning_effort: nextEfforts.includes(activeSettings.reasoning_effort ?? "") ? activeSettings.reasoning_effort : nextEfforts[0],
+                    reasoning_effort: nextEfforts.includes(activeSettings.reasoning_effort ?? "")
+                      ? activeSettings.reasoning_effort
+                      : preferredReasoningEffort(nextModelEntry, activeProfile, activeSettings.reasoning_effort),
                   });
                 }}
                 aria-label={t(locale, "title_model")}
@@ -4385,7 +4505,7 @@ function AppShell() {
               <section className="pane-section inspector-section inspector-environment-section">
                 <div className="section-header">
                   <h2>环境信息</h2>
-                  <span className={`mini-guard mini-guard-${supervisor.data?.guard.level ?? "ok"}`}>{supervisor.data?.guard.level ?? "ok"}</span>
+                  <span className={`mini-guard mini-guard-${supervisor.data?.guard.level ?? "ok"}`}>{productStatusLabel(supervisor.data?.guard.level ?? "ok")}</span>
                 </div>
                 <EnvironmentStrip
                   supervisor={supervisor.data}
@@ -4484,6 +4604,21 @@ function AppShell() {
             setSaveDescription("");
           }}
           onSave={handleCreateCheckpoint}
+        />
+      ) : null}
+      {textEntryRequest ? (
+        <TextEntryModal
+          request={textEntryRequest}
+          onCancel={() => {
+            const request = textEntryRequest;
+            setTextEntryRequest(null);
+            request.resolve(null);
+          }}
+          onSubmit={(value) => {
+            const request = textEntryRequest;
+            setTextEntryRequest(null);
+            request.resolve(value);
+          }}
         />
       ) : null}
     </div>

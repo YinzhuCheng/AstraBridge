@@ -1,11 +1,20 @@
 ﻿from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Any
 
 from .common import PROJECT_FILE_SUFFIX, WORKSPACE_STATE_DIRNAME
 from .security import SECRET_RE
+
+
+SAFE_CONFIG_SECRET_FALSE_POSITIVES = {
+    "env_key",
+    "router_env_key",
+    "model_auto_compact_token_limit",
+    "tool_output_token_limit",
+}
 
 
 class IsolationAuditService:
@@ -24,6 +33,8 @@ class IsolationAuditService:
         runtime_config = dict(runtime_environment.get("runtime_config") or {})
         codex_home = _optional_path(runtime_config.get("codex_home"))
         official_config = _optional_path(official_codex_status.get("config_path"))
+        expected_appdata = _optional_path(os.environ.get("ASTRABRIDGE_APPDATA"))
+        expected_codex_home = _optional_path(os.environ.get("ASTRABRIDGE_CODEX_HOME"))
         checks = []
         checks.append(_check("project_file_suffix", project_file is None or project_file.suffix == PROJECT_FILE_SUFFIX, str(project_file) if project_file else None))
         if workspace:
@@ -39,6 +50,17 @@ class IsolationAuditService:
                 str(codex_home) if codex_home else None,
             )
         )
+        if expected_codex_home is not None:
+            checks.append(
+                _check(
+                    "isolated_codex_home_matches_expected_override",
+                    codex_home is not None and codex_home.resolve() == expected_codex_home.resolve(),
+                    {
+                        "expected": str(expected_codex_home),
+                        "actual": str(codex_home) if codex_home else None,
+                    },
+                )
+            )
         checks.append(
             _check(
                 "isolated_codex_config_has_no_secret",
@@ -57,6 +79,8 @@ class IsolationAuditService:
                 "astrabridge_state": str(workspace / WORKSPACE_STATE_DIRNAME) if workspace else None,
                 "isolated_codex_home": str(codex_home) if codex_home else None,
                 "official_codex_config": str(official_config) if official_config else None,
+                "expected_appdata": str(expected_appdata) if expected_appdata else None,
+                "expected_codex_home": str(expected_codex_home) if expected_codex_home else None,
             },
             "official_codex": {
                 "exists": bool(official_codex_status.get("exists")),
@@ -94,9 +118,20 @@ def _path_contains_secret(path: Path) -> bool:
     if not path.exists() or not path.is_file():
         return False
     try:
-        return bool(SECRET_RE.search(path.read_text(encoding="utf-8")))
+        text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if "=" in stripped:
+            key = stripped.split("=", 1)[0].strip().strip("\"'").lower()
+            if key in SAFE_CONFIG_SECRET_FALSE_POSITIVES:
+                continue
+        if SECRET_RE.search(stripped):
+            return True
+    return False
 
 
 def _scan_astrabridge_state(project_file: Path | None, workspace: Path | None) -> list[str]:

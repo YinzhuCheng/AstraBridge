@@ -4,11 +4,19 @@ from pathlib import Path
 from typing import Any
 
 from .common import WORKSPACE_STATE_DIRNAME, new_id, now_iso, read_json, write_json
+from .providers.runtime_transition import summarize_transition
 from .security import SECRET_RE, SecurityError, redact_sensitive
 
 
-TASK_STATE_SCHEMA_VERSION = "lcr-task-state-v1"
+TASK_STATE_SCHEMA_VERSION = "astrabridge-task-state-v1"
 DEFAULT_HANDOFF_POLICY = "multi_provider_handoff"
+AUTO_INJECTED_CONTEXT_NAME_MARKERS = (
+    "--- astrabridge project context pack",
+    "astrabridge project context pack",
+    "--- astrabridge asset context pack",
+    "astrabridge asset context pack",
+    "freshness rule:",
+)
 
 
 class TaskService:
@@ -112,6 +120,40 @@ class TaskService:
                 self._sync_project_current_task(normalized_task)
             return normalized_task
         return None
+
+    def reconcile_after_project_reload(self, *, preferred_thread_id: str | None = None) -> dict[str, Any] | None:
+        """Re-anchor task pointers after project reopen or checkpoint restore."""
+        state = self._state()
+        tasks = [dict(item) for item in list(state.get("tasks") or []) if isinstance(item, dict)]
+        if not tasks:
+            return None
+        normalized_tasks: list[dict[str, Any]] = []
+        changed = False
+        for item in tasks:
+            normalized, item_changed = self._normalize_task(item)
+            normalized_tasks.append(normalized)
+            changed = changed or item_changed or normalized != item
+        project = self._project()
+        selected = self._select_reloaded_task(
+            normalized_tasks,
+            current_task_id=str(project.get("current_task_id") or state.get("current_task_id") or ""),
+            preferred_thread_id=str(preferred_thread_id or project.get("current_thread_id") or "").strip(),
+        )
+        if not selected:
+            return None
+        selected_id = str(selected.get("task_id") or "").strip()
+        if str(state.get("current_task_id") or "") != selected_id:
+            state["current_task_id"] = selected_id
+            changed = True
+        if normalized_tasks != list(state.get("tasks") or []):
+            state["tasks"] = normalized_tasks
+            changed = True
+        if changed:
+            state["updated_at"] = now_iso()
+            self._write_state(state)
+        if self._project_sync_needed(selected):
+            self._sync_project_current_task(selected)
+        return selected
 
     def bind_thread(
         self,
@@ -286,6 +328,13 @@ class TaskService:
         reused_existing: bool,
     ) -> dict[str, Any]:
         task = self.bind_thread(thread_id=to_thread_id, settings=settings, role="provider", make_active=True)
+        source_settings = self._provider_thread_settings(task, from_thread_id)
+        transition = summarize_transition(
+            from_provider=str((source_settings or {}).get("provider_id") or "") or None,
+            to_provider=str(settings.get("provider_id") or "openai"),
+            to_model=str(settings.get("model") or "") or None,
+            projection_mode="reused_provider_thread" if reused_existing else "task_context_fresh_thread",
+        )
         event = {
             "event_id": new_id("handoff"),
             "type": "provider_handoff",
@@ -298,6 +347,7 @@ class TaskService:
             "reasoning_effort": settings.get("reasoning_effort"),
             "permission_mode": settings.get("permission_mode"),
             "reused_existing": reused_existing,
+            "transition_summary": transition.to_dict(),
             "created_at": now_iso(),
         }
         handoff_events = list(task.get("handoff_events") or [])
@@ -311,6 +361,15 @@ class TaskService:
         self._write_state(state)
         self._sync_project_current_task(task)
         return event
+
+    def _provider_thread_settings(self, task: dict[str, Any] | None, thread_id: str | None) -> dict[str, Any] | None:
+        clean_thread_id = str(thread_id or "").strip()
+        if not clean_thread_id or not isinstance(task, dict):
+            return None
+        for item in list(task.get("provider_threads") or []):
+            if str(item.get("thread_id") or "") == clean_thread_id:
+                return dict(item)
+        return None
 
     def mark_provider_thread_missing(self, thread_id: str, *, reason: str | None = None) -> None:
         clean_thread_id = str(thread_id or "").strip()
@@ -532,11 +591,81 @@ class TaskService:
         if pruned_threads != original_threads:
             normalized["provider_threads"] = pruned_threads
             changed = True
+        original_forks = list(normalized.get("fork_threads") or [])
+        pruned_forks = self._prune_fork_threads(original_forks)
+        if pruned_forks != original_forks:
+            normalized["fork_threads"] = pruned_forks
+            changed = True
+        original_checkpoints = list(normalized.get("checkpoint_refs") or [])
+        pruned_checkpoints = self._dedupe_records(original_checkpoints, key_fields=("save_id",))
+        if pruned_checkpoints != original_checkpoints:
+            normalized["checkpoint_refs"] = pruned_checkpoints
+            changed = True
+        original_asset_refs = list(normalized.get("asset_context_refs") or [])
+        pruned_asset_refs = self._dedupe_records(original_asset_refs, key_fields=("pack_type", "path"))
+        if pruned_asset_refs != original_asset_refs:
+            normalized["asset_context_refs"] = pruned_asset_refs
+            changed = True
+        original_context_refs = list(normalized.get("context_pack_refs") or [])
+        pruned_context_refs = self._dedupe_records(original_context_refs, key_fields=("pack_type", "path"))
+        if pruned_context_refs != original_context_refs:
+            normalized["context_pack_refs"] = pruned_context_refs
+            changed = True
         preferred_active_thread_id = self._preferred_active_thread_id(normalized, pruned_threads)
         if str(normalized.get("active_provider_thread_id") or "") != preferred_active_thread_id:
             normalized["active_provider_thread_id"] = preferred_active_thread_id or None
             changed = True
         return normalized, changed
+
+    def _prune_fork_threads(self, fork_threads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen_ids: set[str] = set()
+        pruned: list[dict[str, Any]] = []
+        for item in fork_threads:
+            if not isinstance(item, dict):
+                continue
+            entry = dict(item)
+            thread_id = str(entry.get("thread_id") or "").strip()
+            if not thread_id or thread_id in seen_ids:
+                continue
+            seen_ids.add(thread_id)
+            pruned.append(entry)
+        return pruned[:40]
+
+    def _dedupe_records(self, records: list[Any], *, key_fields: tuple[str, ...], limit: int = 40) -> list[dict[str, Any]]:
+        seen: set[tuple[str, ...]] = set()
+        deduped: list[dict[str, Any]] = []
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            key = tuple(str(item.get(field) or "").strip() for field in key_fields)
+            if not any(key):
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(dict(item))
+        return deduped[:limit]
+
+    def _select_reloaded_task(
+        self,
+        tasks: list[dict[str, Any]],
+        *,
+        current_task_id: str,
+        preferred_thread_id: str,
+    ) -> dict[str, Any] | None:
+        existing = self._find_task(tasks, current_task_id)
+        if existing:
+            return existing
+        if preferred_thread_id:
+            for task in tasks:
+                for item in list(task.get("provider_threads") or []):
+                    if str((item or {}).get("thread_id") or "").strip() == preferred_thread_id:
+                        return dict(task)
+        if tasks:
+            tasks = [dict(item) for item in tasks]
+            tasks.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+            return tasks[0]
+        return None
 
     def _preferred_active_thread_id(self, task: dict[str, Any], provider_threads: list[dict[str, Any]]) -> str:
         active_thread_id = str(task.get("active_provider_thread_id") or "").strip()
@@ -706,7 +835,18 @@ def _display_thread_name(name: Any, provider_id: Any = None) -> str | None:
     text = str(name or "").strip()
     if not text:
         return None
-    first_line = text.splitlines()[0].strip()
+    flattened = text.replace("\r", "\n")
+    candidate_lines = [line.strip() for line in flattened.splitlines() if line.strip()]
+    first_line = candidate_lines[0] if candidate_lines else ""
+    lowered_first_line = first_line.lower()
+    for marker in AUTO_INJECTED_CONTEXT_NAME_MARKERS:
+        if marker in lowered_first_line:
+            prefix = first_line[:lowered_first_line.index(marker)].strip(" -:\t")
+            first_line = prefix or ""
+            break
+    if not first_line:
+        provider = str(provider_id or "").strip()
+        return f"{provider.title() or 'Provider'} thread"
     if first_line.lower().startswith(("astrabridge minimal visual mode:", "lcr minimal visual mode:")):
         provider = str(provider_id or "").strip()
         return f"{provider.title() or 'Provider'} visual review"

@@ -15,13 +15,14 @@ import type {
   LlmManagerKeysResponse,
   LlmManagerSession,
   MetadataRefreshResponse,
+  MetadataRefreshJobStartResponse,
+  MetadataRefreshJobStatusResponse,
   MetadataReportResponse,
   MetadataSourcesResponse,
   McpConfigResponse,
   McpServerConfig,
   McpStatusResponse,
   PermissionMode,
-  OfficialCodexStatus,
   Profile,
   ProjectFile,
   ProjectFilePreview,
@@ -45,6 +46,7 @@ import type {
   RuntimeSupervisorState,
   ProjectTerminalHistory,
   ShellThread,
+  TaskConversationResponse,
   TestMatrixResponse,
   ThreadListResponse,
   ThreadReadResponse,
@@ -106,6 +108,7 @@ async function request<T>(path: string, init?: RequestWithTimeout): Promise<T> {
   const base = await sidecarBaseUrl();
   const isMutation = (init?.method ?? "GET").toUpperCase() !== "GET";
   const timeoutMs = init?.timeoutMs ?? (isMutation ? 65000 : 15000);
+  const cacheMode = init?.cache ?? (isMutation ? "no-store" : "no-store");
   const headers: Record<string, string> = { "Content-Type": "application/json", ...((init?.headers ?? {}) as Record<string, string>) };
   if (isMutation) {
     if (!adminTokenPromise) {
@@ -121,6 +124,7 @@ async function request<T>(path: string, init?: RequestWithTimeout): Promise<T> {
   try {
     response = await fetch(`${base}${path}`, {
       headers,
+      cache: cacheMode,
       ...init,
       signal: controller.signal,
     });
@@ -187,6 +191,12 @@ export const api = {
   projectFileRead: (path: string) => request<ProjectFilePreview>(`/api/project/files/read?path=${encodeURIComponent(path)}`),
   projectTerminalHistory: () => request<ProjectTerminalHistory>("/api/project/terminal/history?limit=30"),
   projectTasks: () => request<ProjectTasksResponse>("/api/project/tasks"),
+  taskConversation: (taskId?: string | null) => {
+    const params = new URLSearchParams();
+    if (taskId) params.set("task_id", taskId);
+    const suffix = params.toString();
+    return request<TaskConversationResponse>(`/api/project/task-conversation${suffix ? `?${suffix}` : ""}`);
+  },
   createTask: (title?: string) => jsonRequest<{ task: ProjectTasksResponse["tasks"][number]; project: ProjectFile }>("/api/project/tasks/create", { title }),
   switchTask: (taskId: string) => jsonRequest<{ task: ProjectTasksResponse["tasks"][number]; project: ProjectFile }>("/api/project/tasks/switch", { task_id: taskId }),
   createProjectSave: (payload: { thread_id?: string | null; description?: string; provider?: string; model?: string }) =>
@@ -244,6 +254,9 @@ export const api = {
   metadataSources: () => request<MetadataSourcesResponse>("/api/router/metadata/sources"),
   saveMetadataSources: (payload: MetadataSourcesResponse) => jsonRequest<MetadataSourcesResponse>("/api/router/metadata/sources/save", payload),
   refreshMetadata: (apply: boolean) => jsonRequest<MetadataRefreshResponse>("/api/router/metadata/refresh", { apply }),
+  startMetadataRefresh: (apply: boolean) => jsonRequest<MetadataRefreshJobStartResponse>("/api/router/metadata/refresh/start", { apply }),
+  metadataRefreshStatus: (jobId?: string | null) => request<MetadataRefreshJobStatusResponse>(`/api/router/metadata/refresh/status${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`),
+  metadataRefreshResult: (jobId?: string | null) => request<MetadataRefreshResponse>(`/api/router/metadata/refresh/result${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`),
   importMetadataSeed: (apply = true) => jsonRequest<{ applied: boolean; providers: RouterProvider[]; models: RouterModelEntry[]; model_count: number }>("/api/router/metadata/import-seed", { apply }),
   effectiveCatalog: (modelId?: string) => {
     const suffix = modelId ? `?model_id=${encodeURIComponent(modelId)}` : "";
@@ -301,10 +314,6 @@ export const api = {
   runtimeSupervisorDecision: (payload: { action: "continue" | "compact" | "fork" | "interrupt"; thread_id: string; turn_id?: string; profile_id?: string; model?: string; effort?: string; permission_mode?: PermissionMode; name?: string }) =>
     jsonRequest<Record<string, unknown>>("/api/runtime/supervisor/decision", payload),
   routerStatus: () => request<RuntimeEnvironment["router"]>("/api/router/status"),
-  officialCodexStatus: () => request<OfficialCodexStatus>("/api/official-codex/status"),
-  applyOfficialCodexConfig: (payload: { router_base_url: string; default_model?: string }) =>
-    jsonRequest<OfficialCodexStatus>("/api/official-codex/apply", payload),
-  restoreOfficialCodexConfig: () => jsonRequest<OfficialCodexStatus>("/api/official-codex/restore", {}),
   restartRuntime: () => jsonRequest<{ runtime: RuntimeEnvironment }>("/api/runtime/restart", {}),
   runtimeEvents: (after: number) => request<{ cursor: number; events: RuntimeEvent[] }>(`/api/runtime/events?after=${after}`),
   runtimeEventsStreamUrl: async (after: number) => {

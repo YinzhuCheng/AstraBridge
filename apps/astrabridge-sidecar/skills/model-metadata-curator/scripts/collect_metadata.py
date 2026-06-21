@@ -18,7 +18,7 @@ def main() -> None:
         for url in provider.get("urls", []):
             fetched.append(fetch_status(provider.get("provider_id"), url))
     proposal = {
-        "schema_version": "lcr-metadata-proposal-v1",
+        "schema_version": "astrabridge-metadata-proposal-v1",
         "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
         "sources": sources.get("providers", []),
         "fetch_status": fetched,

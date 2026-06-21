@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import app_data_dir, now_iso, read_json, write_json
+from .providers import default_profiles, resolve_provider_id
 
 
 PROFILE_TYPES = {"openai_api_key", "custom_provider"}
@@ -113,16 +114,21 @@ class ProfileService:
         try:
             return self.get_profile(chosen)
         except ValueError as exc:
+            canonical_provider = None
+            try:
+                canonical_provider = resolve_provider_id(chosen)
+            except ValueError:
+                canonical_provider = chosen
             profiles = self.list_profiles()["profiles"]
             provider_matches = [
                 item
                 for item in profiles
-                if str(item.get("provider_id") or "").strip() == chosen
+                if str(item.get("provider_id") or "").strip() == canonical_provider
             ]
             if not provider_matches:
                 raise
 
-            default_profile_id = f"{chosen}-default"
+            default_profile_id = "openai-compatible" if canonical_provider == "openai" else f"{canonical_provider}-default"
             for item in provider_matches:
                 if item.get("profile_id") == default_profile_id:
                     return item
@@ -137,7 +143,7 @@ class ProfileService:
 
             suggestions = ", ".join(str(item.get("profile_id") or "") for item in sorted_matches)
             raise ValueError(
-                f"Unknown profile: {chosen}. Provider '{chosen}' has multiple profiles; use one of: {suggestions}"
+                f"Unknown profile: {chosen}. Provider '{canonical_provider}' has multiple profiles; use one of: {suggestions}"
             ) from exc
 
     def _assert_no_secret(self, value: Any) -> None:
@@ -155,41 +161,12 @@ class ProfileService:
 
     def _default_profiles(self) -> list[dict[str, Any]]:
         created_at = now_iso()
-        return [
-            {
-                "profile_id": "openai-compatible",
-                "label": "OpenAI Compatible",
-                "type": "custom_provider",
-                "provider_id": "openai",
-                "base_url": "https://api.openai.com/v1",
-                "model": "gpt-5.3-codex",
-                "reasoning_effort": "high",
-                "wire_api": "responses",
-                "env_key": "OPENAI_API_KEY",
-                "auth_mode": "env_ref",
-                "secret_ref": "env:OPENAI_API_KEY",
-                "proxy_mode": "direct",
-                "proxy_url": "",
-                "created_at": created_at,
-                "updated_at": created_at,
-            },
-            {
-                "profile_id": "yunwu-gpt-55-xhigh",
-                "label": "Yunwu GPT-5.5 xhigh",
-                "type": "custom_provider",
-                "provider_id": "yunwu",
-                "base_url": "https://yunwu.ai/v1",
-                "model": "gpt-5.5",
-                "reasoning_effort": "xhigh",
-                "wire_api": "responses",
-                "env_key": "YUNWU_API_KEY",
-                "auth_mode": "env_ref",
-                "secret_ref": "env:YUNWU_API_KEY",
-                "proxy_mode": "direct",
-                "proxy_url": "",
-                "created_at": created_at,
-                "updated_at": created_at,
-            },
-        ]
+        profiles: list[dict[str, Any]] = []
+        for profile in default_profiles():
+            item = dict(profile)
+            item.setdefault("created_at", created_at)
+            item.setdefault("updated_at", created_at)
+            profiles.append(item)
+        return profiles
 
 

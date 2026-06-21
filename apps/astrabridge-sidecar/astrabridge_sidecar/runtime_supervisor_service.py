@@ -33,7 +33,9 @@ class RuntimeSupervisorService:
         plan = self._latest_plan(events, selected_thread_id)
         token = self._latest_token_usage(events, selected_thread_id)
         thread_status = self._latest_thread_status(events, selected_thread_id)
-        runtime_error = self._latest_runtime_error(events, selected_thread_id, thread_status)
+        thread_snapshot = self._thread_snapshot(selected_thread_id, profile)
+        thread_status = self._normalize_thread_status_from_snapshot(thread_status, thread_snapshot)
+        runtime_error = self._latest_runtime_error(events, selected_thread_id, thread_status, thread_snapshot=thread_snapshot)
         compaction = self._latest_compaction(events, selected_thread_id)
         pending_modals = [
             item
@@ -322,6 +324,8 @@ class RuntimeSupervisorService:
         events: list[dict[str, Any]],
         thread_id: str,
         thread_status: dict[str, Any],
+        *,
+        thread_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Return the latest sanitized turn/runtime error for inspector notices.
 
@@ -330,6 +334,8 @@ class RuntimeSupervisorService:
         can look merely idle after a provider timeout.
         """
         status_type = str((thread_status or {}).get("type") or "").lower()
+        if self._thread_snapshot_has_stale_completed_failure(thread_snapshot):
+            return None
         for event in reversed(events):
             if event.get("type") != "notification":
                 continue
@@ -369,6 +375,55 @@ class RuntimeSupervisorService:
             }
         return None
 
+    def _thread_snapshot(self, thread_id: str, profile: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not thread_id or not profile:
+            return None
+        try:
+            result = self._runtime.read_thread(profile, thread_id)
+        except Exception:
+            return None
+        thread = result.get("thread") if isinstance(result, dict) else None
+        return dict(thread) if isinstance(thread, dict) else None
+
+    def _normalize_thread_status_from_snapshot(
+        self,
+        thread_status: dict[str, Any],
+        thread_snapshot: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(thread_status, dict):
+            return thread_status
+        snapshot_status = (thread_snapshot or {}).get("status")
+        if isinstance(snapshot_status, dict) and snapshot_status.get("stale_error_normalized"):
+            return dict(snapshot_status)
+        if not self._thread_snapshot_has_stale_completed_failure(thread_snapshot):
+            return thread_status
+        normalized = dict(thread_status)
+        normalized["type"] = "idle"
+        normalized["stale_error_type"] = str(
+            ((thread_snapshot or {}).get("status") or {}).get("type") or thread_status.get("type") or "systemError"
+        )
+        normalized["stale_error_normalized"] = True
+        return normalized
+
+    def _thread_snapshot_has_stale_completed_failure(self, thread_snapshot: dict[str, Any] | None) -> bool:
+        if not isinstance(thread_snapshot, dict):
+            return False
+        status = thread_snapshot.get("status")
+        if not isinstance(status, dict):
+            return False
+        if status.get("stale_error_normalized"):
+            return True
+        if str(status.get("type") or "").lower() not in {"systemerror", "notloaded"}:
+            return False
+        turns = [item for item in list(thread_snapshot.get("turns") or []) if isinstance(item, dict)]
+        if not turns:
+            return False
+        latest_turn = turns[-1]
+        latest_error = latest_turn.get("error")
+        return str(latest_turn.get("status") or "").lower() == "completed" and (
+            latest_error is None or latest_error == "" or latest_error == {}
+        )
+
     def _normalize_runtime_error(self, raw_message: str) -> dict[str, Any]:
         parsed: dict[str, Any] = {}
         message = str(raw_message or "")
@@ -383,14 +438,49 @@ class RuntimeSupervisorService:
         category = "runtime_error"
         summary = message
         hint = str(parsed.get("actionable_hint") or "")
+        retryable = False
+        compact_recommended = False
+        fork_recommended = False
         if "winerror 10060" in lowered or "timed out" in lowered or "timeout" in lowered:
             category = "provider_timeout"
             summary = "Provider network timeout. The upstream model endpoint did not respond before the socket timeout."
             hint = hint or "Retry the turn, switch provider, or check network/provider status before continuing."
+            retryable = True
+            fork_recommended = True
+        elif any(token in lowered for token in ["context length exceeded", "maximum context length", "context window", "too many tokens"]):
+            category = "context_window_limit"
+            summary = "The request exceeded the model context window."
+            hint = hint or "Compact the thread, fork a narrower follow-up, or retry with a smaller request."
+            compact_recommended = True
+            fork_recommended = True
+        elif any(token in lowered for token in ["401", "unauthorized", "invalid api key", "incorrect api key", "authentication", "auth failed"]):
+            category = "auth_failure"
+            summary = "Provider authentication failed."
+            hint = hint or "Check the selected provider key, vault entry, or environment mapping before retrying."
+        elif any(token in lowered for token in ["unsupported", "not supported", "does not support"]):
+            category = "unsupported_feature"
+            summary = "The selected provider or model does not support this feature."
+            hint = hint or "Switch to a supported model, disable the unsupported feature, or try another provider lane."
+        elif any(token in lowered for token in ["tool call", "tool result", "mcp", "function call"]) and any(token in lowered for token in ["missing", "invalid", "mismatch", "schema"]):
+            category = "tool_mismatch"
+            summary = "Tool-call state did not line up with the provider response."
+            hint = hint or "Retry the turn, inspect MCP/tool wiring, or fork a fresh thread if the history is stale."
+            retryable = True
+            fork_recommended = True
+        elif any(token in lowered for token in ["thread not found", "provider thread missing", "systemerror", "state corruption", "stale state"]):
+            category = "runtime_state_corruption"
+            summary = "Runtime state became inconsistent with the current thread or provider session."
+            hint = hint or "Retry with provider handoff, reopen the thread, or fork a fresh continuation from the latest saved state."
+            fork_recommended = True
         elif "provider_error" in lowered or parsed.get("type") == "provider_error":
             category = "provider_error"
             summary = "Provider returned an error during the turn."
             hint = hint or "Check provider auth, request shape, router state, or upstream connectivity."
+        elif any(token in lowered for token in ["connection reset", "connection aborted", "name resolution", "dns", "refused", "temporarily unavailable"]):
+            category = "transport_failure"
+            summary = "Network transport failed before the provider returned a usable response."
+            hint = hint or "Retry the turn or check local network, DNS, proxy, and provider endpoint reachability."
+            retryable = True
         return {
             "level": "danger",
             "category": category,
@@ -399,6 +489,9 @@ class RuntimeSupervisorService:
             "summary": summary[:240],
             "message": message[:500],
             "actionable_hint": hint[:240],
+            "retryable": retryable,
+            "compact_recommended": compact_recommended,
+            "fork_recommended": fork_recommended,
         }
 
     def _guard(

@@ -16,18 +16,21 @@ from .common import (
     slugify,
     write_json,
 )
+from .profile_service import ProfileService
 from .wsl_dependency_service import DEFAULT_WSL_DISTRO, ASTRABRIDGE_WSL_CODEX_HOME, ASTRABRIDGE_WSL_ROOT
 
 
 DEFAULT_RUNTIME_HOST_ENV = "ASTRABRIDGE_DEFAULT_EXECUTION_HOST"
 DEFAULT_RUNTIME_WSL_DISTRO_ENV = "ASTRABRIDGE_DEFAULT_WSL_DISTRO"
 _DEFAULT_RUNTIME_PREFS_CACHE: dict[str, str] | None = None
+_VALID_REASONING_EFFORTS = {"off", "auto", "minimal", "low", "medium", "high", "xhigh"}
 
 
 class ProjectService:
     def __init__(self, store_path: Path | None = None, session_path: Path | None = None) -> None:
         self.store_path = store_path or (app_data_dir() / "projects.json")
         self.session_path = session_path or self.store_path.with_name("current_project.json")
+        self._profiles = ProfileService()
         self.current_project: dict[str, Any] | None = None
         self._restore_current_project()
 
@@ -58,9 +61,9 @@ class ProjectService:
             "project_file": str(project_path),
             "workspace_root": str(resolved_workspace),
             "entry_mode": entry_mode,
-            "default_profile_id": "yunwu-gpt-55-xhigh",
+            "default_profile_id": "openai-compatible",
             "default_model": "gpt-5.5",
-            "default_effort": "xhigh",
+            "default_effort": "high",
             "current_thread_id": None,
             "recent_threads": [],
             "current_task_id": None,
@@ -69,6 +72,7 @@ class ProjectService:
             "created_at": now_iso(),
             "updated_at": now_iso(),
         }
+        payload = self._normalize_project_runtime_defaults(payload)
         self._ensure_workspace_state(resolved_workspace)
         write_json(project_path, payload)
         self._remember_project(payload)
@@ -92,10 +96,21 @@ class ProjectService:
         payload.setdefault("recent_threads", [])
         payload.setdefault("current_task_id", None)
         payload.setdefault("recent_tasks", [])
+        before_runtime = {
+            "default_profile_id": payload.get("default_profile_id"),
+            "default_model": payload.get("default_model"),
+            "default_effort": payload.get("default_effort"),
+        }
+        payload = self._normalize_project_runtime_defaults(payload)
         before_preferences = dict(payload.get("ui_preferences") or {})
         payload["ui_preferences"] = self._normalize_ui_preferences(before_preferences)
         self._ensure_workspace_state(workspace_root)
-        if payload["ui_preferences"] != before_preferences or missing_task_fields:
+        runtime_changed = before_runtime != {
+            "default_profile_id": payload.get("default_profile_id"),
+            "default_model": payload.get("default_model"),
+            "default_effort": payload.get("default_effort"),
+        }
+        if payload["ui_preferences"] != before_preferences or missing_task_fields or runtime_changed:
             payload["updated_at"] = now_iso()
             write_json(project_path, payload)
         self._remember_project(payload)
@@ -127,10 +142,25 @@ class ProjectService:
         payload = read_json(path, {})
         if not isinstance(payload, dict) or not payload:
             return self.current_project
+        before_runtime = {
+            "default_profile_id": payload.get("default_profile_id"),
+            "default_model": payload.get("default_model"),
+            "default_effort": payload.get("default_effort"),
+        }
+        before_preferences = dict(payload.get("ui_preferences") or {})
         payload.setdefault("recent_threads", [])
         payload.setdefault("current_task_id", None)
         payload.setdefault("recent_tasks", [])
-        payload["ui_preferences"] = self._normalize_ui_preferences(dict(payload.get("ui_preferences") or {}))
+        payload = self._normalize_project_runtime_defaults(payload)
+        payload["ui_preferences"] = self._normalize_ui_preferences(before_preferences)
+        runtime_changed = before_runtime != {
+            "default_profile_id": payload.get("default_profile_id"),
+            "default_model": payload.get("default_model"),
+            "default_effort": payload.get("default_effort"),
+        }
+        if runtime_changed or payload["ui_preferences"] != before_preferences:
+            payload["updated_at"] = now_iso()
+            write_json(path, payload)
         self.current_project = payload
         return self.current_project
 
@@ -196,9 +226,12 @@ class ProjectService:
             raise ValueError("No project is open.")
         for key in {"schema_version", "project_file", "workspace_root"}:
             patch.pop(key, None)
+        runtime_keys = {"default_profile_id", "default_model", "default_effort"}
         if "ui_preferences" in patch:
             patch["ui_preferences"] = self._normalize_ui_preferences(dict(patch.get("ui_preferences") or {}))
         self.current_project.update(patch)
+        if runtime_keys.intersection(patch.keys()):
+            self.current_project = self._normalize_project_runtime_defaults(self.current_project)
         self.current_project["updated_at"] = now_iso()
         path = Path(str(self.current_project["project_file"]))
         write_json(path, self.current_project)
@@ -222,10 +255,12 @@ class ProjectService:
             if not thread_id:
                 continue
             current = dict(by_id.get(thread_id) or {})
+            status = thread.get("status")
             by_id[thread_id] = {
                 **current,
                 "thread_id": thread_id,
                 "name": thread.get("name") or thread.get("displayName") or current.get("name"),
+                "status": dict(status) if isinstance(status, dict) else current.get("status"),
                 "updated_at": now_iso(),
             }
         write_json(
@@ -360,6 +395,63 @@ class ProjectService:
         else:
             merged["wsl_distro"] = str(merged.get("wsl_distro") or "")
         return merged
+
+    def _normalize_project_runtime_defaults(self, payload: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(payload)
+        requested_profile = str(merged.get("default_profile_id") or "").strip()
+        profile = self._resolve_default_profile(requested_profile)
+        provider_id = str(profile.get("provider_id") or "openai").strip() or "openai"
+        default_profile_id = str(profile.get("profile_id") or requested_profile or "openai-compatible").strip()
+        requested_model = self._normalize_native_model(merged.get("default_model"), provider_id)
+        profile_model = self._normalize_native_model(profile.get("model"), provider_id)
+        if not requested_model or self._model_provider_mismatch(requested_model, provider_id):
+            requested_model = profile_model
+        requested_effort = self._normalize_reasoning_effort(merged.get("default_effort"))
+        profile_effort = self._normalize_reasoning_effort(profile.get("reasoning_effort"))
+        merged["default_profile_id"] = default_profile_id
+        merged["default_model"] = requested_model or profile_model or "gpt-5.5"
+        merged["default_effort"] = requested_effort or profile_effort or "high"
+        return merged
+
+    def _resolve_default_profile(self, requested_profile: str) -> dict[str, Any]:
+        fallback_profile_id = "openai-compatible"
+        try:
+            return self._profiles.resolve_runtime_profile(requested_profile or fallback_profile_id)
+        except Exception:
+            try:
+                return self._profiles.resolve_runtime_profile(fallback_profile_id)
+            except Exception:
+                return {
+                    "profile_id": fallback_profile_id,
+                    "provider_id": "openai",
+                    "model": "gpt-5.5",
+                    "reasoning_effort": "high",
+                }
+
+    def _normalize_native_model(self, value: Any, provider_id: str) -> str:
+        model = str(value or "").strip()
+        if not model:
+            return ""
+        if "/" not in model:
+            return model
+        model_provider, native_model = model.split("/", 1)
+        if model_provider.strip().lower() == provider_id.strip().lower() and native_model.strip():
+            return native_model.strip()
+        return model
+
+    def _model_provider_mismatch(self, model: str, provider_id: str) -> bool:
+        if "/" not in model:
+            return False
+        model_provider, _native_model = model.split("/", 1)
+        return model_provider.strip().lower() != provider_id.strip().lower()
+
+    def _normalize_reasoning_effort(self, value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized == "max":
+            return "xhigh"
+        if normalized in _VALID_REASONING_EFFORTS:
+            return normalized
+        return ""
 
     def _default_runtime_preferences(self) -> dict[str, str]:
         forced_host = os.environ.get(DEFAULT_RUNTIME_HOST_ENV, "").strip().lower()

@@ -13,16 +13,35 @@
       "notes": "Machine fetch currently does not expose readable Apifox content; use screenshot seed and OpenAI-compatible capability inference."
     },
     {
+      "provider_id": "openai",
+      "display_name": "OpenAI",
+      "source_status": "official_docs",
+      "urls": [
+        "https://developers.openai.com/api/docs/models",
+        "https://platform.openai.com/docs/guides/reasoning"
+      ],
+      "notes": "OpenAI is a normal API-key provider only. Do not add official account login."
+    },
+    {
       "provider_id": "deepseek",
       "display_name": "DeepSeek",
       "source_status": "official_docs",
-      "urls": ["https://api-docs.deepseek.com/zh-cn/"]
+      "urls": [
+        "https://api-docs.deepseek.com/api/list-models",
+        "https://api-docs.deepseek.com/quick_start/pricing",
+        "https://api-docs.deepseek.com/updates"
+      ]
     },
     {
       "provider_id": "kimi",
       "display_name": "Kimi",
       "source_status": "official_docs",
-      "urls": ["https://platform.kimi.com/docs/overview", "https://platform.kimi.com/docs/models"]
+      "urls": [
+        "https://platform.moonshot.ai/docs/overview",
+        "https://platform.moonshot.ai/docs/guide/start-using-kimi-api",
+        "https://platform.kimi.com/docs/api/overview",
+        "https://platform.kimi.com/docs/pricing/chat"
+      ]
     },
     {
       "provider_id": "qwen",
@@ -36,6 +55,16 @@
         "https://qwen.ai/blog?id=qwen3.7",
         "https://qwen.ai/apiplatform"
       ]
+    },
+    {
+      "provider_id": "glm",
+      "display_name": "GLM / Z.AI",
+      "source_status": "official_docs",
+      "urls": [
+        "https://open.bigmodel.cn/dev/api",
+        "https://open.bigmodel.cn/pricing"
+      ],
+      "notes": "GLM-5.2 is the official flagship baseline as of 2026-06-21."
     }
   ]
 }

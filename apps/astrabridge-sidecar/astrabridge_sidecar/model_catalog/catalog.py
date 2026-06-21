@@ -1,21 +1,30 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any
+
+from ..providers import get_provider_profile, resolve_provider_id
 
 
 CODEX_CLI_BASELINE = "0.137.0"
 DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT = 80
+ASTRABRIDGE_MODEL_CATALOG_FILENAME = "astrabridge-models.json"
+ASTRABRIDGE_MODELS_CACHE_FILENAME = "astrabridge-models-cache.json"
 
 
 def known_context_window(provider_id: str, model: str) -> int | None:
+    profile = _profile_for(provider_id, model)
+    if profile and profile.context_window():
+        return int(profile.context_window() or 0) or None
     provider = provider_id.lower()
     native_model = model.lower()
     if "deepseek" in provider or "deepseek" in native_model:
         return 1_000_000 if "v4" in native_model else 128_000
     if "kimi" in provider or "kimi" in native_model or "moonshot" in provider:
         return 256_000
+    if "glm" in provider or "zai" in provider or "zhipu" in provider or "glm" in native_model:
+        return 1_000_000 if "5.2" in native_model else 128_000
     if "qwen" in provider or "dashscope" in provider or "qwen" in native_model:
-        return 1_000_000 if "coder" in native_model or "long" in native_model or "3.5" in native_model else 262_144
+        return 1_000_000 if any(token in native_model for token in ("3.7", "coder", "long", "plus", "flash")) else 262_144
     if "gpt-5.5" in native_model or "gpt-5.4" in native_model:
         return 1_000_000
     if "gpt-5" in native_model:
@@ -24,20 +33,24 @@ def known_context_window(provider_id: str, model: str) -> int | None:
 
 
 def known_reasoning_efforts(provider_id: str, model: str) -> list[str]:
-    signals = f"{provider_id} {model}".lower()
-    if "deepseek" in signals:
-        return ["high", "xhigh"]
-    if "kimi" in signals or "qwen" in signals or "dashscope" in signals:
-        return ["low", "medium", "high", "xhigh"]
+    profile = _profile_for(provider_id, model)
+    if profile:
+        return list(profile.reasoning_levels())
     return ["low", "medium", "high", "xhigh"]
 
 
 def known_input_modalities(provider_id: str, model: str) -> list[str] | None:
+    profile = _profile_for(provider_id, model)
+    if profile:
+        return list(profile.context_policy.default_input_modalities)
     signals = f"{provider_id} {model}".lower()
     if ("kimi" in signals or "moonshot" in signals) and any(
-        token in signals for token in ("kimi-k2.6", "k2.6", "kimi-k2.5", "k2.5", "vision", "visual")
+        token in signals for token in ("kimi-k2.7", "kimi-k2.6", "k2.6", "kimi-k2.5", "k2.5", "vision", "visual")
     ):
         return ["text", "image"]
+    if "glm" in signals or "zai" in signals or "zhipu" in signals:
+        if any(token in signals for token in ("5.2", "4.1v", "4.5", "vision", "visual")):
+            return ["text", "image"]
     return None
 
 
@@ -65,7 +78,6 @@ def normalize_input_modalities(value: Any, provider_id: str = "", native_model: 
             if known:
                 allowed = [*allowed, *[item for item in known if item not in allowed]]
             return sorted(set(allowed), key=allowed.index)
-    # Third-party providers must be conservative until image input is verified.
     return known or ["text"]
 
 
@@ -82,11 +94,14 @@ def model_catalog_entry(
 ) -> dict[str, Any]:
     configured_model = configured_model or {}
     configured_efforts = [str(item) for item in list(configured_model.get("supported_reasoning_levels") or []) if str(item).strip()]
+    profile = _profile_for(provider_id, native_model)
     efforts = configured_efforts or known_reasoning_efforts(provider_id, native_model)
     default_effort = (
         _codex_reasoning_effort(reasoning_effort)
         if reasoning_effort
-        else str(configured_model.get("default_reasoning_level") or "").strip() or (efforts[-1] if efforts else None)
+        else str(configured_model.get("default_reasoning_level") or "").strip()
+        or (profile.default_reasoning_level() if profile else "")
+        or (efforts[-1] if efforts else None)
     )
     resolved_compact_limit = compact_limit(context_window, auto_compact_token_limit)
     truncation_limit = int(configured_model.get("tool_output_token_limit") or tool_output_truncation_limit(context_window))
@@ -171,6 +186,13 @@ def model_catalog_entry(
         "source_status": configured_model.get("source_status") or "seeded",
         "last_verified_at": configured_model.get("last_verified_at"),
         "verification_notes": configured_model.get("verification_notes") or "",
+        "catalog_version": configured_model.get("catalog_version"),
+        "recommended": bool(configured_model.get("recommended", False)),
+        "default_for_provider": bool(configured_model.get("default_for_provider", False)),
+        "deprecated": bool(configured_model.get("deprecated", False)),
+        "deprecated_after": configured_model.get("deprecated_after"),
+        "confidence": configured_model.get("confidence"),
+        "source_provenance": dict(configured_model.get("source_provenance") or {}),
     }
 
 
@@ -178,7 +200,7 @@ def _codex_reasoning_effort(effort: Any) -> str:
     normalized = str(effort or "high").strip().lower()
     if normalized == "max":
         return "xhigh"
-    if normalized in {"off", "auto", "minimal", "low", "medium", "high", "xhigh"}:
+    if normalized in {"off", "auto", "minimal", "low", "medium", "high", "xhigh", "none"}:
         return normalized
     return "high"
 
@@ -190,3 +212,26 @@ def _optional_float(value: Any, fallback: float) -> float:
         return fallback
     return parsed
 
+
+def _profile_for(provider_id: str, model: str) -> Any | None:
+    for candidate in (provider_id, model, f"{provider_id} {model}"):
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        try:
+            return get_provider_profile(resolve_provider_id(text))
+        except ValueError:
+            lowered = text.lower()
+            if "deepseek" in lowered:
+                return get_provider_profile("deepseek")
+            if "kimi" in lowered or "moonshot" in lowered:
+                return get_provider_profile("kimi")
+            if "qwen" in lowered or "dashscope" in lowered:
+                return get_provider_profile("qwen")
+            if any(token in lowered for token in ("glm", "zai", "zhipu", "bigmodel")):
+                return get_provider_profile("glm")
+            if "yunwu" in lowered:
+                return get_provider_profile("yunwu")
+            if "openai" in lowered or "gpt-" in lowered:
+                return get_provider_profile("openai")
+    return None

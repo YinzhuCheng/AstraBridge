@@ -23,10 +23,13 @@ from .lcr_web_mcp_server import _tools as lcr_web_dynamic_tools
 from .lcr_web_service import LcrWebService
 from .mcp_config_service import McpConfigService
 from .modal_service import ModalService
+from .model_catalog import ASTRABRIDGE_MODEL_CATALOG_FILENAME, ASTRABRIDGE_MODELS_CACHE_FILENAME
+from .profile_service import ProfileService
 from .router_service import ROUTER_ENV_KEY, ROUTER_PORT
 from .runtime_config_service import RuntimeConfigService, codex_model_id, codex_reasoning_effort
 from .security import SecurityError, redact_sensitive, resolve_under, scan_text_for_secrets
 from .secret_service import SecretService
+from .task_service import _display_thread_name
 from .tool_context_service import ToolContextService, sanitize_tool_context
 from .wsl_dependency_service import ASTRABRIDGE_WSL_BIN, ASTRABRIDGE_WSL_CODEX_HOME, ASTRABRIDGE_WSL_ROOT
 from .yunwu_image_mcp_server import _summarize_image_result as summarize_yunwu_image_result
@@ -61,6 +64,7 @@ class RuntimeService:
         asset_registry: Any | None = None,
         project_context: Any | None = None,
         task_service: Any | None = None,
+        task_conversation: Any | None = None,
         dogfood_run: Any | None = None,
         lcr_web_service: Any | None = None,
     ) -> None:
@@ -71,10 +75,12 @@ class RuntimeService:
         self._asset_registry = asset_registry
         self._project_context = project_context
         self._tasks = task_service
+        self._task_conversation = task_conversation
         self._dogfood_run = dogfood_run
         self._lcr_web = lcr_web_service or LcrWebService(project_service)
         self._tool_context = ToolContextService(project_service, task_service)
         self._runtime_config = runtime_config or RuntimeConfigService(secret_service=self._secrets, mcp_config=self._mcp_config)
+        self._profiles = ProfileService()
         self._client: AppServerClient | None = None
         self._runtime_signature: tuple[Any, ...] | None = None
         self._events: list[dict[str, Any]] = []
@@ -86,6 +92,7 @@ class RuntimeService:
         self._runtime_operation_lock = threading.RLock()
         self._runtime_operation_local = threading.local()
         self._runtime_start_turn_in_progress = False
+        self._runtime_thread_start_in_progress = False
         self._runtime_pin_signature: tuple[Any, ...] | None = None
         self._runtime_pin_until_monotonic = 0.0
         self._runtime_pin_thread_id: str | None = None
@@ -151,7 +158,11 @@ class RuntimeService:
             if not exists:
                 self._mark_provider_thread_missing(clean_thread_id, reason="startup_thread_missing")
                 current_project = self._projects.current_project or {}
-                result["reconciled_thread_id"] = str(current_project.get("current_thread_id") or "").strip() or None
+                reconciled_thread_id = str(current_project.get("current_thread_id") or "").strip()
+                if reconciled_thread_id and reconciled_thread_id != clean_thread_id:
+                    result["reconciled_thread_id"] = reconciled_thread_id
+                else:
+                    result["reconciled_thread_id"] = None
                 if not result["reconciled_thread_id"]:
                     try:
                         recovered_thread_id = self._recover_startup_provider_thread(
@@ -224,6 +235,7 @@ class RuntimeService:
         runtime_status["wsl_distro"] = self._wsl_distro()
         if profile.get("secret_ref"):
             runtime_status = {**runtime_status, "auth_mode": profile.get("auth_mode"), "secret_ref": profile.get("secret_ref")}
+        self._update_project_runtime_defaults(profile, None, None)
         self._refresh_client_if_runtime_changed(runtime_status)
         self._record_event({"type": "runtime_secret_loaded", "runtime": runtime_status})
         return runtime_status
@@ -307,6 +319,7 @@ class RuntimeService:
         if self._runtime_switch_is_pinned(runtime_status):
             cached = self._cached_thread(thread_id, warning="runtime_switch_deferred_active_turn")
             if cached:
+                self._record_task_thread_snapshot(cached)
                 self._record_event(
                     {
                         "type": "thread_read_deferred_active_turn",
@@ -323,6 +336,7 @@ class RuntimeService:
         except Exception as exc:
             cached = self._cached_thread(thread_id, warning=str(exc))
             if cached:
+                self._record_task_thread_snapshot(cached)
                 self._record_event(
                     {
                         "type": "thread_read_fallback",
@@ -337,8 +351,33 @@ class RuntimeService:
         thread = self._overlay_dynamic_tool_events(thread)
         thread = self._decorate_dynamic_tool_evidence(thread)
         thread = self._decorate_turn_completion_quality(thread)
-        self._cache_thread_entry(thread["id"], {"name": thread.get("name")})
+        normalized_status = self._normalize_thread_status(thread)
+        if isinstance(normalized_status, dict):
+            if normalized_status != thread.get("status"):
+                thread = {**thread, "status": normalized_status}
+            normalized_status = self._overlay_cached_thread_status(thread["id"], normalized_status)
+            if normalized_status != thread.get("status"):
+                thread = {**thread, "status": normalized_status}
+        cache_patch: dict[str, Any] = {"name": thread.get("name")}
+        if isinstance(thread.get("status"), dict):
+            cache_patch["status"] = thread.get("status")
+        self._cache_thread_entry(thread["id"], cache_patch)
+        self._record_task_thread_snapshot(thread)
         return {"thread": thread}
+
+    def _record_task_thread_snapshot(self, thread: dict[str, Any]) -> None:
+        if self._task_conversation is None:
+            return
+        try:
+            self._task_conversation.record_thread_snapshot(thread)
+        except Exception as exc:  # noqa: BLE001
+            self._record_event(
+                {
+                    "type": "task_thread_snapshot_failed",
+                    "thread_id": str(thread.get("id") or thread.get("thread_id") or ""),
+                    "error": str(exc)[:300],
+                }
+            )
 
     def create_thread(
         self,
@@ -349,6 +388,21 @@ class RuntimeService:
         permission_mode: str,
         name: str | None = None,
     ) -> dict[str, Any]:
+        if not getattr(self._runtime_operation_local, "in_thread_start", False):
+            with self._runtime_operation_lock:
+                self._runtime_thread_start_in_progress = True
+                self._runtime_operation_local.in_thread_start = True
+                try:
+                    return self.create_thread(
+                        profile,
+                        model=model,
+                        effort=effort,
+                        permission_mode=permission_mode,
+                        name=name,
+                    )
+                finally:
+                    self._runtime_operation_local.in_thread_start = False
+                    self._runtime_thread_start_in_progress = False
         runtime_status = self._prepare_runtime(profile, require_secret=True)
         client = self._runtime_request_client(runtime_status)
         params = self._thread_start_params(profile=profile, model=model, permission_mode=permission_mode)
@@ -403,6 +457,22 @@ class RuntimeService:
         permission_mode: str,
         name: str | None = None,
     ) -> dict[str, Any]:
+        if not getattr(self._runtime_operation_local, "in_thread_start", False):
+            with self._runtime_operation_lock:
+                self._runtime_thread_start_in_progress = True
+                self._runtime_operation_local.in_thread_start = True
+                try:
+                    return self.fork_thread(
+                        profile,
+                        thread_id=thread_id,
+                        model=model,
+                        effort=effort,
+                        permission_mode=permission_mode,
+                        name=name,
+                    )
+                finally:
+                    self._runtime_operation_local.in_thread_start = False
+                    self._runtime_thread_start_in_progress = False
         if not thread_id.strip():
             raise ValueError("thread_id is required.")
         runtime_status = self._prepare_runtime(profile, require_secret=True)
@@ -473,6 +543,7 @@ class RuntimeService:
         client.request("thread/archive", {"threadId": thread_id})
         if (self._projects.current_project or {}).get("current_thread_id") == thread_id:
             self._projects.switch_thread(None)
+        self._mark_provider_thread_missing(thread_id, reason="thread_archived")
         self._record_event({"type": "thread_archived", "thread_id": thread_id, "runtime": runtime_status})
         return {"archived": thread_id}
 
@@ -488,8 +559,7 @@ class RuntimeService:
     ) -> dict[str, Any]:
         if not thread_id.strip():
             raise ValueError("thread_id is required.")
-        self._cache_thread_entry(
-            thread_id,
+        normalized = self._normalize_shell_settings(
             {
                 "profile_id": profile_id,
                 "model": model,
@@ -497,13 +567,25 @@ class RuntimeService:
                 "permission_mode": permission_mode,
                 "collaboration_mode": collaboration_mode,
             },
+            current_project=self._projects.current_project or {},
+            prefer_project_defaults=False,
         )
-        if profile_id or model or effort:
+        self._cache_thread_entry(
+            thread_id,
+            {
+                "profile_id": normalized.get("profile_id"),
+                "model": normalized.get("model"),
+                "reasoning_effort": normalized.get("reasoning_effort"),
+                "permission_mode": normalized.get("permission_mode"),
+                "collaboration_mode": normalized.get("collaboration_mode"),
+            },
+        )
+        if normalized.get("profile_id") or normalized.get("model") or normalized.get("reasoning_effort"):
             self._projects.update_project(
                 {
-                    **({"default_profile_id": profile_id} if profile_id else {}),
-                    **({"default_model": model} if model else {}),
-                    **({"default_effort": effort} if effort else {}),
+                    **({"default_profile_id": normalized.get("profile_id")} if normalized.get("profile_id") else {}),
+                    **({"default_model": normalized.get("model")} if normalized.get("model") else {}),
+                    **({"default_effort": normalized.get("reasoning_effort")} if normalized.get("reasoning_effort") else {}),
                 }
             )
         return self._thread_settings_for(thread_id)
@@ -1568,6 +1650,10 @@ class RuntimeService:
                 self._tasks.mark_provider_thread_missing(thread_id, reason=reason)
             except Exception:
                 pass
+            try:
+                self._tasks.current_task()
+            except Exception:
+                pass
         self._record_event(
             {
                 "type": "provider_thread_missing",
@@ -1829,20 +1915,52 @@ class RuntimeService:
             return runtime_status
 
     def _runtime_status_for_profile(self, profile: dict[str, Any], *, require_secret: bool) -> dict[str, Any]:
+        deferred_runtime = self._deferred_active_runtime_status(profile)
+        if deferred_runtime is not None:
+            return deferred_runtime
         runtime_status = self._runtime_config.prepare_profile(profile, require_secret=require_secret)
         runtime_status["execution_host"] = self._execution_host()
         runtime_status["wsl_distro"] = self._wsl_distro()
         return runtime_status
 
     def _should_defer_runtime_prepare(self, profile: dict[str, Any]) -> bool:
-        if not self._runtime_start_turn_in_progress:
+        if not (self._runtime_start_turn_in_progress or self._runtime_thread_start_in_progress):
             return False
         if getattr(self._runtime_operation_local, "in_start_turn", False):
+            return False
+        if getattr(self._runtime_operation_local, "in_thread_start", False):
             return False
         active = self._runtime_config.status()
         if not active.get("configured"):
             return False
         return self._profile_targets_different_runtime(profile, active)
+
+    def _deferred_active_runtime_status(self, profile: dict[str, Any]) -> dict[str, Any] | None:
+        if getattr(self._runtime_operation_local, "in_start_turn", False):
+            return None
+        if getattr(self._runtime_operation_local, "in_thread_start", False):
+            return None
+        if not (self._runtime_start_turn_in_progress or self._runtime_thread_start_in_progress):
+            return None
+        active = self._runtime_config.status()
+        if not active.get("configured"):
+            return None
+        if not self._profile_targets_different_runtime(profile, active):
+            return None
+        reason = "thread_start_in_progress_passive_status_guard" if self._runtime_thread_start_in_progress else "start_turn_in_progress_passive_status_guard"
+        self._record_event(
+            {
+                "type": "runtime_switch_deferred_active_mutation",
+                "requested_runtime": self._runtime_defer_preview(profile),
+                "active_runtime_signature": list(self._runtime_signature or []),
+                "reason": reason,
+            }
+        )
+        return {
+            **active,
+            "execution_host": self._execution_host(),
+            "wsl_distro": self._wsl_distro(),
+        }
 
     def _profile_targets_different_runtime(self, profile: dict[str, Any], active: dict[str, Any]) -> bool:
         checks = (
@@ -1873,12 +1991,16 @@ class RuntimeService:
             if self._client is not None and self._client.is_running():
                 if self._runtime_signature == desired_signature:
                     return self._client
-                if self._runtime_start_turn_in_progress and not getattr(self._runtime_operation_local, "in_start_turn", False):
+                if (
+                    (self._runtime_start_turn_in_progress and not getattr(self._runtime_operation_local, "in_start_turn", False))
+                    or (self._runtime_thread_start_in_progress and not getattr(self._runtime_operation_local, "in_thread_start", False))
+                ):
                     self._record_event(
                         {
-                            "type": "runtime_switch_deferred_start_turn",
+                            "type": "runtime_switch_deferred_active_mutation",
                             "requested_runtime": runtime_status,
                             "active_runtime_signature": list(self._runtime_signature or []),
+                            "reason": "runtime_request_during_active_mutation",
                         }
                     )
                     raise RuntimeError("runtime_switch_deferred_start_turn")
@@ -1943,12 +2065,16 @@ class RuntimeService:
         with self._lock:
             signature = self._runtime_config.runtime_signature(runtime_status)
             if self._client is not None and self._runtime_signature is not None and signature != self._runtime_signature:
-                if self._runtime_start_turn_in_progress and not getattr(self._runtime_operation_local, "in_start_turn", False):
+                if (
+                    (self._runtime_start_turn_in_progress and not getattr(self._runtime_operation_local, "in_start_turn", False))
+                    or (self._runtime_thread_start_in_progress and not getattr(self._runtime_operation_local, "in_thread_start", False))
+                ):
                     self._record_event(
                         {
-                            "type": "runtime_switch_deferred_start_turn",
+                            "type": "runtime_switch_deferred_active_mutation",
                             "requested_runtime": runtime_status,
                             "active_runtime_signature": list(self._runtime_signature or []),
+                            "reason": "runtime_refresh_during_active_mutation",
                         }
                     )
                     return
@@ -2520,11 +2646,11 @@ print(",".join(str(pid) for pid in terminated))
         windows_codex_home = Path(str(runtime_status.get("codex_home") or "")).expanduser()
         config_path = windows_codex_home / "config.toml"
         models_dir = windows_codex_home / "models"
-        models_cache = windows_codex_home / "models_cache.json"
+        models_cache = windows_codex_home / ASTRABRIDGE_MODELS_CACHE_FILENAME
         if not config_path.is_file() or not models_dir.is_dir():
             raise RuntimeError("AstraBridge runtime config was not rendered before WSL launch.")
         wsl_config_path = windows_codex_home / "config.wsl.toml"
-        wsl_catalog_path = f"{codex_home_wsl_abs.rstrip('/')}/models/lcr-models.json"
+        wsl_catalog_path = f"{codex_home_wsl_abs.rstrip('/')}/models/{ASTRABRIDGE_MODEL_CATALOG_FILENAME}"
         wsl_router_base_url = self._wsl_router_base_url(wsl_executable, distro_args)
         sidecar_source_wsl = self._windows_path_to_wsl(Path(__file__).resolve().parents[1])
         sidecar_link_wsl = f"{home_wsl_abs.rstrip('/')}/.local/share/astrabridge/sidecar-src"
@@ -2544,7 +2670,7 @@ print(",".join(str(pid) for pid in terminated))
             f"cp -R {shlex.quote(source_home_wsl + '/models/.')} {shlex.quote(codex_home_wsl_abs + '/models/')}"
         )
         if models_cache.is_file():
-            command += f" && cp {shlex.quote(source_home_wsl + '/models_cache.json')} {shlex.quote(codex_home_wsl_abs + '/models_cache.json')}"
+            command += f" && cp {shlex.quote(source_home_wsl + '/' + ASTRABRIDGE_MODELS_CACHE_FILENAME)} {shlex.quote(codex_home_wsl_abs + '/' + ASTRABRIDGE_MODELS_CACHE_FILENAME)}"
         result = self._run_capture([wsl_executable, *distro_args, "bash", "-lc", command])
         if int(result["returncode"]) != 0:
             detail = str(result["stderr"] or result["stdout"]).strip()
@@ -2559,7 +2685,7 @@ print(",".join(str(pid) for pid in terminated))
         sidecar_source_wsl: str | None = None,
         sidecar_link_wsl: str | None = None,
     ) -> str:
-        wsl_catalog_path = f"{codex_home_wsl_abs.rstrip('/')}/models/lcr-models.json"
+        wsl_catalog_path = f"{codex_home_wsl_abs.rstrip('/')}/models/{ASTRABRIDGE_MODEL_CATALOG_FILENAME}"
         config_text = re.sub(
             r'^model_catalog_json = ".*"$',
             f'model_catalog_json = "{wsl_catalog_path.replace(chr(34), chr(92) + chr(34))}"',
@@ -3061,7 +3187,7 @@ for host in candidates:
             "sessionId": thread_id,
             "name": name,
             "preview": "",
-            "status": {"type": "idle"},
+            "status": self._thread_cache_status(thread_id) or {"type": "idle"},
             "cwd": self._runtime_workspace_root(),
             "turns": [],
             "shellWarning": warning,
@@ -3075,9 +3201,15 @@ for host in candidates:
             cache = self._read_thread_cache()
             by_id = dict(cache.get("by_id") or {})
             current = dict(by_id.get(thread_id) or {})
+            sanitized_patch = dict(patch)
+            if "name" in sanitized_patch:
+                sanitized_patch["name"] = _display_thread_name(
+                    sanitized_patch.get("name"),
+                    sanitized_patch.get("provider_id") or current.get("provider_id"),
+                )
             merged = {
                 **current,
-                **{key: value for key, value in patch.items() if value is not None},
+                **{key: value for key, value in sanitized_patch.items() if value is not None},
                 "thread_id": thread_id,
                 "updated_at": now_iso(),
             }
@@ -3137,19 +3269,140 @@ for host in candidates:
         cache = self._read_thread_cache()
         entry = dict((cache.get("by_id") or {}).get(thread_id) or {})
         current = self._projects.current_project or {}
-        return {
-            "profile_id": entry.get("profile_id") or current.get("default_profile_id"),
-            "model": entry.get("model") or current.get("default_model"),
-            "reasoning_effort": entry.get("reasoning_effort") or current.get("default_effort") or "high",
-            "permission_mode": entry.get("permission_mode") or "auto",
-            "collaboration_mode": entry.get("collaboration_mode") or "default",
+        normalized = self._normalize_shell_settings(entry, current_project=current, prefer_project_defaults=True)
+        cache_patch = {
+            "profile_id": normalized.get("profile_id"),
+            "model": normalized.get("model"),
+            "reasoning_effort": normalized.get("reasoning_effort"),
+            "permission_mode": normalized.get("permission_mode"),
+            "collaboration_mode": normalized.get("collaboration_mode"),
         }
+        if any(entry.get(key) != value for key, value in cache_patch.items() if value is not None):
+            self._cache_thread_entry(thread_id, cache_patch)
+        return normalized
+
+    def _normalize_shell_settings(
+        self,
+        settings: dict[str, Any],
+        *,
+        current_project: dict[str, Any],
+        prefer_project_defaults: bool,
+    ) -> dict[str, Any]:
+        project_profile_id = str(current_project.get("default_profile_id") or "").strip()
+        chosen_profile_id = str(settings.get("profile_id") or "").strip()
+        target_profile = self._resolve_shell_profile(chosen_profile_id or project_profile_id)
+        provider_id = str(target_profile.get("provider_id") or "openai").strip() or "openai"
+        profile_id = str(target_profile.get("profile_id") or project_profile_id or "openai-compatible").strip()
+        project_model = self._normalize_shell_model(current_project.get("default_model"), provider_id)
+        chosen_model = self._normalize_shell_model(settings.get("model"), provider_id)
+        if prefer_project_defaults and not chosen_model:
+            chosen_model = project_model
+        if not chosen_model or self._shell_model_provider_mismatch(chosen_model, provider_id):
+            chosen_model = self._normalize_shell_model(target_profile.get("model"), provider_id) or project_model
+        project_effort = codex_reasoning_effort(current_project.get("default_effort"))
+        chosen_effort = codex_reasoning_effort(settings.get("reasoning_effort"))
+        if prefer_project_defaults and not str(settings.get("reasoning_effort") or "").strip():
+            chosen_effort = project_effort
+        permission_mode = str(settings.get("permission_mode") or "").strip().lower() or "auto"
+        if permission_mode not in {"ask", "auto", "full"}:
+            permission_mode = "auto"
+        collaboration_mode = str(settings.get("collaboration_mode") or "").strip().lower() or "default"
+        if collaboration_mode not in VALID_COLLABORATION_MODES:
+            collaboration_mode = "default"
+        return {
+            "profile_id": profile_id,
+            "model": chosen_model or self._normalize_shell_model(target_profile.get("model"), provider_id) or "gpt-5.5",
+            "reasoning_effort": chosen_effort or codex_reasoning_effort(target_profile.get("reasoning_effort")),
+            "permission_mode": permission_mode,
+            "collaboration_mode": collaboration_mode,
+        }
+
+    def _resolve_shell_profile(self, profile_id: str) -> dict[str, Any]:
+        fallback = "openai-compatible"
+        try:
+            return self._profiles.resolve_runtime_profile(profile_id or fallback)
+        except Exception:
+            try:
+                return self._profiles.resolve_runtime_profile(fallback)
+            except Exception:
+                return {
+                    "profile_id": fallback,
+                    "provider_id": "openai",
+                    "model": "gpt-5.5",
+                    "reasoning_effort": "high",
+                }
+
+    def _normalize_shell_model(self, value: Any, provider_id: str) -> str:
+        model = str(value or "").strip()
+        if not model:
+            return ""
+        if "/" not in model:
+            return model
+        model_provider, native_model = model.split("/", 1)
+        if model_provider.strip().lower() == provider_id.strip().lower():
+            return native_model.strip()
+        return model
+
+    def _shell_model_provider_mismatch(self, model: str, provider_id: str) -> bool:
+        if "/" not in model:
+            return False
+        model_provider, _native_model = model.split("/", 1)
+        return model_provider.strip().lower() != provider_id.strip().lower()
 
     def _decorate_thread(self, thread: dict[str, Any]) -> dict[str, Any]:
         thread_id = str(thread.get("id") or "")
         settings = self._thread_settings_for(thread_id) if thread_id else {}
-        display_name = thread.get("name") or self._thread_cache_name(thread_id) or str(thread.get("preview") or thread_id)
-        return {**thread, "shellSettings": settings, "displayName": display_name}
+        display_name = (
+            _display_thread_name(thread.get("name"), settings.get("provider_id") or settings.get("profile_id"))
+            or self._thread_cache_name(thread_id)
+            or str(thread.get("preview") or thread_id)
+        )
+        normalized_status = self._normalize_thread_status(thread)
+        if thread_id:
+            normalized_status = self._overlay_cached_thread_status(thread_id, normalized_status)
+        return {**thread, "status": normalized_status, "shellSettings": settings, "displayName": display_name}
+
+    def _normalize_thread_status(self, thread: dict[str, Any]) -> dict[str, Any] | Any:
+        status = thread.get("status")
+        if not isinstance(status, dict):
+            return status
+        status_type = str(status.get("type") or "")
+        if status_type not in {"systemError", "notLoaded"}:
+            return status
+        turns = [item for item in list(thread.get("turns") or []) if isinstance(item, dict)]
+        if not turns:
+            return status
+        latest_turn = turns[-1]
+        latest_error = latest_turn.get("error")
+        if str(latest_turn.get("status") or "") == "completed" and (
+            latest_error is None or latest_error == "" or latest_error == {}
+        ):
+            normalized = dict(status)
+            normalized["type"] = "idle"
+            normalized["stale_error_type"] = status_type
+            normalized["stale_error_normalized"] = True
+            return normalized
+        return status
+
+    def _thread_cache_status(self, thread_id: str) -> dict[str, Any] | None:
+        if not thread_id:
+            return None
+        cache = self._read_thread_cache()
+        entry = dict((cache.get("by_id") or {}).get(thread_id) or {})
+        status = entry.get("status")
+        return dict(status) if isinstance(status, dict) else None
+
+    def _overlay_cached_thread_status(self, thread_id: str, status: dict[str, Any] | Any) -> dict[str, Any] | Any:
+        if not isinstance(status, dict):
+            return status
+        cached_status = self._thread_cache_status(thread_id)
+        if not isinstance(cached_status, dict):
+            return status
+        if str(status.get("type") or "") not in {"systemError", "notLoaded"}:
+            return status
+        if str(cached_status.get("type") or "") == "idle" and cached_status.get("stale_error_normalized"):
+            return cached_status
+        return status
 
     def _overlay_dynamic_tool_events(self, thread: dict[str, Any]) -> dict[str, Any]:
         """Make app-server dynamic tool events visible when thread/read omits them."""
@@ -3449,7 +3702,7 @@ for host in candidates:
         cache = self._read_thread_cache()
         entry = dict((cache.get("by_id") or {}).get(thread_id) or {})
         name = entry.get("name")
-        return str(name) if name else None
+        return _display_thread_name(name, entry.get("provider_id")) if name else None
 
     def _sync_thread_settings_from_notification(self, payload: dict[str, Any]) -> None:
         thread_id = str(payload.get("threadId") or "")

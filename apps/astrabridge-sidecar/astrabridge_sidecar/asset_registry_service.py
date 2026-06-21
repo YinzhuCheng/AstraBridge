@@ -11,8 +11,10 @@ from .common import WORKSPACE_STATE_DIRNAME, now_iso, read_json, slugify, write_
 from .security import SECRET_RE, SecurityError, redact_sensitive, resolve_under, scan_text_for_secrets
 
 
-REGISTRY_SCHEMA_VERSION = "lcr-asset-registry-v1"
-CONTEXT_SCHEMA_VERSION = "lcr-asset-context-pack-v1"
+REGISTRY_SCHEMA_VERSION = "astrabridge-asset-registry-v1"
+CONTEXT_SCHEMA_VERSION = "astrabridge-asset-context-pack-v1"
+LEGACY_REGISTRY_SCHEMA_VERSIONS = {"lcr-asset-registry-v1"}
+LEGACY_CONTEXT_SCHEMA_VERSIONS = {"lcr-asset-context-pack-v1"}
 
 
 class AssetRegistryService:
@@ -31,8 +33,9 @@ class AssetRegistryService:
         path = self._registry_path()
         if rebuild_if_missing and not path.exists():
             self.rebuild()
-        registry = self._normalize_registry(read_json(path, {}))
-        if not path.exists():
+        raw_registry = read_json(path, {})
+        registry = self._normalize_registry(raw_registry)
+        if (not path.exists()) or registry != raw_registry:
             write_json(path, registry)
         context_pack = self.context_pack(registry=registry)
         self._write_context_pack(registry)
@@ -785,6 +788,9 @@ class AssetRegistryService:
 
     def _normalize_registry(self, payload: Any) -> dict[str, Any]:
         registry = dict(payload or {}) if isinstance(payload, dict) else {}
+        schema_version = str(registry.get("schema_version") or "").strip()
+        if schema_version in LEGACY_REGISTRY_SCHEMA_VERSIONS:
+            registry["schema_version"] = REGISTRY_SCHEMA_VERSION
         assets = [dict(item) for item in list(registry.get("assets") or []) if isinstance(item, dict)]
         for item in assets:
             kind = str(item.get("kind") or item.get("asset_type") or self._infer_kind(item.get("role"), item.get("source_path"), item.get("promoted_path")))

@@ -7,7 +7,15 @@ from typing import Any
 
 from .common import default_codex_home, now_iso, write_json
 from .mcp_config_service import McpConfigService
-from .model_catalog import compact_limit, known_context_window, model_catalog_entry, normalize_input_modalities, tool_output_truncation_limit
+from .model_catalog import (
+    ASTRABRIDGE_MODEL_CATALOG_FILENAME,
+    ASTRABRIDGE_MODELS_CACHE_FILENAME,
+    compact_limit,
+    known_context_window,
+    model_catalog_entry,
+    normalize_input_modalities,
+    tool_output_truncation_limit,
+)
 from .security import SECRET_RE, SecurityError
 from .secret_service import SecretService
 
@@ -414,11 +422,11 @@ class RuntimeConfigService:
             configured_model=configured_model,
             auto_compact_token_limit=auto_compact_limit,
         )
-        catalog_path = self.codex_home / "models" / "lcr-models.json"
+        catalog_path = self.codex_home / "models" / ASTRABRIDGE_MODEL_CATALOG_FILENAME
         catalog_payload = {"models": [model]}
         write_json(catalog_path, catalog_payload)
         write_json(
-            self.codex_home / "models_cache.json",
+            self.codex_home / ASTRABRIDGE_MODELS_CACHE_FILENAME,
             {
                 "fetched_at": now_iso(),
                 "etag": "astrabridge",

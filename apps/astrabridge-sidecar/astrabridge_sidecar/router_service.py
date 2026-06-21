@@ -19,6 +19,17 @@ from pathlib import Path
 from typing import Any
 
 from .model_catalog import known_context_window, model_catalog_entry
+from .providers import get_provider_profile, resolve_provider_id
+from .providers.transports import (
+    ChatCompletionsTransport as RegistryChatCompletionsTransport,
+    DeepSeekChatTransport as RegistryDeepSeekChatTransport,
+    GlmChatTransport as RegistryGlmChatTransport,
+    KimiChatTransport as RegistryKimiChatTransport,
+    OpenAIChatTransport as RegistryOpenAIChatTransport,
+    OpenAIResponsesTransport as RegistryOpenAIResponsesTransport,
+    QwenResponsesTransport as RegistryQwenResponsesTransport,
+    ProviderTransport as RegistryProviderTransport,
+)
 from .security import redact_sensitive
 
 
@@ -134,12 +145,34 @@ class ProviderAdapter:
                         "item": {**item, "id": item_id, "status": "completed"},
                     }
                 )
+            elif item.get("type") == "reasoning":
+                events.append(
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": item,
+                    }
+                )
+                events.append(
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": output_index,
+                        "item": {**item, "status": "completed"},
+                    }
+                )
             elif item.get("type") == "function_call":
                 events.append(
                     {
                         "type": "response.output_item.added",
                         "output_index": output_index,
                         "item": item,
+                    }
+                )
+                events.append(
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": output_index,
+                        "item": {**item, "status": "completed"},
                     }
                 )
         events.append({"type": "response.completed", "response": response})
@@ -378,8 +411,9 @@ class ChatCompletionsAdapter(ProviderAdapter):
         if item_type == "message":
             role = self._map_role(str(item.get("role") or "user"))
             return [{"role": role, "content": self._chat_content(item.get("content"))}]
-        if item_type in {"contextCompaction", "enteredReviewMode", "exitedReviewMode"}:
-            return []
+        if item_type in {"contextCompaction", "enteredReviewMode", "exitedReviewMode", "collabAgentToolCall"}:
+            summary = self._transition_summary_message(item)
+            return [{"role": "assistant", "content": summary}] if summary else []
         return [{"role": "user", "content": self._flatten_content(item)}]
 
     def _chat_content(self, content: Any) -> Any:
@@ -641,6 +675,59 @@ class ChatCompletionsAdapter(ProviderAdapter):
         except Exception:
             return json.dumps({"raw": text}, ensure_ascii=False, separators=(",", ":"))
 
+    def _transition_summary_message(self, item: dict[str, Any]) -> str:
+        item_type = str(item.get("type") or "")
+        if item_type == "contextCompaction":
+            return "[context compaction]\nThread context was compacted before this turn. Continue from the surviving summary, tool results, and recent file state."
+        if item_type == "enteredReviewMode":
+            review = str(item.get("review") or "").strip()
+            return f"[review mode entered]\n{review}".strip()
+        if item_type == "exitedReviewMode":
+            review = str(item.get("review") or "").strip()
+            return f"[review mode exited]\n{review}".strip()
+        if item_type != "collabAgentToolCall":
+            return ""
+        tool = str(item.get("tool") or "").strip()
+        receivers = [str(value).strip() for value in list(item.get("receiverThreadIds") or []) if str(value).strip()]
+        prompt = str(item.get("prompt") or "").strip()
+        model = str(item.get("model") or "").strip()
+        effort = str(item.get("reasoningEffort") or "").strip()
+        states = item.get("agentsStates") or {}
+        lines: list[str] = []
+        if tool == "spawnAgent":
+            lines.append("[forked collaborator thread]")
+            if receivers:
+                lines.append(f"Spawned collaborator thread(s): {', '.join(receivers)}")
+            else:
+                lines.append("Spawned a collaborator thread.")
+        elif tool == "sendInput":
+            lines.append("[collaborator follow-up]")
+            if receivers:
+                lines.append(f"Sent follow-up input to: {', '.join(receivers)}")
+        elif tool == "resumeAgent":
+            lines.append("[collaborator resumed]")
+            if receivers:
+                lines.append(f"Resumed collaborator thread(s): {', '.join(receivers)}")
+        elif tool == "wait":
+            lines.append("[collaborator wait]")
+            lines.append("Waiting for collaborator progress.")
+        elif tool == "closeAgent":
+            lines.append("[collaborator closed]")
+            if receivers:
+                lines.append(f"Closed collaborator thread(s): {', '.join(receivers)}")
+        else:
+            lines.append("[collaborator transition]")
+            lines.append(f"Recorded collaborator tool event: {tool or 'unknown'}")
+        if model:
+            lines.append(f"Model: {model}")
+        if effort:
+            lines.append(f"Reasoning effort: {effort}")
+        if prompt:
+            lines.append(f"Prompt summary: {prompt[:240]}")
+        if isinstance(states, dict) and states:
+            lines.append(f"Known collaborator states: {', '.join(sorted(states.keys()))}")
+        return "\n".join(lines).strip()
+
     def _response_usage_from_chat_usage(self, usage: dict[str, Any]) -> dict[str, Any]:
         token_details = dict(usage.get("completion_tokens_details") or {})
         return {
@@ -870,15 +957,32 @@ class RouterService:
                         payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
                         service.forward_response(payload, self)
                     except Exception as exc:  # noqa: BLE001
-                        context = service._error_context_for_payload(locals().get("payload") if isinstance(locals().get("payload"), dict) else {})
-                        envelope = {
-                            "error": {
-                                "type": "provider_error",
-                                **context,
-                                "message": str(exc),
-                                "actionable_hint": service._provider_error_hint(str(exc), fallback="Check provider auth, request shape, router state, or upstream connectivity."),
+                        payload_for_error = locals().get("payload") if isinstance(locals().get("payload"), dict) else {}
+                        if isinstance(exc, urllib.error.HTTPError):
+                            try:
+                                profile = service._resolve_profile(payload_for_error)
+                                normalized = service._normalize_provider_error(profile, exc.code, exc.read().decode("utf-8", errors="replace"))
+                                envelope = normalized
+                            except Exception:
+                                context = service._error_context_for_payload(payload_for_error)
+                                envelope = {
+                                    "error": {
+                                        "type": "provider_error",
+                                        **context,
+                                        "message": str(exc),
+                                        "actionable_hint": service._provider_error_hint(str(exc), fallback="Check provider auth, request shape, router state, or upstream connectivity."),
+                                    }
+                                }
+                        else:
+                            context = service._error_context_for_payload(payload_for_error)
+                            envelope = {
+                                "error": {
+                                    "type": "provider_error",
+                                    **context,
+                                    "message": str(exc),
+                                    "actionable_hint": service._provider_error_hint(str(exc), fallback="Check provider auth, request shape, router state, or upstream connectivity."),
+                                }
                             }
-                        }
                         service._record("router_error", {"error": envelope["error"]})
                         self._send_json(400, envelope)
 
@@ -1090,20 +1194,32 @@ class RouterService:
         raw_model = str(payload.get("model") or "").strip()
         if "/" not in raw_model:
             raise RuntimeError("Router models must be prefixed as provider/model.")
-        provider_id, native_model = raw_model.split("/", 1)
+        raw_provider_id, native_model = raw_model.split("/", 1)
+        provider_family = _provider_family(raw_provider_id)
+        canonical_model = f"{provider_family}/{native_model}" if provider_family else raw_model
         configured_models = self._router_config.models() if self._router_config is not None else []
         if configured_models:
             for item in configured_models:
                 if not item.get("enabled", True):
                     continue
-                if str(item.get("id") or "") == raw_model:
-                    provider = self._provider_by_id(provider_id)
+                if str(item.get("id") or "") in {raw_model, canonical_model}:
+                    provider = self._provider_by_id(str(item.get("provider") or raw_provider_id))
                     return {**provider, "model": native_model, "adapter_profile": item.get("adapter_profile")}
+        family_match: dict[str, Any] | None = None
         for profile in self._router_profiles():
             if not profile.get("enabled", True):
                 continue
-            if str(profile.get("provider_id") or "").strip() == provider_id and str(profile.get("model") or "").strip() == native_model:
+            if str(profile.get("provider_id") or "").strip() == raw_provider_id and str(profile.get("model") or "").strip() == native_model:
                 return profile
+            if (
+                family_match is None
+                and provider_family
+                and str(profile.get("provider_family") or "").strip() == provider_family
+                and str(profile.get("model") or "").strip() == native_model
+            ):
+                family_match = profile
+        if family_match is not None:
+            return family_match
         raise RuntimeError(f"No router profile matches model {raw_model}.")
 
     def _router_profiles(self) -> list[dict[str, Any]]:
@@ -1111,56 +1227,89 @@ class RouterService:
             providers = self._router_config.providers()
             if providers:
                 return [
-                    {
-                        "enabled": item.get("enabled", True),
-                        "provider_id": item.get("id"),
-                        "label": item.get("display_name"),
-                        "base_url": item.get("base_url"),
-                        "model": item.get("default_model"),
-                        "wire_api": item.get("adapter_type"),
-                        "adapter_profile": item.get("adapter_profile"),
-                        "env_key": item.get("env_key"),
-                        "auth_mode": item.get("auth_mode"),
-                        "secret_ref": item.get("auth_key_ref"),
-                        "proxy_mode": item.get("proxy_mode"),
-                        "proxy_url": item.get("proxy_url"),
-                    }
+                    self._registry_enriched_provider(
+                        {
+                            "enabled": item.get("enabled", True),
+                            "provider_id": str(item.get("id") or item.get("provider_id") or ""),
+                            "provider_family": item.get("provider_family") or item.get("adapter_profile"),
+                            "label": item.get("display_name"),
+                            "base_url": item.get("base_url"),
+                            "model": item.get("default_model"),
+                            "wire_api": item.get("adapter_type"),
+                            "adapter_profile": item.get("adapter_profile"),
+                            "env_key": item.get("env_key"),
+                            "auth_mode": item.get("auth_mode"),
+                            "secret_ref": item.get("auth_key_ref"),
+                            "proxy_mode": item.get("proxy_mode"),
+                            "proxy_url": item.get("proxy_url"),
+                        }
+                    )
                     for item in providers
                 ]
         profiles = self._profiles.list_profiles().get("profiles") or []
-        router_profiles = []
+        router_profiles: list[dict[str, Any]] = []
         for profile in profiles:
             if not isinstance(profile, dict):
                 continue
             if not profile.get("base_url"):
                 continue
-            router_profiles.append({"enabled": True, **profile})
-        return router_profiles
+            router_profiles.append(self._registry_enriched_provider({"enabled": True, **profile, "provider_id": str(profile.get("provider_id") or "openai")}))
+        deduped: dict[tuple[str, str], dict[str, Any]] = {}
+        for profile in router_profiles:
+            key = (str(profile.get("provider_id") or ""), str(profile.get("model") or ""))
+            existing = deduped.get(key)
+            if existing is None or _profile_priority(profile) < _profile_priority(existing):
+                deduped[key] = profile
+        return list(deduped.values())
 
-    def _adapter_for(self, profile: dict[str, Any]) -> ProviderAdapter:
-        signals = " ".join(
-            str(profile.get(key) or "")
-            for key in ("provider_id", "adapter_profile", "wire_api", "base_url", "model")
-        ).strip().lower()
+    def _adapter_for(self, profile: dict[str, Any]) -> RegistryProviderTransport:
+        provider_family = _provider_family(profile.get("provider_family") or profile.get("adapter_profile") or profile.get("provider_id")) or "openai"
+        if provider_family == "qwen":
+            return RegistryQwenResponsesTransport(self, profile)
+        if provider_family == "deepseek":
+            return RegistryDeepSeekChatTransport(self, profile)
+        if provider_family == "kimi":
+            return RegistryKimiChatTransport(self, profile)
+        if provider_family == "glm":
+            return RegistryGlmChatTransport(self, profile)
         wire_api = str(profile.get("wire_api") or "").strip().lower()
-        if "qwen" in signals or "dashscope" in signals:
-            return QwenResponsesAdapter(self, profile)
-        if "deepseek" in signals:
-            return DeepSeekChatAdapter(self, profile)
-        if "kimi" in signals or "moonshot" in signals:
-            return KimiChatAdapter(self, profile)
         if wire_api == "chat":
-            return ChatCompletionsAdapter(self, profile)
-        return ProviderAdapter(self, profile)
+            return RegistryOpenAIChatTransport(self, profile)
+        return RegistryOpenAIResponsesTransport(self, profile)
 
-    def _adapter_for_provider(self, provider_id: str) -> ProviderAdapter:
-        return self._adapter_for({"provider_id": provider_id})
+    def _adapter_for_provider(self, provider_id: str) -> RegistryProviderTransport:
+        return self._adapter_for({"provider_id": provider_id, "provider_family": _provider_family(provider_id)})
 
     def _provider_by_id(self, provider_id: str) -> dict[str, Any]:
         for profile in self._router_profiles():
             if str(profile.get("provider_id") or "") == provider_id:
                 return profile
+        provider_family = _provider_family(provider_id)
+        if provider_family:
+            for profile in self._router_profiles():
+                if str(profile.get("provider_family") or "") == provider_family:
+                    return profile
         raise RuntimeError(f"Unknown provider {provider_id}.")
+
+    def _registry_enriched_provider(self, provider: dict[str, Any]) -> dict[str, Any]:
+        provider_family = _provider_family(
+            provider.get("provider_family") or provider.get("adapter_profile") or provider.get("provider_id"),
+            base_url=provider.get("base_url"),
+            model=provider.get("model"),
+        ) or "openai"
+        profile = get_provider_profile(provider_family)
+        return {
+            **provider,
+            "provider_family": profile.id,
+            "aliases": list(profile.aliases),
+            "capabilities": profile.capability_payload(),
+            "reasoning_policy_mode": profile.reasoning_policy.mode,
+            "edit_policy": {
+                "small": profile.edit_policy.small,
+                "medium": profile.edit_policy.medium,
+                "large": profile.edit_policy.large,
+            },
+        }
 
     def _model_metadata(self, model_id: str, profile: dict[str, Any], configured_model: dict[str, Any]) -> dict[str, Any]:
         context_window = int(configured_model.get("advertised_context_window") or _fallback_context_window(profile) or 128000)
@@ -1460,7 +1609,7 @@ class RouterService:
                 pass
         return redact_sensitive({"provider": provider or None, "model": model or None})
 
-    def _stream_chat_completion(self, adapter: ProviderAdapter, response: http.client.HTTPResponse, original_payload: dict[str, Any], handler: BaseHTTPRequestHandler) -> None:
+    def _stream_chat_completion(self, adapter: RegistryProviderTransport, response: http.client.HTTPResponse, original_payload: dict[str, Any], handler: BaseHTTPRequestHandler) -> None:
         handler.send_response(response.status)
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
         handler.send_header("Cache-Control", "no-store")
@@ -1552,7 +1701,7 @@ class RouterService:
                     partial_text.append(str(content))
                     self._write_sse(handler, {"type": "response.output_text.delta", "item_id": "msg_stream", "output_index": 0, "content_index": 0, "delta": str(content)})
         text = "".join(partial_text)
-        if isinstance(adapter, ChatCompletionsAdapter):
+        if isinstance(adapter, RegistryChatCompletionsTransport):
             text = adapter._visible_text_or_reasoning_only_notice(text, "".join(partial_reasoning), bool(partial_tool_calls))
             if text and not partial_text and partial_reasoning and not partial_tool_calls:
                 self._write_sse(handler, {"type": "response.output_text.delta", "item_id": "msg_stream", "output_index": 0, "content_index": 0, "delta": text})
@@ -1586,7 +1735,7 @@ class RouterService:
                 "type": "function_call",
                 "call_id": call_id,
                 "name": function.get("name") or "tool",
-                "arguments": adapter._safe_tool_arguments(function.get("arguments")) if isinstance(adapter, ChatCompletionsAdapter) else str(function.get("arguments") or "{}"),
+                "arguments": adapter._safe_tool_arguments(function.get("arguments")) if isinstance(adapter, RegistryChatCompletionsTransport) else str(function.get("arguments") or "{}"),
                 "status": "completed",
             }
             output_index = len(output)
@@ -1601,7 +1750,7 @@ class RouterService:
             "output": output,
             "output_text": text,
         }
-        if stream_usage and isinstance(adapter, ChatCompletionsAdapter):
+        if stream_usage and isinstance(adapter, RegistryChatCompletionsTransport):
             final_response["usage"] = adapter._response_usage_from_chat_usage(stream_usage)
         self._write_sse(handler, {"type": "response.completed", "response": final_response})
         handler.wfile.write(b"data: [DONE]\n\n")
@@ -1614,7 +1763,7 @@ class RouterService:
 
 def _fallback_context_window(profile: dict[str, Any]) -> int | None:
     signals = " ".join(str(profile.get(key) or "") for key in ("provider_id", "base_url", "model")).lower()
-    provider = str(profile.get("provider_id") or "")
+    provider = str(profile.get("provider_family") or profile.get("provider_id") or "")
     model = str(profile.get("model") or "")
     return known_context_window(provider, model) or known_context_window(signals, signals)
 
@@ -1633,6 +1782,37 @@ def _optional_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed
+
+
+def _provider_family(provider_id: Any, *, base_url: Any = None, model: Any = None) -> str | None:
+    try:
+        return resolve_provider_id(str(provider_id or "").strip())
+    except ValueError:
+        signals = " ".join(
+            str(value or "").strip().lower()
+            for value in (provider_id, base_url, model)
+            if str(value or "").strip()
+        )
+        if "deepseek" in signals:
+            return "deepseek"
+        if "moonshot" in signals or "kimi" in signals:
+            return "kimi"
+        if "dashscope" in signals or "qwen" in signals:
+            return "qwen"
+        if any(token in signals for token in ("bigmodel", "glm", "zai", "zhipu")):
+            return "glm"
+        if "yunwu" in signals:
+            return "yunwu"
+        if "openai" in signals:
+            return "openai"
+    return None
+
+
+def _profile_priority(profile: dict[str, Any]) -> int:
+    profile_id = str(profile.get("profile_id") or "")
+    provider_id = str(profile.get("provider_id") or "")
+    default_profile_id = "openai-compatible" if provider_id == "openai" else f"{provider_id}-default"
+    return 1 if profile_id == default_profile_id else 0
 
 
 class _BufferHandler:

@@ -9,6 +9,7 @@ import hashlib
 import os
 import ssl
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -40,8 +41,11 @@ from astrabridge_sidecar.lcr_web_service import LcrWebService
 from astrabridge_sidecar.lcr_web_mcp_server import _tools as lcr_web_mcp_tools
 from astrabridge_sidecar.metadata_service import MetadataService
 from astrabridge_sidecar.mcp_config_service import McpConfigService
-from astrabridge_sidecar.official_codex_service import OfficialCodexService
+from astrabridge_sidecar.model_catalog import known_context_window, known_input_modalities, known_reasoning_efforts
+from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERROR, disabled_status
 from astrabridge_sidecar.profile_service import ProfileService
+from astrabridge_sidecar.providers import get_provider_profile
+from astrabridge_sidecar.providers.history_projector import HistoryProjector, NeutralMessage, ReasoningArtifact
 from astrabridge_sidecar.project_context_service import ProjectContextService
 from astrabridge_sidecar.project_service import DEFAULT_RUNTIME_HOST_ENV, DEFAULT_RUNTIME_WSL_DISTRO_ENV, ProjectService
 from astrabridge_sidecar.project_tools_service import ProjectToolsService
@@ -51,6 +55,7 @@ from astrabridge_sidecar.runtime_config_service import RuntimeConfigService
 from astrabridge_sidecar.runtime_supervisor_service import RuntimeSupervisorService
 from astrabridge_sidecar.runtime_service import RuntimeService
 from astrabridge_sidecar.server import AppContext, Handler, sse_frame, turn_text_from_payload
+from astrabridge_sidecar.task_conversation_service import TaskConversationService
 from astrabridge_sidecar.task_service import TaskService
 from astrabridge_sidecar.wsl_dependency_service import WslDependencyService
 from astrabridge_sidecar.yunwu_image_mcp_server import _normalize_path_for_os as yunwu_image_normalize_path_for_os
@@ -185,7 +190,16 @@ class AstraBridgeServiceTests(unittest.TestCase):
             else:
                 os.environ[key] = value
         project_service_module._DEFAULT_RUNTIME_PREFS_CACHE = None
-        self._test_env_root.cleanup()
+        for attempt in range(6):
+            try:
+                self._test_env_root.cleanup()
+                break
+            except PermissionError:
+                if attempt == 5:
+                    self._test_env_root._ignore_cleanup_errors = True  # type: ignore[attr-defined]  # noqa: SLF001
+                    self._test_env_root.cleanup()
+                    break
+                time.sleep(0.1 * (attempt + 1))
 
     def test_write_json_retries_transient_replace_permission_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -272,6 +286,42 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(len(commands), 2)
             self.assertIn("node --check", commands[0]["command"])
             self.assertEqual(history["workspace_root"], str(workspace.resolve()))
+
+    def test_project_tools_review_scopes_parent_git_repo_to_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            init = subprocess.run(["git", "init"], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+            if init.returncode != 0:
+                self.skipTest("git is not available")
+            subprocess.run(
+                ["git", "-c", "user.email=demo@example.invalid", "-c", "user.name=AstraBridge Test", "commit", "--allow-empty", "-m", "init"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            workspace = root / "PRIVATE" / "demo" / "workspace"
+            workspace.mkdir(parents=True)
+            (root / "repo_change.txt").write_text("outside workspace\n", encoding="utf-8")
+            (workspace / "scorecard.py").write_text("print('ok')\n", encoding="utf-8")
+            project_file = root / "demo.abproj"
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="existing")
+            tools = ProjectToolsService(projects, _RuntimeEventsStub())
+
+            status = tools.review_status()
+            paths = {item["path"] for item in status["files"]}
+            self.assertIn("scorecard.py", paths)
+            self.assertNotIn("repo_change.txt", paths)
+            self.assertEqual(status["git"]["changed_files"], 1)
+
+            diff = tools.review_diff("scorecard.py")
+            self.assertTrue(diff["ok"])
+            self.assertTrue(diff.get("synthetic"))
+            self.assertIn("diff --astrabridge", diff["diff"])
+            self.assertIn("+print('ok')", diff["diff"])
 
     def test_app_data_dir_does_not_migrate_legacy_local_store(self) -> None:
         original_appdata = os.environ.get("APPDATA")
@@ -416,6 +466,30 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(refreshed["current_thread_id"], "thread-refreshed")
             self.assertEqual(projects.current_project["current_thread_id"], "thread-refreshed")
 
+    def test_project_service_refresh_current_project_repairs_and_persists_runtime_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            project = projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            path = Path(str(project["project_file"]))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["default_profile_id"] = "yunwu-gpt-55-xhigh"
+            payload["default_model"] = "glm/glm-5.2"
+            payload["default_effort"] = "max"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            refreshed = projects.refresh_current_project()
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(refreshed["default_profile_id"], "openai-compatible")
+            self.assertEqual(refreshed["default_model"], "gpt-5.5")
+            self.assertEqual(refreshed["default_effort"], "xhigh")
+            self.assertEqual(persisted["default_profile_id"], "openai-compatible")
+            self.assertEqual(persisted["default_model"], "gpt-5.5")
+            self.assertEqual(persisted["default_effort"], "xhigh")
+
     def test_project_service_reconcile_task_projection_repairs_project_thread_focus(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -482,12 +556,148 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             snapshot = tasks.snapshot()
             current = snapshot["current_task"]
+            self.assertEqual(snapshot["schema_version"], "astrabridge-task-state-v1")
             self.assertEqual(event["to_thread_id"], "thread-deepseek")
             self.assertEqual(current["active_provider_thread_id"], "thread-deepseek")
             self.assertEqual(len(current["provider_threads"]), 2)
+            self.assertEqual(event["transition_summary"]["to_provider"], "deepseek")
+            self.assertEqual(event["transition_summary"]["projection_mode"], "task_context_fresh_thread")
+            self.assertGreaterEqual(int(event["transition_summary"]["context_budget"]), 1000000)
             state_text = (workspace / ".astrabridge" / "tasks.json").read_text(encoding="utf-8")
             self.assertIn("multi_provider_handoff", state_text)
             self.assertNotIn("Authorization", state_text)
+
+    def test_task_conversation_merges_provider_threads_and_redacts_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            task = tasks.create_task(
+                "Scorecard task",
+                thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "max",
+                    "permission_mode": "auto",
+                },
+            )
+            tasks.record_provider_handoff(
+                from_thread_id="thread-deepseek",
+                to_thread_id="thread-kimi",
+                settings={
+                    "profile_id": "kimi-default",
+                    "provider_id": "kimi",
+                    "model": "kimi-k2.7-code",
+                    "reasoning_effort": "xhigh",
+                    "permission_mode": "auto",
+                },
+                reused_existing=False,
+            )
+            conversation = TaskConversationService(projects, tasks)
+            conversation.record_thread_snapshot(
+                {
+                    "id": "thread-deepseek",
+                    "name": "DeepSeek lane",
+                    "status": {"type": "idle"},
+                    "shellSettings": {"profile_id": "deepseek-default", "model": "deepseek-v4-pro"},
+                    "turns": [
+                        {
+                            "id": "turn-1",
+                            "startedAt": 1,
+                            "items": [
+                                {"type": "userMessage", "id": "user-1", "text": "Build a release readiness scorecard."},
+                                {"type": "agentMessage", "id": "agent-1", "text": "Created scorecard.py"},
+                            ],
+                        }
+                    ],
+                }
+            )
+            conversation.record_thread_snapshot(
+                {
+                    "id": "thread-kimi",
+                    "name": "Kimi lane",
+                    "status": {"type": "idle"},
+                    "shellSettings": {"profile_id": "kimi-default", "model": "kimi-k2.7-code"},
+                    "turns": [
+                        {
+                            "id": "turn-2",
+                            "startedAt": 2,
+                            "items": [
+                                {
+                                    "type": "agentMessage",
+                                    "id": "agent-2",
+                                    "text": "Reviewed scorecard.py and added a boundary test. Authorization: Bearer should-not-persist",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+
+            result = conversation.conversation(task_id=task["task_id"])
+            thread = result["thread"]
+
+            self.assertEqual(thread["id"], f"task:{task['task_id']}")
+            self.assertTrue(thread["isCompositeTaskThread"])
+            self.assertEqual(thread["active_provider_thread_id"], "thread-kimi")
+            self.assertEqual([turn["id"] for turn in thread["turns"]], ["turn-1", "turn-2"])
+            self.assertEqual(thread["turns"][0]["provider_id"], "deepseek")
+            self.assertEqual(thread["turns"][1]["provider_id"], "kimi")
+            self.assertEqual(thread["turns"][1]["items"][0]["provider_id"], "kimi")
+            transcript_text = (workspace / ".astrabridge" / "task_transcripts.json").read_text(encoding="utf-8")
+            self.assertIn("task_transcripts", str(result["transcript_path"]))
+            self.assertNotIn("should-not-persist", transcript_text)
+            self.assertNotIn("Authorization", transcript_text)
+
+    def test_project_context_pack_includes_task_conversation_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            task = tasks.create_task(
+                "Scorecard task",
+                thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "max",
+                    "permission_mode": "auto",
+                },
+            )
+            conversation = TaskConversationService(projects, tasks)
+            conversation.record_thread_snapshot(
+                {
+                    "id": "thread-deepseek",
+                    "turns": [
+                        {
+                            "id": "turn-1",
+                            "startedAt": 1,
+                            "items": [
+                                {"type": "userMessage", "id": "user-1", "text": "Build a release readiness scorecard."},
+                                {"type": "fileChange", "id": "file-1", "changes": [{"path": "scorecard.py"}]},
+                            ],
+                        }
+                    ],
+                }
+            )
+            context = ProjectContextService(projects, task_service=tasks, task_conversation_service=conversation)
+
+            pack = context.snapshot(thread_id="thread-deepseek")["context_pack"]
+
+            self.assertEqual(pack["task_conversation_digest"]["status"], "ok")
+            self.assertEqual(pack["task_conversation_digest"]["task_id"], task["task_id"])
+            self.assertIn("Task conversation digest", pack["text"])
+            self.assertIn("Build a release readiness scorecard", pack["text"])
+            self.assertIn("scorecard.py", pack["text"])
 
     def test_default_task_inherits_thread_context_goal_and_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -619,6 +829,36 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             self.assertEqual(provider_thread["model"], "kimi-k2.6")
             self.assertEqual(provider_thread["name"], "Kimi visual review")
+
+    def test_auto_injected_context_suffix_is_trimmed_from_visible_thread_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            shell_root = workspace / ".astrabridge"
+            (shell_root / "thread_cache.json").write_text(
+                json.dumps(
+                    {
+                        "by_id": {
+                            "thread-yunwu": {
+                                "name": "Please audit the current workspace --- AstraBridge Project Context Pack (auto-injected, secret-free)",
+                                "profile_id": "yunwu-default",
+                                "provider_id": "yunwu",
+                                "model": "gpt-5.5",
+                                "reasoning_effort": "high",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            task = TaskService(projects).ensure_default_task(thread_id="thread-yunwu")
+            provider_thread = task["provider_threads"][0]
+
+            self.assertEqual(provider_thread["name"], "Please audit the current workspace")
 
     def test_provider_thread_matching_normalizes_model_and_effort_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -805,6 +1045,58 @@ class AstraBridgeServiceTests(unittest.TestCase):
             task = tasks.current_task()
             missing = [item for item in task["provider_threads"] if item["thread_id"] == "thread-deepseek-missing"][0]
             self.assertEqual(missing["missing_reason"], "provider_handoff_target_missing")
+
+    def test_runtime_archive_thread_reprojects_visible_task_thread(self) -> None:
+        class FakeClient:
+            def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:
+                self.method = method
+                self.params = params
+                if method == "thread/archive":
+                    return {"ok": True}
+                raise AssertionError(f"Unexpected method {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Same task",
+                thread_id="thread-active",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            tasks.bind_thread(
+                thread_id="thread-fallback",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-flash",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+                make_active=False,
+            )
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id", "deepseek")}  # type: ignore[method-assign]
+            runtime._ensure_client = lambda runtime_status: FakeClient()  # type: ignore[method-assign]
+
+            result = runtime.archive_thread({"provider_id": "deepseek"}, "thread-active")
+
+            self.assertEqual(result["archived"], "thread-active")
+            current = tasks.current_task()
+            self.assertEqual(current["active_provider_thread_id"], "thread-fallback")
+            self.assertEqual(projects.current_project["current_thread_id"], "thread-fallback")
+            archived = [item for item in current["provider_threads"] if item["thread_id"] == "thread-active"][0]
+            self.assertEqual(archived["missing_reason"], "thread_archived")
+            self.assertTrue(any(event.get("type") == "thread_archived" for event in runtime._events))
 
     def test_runtime_recovers_when_source_provider_thread_is_missing(self) -> None:
         class FakeClient:
@@ -1162,6 +1454,100 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(current["active_provider_thread_id"], "thread-deepseek")
             self.assertEqual(projects.current_project["current_thread_id"], "thread-deepseek")
 
+    def test_task_service_reconcile_after_project_reload_restores_current_task_from_visible_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            first = tasks.create_task(
+                "DeepSeek task",
+                thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            second = tasks.create_task(
+                "Kimi task",
+                thread_id="thread-kimi",
+                settings={
+                    "profile_id": "kimi-default",
+                    "provider_id": "kimi",
+                    "model": "kimi-k2.6",
+                    "reasoning_effort": "xhigh",
+                    "permission_mode": "auto",
+                },
+            )
+            state_path = workspace / ".astrabridge" / "tasks.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["current_task_id"] = None
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            projects.update_project({"current_task_id": None, "current_thread_id": "thread-deepseek"})
+
+            reconciled = tasks.reconcile_after_project_reload(preferred_thread_id="thread-deepseek")
+
+            self.assertEqual(reconciled["task_id"], first["task_id"])
+            self.assertEqual(projects.current_project["current_task_id"], first["task_id"])
+            self.assertEqual(projects.current_project["current_thread_id"], "thread-deepseek")
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["current_task_id"], first["task_id"])
+            self.assertNotEqual(second["task_id"], first["task_id"])
+
+    def test_task_service_reconcile_after_project_reload_dedupes_checkpoint_and_context_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            task = tasks.create_task(
+                "DeepSeek task",
+                thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            state_path = workspace / ".astrabridge" / "tasks.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["tasks"][0]["checkpoint_refs"] = [
+                {"save_id": "save-1", "description": "A"},
+                {"save_id": "save-1", "description": "A duplicate"},
+                {"save_id": "save-2", "description": "B"},
+            ]
+            state["tasks"][0]["context_pack_refs"] = [
+                {"pack_type": "project", "path": "a.json", "generated_at": "1"},
+                {"pack_type": "project", "path": "a.json", "generated_at": "2"},
+            ]
+            state["tasks"][0]["asset_context_refs"] = [
+                {"pack_type": "asset", "path": "asset.json", "generated_at": "1"},
+                {"pack_type": "asset", "path": "asset.json", "generated_at": "2"},
+            ]
+            state["tasks"][0]["fork_threads"] = [
+                {"thread_id": "fork-1"},
+                {"thread_id": "fork-1"},
+                {"thread_id": "fork-2"},
+            ]
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            projects.update_project({"current_task_id": task["task_id"], "current_thread_id": "thread-deepseek"})
+
+            reconciled = tasks.reconcile_after_project_reload(preferred_thread_id="thread-deepseek")
+
+            self.assertEqual([item["save_id"] for item in reconciled["checkpoint_refs"]], ["save-1", "save-2"])
+            self.assertEqual(len(reconciled["context_pack_refs"]), 1)
+            self.assertEqual(len(reconciled["asset_context_refs"]), 1)
+            self.assertEqual([item["thread_id"] for item in reconciled["fork_threads"]], ["fork-1", "fork-2"])
+
     def test_runtime_ensure_client_restarts_running_client_when_signature_changes(self) -> None:
         class FakeRuntimeConfig:
             def prepare_profile(self, profile: dict[str, object], *, require_secret: bool) -> dict[str, object]:  # noqa: ARG002
@@ -1275,6 +1661,80 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(result["threads"][0]["id"], "thread-kimi")
             self.assertTrue(
                 any(event.get("type") == "threads_list_deferred_active_turn" for event in runtime.list_events()["events"])
+            )
+
+    def test_runtime_thread_list_uses_active_runtime_during_thread_create_mutation(self) -> None:
+        class FakeRuntimeConfig:
+            def __init__(self) -> None:
+                self.prepare_calls = 0
+
+            def prepare_profile(self, profile: dict[str, object], *, require_secret: bool) -> dict[str, object]:  # noqa: ARG002
+                self.prepare_calls += 1
+                return {"profile_id": profile.get("profile_id"), "provider_id": profile.get("provider_id")}
+
+            def runtime_signature(self, status: dict[str, object]) -> tuple[object, ...]:
+                return (status.get("provider_id"),)
+
+            def status(self) -> dict[str, object]:
+                return {
+                    "configured": True,
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "provider_name": "Qwen / DashScope",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "model": "qwen3.7-plus",
+                    "reasoning_effort": "high",
+                    "wire_api": "responses",
+                    "env_key": "DASHSCOPE_API_KEY",
+                    "secret_loaded": True,
+                    "proxy_mode": "direct",
+                    "proxy_url": "",
+                    "secret_source": "environment",
+                    "secret_fingerprint": "fingerprint",
+                }
+
+        class ExistingClient:
+            def __init__(self) -> None:
+                self.closed = False
+                self.requests: list[tuple[str, dict[str, object]]] = []
+
+            def is_running(self) -> bool:
+                return not self.closed
+
+            def close(self) -> None:
+                self.closed = True
+
+            def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:  # noqa: ARG002
+                self.requests.append((method, params))
+                if method == "thread/list":
+                    return {"data": [{"id": "thread-qwen", "name": "Qwen active thread", "updatedAt": "2026-06-21T20:00:00+08:00"}]}
+                raise AssertionError(f"Unexpected method {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime_config = FakeRuntimeConfig()
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                runtime_config=runtime_config,  # type: ignore[arg-type]
+            )
+            existing = ExistingClient()
+            runtime._client = existing  # type: ignore[assignment]
+            runtime._runtime_signature = ("qwen",)
+            runtime._runtime_thread_start_in_progress = True
+
+            result = runtime.list_threads({"profile_id": "openai-compatible", "provider_id": "openai"})
+
+            self.assertFalse(existing.closed)
+            self.assertEqual(runtime_config.prepare_calls, 0)
+            self.assertEqual(result["threads"][0]["id"], "thread-qwen")
+            self.assertEqual(existing.requests[0][0], "thread/list")
+            self.assertTrue(
+                any(event.get("type") == "runtime_switch_deferred_active_mutation" for event in runtime.list_events()["events"])
             )
 
     def test_runtime_request_client_retries_one_transport_disconnect(self) -> None:
@@ -1634,6 +2094,38 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(result["turn"]["synthetic"])
             self.assertIn("thread/start", [method for method, _params in client.requests])
             self.assertEqual(runtime.list_events()["events"][-1]["type"], "turn_start_background_pending")
+
+    def test_load_secret_updates_project_runtime_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            key_file = root / "dashscope.txt"
+            key_file.write_text("sk-test-dashscope-demo-key", encoding="utf-8")
+            projects = ProjectService(root / "recent.json")
+            project = projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+
+            status = runtime.load_secret(
+                {
+                    "profile_id": "qwen-default",
+                    "label": "Qwen / DashScope",
+                    "provider_id": "qwen",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "model": "qwen3.7-plus",
+                    "reasoning_effort": "high",
+                    "wire_api": "responses",
+                    "env_key": "DASHSCOPE_API_KEY",
+                    "auth_mode": "env_ref",
+                },
+                key_file_path=str(key_file),
+            )
+
+            self.assertTrue(status["secret_loaded"])
+            updated = projects.current_project or {}
+            self.assertEqual(updated.get("default_profile_id"), "qwen-default")
+            self.assertEqual(updated.get("default_model"), "qwen3.7-plus")
+            self.assertEqual(updated.get("default_effort"), "high")
 
     def test_start_turn_recovers_when_app_server_reports_thread_not_loaded(self) -> None:
         class FakeClient:
@@ -2131,6 +2623,64 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(items[1]["lcrVerifiedEvidence"]["server"], "lcr_web")
             self.assertIn("tool-event verified", items[1]["lcrVerifiedEvidence"]["label"])
 
+    def test_runtime_read_thread_records_task_conversation_snapshot(self) -> None:
+        class FakeClient:
+            def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:
+                if method == "thread/read":
+                    return {
+                        "thread": {
+                            "id": "thread-deepseek",
+                            "name": "DeepSeek lane",
+                            "status": {"type": "idle"},
+                            "turns": [
+                                {
+                                    "id": "turn-1",
+                                    "startedAt": 1,
+                                    "items": [
+                                        {"type": "userMessage", "id": "user-1", "text": "Keep the same visible chat."},
+                                        {"type": "agentMessage", "id": "agent-1", "text": "Done."},
+                                    ],
+                                }
+                            ],
+                        }
+                    }
+                raise AssertionError(f"unexpected request: {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            task = tasks.create_task(
+                "Visible task",
+                thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "max",
+                    "permission_mode": "auto",
+                },
+            )
+            conversation = TaskConversationService(projects, tasks)
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                task_service=tasks,
+                task_conversation=conversation,
+            )
+            runtime._ensure_client = lambda _status: FakeClient()  # type: ignore[method-assign]
+            runtime._prepare_runtime = lambda _profile, require_secret=False: {"configured": True, "provider_id": "deepseek"}  # type: ignore[method-assign]
+
+            runtime.read_thread({"profile_id": "deepseek-default", "provider_id": "deepseek"}, "thread-deepseek")
+            composite = conversation.conversation(task_id=task["task_id"])["thread"]
+
+            self.assertEqual(composite["id"], f"task:{task['task_id']}")
+            self.assertEqual(composite["turns"][0]["provider_id"], "deepseek")
+            self.assertEqual(composite["turns"][0]["items"][0]["provider_id"], "deepseek")
+
     def test_runtime_read_thread_decorates_existing_dynamic_tool_evidence(self) -> None:
         class FakeClient:
             def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:
@@ -2192,6 +2742,176 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(evidence["server"], "lcr_browser")
             self.assertIn("D:/workspace/.astrabridge/captures/map.png", evidence["paths"])
             self.assertTrue(any("browser smoke map smoke pass" in line for line in evidence["summary"]))
+
+    def test_runtime_read_thread_normalizes_stale_system_error_after_completed_turn(self) -> None:
+        class FakeClient:
+            def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:
+                if method == "thread/read":
+                    return {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "systemError"},
+                            "turns": [
+                                {
+                                    "id": "turn-1",
+                                    "status": "completed",
+                                    "error": None,
+                                    "items": [
+                                        {"type": "userMessage", "id": "user-1", "content": []},
+                                        {"type": "agentMessage", "id": "assistant-1", "text": "done"},
+                                    ],
+                                }
+                            ],
+                        }
+                    }
+                raise AssertionError(f"unexpected request: {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            runtime._ensure_client = lambda _status: FakeClient()  # type: ignore[method-assign]
+            runtime._prepare_runtime = lambda _profile, require_secret=False: {"configured": True}  # type: ignore[method-assign]
+
+            result = runtime.read_thread({"profile_id": "p"}, "thread-1")
+
+            self.assertEqual(result["thread"]["status"]["type"], "idle")
+            self.assertTrue(result["thread"]["status"]["stale_error_normalized"])
+            self.assertEqual(result["thread"]["status"]["stale_error_type"], "systemError")
+
+            cache = json.loads((projects.require_shell_state_root() / "thread_cache.json").read_text(encoding="utf-8"))
+            self.assertEqual(cache["by_id"]["thread-1"]["status"]["type"], "idle")
+            self.assertTrue(cache["by_id"]["thread-1"]["status"]["stale_error_normalized"])
+            self.assertEqual(cache["by_id"]["thread-1"]["status"]["stale_error_type"], "systemError")
+
+    def test_runtime_read_thread_normalizes_stale_not_loaded_after_completed_turn(self) -> None:
+        class FakeClient:
+            def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:
+                if method == "thread/read":
+                    return {
+                        "thread": {
+                            "id": "thread-1",
+                            "status": {"type": "notLoaded"},
+                            "turns": [
+                                {
+                                    "id": "turn-1",
+                                    "status": "completed",
+                                    "error": None,
+                                    "items": [
+                                        {"type": "userMessage", "id": "user-1", "content": []},
+                                        {"type": "agentMessage", "id": "assistant-1", "text": "done"},
+                                    ],
+                                }
+                            ],
+                        }
+                    }
+                raise AssertionError(f"unexpected request: {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            runtime._ensure_client = lambda _status: FakeClient()  # type: ignore[method-assign]
+            runtime._prepare_runtime = lambda _profile, require_secret=False: {"configured": True}  # type: ignore[method-assign]
+
+            result = runtime.read_thread({"profile_id": "p"}, "thread-1")
+
+            self.assertEqual(result["thread"]["status"]["type"], "idle")
+            self.assertTrue(result["thread"]["status"]["stale_error_normalized"])
+            self.assertEqual(result["thread"]["status"]["stale_error_type"], "notLoaded")
+
+    def test_runtime_list_threads_overlays_cached_normalized_status_for_stale_system_error(self) -> None:
+        class FakeClient:
+            def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:
+                if method == "thread/list":
+                    return {
+                        "data": [
+                            {
+                                "id": "thread-1",
+                                "name": "Demo thread",
+                                "status": {"type": "systemError"},
+                                "turns": [],
+                            }
+                        ]
+                    }
+                raise AssertionError(f"unexpected request: {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            runtime._ensure_client = lambda _status: FakeClient()  # type: ignore[method-assign]
+            runtime._runtime_status_for_profile = lambda _profile, require_secret=False: {"configured": True}  # type: ignore[method-assign]
+            runtime._refresh_client_if_runtime_changed = lambda _status: None  # type: ignore[method-assign]
+            runtime._cache_thread_entry(
+                "thread-1",
+                {
+                    "name": "Demo thread",
+                    "status": {
+                        "type": "idle",
+                        "stale_error_type": "systemError",
+                        "stale_error_normalized": True,
+                    },
+                },
+            )
+
+            result = runtime.list_threads({"profile_id": "p"})
+
+            self.assertEqual(result["threads"][0]["status"]["type"], "idle")
+            self.assertTrue(result["threads"][0]["status"]["stale_error_normalized"])
+
+    def test_runtime_list_threads_persists_normalized_status_for_cached_fallbacks(self) -> None:
+        class FakeClient:
+            def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:
+                if method == "thread/list":
+                    return {
+                        "data": [
+                            {
+                                "id": "thread-1",
+                                "name": "Demo thread",
+                                "status": {
+                                    "type": "idle",
+                                    "stale_error_type": "systemError",
+                                    "stale_error_normalized": True,
+                                },
+                                "turns": [],
+                            }
+                        ]
+                    }
+                raise AssertionError(f"unexpected request: {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            runtime._ensure_client = lambda _status: FakeClient()  # type: ignore[method-assign]
+            runtime._runtime_status_for_profile = lambda _profile, require_secret=False: {"configured": True}  # type: ignore[method-assign]
+            runtime._refresh_client_if_runtime_changed = lambda _status: None  # type: ignore[method-assign]
+
+            result = runtime.list_threads({"profile_id": "p"})
+
+            self.assertEqual(result["threads"][0]["status"]["type"], "idle")
+            cache = json.loads((projects.require_shell_state_root() / "thread_cache.json").read_text(encoding="utf-8"))
+            self.assertEqual(cache["by_id"]["thread-1"]["status"]["type"], "idle")
+            self.assertTrue(cache["by_id"]["thread-1"]["status"]["stale_error_normalized"])
+
+            fallback = runtime._cached_thread("thread-1", warning="boom")  # type: ignore[attr-defined]
+
+            assert fallback is not None
+            self.assertEqual(fallback["status"]["type"], "idle")
+            self.assertTrue(fallback["status"]["stale_error_normalized"])
 
     def test_runtime_read_thread_marks_completed_yunwu_image_item_verified_from_paths(self) -> None:
         class FakeClient:
@@ -3525,6 +4245,44 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 os.environ[DEFAULT_RUNTIME_WSL_DISTRO_ENV] = previous_distro
             project_service_module._DEFAULT_RUNTIME_PREFS_CACHE = None
 
+    def test_open_project_repairs_legacy_runtime_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            project_file = root / "demo.abproj"
+            project_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "astrabridge-project-v1",
+                        "project_id": "demo",
+                        "name": "Demo",
+                        "project_file": str(project_file),
+                        "workspace_root": str(workspace),
+                        "entry_mode": "existing",
+                        "default_profile_id": "yunwu-gpt-55-xhigh",
+                        "default_model": "deepseek/deepseek-v4-pro",
+                        "default_effort": "max",
+                        "current_thread_id": None,
+                        "recent_threads": [],
+                        "ui_preferences": {},
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "updated_at": "2026-01-01T00:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            project = ProjectService(root / "recent.json").open_project(project_file)
+
+            self.assertEqual(project["default_profile_id"], "openai-compatible")
+            self.assertEqual(project["default_model"], "gpt-5.5")
+            self.assertEqual(project["default_effort"], "xhigh")
+            saved = json.loads(project_file.read_text(encoding="utf-8"))
+            self.assertEqual(saved["default_profile_id"], "openai-compatible")
+            self.assertEqual(saved["default_model"], "gpt-5.5")
+            self.assertEqual(saved["default_effort"], "xhigh")
+
     def test_open_old_project_formats_are_rejected_without_migration(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -3702,7 +4460,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     session_key="unit_secret_kimi_test_value_123456",
                 )
 
-                catalog = json.loads((root / "embedded_codex_home" / "models" / "lcr-models.json").read_text(encoding="utf-8"))
+                catalog = json.loads((root / "embedded_codex_home" / "models" / "astrabridge-models.json").read_text(encoding="utf-8"))
                 model_info = catalog["models"][0]
                 self.assertEqual(model_info["slug"], "kimi/kimi-k2.6")
                 self.assertEqual(model_info["input_modalities"], ["text", "image"])
@@ -4710,6 +5468,47 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("Do not call MCP resources/read", text)
             self.assertFalse(any(item.get("name") == "asset_registry.json" for item in mentions))
 
+    def test_asset_registry_snapshot_rewrites_legacy_schema_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "projects.json")
+            projects.create_project("Dogfood", root / "dogfood.abproj", workspace_root=workspace, entry_mode="existing")
+            registry_root = workspace / ".astrabridge" / "assets"
+            registry_root.mkdir(parents=True)
+            registry_path = registry_root / "asset_registry.json"
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "lcr-asset-registry-v1",
+                        "assets": [
+                            {
+                                "asset_id": "sprite-1",
+                                "stage": "generated",
+                                "role": "yellow_key",
+                                "status": "generated",
+                                "quality_status": "passed",
+                                "integration_status": "not_promoted",
+                                "source_path": ".astrabridge/assets/generated/sprite-1.png",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = AssetRegistryService(projects).snapshot(rebuild_if_missing=False)
+            saved = json.loads(registry_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(snapshot["registry"]["schema_version"], "astrabridge-asset-registry-v1")
+            self.assertEqual(snapshot["context_pack"]["schema_version"], "astrabridge-asset-context-pack-v1")
+            self.assertEqual(saved["schema_version"], "astrabridge-asset-registry-v1")
+            self.assertEqual(
+                json.loads((registry_root / "asset_context_pack.json").read_text(encoding="utf-8"))["schema_version"],
+                "astrabridge-asset-context-pack-v1",
+            )
+
     def test_asset_and_project_context_snapshots_record_task_context_refs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -5215,6 +6014,45 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("Selected thread availability: missing (startup_thread_missing)", pack_text)
             self.assertEqual(pack["task"]["task_id"], task["task_id"])
 
+    def test_project_context_pack_includes_fork_thread_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "projects.json")
+            projects.create_project("Context Project", root / "context.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Same task",
+                thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            tasks.bind_thread(
+                thread_id="thread-fork-1",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                    "name": "Forked branch",
+                },
+                role="fork",
+                make_active=False,
+            )
+
+            pack = ProjectContextService(projects, task_service=tasks).snapshot(thread_id="thread-deepseek")["context_pack"]
+
+            self.assertTrue(pack["task"]["fork_threads"])
+            self.assertEqual(pack["task"]["fork_threads"][0]["thread_id"], "thread-fork-1")
+            self.assertEqual(pack["task"]["fork_threads"][0]["role"], "fork")
+
     def test_project_context_prefers_task_aligned_dogfood_summary_over_placeholder_milestone(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -5448,6 +6286,71 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("Context pack JSON paths are orientation references only", text)
             self.assertFalse(any(item.get("name") == "project_context_pack.json" for item in mentions))
 
+    def test_project_context_state_rewrites_legacy_schema_and_emits_astrabridge_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "projects.json")
+            projects.create_project("Generic Project", root / "generic.abproj", workspace_root=workspace, entry_mode="existing")
+            state_root = workspace / ".astrabridge"
+            state_root.mkdir(parents=True, exist_ok=True)
+            (state_root / "project_context_state.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "lcr-project-context-pack-v1",
+                        "threads": {
+                            "thread-1": {
+                                "thread_id": "thread-1",
+                                "name": "First",
+                                "model": "deepseek-v4-pro",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            service = ProjectContextService(projects)
+            state = service._state()  # noqa: SLF001
+            snapshot = service.snapshot(thread_id="thread-1")
+
+            self.assertEqual(state["schema_version"], "astrabridge-project-context-state-v1")
+            self.assertEqual(snapshot["context_pack"]["schema_version"], "astrabridge-project-context-pack-v1")
+            self.assertEqual(
+                json.loads((state_root / "project_context_pack.json").read_text(encoding="utf-8"))["schema_version"],
+                "astrabridge-project-context-pack-v1",
+            )
+            self.assertEqual(
+                json.loads((state_root / "project_context_state.json").read_text(encoding="utf-8"))["schema_version"],
+                "astrabridge-project-context-state-v1",
+            )
+
+    def test_project_context_pack_sanitizes_thread_names_with_auto_injected_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "projects.json")
+            projects.create_project("Generic Project", root / "generic.abproj", workspace_root=workspace, entry_mode="existing")
+            context = ProjectContextService(projects)
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), project_context=context)
+            runtime._cache_thread_entry(  # noqa: SLF001
+                "thread-1",
+                {
+                    "name": "Please audit the current workspace --- AstraBridge Project Context Pack (auto-injected, secret-free)",
+                    "provider_id": "yunwu",
+                    "model": "gpt-5.5",
+                },
+            )
+            projects.switch_thread("thread-1")
+
+            pack = context.snapshot(thread_id="thread-1")["context_pack"]
+            text = str(pack["text"] or "")
+
+            self.assertIn("Selected thread settings: name=Please audit the current workspace", text)
+            self.assertNotIn("Selected thread settings: name=Please audit the current workspace --- AstraBridge Project Context Pack", text)
+
     def test_dogfood_run_service_project_local_and_secret_guarded(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -5591,6 +6494,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             after_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(workspace), text=True).strip()
             self.assertEqual(before_head, after_head)
+            self.assertEqual(save["save"]["schema_version"], "astrabridge-checkpoint-v1")
             self.assertTrue(save["save"]["git"]["is_repo"])
             self.assertTrue((workspace / ".astrabridge" / "saves" / save["save"]["save_id"] / "git.diff").is_file())
             self.assertIn("Checkpoint thread", save["save"]["description"])
@@ -5890,7 +6794,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             runtime = RuntimeService(project, ModalService(project.require_shell_state_root))
             config_text = "\n".join(
                 [
-                    'model_catalog_json = "C:\\\\Users\\\\cyz19\\\\AppData\\\\Local\\\\LCR\\\\cx\\\\models\\\\lcr-models.json"',
+                    'model_catalog_json = "C:\\\\Users\\\\cyz19\\\\AppData\\\\Local\\\\LCR\\\\cx\\\\models\\\\astrabridge-models.json"',
                     'base_url = "http://127.0.0.1:8787/v1"',
                     "",
                     "[mcp_servers.yunwu_image]",
@@ -5911,7 +6815,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 sidecar_link_wsl="/home/user/.local/share/astrabridge/sidecar-src",
             )
 
-            self.assertIn('model_catalog_json = "/home/user/.local/share/astrabridge/codex-home/models/lcr-models.json"', rewritten)
+            self.assertIn('model_catalog_json = "/home/user/.local/share/astrabridge/codex-home/models/astrabridge-models.json"', rewritten)
             self.assertIn('base_url = "http://10.255.255.254:8787/v1"', rewritten)
             self.assertIn('command = "python3"', rewritten)
             self.assertIn('"/home/user/.local/share/astrabridge/sidecar-src/astrabridge_sidecar/yunwu_image_mcp_server.py"', rewritten)
@@ -6085,7 +6989,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 self.assertIn("model_catalog_json =", config_text)
                 self.assertIn("model_context_window = 1000000", config_text)
                 self.assertIn("model_auto_compact_token_limit = 4096", config_text)
-                model_catalog = json.loads((root / "embedded_codex_home" / "models" / "lcr-models.json").read_text(encoding="utf-8"))
+                model_catalog = json.loads((root / "embedded_codex_home" / "models" / "astrabridge-models.json").read_text(encoding="utf-8"))
                 model_info = model_catalog["models"][0]
                 self.assertEqual(model_info["slug"], "deepseek-verify/deepseek-v4-pro")
                 self.assertEqual(model_info["input_modalities"], ["text"])
@@ -6314,8 +7218,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             runtime_config = RuntimeConfigService(codex_home=codex_home, mcp_config=mcp_config)
             runtime = RuntimeService(project, ModalService(project.require_shell_state_root), runtime_config=runtime_config)
             (codex_home / "models").mkdir(parents=True)
-            (codex_home / "config.toml").write_text('model_catalog_json = "C:\\\\tmp\\\\models\\\\lcr-models.json"\n', encoding="utf-8")
-            (codex_home / "models" / "lcr-models.json").write_text('{"models":[]}', encoding="utf-8")
+            (codex_home / "config.toml").write_text('model_catalog_json = "C:\\\\tmp\\\\models\\\\astrabridge-models.json"\n', encoding="utf-8")
+            (codex_home / "models" / "astrabridge-models.json").write_text('{"models":[]}', encoding="utf-8")
             original_router_token = os.environ.get("CODEX_ROUTER_API_KEY")
             original_yunwu_key = os.environ.get("YUNWU_API_KEY")
             os.environ["CODEX_ROUTER_API_KEY"] = "router-token-for-wsl-test"
@@ -6463,32 +7367,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertNotIn("Bearer ", combined)
             self.assertNotIn("unit_secret_", combined)
 
-    def test_official_codex_config_apply_and_restore(self) -> None:
-        original = os.environ.get("ASTRABRIDGE_OFFICIAL_CODEX_HOME")
-        try:
-            with tempfile.TemporaryDirectory() as temp:
-                root = Path(temp)
-                os.environ["ASTRABRIDGE_OFFICIAL_CODEX_HOME"] = str(root / ".codex")
-                profiles = ProfileService(root / "profiles.json")
-                service = OfficialCodexService(profiles, root / "backups")
-                status = service.apply_router_config(router_base_url="http://127.0.0.1:8787/v1", default_model="yunwu/gpt-5.5")
-                config_text = (root / ".codex" / "config.toml").read_text(encoding="utf-8")
-                self.assertTrue(status["router_configured"])
-                self.assertIn('[model_providers.router]', config_text)
-                self.assertIn('env_key = "CODEX_ROUTER_API_KEY"', config_text)
-
-                (root / ".codex" / "config.toml").write_text('model = "custom"\n', encoding="utf-8")
-                status = service.apply_router_config(router_base_url="http://127.0.0.1:8787/v1", default_model="yunwu/gpt-5.5")
-                self.assertGreaterEqual(status["backup_count"], 1)
-                restored = service.restore_latest_backup()
-                restored_text = (root / ".codex" / "config.toml").read_text(encoding="utf-8")
-                self.assertEqual(restored["backup_count"], status["backup_count"])
-                self.assertIn('model = "custom"', restored_text)
-        finally:
-            if original is None:
-                os.environ.pop("ASTRABRIDGE_OFFICIAL_CODEX_HOME", None)
-            else:
-                os.environ["ASTRABRIDGE_OFFICIAL_CODEX_HOME"] = original
+    def test_official_codex_product_path_is_disabled(self) -> None:
+        status = disabled_status()
+        self.assertTrue(status["disabled"])
+        self.assertEqual(status["error"], OFFICIAL_CODEX_DISABLED_ERROR)
+        self.assertFalse(status["router_configured"])
+        self.assertFalse(status["managed_by_app"])
+        self.assertEqual(status["backup_count"], 0)
+        self.assertIn("does not patch official Codex account config", status["message"])
 
     def test_router_service_models_and_responses_passthrough(self) -> None:
         class UpstreamHandler(BaseHTTPRequestHandler):
@@ -6625,6 +7511,55 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 os.environ[ROUTER_ENV_KEY] = original_router_token
 
     def test_isolation_audit_reports_lcr_boundaries_without_secret_values(self) -> None:
+        original_override = os.environ.get("ASTRABRIDGE_CODEX_HOME")
+        original_appdata = os.environ.get("ASTRABRIDGE_APPDATA")
+        try:
+            os.environ.pop("ASTRABRIDGE_CODEX_HOME", None)
+            os.environ.pop("ASTRABRIDGE_APPDATA", None)
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                project_service = ProjectService(root / "projects.json")
+                project = project_service.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+                codex_home = root / "isolated-codex-home"
+                codex_home.mkdir()
+                (codex_home / "config.toml").write_text('model = "deepseek/deepseek-v4-pro"\n', encoding="utf-8")
+                official_home = root / ".codex"
+                official_home.mkdir()
+                official_config = official_home / "config.toml"
+                official_config.write_text('model = "gpt-5"\n', encoding="utf-8")
+                audit = IsolationAuditService().snapshot(
+                    current_project=project,
+                    runtime_environment={
+                        "running": False,
+                        "codex_cli": "codex",
+                        "execution_host": "windows",
+                        "runtime_config": {"codex_home": str(codex_home)},
+                    },
+                    router_status={"listen_port": 8787, "base_url": "http://127.0.0.1:8787/v1"},
+                    official_codex_status={
+                        "config_path": str(official_config),
+                        "exists": True,
+                        "managed_by_app": False,
+                        "router_configured": False,
+                    },
+                    sidecar_port=8790,
+                )
+                self.assertTrue(audit["ok"])
+                self.assertEqual(audit["paths"]["astrabridge_state"], str(workspace / ".astrabridge"))
+                self.assertIsNotNone(audit["official_codex"]["config_sha256"])
+        finally:
+            if original_override is None:
+                os.environ.pop("ASTRABRIDGE_CODEX_HOME", None)
+            else:
+                os.environ["ASTRABRIDGE_CODEX_HOME"] = original_override
+            if original_appdata is None:
+                os.environ.pop("ASTRABRIDGE_APPDATA", None)
+            else:
+                os.environ["ASTRABRIDGE_APPDATA"] = original_appdata
+
+    def test_isolation_audit_ignores_safe_env_key_and_token_limit_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace = root / "workspace"
@@ -6633,11 +7568,13 @@ class AstraBridgeServiceTests(unittest.TestCase):
             project = project_service.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
             codex_home = root / "isolated-codex-home"
             codex_home.mkdir()
-            (codex_home / "config.toml").write_text('model = "deepseek/deepseek-v4-pro"\n', encoding="utf-8")
-            official_home = root / ".codex"
-            official_home.mkdir()
-            official_config = official_home / "config.toml"
-            official_config.write_text('model = "gpt-5"\n', encoding="utf-8")
+            (codex_home / "config.toml").write_text(
+                'model_auto_compact_token_limit = 4096\n'
+                'tool_output_token_limit = 12000\n'
+                'env_key = "YUNWU_API_KEY"\n'
+                'router_env_key = "CODEX_ROUTER_API_KEY"\n',
+                encoding="utf-8",
+            )
             audit = IsolationAuditService().snapshot(
                 current_project=project,
                 runtime_environment={
@@ -6648,16 +7585,82 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 },
                 router_status={"listen_port": 8787, "base_url": "http://127.0.0.1:8787/v1"},
                 official_codex_status={
-                    "config_path": str(official_config),
-                    "exists": True,
+                    "config_path": str(root / ".codex" / "config.toml"),
+                    "exists": False,
                     "managed_by_app": False,
                     "router_configured": False,
                 },
                 sidecar_port=8790,
             )
-            self.assertTrue(audit["ok"])
-            self.assertEqual(audit["paths"]["astrabridge_state"], str(workspace / ".astrabridge"))
-            self.assertIsNotNone(audit["official_codex"]["config_sha256"])
+            checks = {item["name"]: item for item in audit["checks"]}
+            self.assertTrue(checks["isolated_codex_config_has_no_secret"]["ok"])
+
+    def test_isolation_audit_requires_expected_codex_home_override_match(self) -> None:
+        original_override = os.environ.get("ASTRABRIDGE_CODEX_HOME")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                project_service = ProjectService(root / "projects.json")
+                project = project_service.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+                expected_home = root / "expected-codex-home"
+                expected_home.mkdir()
+                (expected_home / "config.toml").write_text('model = "gpt-5.5"\n', encoding="utf-8")
+                actual_home = root / "actual-codex-home"
+                actual_home.mkdir()
+                (actual_home / "config.toml").write_text('model = "gpt-5.5"\n', encoding="utf-8")
+                os.environ["ASTRABRIDGE_CODEX_HOME"] = str(expected_home)
+
+                mismatch_audit = IsolationAuditService().snapshot(
+                    current_project=project,
+                    runtime_environment={
+                        "running": False,
+                        "codex_cli": "codex",
+                        "execution_host": "windows",
+                        "runtime_config": {"codex_home": str(actual_home)},
+                    },
+                    router_status={"listen_port": 8787, "base_url": "http://127.0.0.1:8787/v1"},
+                    official_codex_status={
+                        "config_path": str(root / ".codex" / "config.toml"),
+                        "exists": False,
+                        "managed_by_app": False,
+                        "router_configured": False,
+                    },
+                    sidecar_port=8790,
+                )
+                mismatch_checks = {item["name"]: item for item in mismatch_audit["checks"]}
+                self.assertFalse(mismatch_audit["ok"])
+                self.assertFalse(mismatch_checks["isolated_codex_home_matches_expected_override"]["ok"])
+                self.assertEqual(mismatch_checks["isolated_codex_home_matches_expected_override"]["detail"]["expected"], str(expected_home.resolve()))
+                self.assertEqual(mismatch_checks["isolated_codex_home_matches_expected_override"]["detail"]["actual"], str(actual_home.resolve()))
+
+                matching_audit = IsolationAuditService().snapshot(
+                    current_project=project,
+                    runtime_environment={
+                        "running": False,
+                        "codex_cli": "codex",
+                        "execution_host": "windows",
+                        "runtime_config": {"codex_home": str(expected_home)},
+                    },
+                    router_status={"listen_port": 8787, "base_url": "http://127.0.0.1:8787/v1"},
+                    official_codex_status={
+                        "config_path": str(root / ".codex" / "config.toml"),
+                        "exists": False,
+                        "managed_by_app": False,
+                        "router_configured": False,
+                    },
+                    sidecar_port=8790,
+                )
+                matching_checks = {item["name"]: item for item in matching_audit["checks"]}
+                self.assertTrue(matching_audit["ok"])
+                self.assertTrue(matching_checks["isolated_codex_home_matches_expected_override"]["ok"])
+                self.assertEqual(matching_audit["paths"]["expected_codex_home"], str(expected_home.resolve()))
+        finally:
+            if original_override is None:
+                os.environ.pop("ASTRABRIDGE_CODEX_HOME", None)
+            else:
+                os.environ["ASTRABRIDGE_CODEX_HOME"] = original_override
 
     def test_qwen_adapter_maps_effort_to_enable_thinking(self) -> None:
         class UpstreamHandler(BaseHTTPRequestHandler):
@@ -7331,6 +8334,256 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(tool["role"], "tool")
             self.assertEqual(tool["tool_call_id"], "call_after_compact")
 
+    def test_chat_adapter_projects_review_and_compaction_transitions_as_assistant_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            profiles.upsert_profile(
+                {
+                    "profile_id": "deepseek-router",
+                    "label": "DeepSeek Router",
+                    "type": "custom_provider",
+                    "provider_id": "deepseek",
+                    "base_url": "https://api.deepseek.com",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "xhigh",
+                    "wire_api": "chat",
+                    "env_key": "TEST_DEEPSEEK_PROVIDER_KEY",
+                    "auth_mode": "env_ref",
+                    "proxy_mode": "direct",
+                    "proxy_url": "",
+                }
+            )
+            router = RouterService(profiles, port=0)
+            preview = router.preview_payload(
+                {
+                    "model": "deepseek/deepseek-v4-pro",
+                    "input": [
+                        {"type": "contextCompaction", "id": "compact-1"},
+                        {"type": "enteredReviewMode", "id": "review-1", "review": "Inspect the latest diff for regressions."},
+                        {"type": "exitedReviewMode", "id": "review-2", "review": "Review complete; continue coding."},
+                    ],
+                    "stream": False,
+                }
+            )
+
+            messages = preview["upstream_payload"]["messages"]
+            self.assertEqual([message["role"] for message in messages], ["assistant", "assistant", "assistant"])
+            self.assertIn("[context compaction]", messages[0]["content"])
+            self.assertIn("[review mode entered]", messages[1]["content"])
+            self.assertIn("latest diff", messages[1]["content"])
+            self.assertIn("[review mode exited]", messages[2]["content"])
+
+    def test_chat_adapter_projects_collab_spawn_as_fork_transition_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            profiles.upsert_profile(
+                {
+                    "profile_id": "deepseek-router",
+                    "label": "DeepSeek Router",
+                    "type": "custom_provider",
+                    "provider_id": "deepseek",
+                    "base_url": "https://api.deepseek.com",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "xhigh",
+                    "wire_api": "chat",
+                    "env_key": "TEST_DEEPSEEK_PROVIDER_KEY",
+                    "auth_mode": "env_ref",
+                    "proxy_mode": "direct",
+                    "proxy_url": "",
+                }
+            )
+            router = RouterService(profiles, port=0)
+            preview = router.preview_payload(
+                {
+                    "model": "deepseek/deepseek-v4-pro",
+                    "input": [
+                        {
+                            "type": "collabAgentToolCall",
+                            "id": "collab-1",
+                            "tool": "spawnAgent",
+                            "senderThreadId": "thread-main",
+                            "receiverThreadIds": ["thread-fork-1"],
+                            "prompt": "Review the CSS changes and report layout risks.",
+                            "model": "deepseek-v4-pro",
+                            "reasoningEffort": "high",
+                            "agentsStates": {"thread-fork-1": {"status": "running"}},
+                            "status": "completed",
+                        }
+                    ],
+                    "stream": False,
+                }
+            )
+
+            messages = preview["upstream_payload"]["messages"]
+            self.assertEqual(len(messages), 1)
+            self.assertEqual(messages[0]["role"], "assistant")
+            self.assertIn("[forked collaborator thread]", messages[0]["content"])
+            self.assertIn("thread-fork-1", messages[0]["content"])
+            self.assertIn("Review the CSS changes", messages[0]["content"])
+
+    def test_responses_transport_projects_transition_items_as_assistant_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            preview = router.preview_payload(
+                {
+                    "model": "openai/gpt-5.5",
+                    "input": [
+                        {"type": "contextCompaction", "id": "compact-1"},
+                        {"type": "enteredReviewMode", "id": "review-1", "review": "Inspect the latest diff for regressions."},
+                        {
+                            "type": "collabAgentToolCall",
+                            "id": "collab-1",
+                            "tool": "spawnAgent",
+                            "senderThreadId": "thread-main",
+                            "receiverThreadIds": ["thread-fork-1"],
+                            "prompt": "Review the CSS changes and report layout risks.",
+                            "model": "gpt-5.5",
+                            "reasoningEffort": "high",
+                            "agentsStates": {"thread-fork-1": {"status": "running"}},
+                        },
+                    ],
+                    "stream": False,
+                }
+            )
+
+            items = preview["upstream_payload"]["input"]
+            self.assertEqual([item["type"] for item in items], ["message", "message", "message"])
+            self.assertEqual([item["role"] for item in items], ["assistant", "assistant", "assistant"])
+            self.assertIn("[context compaction]", items[0]["content"][0]["text"])
+            self.assertIn("[review mode entered]", items[1]["content"][0]["text"])
+            self.assertIn("[forked collaborator thread]", items[2]["content"][0]["text"])
+
+    def test_responses_transport_maps_command_execution_to_function_call_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            preview = router.preview_payload(
+                {
+                    "model": "openai/gpt-5.5",
+                    "input": [
+                        {
+                            "type": "commandExecution",
+                            "id": "call_shell",
+                            "command": "dir",
+                            "status": "completed",
+                            "aggregatedOutput": "index.html",
+                            "exitCode": 0,
+                        }
+                    ],
+                    "stream": False,
+                }
+            )
+
+            items = preview["upstream_payload"]["input"]
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["type"], "function_call_output")
+            self.assertEqual(items[0]["call_id"], "call_shell")
+            self.assertIn("command: dir", items[0]["output"])
+            self.assertIn("exit_code: 0", items[0]["output"])
+
+    def test_responses_transport_stream_events_mark_function_calls_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            adapter = router._adapter_for_provider("openai")  # noqa: SLF001
+
+            upstream = {
+                "id": "resp-openai",
+                "object": "response",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "fc_call_1",
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "shell",
+                        "arguments": "{\"cmd\":\"dir\"}",
+                    }
+                ],
+            }
+
+            events = adapter.client_stream_events_from_upstream_json(upstream, {"model": "openai/gpt-5.5"})
+            added = [event for event in events if event.get("type") == "response.output_item.added"]
+            done = [event for event in events if event.get("type") == "response.output_item.done"]
+
+            self.assertEqual(len(added), 1)
+            self.assertEqual(added[0]["item"]["type"], "function_call")
+            self.assertEqual(len(done), 1)
+            self.assertEqual(done[0]["item"]["type"], "function_call")
+            self.assertEqual(done[0]["item"]["status"], "completed")
+
+    def test_chat_transport_stream_events_keep_function_call_completion_equivalent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            adapter = router._adapter_for_provider("deepseek")  # noqa: SLF001
+
+            upstream = {
+                "id": "chatcmpl-deepseek",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "I will inspect the file.",
+                            "tool_calls": [
+                                {
+                                    "id": "call_after_compact",
+                                    "type": "function",
+                                    "function": {"name": "shell", "arguments": "{\"cmd\":\"type js/data.js\"}"},
+                                }
+                            ],
+                        }
+                    }
+                ],
+            }
+
+            response = adapter.client_response_from_upstream_json(upstream, {"model": "deepseek/deepseek-v4-pro"})
+            events = adapter.client_stream_events_from_upstream_json(upstream, {"model": "deepseek/deepseek-v4-pro"})
+            response_function_calls = [item for item in response["output"] if item.get("type") == "function_call"]
+            done = [event for event in events if event.get("type") == "response.output_item.done" and event.get("item", {}).get("type") == "function_call"]
+
+            self.assertEqual(len(response_function_calls), 1)
+            self.assertEqual(response_function_calls[0]["call_id"], "call_after_compact")
+            self.assertEqual(len(done), 1)
+            self.assertEqual(done[0]["item"]["call_id"], "call_after_compact")
+            self.assertEqual(done[0]["item"]["status"], "completed")
+
+    def test_responses_transport_stream_events_preserve_reasoning_items(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            adapter = router._adapter_for_provider("openai")  # noqa: SLF001
+
+            upstream = {
+                "id": "resp-openai-reasoning",
+                "object": "response",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "reasoning_1",
+                        "type": "reasoning",
+                        "summary": ["first reasoning step", "second reasoning step"],
+                        "content": ["first reasoning step", "second reasoning step"],
+                    },
+                    {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Final answer."}],
+                    },
+                ],
+            }
+
+            events = adapter.client_stream_events_from_upstream_json(upstream, {"model": "openai/gpt-5.5"})
+            reasoning_added = [event for event in events if event.get("type") == "response.output_item.added" and event.get("item", {}).get("type") == "reasoning"]
+            reasoning_done = [event for event in events if event.get("type") == "response.output_item.done" and event.get("item", {}).get("type") == "reasoning"]
+
+            self.assertEqual(len(reasoning_added), 1)
+            self.assertEqual(reasoning_added[0]["item"]["id"], "reasoning_1")
+            self.assertEqual(len(reasoning_done), 1)
+            self.assertEqual(reasoning_done[0]["item"]["status"], "completed")
+
     def test_deepseek_adapter_uses_adapter_profile_not_exact_provider_id(self) -> None:
         class UpstreamHandler(BaseHTTPRequestHandler):
             last_payload = None
@@ -7571,7 +8824,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "profile_id": "deepseek-reasoning-only",
                         "label": "DeepSeek Reasoning Only",
                         "type": "custom_provider",
-                        "provider_id": "deepseek-reasoning-only",
+                        "provider_id": "deepseek",
                         "base_url": f"http://127.0.0.1:{upstream_port}",
                         "model": "deepseek-v4-pro",
                         "reasoning_effort": "xhigh",
@@ -7591,7 +8844,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                     data=json.dumps(
                         {
-                            "model": "deepseek-reasoning-only/deepseek-v4-pro",
+                            "model": "deepseek/deepseek-v4-pro",
                             "input": "reply ok",
                             "stream": True,
                         }
@@ -7791,6 +9044,48 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(service.resolve_runtime_profile("deepseek-v4-pro-max")["provider_id"], "deepseek")
             self.assertEqual(service.resolve_runtime_profile("solo-provider")["profile_id"], "solo-provider-profile")
 
+    def test_profile_service_resolves_provider_aliases_and_seeds_registry_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            service = ProfileService(Path(temp) / "profiles.json")
+            profiles = service.list_profiles()["profiles"]
+            profile_ids = {item["profile_id"] for item in profiles}
+
+            self.assertIn("qwen-default", profile_ids)
+            self.assertIn("kimi-default", profile_ids)
+            self.assertIn("glm-default", profile_ids)
+            self.assertEqual(service.resolve_runtime_profile("dashscope")["provider_id"], "qwen")
+            self.assertEqual(service.resolve_runtime_profile("moonshot")["provider_id"], "kimi")
+            self.assertEqual(service.resolve_runtime_profile("zai")["provider_id"], "glm")
+
+    def test_history_projector_repairs_missing_tool_results_and_drops_cross_provider_reasoning(self) -> None:
+        projected = HistoryProjector().project(
+            source_provider="deepseek",
+            target_provider="glm",
+            neutral_messages=[
+                NeutralMessage(
+                    role="assistant",
+                    text="",
+                    tool_call_id="call_1",
+                    tool_name="update_plan",
+                    provider_data={"arguments_json": "{\"status\":\"ok\"}"},
+                ),
+            ],
+            artifacts=[
+                ReasoningArtifact(
+                    provider_id="deepseek",
+                    model_id="deepseek-v4-pro",
+                    kind="reasoning",
+                    replayable=False,
+                    payload={"summary": ["internal chain"]},
+                )
+            ],
+        )
+
+        self.assertEqual(projected.dropped_artifacts, 1)
+        self.assertEqual(projected.repaired_tool_pairs, 1)
+        self.assertTrue(any(item.get("role") == "tool" for item in projected.messages))
+        self.assertTrue(any("Opaque provider reasoning artifacts were dropped" in warning for warning in projected.warnings))
+
     def test_router_config_tracks_models_and_sanitized_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             profiles = ProfileService(Path(temp) / "profiles.json")
@@ -7823,7 +9118,53 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(provider["id"], "deepseek")
             self.assertEqual(model["provider"], "deepseek")
             self.assertEqual(exported["providers"][0]["auth_key_ref"], None)
-            self.assertEqual(exported["models"][0]["id"], "deepseek/deepseek-v4-flash")
+            self.assertIn("deepseek/deepseek-v4-flash", {item["id"] for item in exported["models"]})
+
+    def test_provider_profiles_seed_reasoning_and_temperature_defaults(self) -> None:
+        deepseek = get_provider_profile("deepseek").to_default_profile()
+        qwen = get_provider_profile("qwen").to_default_profile()
+        kimi = get_provider_profile("kimi").to_default_profile()
+
+        self.assertEqual(deepseek["supported_reasoning_levels"], ["high", "xhigh", "max"])
+        self.assertEqual(deepseek["default_reasoning_level"], "xhigh")
+        self.assertEqual(qwen["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
+        self.assertAlmostEqual(float(qwen["provider_temperature_min"]), 0.00001)
+        self.assertEqual(kimi["temperature_default"], 1.0)
+        self.assertEqual(kimi["provider_temperature_max"], 1.0)
+
+    def test_router_config_uses_provider_profile_defaults_for_new_provider_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            config = RouterConfigService(profiles, Path(temp) / "router.json")
+            provider = config.upsert_provider(
+                {
+                    "id": "deepseek-alt",
+                    "display_name": "DeepSeek Alt",
+                    "enabled": True,
+                    "adapter_type": "chat",
+                    "base_url": "https://api.deepseek.com",
+                    "default_model": "deepseek-v4-pro",
+                    "env_key": "DEEPSEEK_API_KEY",
+                    "auth_mode": "env_ref",
+                    "proxy_mode": "direct",
+                    "proxy_url": "",
+                }
+            )
+            model = next(item for item in config.models() if item["id"] == "deepseek-alt/deepseek-v4-pro")
+            profile = next(item for item in profiles.list_profiles()["profiles"] if item["profile_id"] == "deepseek-alt-default")
+
+            self.assertEqual(provider["supported_reasoning_levels"], ["high", "xhigh", "max"])
+            self.assertEqual(provider["default_reasoning_level"], "xhigh")
+            self.assertEqual(model["supported_reasoning_levels"], ["high", "xhigh", "max"])
+            self.assertEqual(model["default_reasoning_level"], "xhigh")
+            self.assertEqual(model["temperature_adapter_policy"], "pass_through_0_2")
+            self.assertEqual(profile["supported_reasoning_levels"], ["high", "xhigh", "max"])
+            self.assertEqual(profile["reasoning_effort"], "xhigh")
+
+    def test_model_catalog_known_functions_fall_back_to_provider_profiles(self) -> None:
+        self.assertEqual(known_reasoning_efforts("deepseek", "deepseek-v4-pro"), ["high", "xhigh", "max"])
+        self.assertEqual(known_input_modalities("glm", "glm-5.2"), ["text", "image"])
+        self.assertEqual(known_context_window("qwen", "qwen3.7-plus"), 1_000_000)
 
     def test_metadata_seed_import_and_effective_catalog_are_conservative(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -7836,6 +9177,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             catalog = metadata.effective_catalog()
             catalog_ids = {item["id"] for item in catalog["models"]}
             deepseek = next(item for item in catalog["models"] if item["id"] == "deepseek/deepseek-v4-pro")
+            glm = next(item for item in catalog["models"] if item["id"] == "glm/glm-5.2")
             kimi = next(item for item in config.models() if item["id"] == "kimi/kimi-k2.6")
 
             self.assertGreaterEqual(imported["model_count"], 10)
@@ -7853,10 +9195,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(deepseek["tool_web_search_support"], "verified")
             self.assertIn("request_user_input", deepseek["codex_builtin_tools"])
             self.assertIn("structured_summary_quality", deepseek["context_compaction_support"])
+            self.assertIn("glm/glm-5.2", catalog_ids)
+            self.assertIn("image", glm["input_modalities"])
+            self.assertEqual(glm["default_reasoning_level"], "high")
             self.assertIn("image", kimi["input_modalities"])
-            self.assertIn("https://platform.kimi.com/docs/guide/kimi-k2-6-quickstart", kimi["source_urls"])
+            self.assertIn("https://platform.moonshot.ai/docs/overview", kimi["source_urls"])
             self.assertEqual(kimi["modality_limits"]["image_transport"], "chat_completions_base64_image_url")
             self.assertFalse(kimi["modality_limits"]["remote_image_url_supported"])
+            self.assertTrue(any(item["id"] == "kimi/kimi-k2.7-code" for item in catalog["models"]))
 
     def test_metadata_report_writes_sanitized_html_and_catalog_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -7870,12 +9216,87 @@ class AstraBridgeServiceTests(unittest.TestCase):
             html_text = Path(report["path"]).read_text(encoding="utf-8")
             catalog = json.loads(Path(report["catalog_path"]).read_text(encoding="utf-8"))
 
-            self.assertIn("AstraBridge Model Metadata Report", html_text)
+            self.assertIn("AstraBridge Catalog Report", html_text)
             self.assertIn("Secrets are not included", html_text)
-            self.assertIn("MCP policy", html_text)
-            self.assertIn("Compact quality", html_text)
+            self.assertIn("Recommended", html_text)
+            self.assertIn("Confidence", html_text)
             self.assertNotIn("unit_secret_", html_text)
             self.assertTrue(any(item["id"] == "qwen/qwen3.7-plus" for item in catalog["models"]))
+
+    def test_metadata_refresh_writes_source_level_artifacts_and_partial_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            config = RouterConfigService(profiles, Path(temp) / "router.json")
+            router = RouterService(profiles, config, port=0)
+            metadata = MetadataService(config, router, Path(temp) / "sources.json", Path(temp) / "report")
+
+            def fake_fetch(provider_id: str, url: str) -> dict[str, object]:
+                if provider_id == "deepseek":
+                    return {
+                        "provider_id": provider_id,
+                        "url": url,
+                        "ok": True,
+                        "classification": "ok",
+                        "status_code": 200,
+                        "duration_ms": 120,
+                        "bytes": 2048,
+                    }
+                return {
+                    "provider_id": provider_id,
+                    "url": url,
+                    "ok": False,
+                    "classification": "timeout",
+                    "error_summary": "timed out",
+                    "duration_ms": 4000,
+                    "bytes": 0,
+                }
+
+            with patch("astrabridge_sidecar.metadata_service._fetch_source_status", side_effect=fake_fetch):
+                result = metadata.refresh(apply=False)
+
+            self.assertEqual(result["summary"]["status"], "partial")
+            self.assertTrue(Path(result["artifact_paths"]["fetch_results_path"]).exists())
+            self.assertTrue(Path(result["artifact_paths"]["proposal_path"]).exists())
+            self.assertTrue(Path(result["artifact_paths"]["diff_summary_path"]).exists())
+            fetch_payload = json.loads(Path(result["artifact_paths"]["fetch_results_path"]).read_text(encoding="utf-8"))
+            self.assertIn("results", fetch_payload)
+            self.assertTrue(any(item["classification"] == "timeout" for item in fetch_payload["results"]))
+            report = metadata.metadata_report()
+            html_text = Path(report["path"]).read_text(encoding="utf-8")
+            self.assertIn("Fetch results", html_text)
+            self.assertIn("timed out", html_text)
+
+    def test_metadata_refresh_async_job_exposes_status_and_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            config = RouterConfigService(profiles, Path(temp) / "router.json")
+            router = RouterService(profiles, config, port=0)
+            metadata = MetadataService(config, router, Path(temp) / "sources.json", Path(temp) / "report")
+
+            with patch(
+                "astrabridge_sidecar.metadata_service._fetch_source_status",
+                return_value={
+                    "provider_id": "deepseek",
+                    "url": "https://example.com",
+                    "ok": True,
+                    "classification": "ok",
+                    "status_code": 200,
+                    "duration_ms": 50,
+                    "bytes": 256,
+                },
+            ):
+                started = metadata.start_refresh(apply=True)
+                deadline = time.time() + 5
+                status = metadata.refresh_status(started["job_id"])
+                while status["status"] == "running" and time.time() < deadline:
+                    time.sleep(0.05)
+                    status = metadata.refresh_status(started["job_id"])
+
+            self.assertIn(status["status"], {"success", "partial"})
+            result = metadata.refresh_result(started["job_id"])
+            self.assertTrue(result["applied"])
+            self.assertGreaterEqual(result["summary"]["ok_sources"], 1)
+            self.assertEqual(metadata.refresh_status()["job_id"], started["job_id"])
 
     def test_router_temperature_policy_from_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -8217,6 +9638,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertIn("domcontentloaded", source)
         self.assertNotIn("networkidle", source)
         self.assertIn("captured_after_failure", source)
+        self.assertIn("captured_viewport_fallback", source)
+        self.assertIn("fullPage: false", source)
 
     def test_dogfood_browser_smoke_flags_broken_local_stylesheet(self) -> None:
         class CaptureDogfoodRunService(DogfoodRunService):
@@ -8268,6 +9691,42 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             self.assertEqual(smoke["browser_smoke"]["status"], "fail")
             self.assertIn("possible mojibake", smoke["browser_smoke"]["stylesheet_warnings"][0])
+
+    def test_runtime_service_repairs_thread_defaults_from_stale_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+
+            runtime._cache_thread_entry(  # type: ignore[attr-defined]
+                "thread-1",
+                {
+                    "profile_id": "deepseek",
+                    "model": "openai/gpt-5.5",
+                    "reasoning_effort": "bogus",
+                    "permission_mode": "wild-west",
+                    "collaboration_mode": "chaos",
+                },
+            )
+
+            settings = runtime._thread_settings_for("thread-1")  # type: ignore[attr-defined]
+
+            self.assertEqual(settings["profile_id"], "deepseek-default")
+            self.assertEqual(settings["model"], "deepseek-v4-pro")
+            self.assertEqual(settings["reasoning_effort"], "high")
+            self.assertEqual(settings["permission_mode"], "auto")
+            self.assertEqual(settings["collaboration_mode"], "default")
+
+            cache = json.loads((projects.require_shell_state_root() / "thread_cache.json").read_text(encoding="utf-8"))
+            entry = cache["by_id"]["thread-1"]
+            self.assertEqual(entry["profile_id"], "deepseek-default")
+            self.assertEqual(entry["model"], "deepseek-v4-pro")
+            self.assertEqual(entry["reasoning_effort"], "high")
+            self.assertEqual(entry["permission_mode"], "auto")
+            self.assertEqual(entry["collaboration_mode"], "default")
 
     def test_runtime_supervisor_aggregates_plan_token_and_guard_without_secrets(self) -> None:
         class FakeProjects:
@@ -8486,6 +9945,192 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(status["watchdog"]["recommended_action"], "resolve_approval")
         self.assertEqual(runtime.interrupted, [])
         self.assertNotIn("unit_secret", json.dumps(status))
+
+    def test_runtime_supervisor_suppresses_stale_system_error_from_completed_thread_snapshot(self) -> None:
+        class FakeProjects:
+            current_project = {
+                "name": "Demo",
+                "current_thread_id": "thread-1",
+                "default_profile_id": "qwen-default",
+                "default_model": "qwen3.7-plus",
+                "default_effort": "high",
+                "ui_preferences": {},
+            }
+
+            def require_workspace_root(self) -> Path:
+                return Path(tempfile.gettempdir())
+
+        class FakeRuntime:
+            supervisor_events: list[dict[str, object]] = []
+
+            def list_events(self, after: int = 0, limit: int | None = None) -> dict[str, object]:
+                return {
+                    "cursor": 2,
+                    "events": [
+                        {
+                            "type": "notification",
+                            "method": "thread/status/changed",
+                            "timestamp": "2026-06-12T00:00:00+00:00",
+                            "params": {"threadId": "thread-1", "status": {"type": "systemError"}},
+                        },
+                        {
+                            "type": "notification",
+                            "method": "turn/completed",
+                            "timestamp": "2026-06-12T00:00:01+00:00",
+                            "params": {
+                                "threadId": "thread-1",
+                                "turn": {"id": "turn-1", "status": "completed", "error": None},
+                            },
+                        },
+                    ],
+                }
+
+            def read_thread(self, profile, thread_id):  # noqa: ANN001
+                return {
+                    "thread": {
+                        "id": thread_id,
+                        "status": {"type": "systemError"},
+                        "turns": [
+                            {"id": "turn-1", "status": "completed", "error": None, "items": []},
+                        ],
+                    }
+                }
+
+            def record_supervisor_event(self, event):  # noqa: ANN001
+                self.supervisor_events.append(event)
+
+        class FakeModals:
+            def list_pending(self) -> dict[str, object]:
+                return {"modals": []}
+
+        class FakeDogfood:
+            def snapshot(self) -> dict[str, object]:
+                return {"run": {"enabled": False, "browser_smokes": [], "milestones": [], "usage": {}, "budgets": {}}}
+
+        supervisor = RuntimeSupervisorService(FakeProjects(), FakeRuntime(), FakeModals(), FakeDogfood())
+        status = supervisor.status(thread_id="thread-1", profile={"profile_id": "qwen-default", "provider_id": "qwen"})
+
+        self.assertEqual(status["thread_status"]["type"], "idle")
+        self.assertTrue(status["thread_status"]["stale_error_normalized"])
+        self.assertIsNone(status["runtime_error"])
+
+    def test_runtime_supervisor_suppresses_stale_not_loaded_from_completed_thread_snapshot(self) -> None:
+        class FakeProjects:
+            current_project = {
+                "name": "Demo",
+                "current_thread_id": "thread-1",
+                "default_profile_id": "qwen-default",
+                "default_model": "qwen3.7-plus",
+                "default_effort": "high",
+                "ui_preferences": {},
+            }
+
+            def require_workspace_root(self) -> Path:
+                return Path(tempfile.gettempdir())
+
+        class FakeRuntime:
+            supervisor_events: list[dict[str, object]] = []
+
+            def list_events(self, after: int = 0, limit: int | None = None) -> dict[str, object]:
+                return {"cursor": 0, "events": []}
+
+            def read_thread(self, profile, thread_id):  # noqa: ANN001
+                return {
+                    "thread": {
+                        "id": thread_id,
+                        "status": {"type": "notLoaded"},
+                        "turns": [
+                            {"id": "turn-1", "status": "completed", "error": None, "items": []},
+                        ],
+                    }
+                }
+
+            def record_supervisor_event(self, event):  # noqa: ANN001
+                self.supervisor_events.append(event)
+
+        class FakeModals:
+            def list_pending(self) -> dict[str, object]:
+                return {"modals": []}
+
+        class FakeDogfood:
+            def snapshot(self) -> dict[str, object]:
+                return {"run": {"enabled": False, "browser_smokes": [], "milestones": [], "usage": {}, "budgets": {}}}
+
+        supervisor = RuntimeSupervisorService(FakeProjects(), FakeRuntime(), FakeModals(), FakeDogfood())
+        status = supervisor.status(thread_id="thread-1", profile={"profile_id": "qwen-default", "provider_id": "qwen"})
+
+        self.assertEqual(status["thread_status"]["type"], "idle")
+        self.assertTrue(status["thread_status"]["stale_error_normalized"])
+        self.assertIsNone(status["runtime_error"])
+
+    def test_runtime_supervisor_suppresses_runtime_error_when_snapshot_is_already_normalized_idle(self) -> None:
+        class FakeProjects:
+            current_project = {
+                "name": "Demo",
+                "current_thread_id": "thread-1",
+                "default_profile_id": "qwen-default",
+                "default_model": "qwen3.7-plus",
+                "default_effort": "high",
+                "ui_preferences": {},
+            }
+
+            def require_workspace_root(self) -> Path:
+                return Path(tempfile.gettempdir())
+
+        class FakeRuntime:
+            supervisor_events: list[dict[str, object]] = []
+
+            def list_events(self, after: int = 0, limit: int | None = None) -> dict[str, object]:
+                return {
+                    "cursor": 2,
+                    "events": [
+                        {
+                            "type": "notification",
+                            "method": "thread/status/changed",
+                            "timestamp": "2026-06-12T00:00:00+00:00",
+                            "params": {"threadId": "thread-1", "status": {"type": "systemError"}},
+                        },
+                        {
+                            "type": "notification",
+                            "method": "error",
+                            "timestamp": "2026-06-12T00:00:01+00:00",
+                            "params": {"threadId": "thread-1", "error": {"message": "stream closed"}},
+                        },
+                    ],
+                }
+
+            def read_thread(self, profile, thread_id):  # noqa: ANN001
+                return {
+                    "thread": {
+                        "id": thread_id,
+                        "status": {
+                            "type": "idle",
+                            "stale_error_type": "systemError",
+                            "stale_error_normalized": True,
+                        },
+                        "turns": [
+                            {"id": "turn-1", "status": "completed", "error": None, "items": []},
+                        ],
+                    }
+                }
+
+            def record_supervisor_event(self, event):  # noqa: ANN001
+                self.supervisor_events.append(event)
+
+        class FakeModals:
+            def list_pending(self) -> dict[str, object]:
+                return {"modals": []}
+
+        class FakeDogfood:
+            def snapshot(self) -> dict[str, object]:
+                return {"run": {"enabled": False, "browser_smokes": [], "milestones": [], "usage": {}, "budgets": {}}}
+
+        supervisor = RuntimeSupervisorService(FakeProjects(), FakeRuntime(), FakeModals(), FakeDogfood())
+        status = supervisor.status(thread_id="thread-1", profile={"profile_id": "qwen-default", "provider_id": "qwen"})
+
+        self.assertEqual(status["thread_status"]["type"], "idle")
+        self.assertTrue(status["thread_status"]["stale_error_normalized"])
+        self.assertIsNone(status["runtime_error"])
 
     def test_runtime_supervisor_falls_back_to_plan_delta(self) -> None:
         class FakeProjects:
@@ -9111,6 +10756,53 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(runtime._tasks.missing, [("thread-missing", "compact_thread_not_found")])
         self.assertTrue(any(event.get("type") == "thread_compact_blocked" for event in runtime._events))
 
+    def test_runtime_service_compact_thread_missing_reprojects_visible_fallback_thread(self) -> None:
+        class FakeClient:
+            def request(self, method, params):  # noqa: ANN001
+                raise JsonRpcError("thread not found: thread-active")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Same task",
+                thread_id="thread-active",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            tasks.bind_thread(
+                thread_id="thread-fallback",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-flash",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+                make_active=False,
+            )
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            runtime._prepare_runtime = lambda profile, require_secret=True: {"provider_id": profile.get("provider_id", "deepseek")}  # type: ignore[method-assign]
+            runtime._ensure_client = lambda runtime_status: FakeClient()  # type: ignore[method-assign]
+
+            result = runtime.compact_thread({"provider_id": "deepseek"}, "thread-active")
+
+            self.assertEqual(result["status"], "thread_missing")
+            current = tasks.current_task()
+            self.assertEqual(current["active_provider_thread_id"], "thread-fallback")
+            self.assertEqual(projects.current_project["current_thread_id"], "thread-fallback")
+            missing = [item for item in current["provider_threads"] if item["thread_id"] == "thread-active"][0]
+            self.assertEqual(missing["missing_reason"], "compact_thread_not_found")
+
     def test_context_guard_does_not_block_missing_provider_thread(self) -> None:
         class FakeProjects:
             def require_shell_state_root(self) -> Path:
@@ -9143,6 +10835,36 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         self.assertEqual(state["level"], "missing")
         runtime._raise_if_context_guard_blocks_turn(object(), "thread-missing")  # noqa: SLF001
+
+    def test_runtime_supervisor_normalizes_context_limit_and_auth_failures(self) -> None:
+        class FakeProjects:
+            current_project = {"ui_preferences": {}}
+
+            def require_workspace_root(self) -> Path:
+                return Path(tempfile.gettempdir())
+
+        class FakeRuntime:
+            def list_events(self, after: int = 0, limit: int | None = None) -> dict[str, object]:
+                return {"cursor": 0, "events": []}
+
+        class FakeModals:
+            def list_pending(self) -> dict[str, object]:
+                return {"modals": []}
+
+        class FakeDogfood:
+            def snapshot(self) -> dict[str, object]:
+                return {"run": {"enabled": False, "browser_smokes": [], "milestones": [], "usage": {}, "budgets": {}}}
+
+        supervisor = RuntimeSupervisorService(FakeProjects(), FakeRuntime(), FakeModals(), FakeDogfood())
+
+        context_limit = supervisor._normalize_runtime_error('{"error":{"message":"context length exceeded","provider":"deepseek","model":"deepseek-v4-pro"}}')  # noqa: SLF001
+        auth_failure = supervisor._normalize_runtime_error("401 unauthorized: invalid api key")  # noqa: SLF001
+
+        self.assertEqual(context_limit["category"], "context_window_limit")
+        self.assertTrue(context_limit["compact_recommended"])
+        self.assertTrue(context_limit["fork_recommended"])
+        self.assertEqual(auth_failure["category"], "auth_failure")
+        self.assertIn("key", auth_failure["actionable_hint"].lower())
 
 
 if __name__ == "__main__":
