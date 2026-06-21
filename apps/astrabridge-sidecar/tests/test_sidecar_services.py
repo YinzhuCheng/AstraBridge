@@ -45,7 +45,7 @@ from astrabridge_sidecar.mcp_config_service import McpConfigService
 from astrabridge_sidecar.model_catalog import known_context_window, known_input_modalities, known_reasoning_efforts
 from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERROR, disabled_status
 from astrabridge_sidecar.profile_service import ProfileService
-from astrabridge_sidecar.providers import get_provider_profile
+from astrabridge_sidecar.providers import classify_runtime_failure, get_provider_profile
 from astrabridge_sidecar.providers.history_projector import HistoryProjector, NeutralMessage, ReasoningArtifact
 from astrabridge_sidecar.project_context_service import ProjectContextService
 from astrabridge_sidecar.project_service import DEFAULT_RUNTIME_HOST_ENV, DEFAULT_RUNTIME_WSL_DISTRO_ENV, ProjectService
@@ -10966,8 +10966,28 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(context_limit["category"], "context_window_limit")
         self.assertTrue(context_limit["compact_recommended"])
         self.assertTrue(context_limit["fork_recommended"])
+        self.assertEqual(context_limit["recommended_actions"][0]["action"], "compact_thread")
+        self.assertEqual(context_limit["recommended_actions"][2]["action"], "downgrade_reasoning")
+        self.assertEqual(context_limit["recommended_actions"][2]["target"], "xhigh")
+        self.assertEqual(context_limit["fallback_models"], ["deepseek-v4-flash"])
         self.assertEqual(auth_failure["category"], "auth_failure")
         self.assertIn("key", auth_failure["actionable_hint"].lower())
+        self.assertTrue(auth_failure["requires_key_check"])
+        self.assertEqual(auth_failure["recommended_actions"][0]["action"], "refresh_provider_key")
+
+    def test_runtime_failure_classifier_uses_current_profile_defaults(self) -> None:
+        notice = classify_runtime_failure(
+            "timeout while waiting for upstream model response",
+            current_provider="qwen",
+            current_model="qwen3.7-plus",
+        ).to_payload()
+
+        self.assertEqual(notice["category"], "provider_timeout")
+        self.assertTrue(notice["retryable"])
+        self.assertTrue(notice["provider_switch_recommended"])
+        self.assertEqual(notice["fallback_models"], ["qwen3.7-max-2026-06-08", "qwen3.6-flash"])
+        self.assertEqual(notice["recommended_actions"][1]["action"], "switch_model")
+        self.assertEqual(notice["recommended_actions"][1]["target"], "qwen3.7-max-2026-06-08")
 
 
 if __name__ == "__main__":

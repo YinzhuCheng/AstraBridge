@@ -1,12 +1,12 @@
 ﻿from __future__ import annotations
 
-import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .common import now_iso
+from .providers import classify_runtime_failure
 from .security import redact_sensitive
 
 
@@ -35,7 +35,13 @@ class RuntimeSupervisorService:
         thread_status = self._latest_thread_status(events, selected_thread_id)
         thread_snapshot = self._thread_snapshot(selected_thread_id, profile)
         thread_status = self._normalize_thread_status_from_snapshot(thread_status, thread_snapshot)
-        runtime_error = self._latest_runtime_error(events, selected_thread_id, thread_status, thread_snapshot=thread_snapshot)
+        runtime_error = self._latest_runtime_error(
+            events,
+            selected_thread_id,
+            thread_status,
+            thread_snapshot=thread_snapshot,
+            profile=profile,
+        )
         compaction = self._latest_compaction(events, selected_thread_id)
         pending_modals = [
             item
@@ -326,6 +332,7 @@ class RuntimeSupervisorService:
         thread_status: dict[str, Any],
         *,
         thread_snapshot: dict[str, Any] | None = None,
+        profile: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Return the latest sanitized turn/runtime error for inspector notices.
 
@@ -365,7 +372,7 @@ class RuntimeSupervisorService:
                 raw_message = "Thread entered systemError."
             if not raw_message:
                 continue
-            normalized = self._normalize_runtime_error(raw_message)
+            normalized = self._normalize_runtime_error(raw_message, profile=profile)
             return {
                 **normalized,
                 "thread_id": thread_id or event_thread_id,
@@ -424,75 +431,13 @@ class RuntimeSupervisorService:
             latest_error is None or latest_error == "" or latest_error == {}
         )
 
-    def _normalize_runtime_error(self, raw_message: str) -> dict[str, Any]:
-        parsed: dict[str, Any] = {}
-        message = str(raw_message or "")
-        try:
-            value = json.loads(message)
-            if isinstance(value, dict):
-                parsed = value.get("error") if isinstance(value.get("error"), dict) else value
-                message = str(parsed.get("message") or message)
-        except Exception:
-            parsed = {}
-        lowered = message.lower()
-        category = "runtime_error"
-        summary = message
-        hint = str(parsed.get("actionable_hint") or "")
-        retryable = False
-        compact_recommended = False
-        fork_recommended = False
-        if "winerror 10060" in lowered or "timed out" in lowered or "timeout" in lowered:
-            category = "provider_timeout"
-            summary = "Provider network timeout. The upstream model endpoint did not respond before the socket timeout."
-            hint = hint or "Retry the turn, switch provider, or check network/provider status before continuing."
-            retryable = True
-            fork_recommended = True
-        elif any(token in lowered for token in ["context length exceeded", "maximum context length", "context window", "too many tokens"]):
-            category = "context_window_limit"
-            summary = "The request exceeded the model context window."
-            hint = hint or "Compact the thread, fork a narrower follow-up, or retry with a smaller request."
-            compact_recommended = True
-            fork_recommended = True
-        elif any(token in lowered for token in ["401", "unauthorized", "invalid api key", "incorrect api key", "authentication", "auth failed"]):
-            category = "auth_failure"
-            summary = "Provider authentication failed."
-            hint = hint or "Check the selected provider key, vault entry, or environment mapping before retrying."
-        elif any(token in lowered for token in ["unsupported", "not supported", "does not support"]):
-            category = "unsupported_feature"
-            summary = "The selected provider or model does not support this feature."
-            hint = hint or "Switch to a supported model, disable the unsupported feature, or try another provider lane."
-        elif any(token in lowered for token in ["tool call", "tool result", "mcp", "function call"]) and any(token in lowered for token in ["missing", "invalid", "mismatch", "schema"]):
-            category = "tool_mismatch"
-            summary = "Tool-call state did not line up with the provider response."
-            hint = hint or "Retry the turn, inspect MCP/tool wiring, or fork a fresh thread if the history is stale."
-            retryable = True
-            fork_recommended = True
-        elif any(token in lowered for token in ["thread not found", "provider thread missing", "systemerror", "state corruption", "stale state"]):
-            category = "runtime_state_corruption"
-            summary = "Runtime state became inconsistent with the current thread or provider session."
-            hint = hint or "Retry with provider handoff, reopen the thread, or fork a fresh continuation from the latest saved state."
-            fork_recommended = True
-        elif "provider_error" in lowered or parsed.get("type") == "provider_error":
-            category = "provider_error"
-            summary = "Provider returned an error during the turn."
-            hint = hint or "Check provider auth, request shape, router state, or upstream connectivity."
-        elif any(token in lowered for token in ["connection reset", "connection aborted", "name resolution", "dns", "refused", "temporarily unavailable"]):
-            category = "transport_failure"
-            summary = "Network transport failed before the provider returned a usable response."
-            hint = hint or "Retry the turn or check local network, DNS, proxy, and provider endpoint reachability."
-            retryable = True
-        return {
-            "level": "danger",
-            "category": category,
-            "provider": parsed.get("provider") or "",
-            "model": parsed.get("model") or "",
-            "summary": summary[:240],
-            "message": message[:500],
-            "actionable_hint": hint[:240],
-            "retryable": retryable,
-            "compact_recommended": compact_recommended,
-            "fork_recommended": fork_recommended,
-        }
+    def _normalize_runtime_error(self, raw_message: str, *, profile: dict[str, Any] | None = None) -> dict[str, Any]:
+        notice = classify_runtime_failure(
+            raw_message,
+            current_provider=(profile or {}).get("provider_id"),
+            current_model=(profile or {}).get("model"),
+        )
+        return notice.to_payload()
 
     def _guard(
         self,

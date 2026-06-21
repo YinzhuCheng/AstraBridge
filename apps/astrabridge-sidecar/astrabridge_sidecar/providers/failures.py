@@ -1,0 +1,361 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from .profile import ProviderProfile
+from .registry import get_provider_profile
+
+
+FailureCategory = Literal[
+    "runtime_error",
+    "provider_timeout",
+    "context_window_limit",
+    "auth_failure",
+    "unsupported_feature",
+    "tool_mismatch",
+    "runtime_state_corruption",
+    "provider_error",
+    "transport_failure",
+]
+
+
+@dataclass(frozen=True)
+class FailureRecommendation:
+    action: str
+    label: str
+    reason: str
+    target: str | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeFailureNotice:
+    category: FailureCategory
+    summary: str
+    message: str
+    actionable_hint: str
+    provider: str = ""
+    model: str = ""
+    level: Literal["warning", "danger"] = "danger"
+    retryable: bool = False
+    compact_recommended: bool = False
+    fork_recommended: bool = False
+    recommended_actions: tuple[FailureRecommendation, ...] = ()
+    fallback_models: tuple[str, ...] = ()
+    reasoning_downgrade_levels: tuple[str, ...] = ()
+    requires_key_check: bool = False
+    provider_switch_recommended: bool = False
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "level": self.level,
+            "category": self.category,
+            "provider": self.provider,
+            "model": self.model,
+            "summary": self.summary[:240],
+            "message": self.message[:500],
+            "actionable_hint": self.actionable_hint[:240],
+            "retryable": self.retryable,
+            "compact_recommended": self.compact_recommended,
+            "fork_recommended": self.fork_recommended,
+            "fallback_models": list(self.fallback_models),
+            "reasoning_downgrade_levels": list(self.reasoning_downgrade_levels),
+            "requires_key_check": self.requires_key_check,
+            "provider_switch_recommended": self.provider_switch_recommended,
+            "recommended_actions": [
+                {
+                    "action": item.action,
+                    "label": item.label,
+                    "reason": item.reason,
+                    "target": item.target,
+                }
+                for item in self.recommended_actions
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class ParsedRuntimeError:
+    message: str
+    provider: str = ""
+    model: str = ""
+    parsed: dict[str, Any] = field(default_factory=dict)
+
+
+def parse_runtime_error(raw_message: str, *, current_provider: str | None = None, current_model: str | None = None) -> ParsedRuntimeError:
+    parsed: dict[str, Any] = {}
+    message = str(raw_message or "")
+    try:
+        value = json.loads(message)
+        if isinstance(value, dict):
+            parsed = value.get("error") if isinstance(value.get("error"), dict) else value
+            message = str(parsed.get("message") or message)
+    except Exception:
+        parsed = {}
+    provider = str(parsed.get("provider") or current_provider or "").strip().lower()
+    model = str(parsed.get("model") or current_model or "").strip()
+    return ParsedRuntimeError(message=message, provider=provider, model=model, parsed=parsed)
+
+
+def classify_runtime_failure(
+    raw_message: str,
+    *,
+    current_provider: str | None = None,
+    current_model: str | None = None,
+) -> RuntimeFailureNotice:
+    parsed = parse_runtime_error(raw_message, current_provider=current_provider, current_model=current_model)
+    lowered = parsed.message.lower()
+    profile = _provider_profile(parsed.provider)
+    fallback_models = _fallback_models(profile, parsed.model)
+    downgrade_levels = _downgrade_reasoning_levels(profile)
+
+    if "winerror 10060" in lowered or "timed out" in lowered or "timeout" in lowered:
+        return _notice(
+            category="provider_timeout",
+            summary="Provider network timeout. The upstream model endpoint did not respond before the socket timeout.",
+            message=parsed.message,
+            actionable_hint="Retry the turn, switch provider, or check network/provider status before continuing.",
+            provider=parsed.provider,
+            model=parsed.model,
+            retryable=True,
+            fork_recommended=True,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            provider_switch_recommended=True,
+            recommended_actions=_recommendations(
+                _action("retry_same_lane", "Retry", "Retry the current execution lane once."),
+                _fallback_model_action(fallback_models, "Try a fallback model in the same provider lane."),
+                _action("handoff_provider", "Switch Provider", "Move the task to another provider lane if the timeout repeats."),
+            ),
+        )
+    if any(token in lowered for token in ["context length exceeded", "maximum context length", "context window", "too many tokens"]):
+        return _notice(
+            category="context_window_limit",
+            summary="The request exceeded the model context window.",
+            message=parsed.message,
+            actionable_hint="Compact the thread, fork a narrower follow-up, or retry with a smaller request.",
+            provider=parsed.provider,
+            model=parsed.model,
+            compact_recommended=True,
+            fork_recommended=True,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            recommended_actions=_recommendations(
+                _action("compact_thread", "Compact", "Summarize the thread before retrying."),
+                _action("fork_followup", "Fork Narrower", "Continue in a smaller follow-up thread."),
+                _reasoning_downgrade_action(downgrade_levels),
+                _fallback_model_action(fallback_models, "Switch to a smaller fallback model if available."),
+            ),
+        )
+    if any(token in lowered for token in ["401", "unauthorized", "invalid api key", "incorrect api key", "authentication", "auth failed"]):
+        return _notice(
+            category="auth_failure",
+            summary="Provider authentication failed.",
+            message=parsed.message,
+            actionable_hint="Check the selected provider key, vault entry, or environment mapping before retrying.",
+            provider=parsed.provider,
+            model=parsed.model,
+            requires_key_check=True,
+            provider_switch_recommended=True,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            recommended_actions=_recommendations(
+                _action("refresh_provider_key", "Reload Key", "Reload the provider key from vault or environment."),
+                _action("verify_secret_mapping", "Check Secret Mapping", "Confirm the selected profile points at the intended secret."),
+                _action("handoff_provider", "Switch Provider", "Use another provider lane until the key issue is fixed."),
+            ),
+        )
+    if any(token in lowered for token in ["unsupported", "not supported", "does not support"]):
+        return _notice(
+            category="unsupported_feature",
+            summary="The selected provider or model does not support this feature.",
+            message=parsed.message,
+            actionable_hint="Switch to a supported model, disable the unsupported feature, or try another provider lane.",
+            provider=parsed.provider,
+            model=parsed.model,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            provider_switch_recommended=True,
+            recommended_actions=_recommendations(
+                _fallback_model_action(fallback_models, "Switch to a model that advertises the required capability."),
+                _action("disable_feature", "Disable Feature", "Retry without the unsupported tool, modality, or reasoning mode."),
+                _action("handoff_provider", "Switch Provider", "Move the task to a provider lane that supports the feature."),
+            ),
+        )
+    if any(token in lowered for token in ["tool call", "tool result", "mcp", "function call"]) and any(
+        token in lowered for token in ["missing", "invalid", "mismatch", "schema"]
+    ):
+        return _notice(
+            category="tool_mismatch",
+            summary="Tool-call state did not line up with the provider response.",
+            message=parsed.message,
+            actionable_hint="Retry the turn, inspect MCP/tool wiring, or fork a fresh thread if the history is stale.",
+            provider=parsed.provider,
+            model=parsed.model,
+            retryable=True,
+            fork_recommended=True,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            recommended_actions=_recommendations(
+                _action("retry_same_lane", "Retry", "Retry after rebuilding tool-call state."),
+                _action("inspect_tool_contract", "Inspect Tools", "Review tool schema, MCP registration, and tool result wiring."),
+                _action("fork_followup", "Fork Fresh Lane", "Create a fresh continuation if prior tool history is stale."),
+            ),
+        )
+    if any(token in lowered for token in ["thread not found", "provider thread missing", "systemerror", "state corruption", "stale state"]):
+        return _notice(
+            category="runtime_state_corruption",
+            summary="Runtime state became inconsistent with the current thread or provider session.",
+            message=parsed.message,
+            actionable_hint="Retry with provider handoff, reopen the thread, or fork a fresh continuation from the latest saved state.",
+            provider=parsed.provider,
+            model=parsed.model,
+            fork_recommended=True,
+            provider_switch_recommended=True,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            recommended_actions=_recommendations(
+                _action("restart_runtime_lane", "Restart Runtime", "Restart or reopen the current execution lane."),
+                _action("fork_followup", "Fork Fresh Lane", "Continue from the latest saved state in a new lane."),
+                _action("handoff_provider", "Switch Provider", "Move to another provider lane if this runtime stays inconsistent."),
+            ),
+        )
+    if "provider_error" in lowered or parsed.parsed.get("type") == "provider_error":
+        return _notice(
+            category="provider_error",
+            summary="Provider returned an error during the turn.",
+            message=parsed.message,
+            actionable_hint="Check provider auth, request shape, router state, or upstream connectivity.",
+            provider=parsed.provider,
+            model=parsed.model,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            recommended_actions=_recommendations(
+                _action("inspect_request_shape", "Inspect Request", "Review the request body and provider metadata for incompatibilities."),
+                _fallback_model_action(fallback_models, "Try a fallback model if the issue appears model-specific."),
+                _action("handoff_provider", "Switch Provider", "Move to another provider lane if the error persists."),
+            ),
+        )
+    if any(token in lowered for token in ["connection reset", "connection aborted", "name resolution", "dns", "refused", "temporarily unavailable"]):
+        return _notice(
+            category="transport_failure",
+            summary="Network transport failed before the provider returned a usable response.",
+            message=parsed.message,
+            actionable_hint="Retry the turn or check local network, DNS, proxy, and provider endpoint reachability.",
+            provider=parsed.provider,
+            model=parsed.model,
+            retryable=True,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            provider_switch_recommended=True,
+            recommended_actions=_recommendations(
+                _action("retry_same_lane", "Retry", "Retry after transport failure."),
+                _action("inspect_network", "Check Network", "Check local DNS, proxy, firewall, and provider reachability."),
+                _action("handoff_provider", "Switch Provider", "Use another provider lane while transport remains unstable."),
+            ),
+        )
+    return _notice(
+        category="runtime_error",
+        summary=parsed.message,
+        message=parsed.message,
+        actionable_hint=str(parsed.parsed.get("actionable_hint") or "Inspect the runtime notice and retry with a narrower next step."),
+        provider=parsed.provider,
+        model=parsed.model,
+        fallback_models=fallback_models,
+        reasoning_downgrade_levels=downgrade_levels,
+        recommended_actions=_recommendations(
+            _action("inspect_runtime_notice", "Inspect Notice", "Review the runtime notice and thread diagnostics before retrying."),
+        ),
+    )
+
+
+def _provider_profile(provider_id: str) -> ProviderProfile | None:
+    try:
+        return get_provider_profile(provider_id) if provider_id else None
+    except ValueError:
+        return None
+
+
+def _fallback_models(profile: ProviderProfile | None, current_model: str) -> tuple[str, ...]:
+    if profile is None:
+        return ()
+    preferred = profile.fallback_policy.fallback_models or profile.fallback_models
+    seen: set[str] = set()
+    models: list[str] = []
+    for model in preferred:
+        normalized = str(model or "").strip()
+        if not normalized or normalized == current_model or normalized in seen:
+            continue
+        seen.add(normalized)
+        models.append(normalized)
+    return tuple(models)
+
+
+def _downgrade_reasoning_levels(profile: ProviderProfile | None) -> tuple[str, ...]:
+    if profile is None:
+        return ()
+    seen: set[str] = set()
+    levels: list[str] = []
+    for level in profile.fallback_policy.downgrade_reasoning_levels:
+        normalized = str(level or "").strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        levels.append(normalized)
+    return tuple(levels)
+
+
+def _action(action: str, label: str, reason: str, *, target: str | None = None) -> FailureRecommendation:
+    return FailureRecommendation(action=action, label=label, reason=reason, target=target)
+
+
+def _fallback_model_action(fallback_models: tuple[str, ...], reason: str) -> FailureRecommendation | None:
+    if not fallback_models:
+        return None
+    return _action("switch_model", "Try Fallback Model", reason, target=fallback_models[0])
+
+
+def _reasoning_downgrade_action(levels: tuple[str, ...]) -> FailureRecommendation | None:
+    if not levels:
+        return None
+    return _action("downgrade_reasoning", "Lower Reasoning", "Retry with a lower reasoning level to reduce context pressure.", target=levels[0])
+
+
+def _recommendations(*items: FailureRecommendation | None) -> tuple[FailureRecommendation, ...]:
+    return tuple(item for item in items if item is not None)
+
+
+def _notice(
+    *,
+    category: FailureCategory,
+    summary: str,
+    message: str,
+    actionable_hint: str,
+    provider: str = "",
+    model: str = "",
+    retryable: bool = False,
+    compact_recommended: bool = False,
+    fork_recommended: bool = False,
+    fallback_models: tuple[str, ...] = (),
+    reasoning_downgrade_levels: tuple[str, ...] = (),
+    requires_key_check: bool = False,
+    provider_switch_recommended: bool = False,
+    recommended_actions: tuple[FailureRecommendation, ...] = (),
+) -> RuntimeFailureNotice:
+    return RuntimeFailureNotice(
+        category=category,
+        summary=summary,
+        message=message,
+        actionable_hint=actionable_hint,
+        provider=provider,
+        model=model,
+        retryable=retryable,
+        compact_recommended=compact_recommended,
+        fork_recommended=fork_recommended,
+        fallback_models=fallback_models,
+        reasoning_downgrade_levels=reasoning_downgrade_levels,
+        requires_key_check=requires_key_check,
+        provider_switch_recommended=provider_switch_recommended,
+        recommended_actions=recommended_actions,
+    )

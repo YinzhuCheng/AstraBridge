@@ -1,3 +1,4 @@
+from .failures import FailureRecommendation, RuntimeFailureNotice, classify_runtime_failure, parse_runtime_error
 from .history_projector import HistoryProjector, NeutralMessage, ProjectionResult, ReasoningArtifact
 from .ir import NormalizedResponse, ProviderWarning, RawProviderArtifactRef, ReasoningState, ToolCall, Usage
 from .profile import (
@@ -18,6 +19,7 @@ __all__ = [
     "AuthSpec",
     "ContextPolicy",
     "EditPolicy",
+    "FailureRecommendation",
     "FallbackPolicy",
     "HistoryProjector",
     "NeutralMessage",
@@ -26,6 +28,7 @@ __all__ = [
     "ProjectionResult",
     "ProviderCapabilities",
     "ProviderProfile",
+    "RuntimeFailureNotice",
     "RawProviderArtifactRef",
     "ProviderSafetyPolicy",
     "ReasoningArtifact",
@@ -36,8 +39,10 @@ __all__ = [
     "TransitionSummary",
     "Usage",
     "all_provider_profiles",
+    "classify_runtime_failure",
     "default_profiles",
     "get_provider_profile",
+    "parse_runtime_error",
     "resolve_provider_id",
     "summarize_transition",
 ]
