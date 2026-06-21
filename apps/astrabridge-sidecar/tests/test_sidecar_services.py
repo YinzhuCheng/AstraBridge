@@ -8584,6 +8584,82 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(len(reasoning_done), 1)
             self.assertEqual(reasoning_done[0]["item"]["status"], "completed")
 
+    def test_responses_transport_normalizes_reasoning_state_without_raw_payload_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            adapter = router._adapter_for_provider("openai")  # noqa: SLF001
+
+            upstream = {
+                "id": "resp-normalized-openai",
+                "object": "response",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "reasoning_1",
+                        "type": "reasoning",
+                        "summary": ["first reasoning step"],
+                        "content": ["first reasoning step"],
+                    },
+                    {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Final answer."}],
+                    },
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "output_tokens_details": {"reasoning_tokens": 3}},
+            }
+
+            normalized = adapter.normalize_response(upstream, {"model": "openai/gpt-5.5"})
+
+            self.assertEqual(normalized.text, "Final answer.")
+            self.assertEqual(normalized.reasoning_summary, "first reasoning step")
+            self.assertIsNotNone(normalized.reasoning_state)
+            self.assertEqual(normalized.reasoning_state.provider_id, "openai")
+            self.assertEqual(normalized.reasoning_state.model_id, "openai/gpt-5.5")
+            self.assertFalse(normalized.reasoning_state.replayable)
+            self.assertIsNotNone(normalized.raw_ref)
+            self.assertEqual(normalized.raw_ref.kind, "responses_output")
+            self.assertEqual(normalized.raw_ref.locator, "resp-normalized-openai")
+            self.assertNotIn("response", normalized.provider_data)
+            self.assertEqual(normalized.provider_data["output_types"], ["reasoning", "message"])
+            self.assertEqual(normalized.warnings, [])
+
+    def test_chat_transport_normalizes_reasoning_notice_without_raw_payload_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            adapter = router._adapter_for_provider("deepseek")  # noqa: SLF001
+
+            upstream = {
+                "id": "chat-normalized-deepseek",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "Inspecting the repository state.",
+                            "tool_calls": [],
+                        },
+                    }
+                ],
+            }
+
+            normalized = adapter.normalize_response(upstream, {"model": "deepseek/deepseek-v4-pro"})
+
+            self.assertIn("Provider returned reasoning content", normalized.text)
+            self.assertEqual(normalized.reasoning_summary, "Inspecting the repository state.")
+            self.assertIsNotNone(normalized.reasoning_state)
+            self.assertEqual(normalized.reasoning_state.provider_id, "deepseek")
+            self.assertEqual(normalized.reasoning_state.model_id, "deepseek/deepseek-v4-pro")
+            self.assertIsNotNone(normalized.raw_ref)
+            self.assertEqual(normalized.raw_ref.kind, "chat_completion_choice")
+            self.assertEqual(normalized.raw_ref.locator, "chat-normalized-deepseek")
+            self.assertNotIn("response", normalized.provider_data)
+            self.assertTrue(any(item.code == "reasoning_only_notice_emitted" for item in normalized.warnings))
+
     def test_deepseek_adapter_uses_adapter_profile_not_exact_provider_id(self) -> None:
         class UpstreamHandler(BaseHTTPRequestHandler):
             last_payload = None

@@ -1,5 +1,5 @@
 from .history_projector import HistoryProjector, NeutralMessage, ProjectionResult, ReasoningArtifact
-from .ir import NormalizedResponse, ReasoningState, ToolCall, Usage
+from .ir import NormalizedResponse, ProviderWarning, RawProviderArtifactRef, ReasoningState, ToolCall, Usage
 from .profile import (
     AuthSpec,
     ContextPolicy,
@@ -22,9 +22,11 @@ __all__ = [
     "HistoryProjector",
     "NeutralMessage",
     "NormalizedResponse",
+    "ProviderWarning",
     "ProjectionResult",
     "ProviderCapabilities",
     "ProviderProfile",
+    "RawProviderArtifactRef",
     "ProviderSafetyPolicy",
     "ReasoningArtifact",
     "ReasoningPolicy",

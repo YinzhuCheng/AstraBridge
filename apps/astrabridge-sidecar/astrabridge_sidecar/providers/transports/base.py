@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from ..ir import NormalizedResponse, ToolCall, Usage
+from ..ir import NormalizedResponse, ProviderWarning, RawProviderArtifactRef, ReasoningState, ToolCall, Usage
 
 
 LOCAL_IMAGE_MAX_BYTES = 100 * 1024 * 1024
@@ -125,6 +125,37 @@ class ProviderTransport(ABC):
 
     def supports_local_image_input(self) -> bool:
         return False
+
+    def _provider_id(self) -> str:
+        return str(self.profile.get("provider_id") or self.profile.get("provider_family") or "").strip()
+
+    def _model_id(self, original_payload: dict[str, Any]) -> str:
+        return str(original_payload.get("model") or self.profile.get("model") or "").strip()
+
+    def _reasoning_state(
+        self,
+        summary: str | None,
+        *,
+        model_id: str | None = None,
+        replayable: bool = False,
+        opaque_artifacts: list[dict[str, Any]] | None = None,
+    ) -> ReasoningState | None:
+        if not summary and not opaque_artifacts:
+            return None
+        return ReasoningState(
+            provider_id=self._provider_id(),
+            model_id=str(model_id or self.profile.get("model") or "").strip(),
+            replayable=replayable,
+            visible_summary=summary,
+            opaque_artifacts=list(opaque_artifacts or []),
+        )
+
+    def _warning(self, code: str, message: str, severity: str = "warning") -> ProviderWarning:
+        normalized_severity = severity if severity in {"info", "warning", "error"} else "warning"
+        return ProviderWarning(code=code, message=message, severity=normalized_severity)
+
+    def _raw_ref(self, *, kind: str, locator: Any, summary: str | None = None) -> RawProviderArtifactRef:
+        return RawProviderArtifactRef(kind=kind, locator=str(locator or "unknown"), redaction_status="redacted", summary=summary)
 
     def apply_reasoning_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         upstream_payload = dict(payload)
@@ -257,10 +288,13 @@ class ResponsesTransport(ProviderTransport):
         output = list((raw or {}).get("output") or [])
         text_parts: list[str] = []
         reasoning_summary: str | None = None
+        reasoning_items: list[dict[str, Any]] = []
         tool_calls: list[ToolCall] = []
+        warnings: list[ProviderWarning] = []
         for item in output:
             item_type = str(item.get("type") or "")
             if item_type == "reasoning":
+                reasoning_items.append(dict(item))
                 summary = item.get("summary") or item.get("content") or []
                 reasoning_summary = "\n".join(str(part) for part in summary if str(part).strip()) or reasoning_summary
             elif item_type == "message":
@@ -286,13 +320,37 @@ class ResponsesTransport(ProviderTransport):
                 reasoning_tokens=token_details.get("reasoning_tokens"),
                 total_tokens=usage.get("total_tokens"),
             )
+        if reasoning_summary and not text_parts and not tool_calls:
+            warnings.append(self._warning("reasoning_only_response", "Provider returned reasoning without visible assistant text.", "info"))
+        reasoning_state = self._reasoning_state(
+            reasoning_summary,
+            model_id=self._model_id(original_payload),
+            replayable=False,
+            opaque_artifacts=[
+                {
+                    "id": item.get("id"),
+                    "type": item.get("type"),
+                    "summary_count": len(list(item.get("summary") or [])),
+                }
+                for item in reasoning_items[:8]
+            ],
+        )
         return NormalizedResponse(
             text="".join(text_parts),
             reasoning_summary=reasoning_summary,
+            reasoning_state=reasoning_state,
             tool_calls=tool_calls,
             usage=normalized_usage,
             finish_reason=str((raw or {}).get("status") or "completed"),
-            provider_data={"response": raw, "model": original_payload.get("model")},
+            provider_data={
+                "model": self._model_id(original_payload),
+                "response_id": (raw or {}).get("id"),
+                "status": (raw or {}).get("status"),
+                "output_types": [str(item.get("type") or "") for item in output],
+                "tool_call_count": len(tool_calls),
+            },
+            warnings=warnings,
+            raw_ref=self._raw_ref(kind="responses_output", locator=(raw or {}).get("id"), summary=f"{len(output)} output item(s)"),
         )
 
     def _convert_responses_input_item(self, item: Any) -> list[dict[str, Any]]:
@@ -359,6 +417,7 @@ class ChatCompletionsTransport(ProviderTransport):
         message = dict(choice.get("message") or {})
         reasoning_content = str(message.get("reasoning_content") or "")
         text = self._visible_text_or_reasoning_only_notice(str(message.get("content") or ""), reasoning_content, bool(message.get("tool_calls")))
+        warnings: list[ProviderWarning] = []
         tool_calls = [
             ToolCall(
                 id=str(call.get("id") or "call_router"),
@@ -379,13 +438,28 @@ class ChatCompletionsTransport(ProviderTransport):
                 reasoning_tokens=token_details.get("reasoning_tokens", usage.get("reasoning_tokens")),
                 total_tokens=usage.get("total_tokens"),
             )
+        if reasoning_content and not str(message.get("content") or "").strip() and not tool_calls:
+            warnings.append(self._warning("reasoning_only_notice_emitted", "Visible text was synthesized because the provider returned reasoning without assistant text.", "info"))
         return NormalizedResponse(
             text=text,
             reasoning_summary=reasoning_content or None,
+            reasoning_state=self._reasoning_state(
+                reasoning_content or None,
+                model_id=self._model_id(original_payload),
+                replayable=False,
+                opaque_artifacts=[{"field": "reasoning_content", "chars": len(reasoning_content)}] if reasoning_content else [],
+            ),
             tool_calls=tool_calls,
             usage=normalized_usage,
             finish_reason=str(choice.get("finish_reason") or "stop"),
-            provider_data={"response": raw, "model": original_payload.get("model")},
+            provider_data={
+                "model": self._model_id(original_payload),
+                "response_id": raw.get("id"),
+                "choice_count": len(list(raw.get("choices") or [])),
+                "tool_call_count": len(tool_calls),
+            },
+            warnings=warnings,
+            raw_ref=self._raw_ref(kind="chat_completion_choice", locator=raw.get("id"), summary="First choice normalized from chat completions."),
         )
 
     def convert_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:

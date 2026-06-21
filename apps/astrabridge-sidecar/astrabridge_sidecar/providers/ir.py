@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -21,13 +21,18 @@ class Usage:
 
 
 @dataclass
-class NormalizedResponse:
-    text: str
-    reasoning_summary: str | None
-    tool_calls: list[ToolCall]
-    usage: Usage | None
-    finish_reason: str | None
-    provider_data: dict[str, Any] = field(default_factory=dict)
+class ProviderWarning:
+    code: str
+    message: str
+    severity: Literal["info", "warning", "error"] = "warning"
+
+
+@dataclass
+class RawProviderArtifactRef:
+    kind: str
+    locator: str
+    redaction_status: Literal["redacted", "secret_free", "blocked"] = "redacted"
+    summary: str | None = None
 
 
 @dataclass
@@ -37,3 +42,16 @@ class ReasoningState:
     replayable: bool
     visible_summary: str | None
     opaque_artifacts: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class NormalizedResponse:
+    text: str
+    reasoning_summary: str | None
+    reasoning_state: ReasoningState | None
+    tool_calls: list[ToolCall]
+    usage: Usage | None
+    finish_reason: str | None
+    provider_data: dict[str, Any] = field(default_factory=dict)
+    warnings: list[ProviderWarning] = field(default_factory=list)
+    raw_ref: RawProviderArtifactRef | None = None
