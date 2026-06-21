@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .common import now_iso, read_json, write_json
+from .coding_kernel import project_turn_to_coding_events
 from .security import redact_sensitive
 
 
@@ -130,6 +131,7 @@ class TaskConversationService:
     def _annotate_turn(self, turn: dict[str, Any], *, snapshot: dict[str, Any], route: dict[str, Any]) -> dict[str, Any]:
         thread_id = str(snapshot.get("thread_id") or route.get("thread_id") or "")
         meta = {
+            "task_id": snapshot.get("task_id"),
             "source_thread_id": thread_id,
             "profile_id": snapshot.get("profile_id") or route.get("profile_id"),
             "provider_id": snapshot.get("provider_id") or route.get("provider_id"),
@@ -166,6 +168,11 @@ class TaskConversationService:
             if item_type == "commandExecution" and item.get("command"):
                 commands.append(str(item.get("command"))[:MAX_TEXT_CHARS])
         preview = self._clip("\n".join(chunks).strip(), MAX_TEXT_CHARS)
+        events = project_turn_to_coding_events(
+            task_id=str(turn.get("task_id") or ""),
+            visible_thread_id=f"task:{str(turn.get('task_id') or '')}" if turn.get("task_id") else "task:unknown",
+            turn=turn,
+        )
         if not preview and not file_changes and not commands:
             return None
         return {
@@ -178,6 +185,7 @@ class TaskConversationService:
             "summary": preview,
             "files": file_changes[:10],
             "commands": commands[:5],
+            "event_types": [str(item.get("event_type") or "") for item in events[:8] if str(item.get("event_type") or "").strip()],
         }
 
     def _item_text(self, item: dict[str, Any]) -> str:

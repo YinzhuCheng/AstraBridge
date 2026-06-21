@@ -31,6 +31,7 @@ from astrabridge_sidecar import lcr_web_service as lcr_web_service_module
 from astrabridge_sidecar import lcr_web_mcp_server
 from astrabridge_sidecar.app_server_client import AppServerClient, JsonRpcError
 from astrabridge_sidecar.asset_registry_service import AssetRegistryService
+from astrabridge_sidecar.coding_kernel import project_turn_to_coding_events
 from astrabridge_sidecar.modal_service import ModalService
 from astrabridge_sidecar.checkpoint_service import CheckpointService
 from astrabridge_sidecar.dogfood_run_service import DogfoodRunService
@@ -698,6 +699,32 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("Task conversation digest", pack["text"])
             self.assertIn("Build a release readiness scorecard", pack["text"])
             self.assertIn("scorecard.py", pack["text"])
+            self.assertEqual(pack["task_conversation_digest"]["items"][0]["event_types"], ["agent_message", "file_change"])
+
+    def test_coding_event_projection_maps_core_coding_turn_items(self) -> None:
+        events = project_turn_to_coding_events(
+            task_id="task-1",
+            visible_thread_id="task:task-1",
+            turn={
+                "id": "turn-1",
+                "source_thread_id": "thread-deepseek",
+                "provider_id": "deepseek",
+                "model": "deepseek-v4-pro",
+                "startedAt": 1,
+                "items": [
+                    {"type": "userMessage", "id": "user-1", "text": "Inspect the failing test."},
+                    {"type": "reasoning", "id": "reasoning-1", "summary": ["Need to inspect the diff first."]},
+                    {"type": "commandExecution", "id": "cmd-1", "command": "pytest -q", "status": "completed", "exitCode": 1, "aggregatedOutput": "1 failed"},
+                    {"type": "fileChange", "id": "file-1", "changes": [{"path": "scorecard.py"}, {"path": "README.md"}]},
+                    {"type": "contextCompaction", "id": "compact-1"},
+                ],
+            },
+        )
+
+        self.assertEqual([item["event_type"] for item in events], ["agent_message", "reasoning_summary", "command_execution", "file_change", "runtime_transition"])
+        self.assertEqual(events[2]["payload"]["command"], "pytest -q")
+        self.assertEqual(events[3]["payload"]["paths"], ["scorecard.py", "README.md"])
+        self.assertEqual(events[4]["payload"]["transition"], "context_compaction")
 
     def test_default_task_inherits_thread_context_goal_and_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
