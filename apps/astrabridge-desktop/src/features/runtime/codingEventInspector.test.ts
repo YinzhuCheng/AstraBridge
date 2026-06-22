@@ -37,6 +37,14 @@ describe("coding event inspector summary", () => {
               event_type: "checkpoint_created",
               payload: { save_id: "save-final", description: "After verification" },
             },
+            {
+              event_type: "command_execution",
+              payload: { command: "python -m unittest -q test_scorecard", status: "failed", exit_code: 1 },
+            },
+            {
+              event_type: "provider_handoff",
+              payload: { provider_id: "kimi", model: "kimi-k2.7-code", to_thread_id: "thread-kimi" },
+            },
           ],
         },
       ],
@@ -71,6 +79,24 @@ describe("coding event inspector summary", () => {
         model_id: "deepseek-v4-pro",
       },
     ]);
+    expect(summary.commandRefs).toEqual([
+      {
+        command: "python -m unittest -q test_scorecard",
+        status: "failed",
+        exit_code: 1,
+        provider_id: "deepseek",
+        model_id: "deepseek-v4-pro",
+      },
+    ]);
+    expect(summary.diagnosticRefs).toEqual([
+      {
+        kind: "provider_handoff",
+        summary: "Handoff to kimi kimi-k2.7-code",
+        provider_id: "deepseek",
+        model_id: "deepseek-v4-pro",
+        to_thread_id: "thread-kimi",
+      },
+    ]);
   });
 
   it("deduplicates repeated file and checkpoint references", () => {
@@ -83,6 +109,8 @@ describe("coding event inspector summary", () => {
             { event_type: "file_change", payload: { paths: ["src/App.tsx"] } },
             { event_type: "verification_result", payload: { tool: "review_status", files: ["src/App.tsx"], save_ids: ["save-1", "save-1"] } },
             { event_type: "checkpoint_created", payload: { save_id: "save-1", description: "Existing" } },
+            { event_type: "command_execution", payload: { command: "npm test", status: "ok", exit_code: 0 } },
+            { event_type: "command_execution", payload: { command: "npm test", status: "ok", exit_code: 0 } },
           ],
         },
       ],
@@ -93,6 +121,15 @@ describe("coding event inspector summary", () => {
       {
         save_id: "save-1",
         description: "Checkpoint listed by review_status",
+        provider_id: "glm",
+        model_id: "glm-5.2",
+      },
+    ]);
+    expect(summary.commandRefs).toEqual([
+      {
+        command: "npm test",
+        status: "ok",
+        exit_code: 0,
         provider_id: "glm",
         model_id: "glm-5.2",
       },

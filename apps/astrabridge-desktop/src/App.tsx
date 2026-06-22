@@ -1099,7 +1099,26 @@ function ReviewInspectorPanel({
   );
 }
 
-function TerminalInspectorPanel({ supervisor, history }: { supervisor?: RuntimeSupervisorState; history?: ProjectTerminalHistory }) {
+function TerminalInspectorPanel({
+  supervisor,
+  history,
+  fallback,
+}: {
+  supervisor?: RuntimeSupervisorState;
+  history?: ProjectTerminalHistory;
+  fallback?: ReturnType<typeof summarizeCodingEventInspector>;
+}) {
+  const commandRows = history?.commands?.length
+    ? history.commands.slice(-12).map((item, index) => ({
+        key: `${item.timestamp}-${index}`,
+        summary: item.summary || item.command,
+        status: item.status,
+      }))
+    : (fallback?.commandRefs ?? []).slice(-12).map((item, index) => ({
+        key: `${item.command}:${index}`,
+        summary: item.command,
+        status: item.status || "event",
+      }));
   return (
     <section className="inspector-tool-panel" data-testid="terminal-panel">
       <div className="section-header">
@@ -1109,10 +1128,10 @@ function TerminalInspectorPanel({ supervisor, history }: { supervisor?: RuntimeS
       <p className="muted compact-copy">当前先显示 verified 命令历史；自由交互式 PTY 需要单独接审批、编码和会话生命周期。</p>
       <pre className="tool-preview">{history?.workspace_root ?? supervisor?.environment.cwd ?? "当前没有活动工作区。"}</pre>
       <div className="inspector-list" role="list" aria-label="命令历史">
-        {history?.commands?.length ? (
-          history.commands.slice(-12).map((item, index) => (
-            <div className="inspector-list-row static-row" key={`${item.timestamp}-${index}`}>
-              <span>{item.summary || item.command}</span>
+        {commandRows.length ? (
+          commandRows.map((item) => (
+            <div className="inspector-list-row static-row" key={item.key}>
+              <span>{item.summary}</span>
               <small>{item.status}</small>
             </div>
           ))
@@ -1120,6 +1139,68 @@ function TerminalInspectorPanel({ supervisor, history }: { supervisor?: RuntimeS
           <p className="muted compact-copy">还没有命令事件。</p>
         )}
       </div>
+    </section>
+  );
+}
+
+function WorkflowEvidencePanel({
+  facts,
+  fallback,
+}: {
+  facts: ReturnType<typeof summarizeTaskWorkflowFacts>;
+  fallback?: ReturnType<typeof summarizeCodingEventInspector>;
+}) {
+  const checkpoints = fallback?.checkpointRefs ?? [];
+  const diagnostics = fallback?.diagnosticRefs ?? [];
+  return (
+    <section className="pane-section inspector-section" data-testid="workflow-evidence-panel">
+      <div className="section-header">
+        <h2>工作流事实</h2>
+      </div>
+      <div className="tool-list">
+        <div className="tool-row">
+          <span>执行通道</span>
+          <strong>{facts.laneCount}</strong>
+        </div>
+        <div className="tool-row">
+          <span>Provider 切换</span>
+          <strong>{facts.handoffCount}</strong>
+        </div>
+        <div className="tool-row">
+          <span>检查点</span>
+          <strong>{facts.checkpointCount}</strong>
+        </div>
+        <div className="tool-row">
+          <span>命令事件</span>
+          <strong>{facts.commandCount}</strong>
+        </div>
+        <div className="tool-row">
+          <span>诊断事件</span>
+          <strong>{facts.diagnosticCount}</strong>
+        </div>
+      </div>
+      {checkpoints.length ? (
+        <div className="inspector-list" role="list" aria-label="检查点事实">
+          {checkpoints.slice(-4).map((item) => (
+            <div className="inspector-list-row static-row" key={item.save_id}>
+              <span>{item.description}</span>
+              <small>{item.save_id}</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {diagnostics.length ? (
+        <div className="inspector-list" role="list" aria-label="诊断事实">
+          {diagnostics.slice(-4).map((item, index) => (
+            <div className="inspector-list-row static-row" key={`${item.kind}:${item.summary}:${index}`}>
+              <span>{item.summary}</span>
+              <small>{item.kind}</small>
+            </div>
+          ))}
+        </div>
+      ) : !checkpoints.length ? (
+        <p className="muted compact-copy">当前线程还没有事件化的检查点或诊断摘要。</p>
+      ) : null}
     </section>
   );
 }
@@ -4178,9 +4259,10 @@ function AppShell() {
 
   const activeThread = taskConversation.data?.thread ?? selectedThread.data?.thread;
   const activeExecutionThread = selectedThread.data?.thread;
+  const eventInspectorFallback = useMemo(() => summarizeCodingEventInspector(activeThread), [activeThread]);
   const workflowFacts = useMemo(
-    () => summarizeTaskWorkflowFacts(currentTask, activeExecutionThread ?? null),
-    [activeExecutionThread, currentTask],
+    () => summarizeTaskWorkflowFacts(currentTask, activeExecutionThread ?? null, eventInspectorFallback),
+    [activeExecutionThread, currentTask, eventInspectorFallback],
   );
   const activeExecutionBackendLabel = workflowFacts.backend === "native_kernel" ? "native kernel" : "app server";
   const activeThreadName = activeThread?.displayName ?? selectedThreadSummary?.displayName ?? "Thread";
@@ -4218,7 +4300,6 @@ function AppShell() {
   }, [activeThread, clearLiveTurn, liveTurnId, selectedThreadId]);
 
   const blocks = summarizeTurnBlocks(activeThread, liveText, liveReasoning, liveActivity, liveDiff, liveTurnId);
-  const eventInspectorFallback = useMemo(() => summarizeCodingEventInspector(activeThread), [activeThread]);
   const hasRenderedPlanBlock = blocks.some((block) => block.role === "plan" || (("text" in block) && typeof block.text === "string" && extractProposedPlanText(block.text)));
   const inspectorPlan = supervisor.data?.plan ?? (activePlan ? {
     thread_id: selectedThreadId ?? "",
@@ -4761,6 +4842,8 @@ function AppShell() {
                 />
                 {supervisor.data?.guard.message ? <p className={`guard-copy guard-copy-${supervisor.data.guard.level}`}>{supervisor.data.guard.message}</p> : null}
               </section>
+
+              <WorkflowEvidencePanel facts={workflowFacts} fallback={eventInspectorFallback} />
             </>
           ) : null}
           {inspectorTab === "review" ? (
@@ -4773,7 +4856,7 @@ function AppShell() {
               onSelectPath={setInspectorReviewPath}
             />
           ) : null}
-          {inspectorTab === "terminal" ? <TerminalInspectorPanel supervisor={supervisor.data} history={inspectorTerminal.data} /> : null}
+          {inspectorTab === "terminal" ? <TerminalInspectorPanel supervisor={supervisor.data} history={inspectorTerminal.data} fallback={eventInspectorFallback} /> : null}
           {inspectorTab === "browser" ? (
             <BrowserInspectorPanel
               supervisor={supervisor.data}

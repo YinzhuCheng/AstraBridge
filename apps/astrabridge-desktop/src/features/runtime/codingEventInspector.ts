@@ -23,6 +23,20 @@ export type CodingEventInspectorSummary = {
     provider_id?: string;
     model_id?: string;
   }>;
+  commandRefs: Array<{
+    command: string;
+    status?: string;
+    exit_code?: number | null;
+    provider_id?: string;
+    model_id?: string;
+  }>;
+  diagnosticRefs: Array<{
+    kind: string;
+    summary: string;
+    provider_id?: string;
+    model_id?: string;
+    to_thread_id?: string;
+  }>;
 };
 
 type FileAccumulator = {
@@ -45,6 +59,8 @@ function eventPayload(event: CodingEventRecord) {
 export function summarizeCodingEventInspector(thread?: Pick<ShellThread, "turns"> | null): CodingEventInspectorSummary {
   const files = new Map<string, FileAccumulator>();
   const checkpoints = new Map<string, { save_id: string; description: string; provider_id?: string; model_id?: string }>();
+  const commands = new Map<string, { command: string; status?: string; exit_code?: number | null; provider_id?: string; model_id?: string }>();
+  const diagnostics = new Map<string, { kind: string; summary: string; provider_id?: string; model_id?: string; to_thread_id?: string }>();
   let order = 0;
 
   const rememberFile = (path: string, status: string, detailLine: string, kind = "event") => {
@@ -66,6 +82,35 @@ export function summarizeCodingEventInspector(thread?: Pick<ShellThread, "turns"
       description: description.trim() || cleanId,
       provider_id: providerId,
       model_id: modelId,
+    });
+  };
+
+  const rememberCommand = (command: string, status?: string, exitCode?: number | null, providerId?: string, modelId?: string) => {
+    const cleanCommand = command.trim();
+    if (!cleanCommand) return;
+    const key = `${cleanCommand}:${status ?? ""}:${exitCode ?? ""}`;
+    if (commands.has(key)) return;
+    commands.set(key, {
+      command: cleanCommand,
+      status: status?.trim() || undefined,
+      exit_code: typeof exitCode === "number" ? exitCode : null,
+      provider_id: providerId,
+      model_id: modelId,
+    });
+  };
+
+  const rememberDiagnostic = (kind: string, summary: string, providerId?: string, modelId?: string, toThreadId?: string) => {
+    const cleanKind = kind.trim();
+    const cleanSummary = summary.trim();
+    if (!cleanKind || !cleanSummary) return;
+    const key = `${cleanKind}:${cleanSummary}:${toThreadId ?? ""}`;
+    if (diagnostics.has(key)) return;
+    diagnostics.set(key, {
+      kind: cleanKind,
+      summary: cleanSummary,
+      provider_id: providerId,
+      model_id: modelId,
+      to_thread_id: toThreadId?.trim() || undefined,
     });
   };
 
@@ -125,6 +170,23 @@ export function summarizeCodingEventInspector(thread?: Pick<ShellThread, "turns"
           if (!saveId) continue;
           rememberCheckpoint(saveId, `Checkpoint listed by ${tool}`, providerId, modelId);
         }
+      } else if (eventType === "command_execution") {
+        rememberCommand(
+          String(payload.command ?? ""),
+          String(payload.status ?? "").trim() || undefined,
+          typeof payload.exit_code === "number" ? payload.exit_code : null,
+          providerId,
+          modelId,
+        );
+      } else if (eventType === "provider_handoff" || eventType === "runtime_transition") {
+        const transition = String(payload.transition ?? "").trim();
+        const toThreadId = String(payload.to_thread_id ?? "").trim() || undefined;
+        const summary = eventType === "provider_handoff"
+          ? `Handoff to ${String(payload.provider_id ?? providerId ?? "").trim() || "provider"} ${String(payload.model ?? modelId ?? "").trim()}`.trim()
+          : transition
+            ? `Runtime transition: ${transition}`
+            : "Runtime transition";
+        rememberDiagnostic(eventType, summary, providerId, modelId, toThreadId);
       } else if (eventType === "checkpoint_created") {
         const saveId = String(payload.save_id ?? "").trim();
         if (!saveId) continue;
@@ -150,5 +212,7 @@ export function summarizeCodingEventInspector(thread?: Pick<ShellThread, "turns"
     })),
     detailByPath: Object.fromEntries(sortedFiles.map(([path, entry]) => [path, entry.detail.join("\n")])),
     checkpointRefs: Array.from(checkpoints.values()),
+    commandRefs: Array.from(commands.values()),
+    diagnosticRefs: Array.from(diagnostics.values()),
   };
 }

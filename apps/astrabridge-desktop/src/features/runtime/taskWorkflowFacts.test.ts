@@ -54,6 +54,8 @@ describe("task workflow facts", () => {
       laneCount: 2,
       handoffCount: 1,
       checkpointCount: 2,
+      commandCount: 0,
+      diagnosticCount: 0,
       backend: "native_kernel",
     });
   });
@@ -63,5 +65,28 @@ describe("task workflow facts", () => {
     expect(facts.backend).toBe("app_server");
     expect(facts.laneCount).toBe(1);
     expect(facts.handoffCount).toBe(0);
+    expect(facts.commandCount).toBe(0);
+    expect(facts.diagnosticCount).toBe(0);
+  });
+
+  it("uses coding-event fallback for checkpoints, commands, and diagnostics", () => {
+    const facts = summarizeTaskWorkflowFacts(
+      buildTask({ handoff_events: [], checkpoint_refs: [] }),
+      null,
+      {
+        checkpointRefs: [{ save_id: "save-1", description: "Event checkpoint" }],
+        commandRefs: [{ command: "python -m unittest", status: "ok" }],
+        diagnosticRefs: [{ kind: "provider_handoff", summary: "handoff" }, { kind: "runtime_transition", summary: "transition" }],
+      },
+    );
+
+    expect(facts).toEqual({
+      laneCount: 1,
+      handoffCount: 1,
+      checkpointCount: 1,
+      commandCount: 1,
+      diagnosticCount: 2,
+      backend: "app_server",
+    });
   });
 });
