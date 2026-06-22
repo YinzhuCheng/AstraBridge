@@ -10688,6 +10688,45 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(profile["supported_reasoning_levels"], ["high", "xhigh", "max"])
             self.assertEqual(profile["reasoning_effort"], "xhigh")
 
+    def test_router_config_seeds_profile_fallback_models_without_static_catalog_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            config = RouterConfigService(profiles, Path(temp) / "router.json")
+
+            snapshot = config.import_sanitized(
+                {
+                    "providers": [
+                        {
+                            "id": "qwen-alt",
+                            "provider_id": "qwen-alt",
+                            "provider_family": "qwen",
+                            "display_name": "Qwen Alt",
+                            "enabled": True,
+                            "adapter_type": "responses",
+                            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                            "default_model": "qwen3.7-plus",
+                            "env_key": "DASHSCOPE_API_KEY",
+                            "auth_mode": "env_ref",
+                            "proxy_mode": "direct",
+                            "proxy_url": "",
+                        }
+                    ],
+                    "models": [],
+                    "reasoning": {"global_effort": "high", "provider_overrides": {}, "model_overrides": {}, "native_parameter_overrides": {}},
+                }
+            )
+
+            qwen_profile = get_provider_profile("qwen")
+            seeded_ids = {item["id"] for item in snapshot["models"] if item["provider"] == "qwen-alt"}
+
+            self.assertEqual(
+                seeded_ids,
+                {f"qwen-alt/{model_id}" for model_id in (qwen_profile.fallback_policy.fallback_models or qwen_profile.fallback_models)},
+            )
+            seeded_plus = next(item for item in snapshot["models"] if item["id"] == "qwen-alt/qwen3.7-plus")
+            self.assertEqual(seeded_plus["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
+            self.assertEqual(seeded_plus["supported_reasoning_levels"], ["low", "medium", "high", "xhigh"])
+
     def test_model_catalog_known_functions_fall_back_to_provider_profiles(self) -> None:
         self.assertEqual(known_reasoning_efforts("deepseek", "deepseek-v4-pro"), ["high", "xhigh", "max"])
         self.assertEqual(known_input_modalities("glm", "glm-5.2"), ["text", "image"])

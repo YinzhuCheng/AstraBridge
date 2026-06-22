@@ -9,22 +9,10 @@ from .providers import get_provider_profile, resolve_provider_id
 from .providers.tooling import assess_model_authority
 
 
-KNOWN_MODEL_CATALOG: dict[str, list[dict[str, Any]]] = {
-    "openai": [
-        {"native_model": "gpt-5.5", "display_name": "GPT-5.5", "advertised_context_window": 1000000, "supported_reasoning_levels": ["none", "low", "medium", "high", "xhigh"]},
-    ],
-    "yunwu": [
-        {"native_model": "gpt-5.5", "display_name": "GPT-5.5", "advertised_context_window": 1000000},
-    ],
-    "deepseek": [
-        {"native_model": "deepseek-v4-pro", "display_name": "DeepSeek V4 Pro", "advertised_context_window": 1000000},
-        {"native_model": "deepseek-v4-flash", "display_name": "DeepSeek V4 Flash", "advertised_context_window": 1000000},
-    ],
-    "kimi": [
-        {
-            "native_model": "kimi-k2.7-code",
+PROFILE_MODEL_SEED_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
+    "kimi": {
+        "kimi-k2.7-code": {
             "display_name": "Kimi K2.7 Code",
-            "advertised_context_window": 256000,
             "input_modalities": ["text", "image"],
             "modality_limits": {
                 "image_transport": "chat_completions_base64_image_url",
@@ -39,10 +27,8 @@ KNOWN_MODEL_CATALOG: dict[str, list[dict[str, Any]]] = {
                 "https://platform.kimi.com/docs/guide/start-using-kimi-api",
             ],
         },
-        {
-            "native_model": "kimi-k2.6",
+        "kimi-k2.6": {
             "display_name": "Kimi K2.6",
-            "advertised_context_window": 256000,
             "input_modalities": ["text", "image", "video"],
             "modality_limits": {
                 "image_transport": "chat_completions_base64_image_url",
@@ -57,20 +43,7 @@ KNOWN_MODEL_CATALOG: dict[str, list[dict[str, Any]]] = {
                 "https://platform.kimi.com/docs/guide/start-using-kimi-api",
             ],
         },
-    ],
-    "qwen": [
-        {"native_model": "qwen3.7-plus", "display_name": "Qwen3.7 Plus", "advertised_context_window": 1000000},
-        {"native_model": "qwen3.7-max-2026-06-08", "display_name": "Qwen3.7 Max 2026-06-08", "advertised_context_window": 1000000},
-        {"native_model": "qwen3.6-flash", "display_name": "Qwen3.6 Flash", "advertised_context_window": 1000000},
-    ],
-    "dashscope": [
-        {"native_model": "qwen3.7-plus", "display_name": "Qwen3.7 Plus", "advertised_context_window": 1000000},
-        {"native_model": "qwen3.7-max-2026-06-08", "display_name": "Qwen3.7 Max 2026-06-08", "advertised_context_window": 1000000},
-        {"native_model": "qwen3.6-flash", "display_name": "Qwen3.6 Flash", "advertised_context_window": 1000000},
-    ],
-    "glm": [
-        {"native_model": "glm-5.2", "display_name": "GLM 5.2", "advertised_context_window": 1000000, "input_modalities": ["text", "image"], "supported_reasoning_levels": ["low", "medium", "high", "xhigh"]},
-    ],
+    },
 }
 
 PROVIDER_METADATA_FIELDS = (
@@ -413,10 +386,7 @@ class RouterConfigService:
                 base_url=provider.get("base_url"),
                 model=provider.get("default_model"),
             )
-            normalized = str(provider_family or provider_id).lower()
-            known_entries = KNOWN_MODEL_CATALOG.get(normalized)
-            if not known_entries:
-                known_entries = next((entries for key, entries in KNOWN_MODEL_CATALOG.items() if key in normalized), None)
+            known_entries = _profile_seed_entries(provider_family)
             if not known_entries:
                 continue
             base_defaults = _profile_model_defaults(provider_family)
@@ -441,6 +411,32 @@ class RouterConfigService:
                     "updated_at": now_iso(),
                 }
         return sorted(merged.values(), key=lambda item: str(item.get("id")))
+
+
+def _profile_seed_entries(provider_family: str | None) -> list[dict[str, Any]]:
+    if not provider_family:
+        return []
+    try:
+        profile = get_provider_profile(provider_family)
+    except ValueError:
+        return []
+    advertised_context_window = profile.context_window() or 1_000_000
+    preferred_models = profile.fallback_policy.fallback_models or profile.fallback_models or (profile.default_model,)
+    seed_entries: list[dict[str, Any]] = []
+    for native_model in preferred_models:
+        clean_model = str(native_model or "").strip()
+        if not clean_model:
+            continue
+        overrides = PROFILE_MODEL_SEED_OVERRIDES.get(profile.id, {}).get(clean_model, {})
+        seed_entries.append(
+            {
+                "native_model": clean_model,
+                "display_name": str(overrides.get("display_name") or clean_model),
+                "advertised_context_window": int(overrides.get("advertised_context_window") or advertised_context_window),
+                **overrides,
+            }
+        )
+    return seed_entries
 
 
 def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
