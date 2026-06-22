@@ -30,3 +30,11 @@ PRIVATE/**
 !PRIVATE/
 !PRIVATE/README.md
 
+# Local experiment and reference material: keep on disk, do not stage by accident
+output/
+.playwright-cli/
+external/
+hermes-agent-main/
+hermes-agent-main.zip
+astrabridge_formal_upgrade_pack/
+
