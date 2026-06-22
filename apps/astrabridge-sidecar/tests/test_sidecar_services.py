@@ -570,6 +570,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue((workspace / ".astrabridge" / "caches").exists())
             self.assertTrue((workspace / ".astrabridge" / "reviews").exists())
             self.assertTrue((workspace / ".astrabridge" / "runtime_events.jsonl").exists())
+            storage_policy = json.loads((workspace / ".astrabridge" / "storage_policy.json").read_text(encoding="utf-8"))
+            self.assertEqual(storage_policy["schema_version"], "astrabridge-storage-policy-v1")
+            self.assertEqual(storage_policy["managed_dirs"]["captures"], str((workspace / ".astrabridge" / "captures").resolve()))
 
             with self.assertRaises(ValueError):
                 service.create_project(
@@ -578,6 +581,37 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     workspace_root=workspace,
                     entry_mode="existing",
                 )
+
+    def test_project_create_new_without_paths_defaults_to_isolated_runtime_bundle(self) -> None:
+        original_appdata = os.environ.get("ASTRABRIDGE_APPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                os.environ["ASTRABRIDGE_APPDATA"] = str(root / "AppData")
+                service = ProjectService(root / "recent.json")
+
+                project = service.create_project(
+                    "Demo Isolation",
+                    "",
+                    workspace_root=None,
+                    entry_mode="new",
+                )
+
+                project_file = Path(project["project_file"]).resolve()
+                workspace = Path(project["workspace_root"]).resolve()
+                isolated_root = (root / "AppData" / "runtime" / "projects").resolve()
+                self.assertEqual(project_file.suffix, ".abproj")
+                self.assertTrue(project_file.is_file())
+                self.assertTrue(workspace.is_dir())
+                self.assertTrue(str(project_file).startswith(str(isolated_root)))
+                self.assertTrue(str(workspace).startswith(str(isolated_root)))
+                self.assertEqual(workspace.name, "workspace")
+                self.assertTrue((workspace / ".astrabridge" / "storage_policy.json").is_file())
+        finally:
+            if original_appdata is None:
+                os.environ.pop("ASTRABRIDGE_APPDATA", None)
+            else:
+                os.environ["ASTRABRIDGE_APPDATA"] = original_appdata
 
     def test_project_service_creates_shell_tmp_subdir_inside_workspace_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -9886,6 +9920,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 self.assertEqual(audit["paths"]["managed_state_roots"]["captures"], str(workspace / ".astrabridge" / "captures"))
                 self.assertEqual(audit["paths"]["managed_state_roots"]["downloads"], str(workspace / ".astrabridge" / "downloads"))
                 checks = {item["name"]: item for item in audit["checks"]}
+                self.assertTrue(checks["workspace_storage_policy_exists"]["ok"])
+                self.assertTrue(checks["workspace_storage_policy_schema"]["ok"])
+                self.assertTrue(checks["workspace_storage_policy_managed_dirs_match"]["ok"])
                 self.assertTrue(checks["managed_state_dir_captures_exists"]["ok"])
                 self.assertTrue(checks["managed_state_dir_downloads_exists"]["ok"])
                 self.assertIsNotNone(audit["official_codex"]["config_sha256"])

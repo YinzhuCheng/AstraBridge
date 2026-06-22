@@ -1,12 +1,13 @@
 ﻿from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Any
 
 from .common import PROJECT_FILE_SUFFIX, WORKSPACE_STATE_DIRNAME
-from .project_service import MANAGED_STATE_DIRS
+from .project_service import MANAGED_STATE_DIRS, STORAGE_POLICY_SCHEMA_VERSION
 from .security import SECRET_RE
 
 
@@ -39,7 +40,16 @@ class IsolationAuditService:
         checks = []
         checks.append(_check("project_file_suffix", project_file is None or project_file.suffix == PROJECT_FILE_SUFFIX, str(project_file) if project_file else None))
         if workspace:
+            storage_policy = workspace / WORKSPACE_STATE_DIRNAME / "storage_policy.json"
             checks.append(_check("workspace_astrabridge_state_exists", (workspace / WORKSPACE_STATE_DIRNAME).exists(), str(workspace / WORKSPACE_STATE_DIRNAME)))
+            checks.append(_check("workspace_storage_policy_exists", storage_policy.exists(), str(storage_policy)))
+            checks.append(
+                _check(
+                    "workspace_storage_policy_schema",
+                    _storage_policy_schema_ok(storage_policy),
+                    str(storage_policy),
+                )
+            )
             checks.append(_check("workspace_no_owned_codex_state", not (workspace / ".codex").exists(), str(workspace / ".codex")))
             checks.append(_check("workspace_no_old_lcr_state", not (workspace / ".lcr").exists(), str(workspace / ".lcr")))
             checks.append(_check("workspace_no_old_codex_shell_state", not (workspace / ".codex-shell").exists(), str(workspace / ".codex-shell")))
@@ -51,6 +61,13 @@ class IsolationAuditService:
                         str(workspace / WORKSPACE_STATE_DIRNAME / dirname),
                     )
                 )
+            checks.append(
+                _check(
+                    "workspace_storage_policy_managed_dirs_match",
+                    _storage_policy_managed_dirs_match(storage_policy, workspace),
+                    str(storage_policy),
+                )
+            )
         checks.append(_check("isolated_codex_home_present", codex_home is not None and codex_home.exists(), str(codex_home) if codex_home else None))
         checks.append(
             _check(
@@ -164,4 +181,39 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def _storage_policy_schema_ok(path: Path) -> bool:
+    payload = _read_storage_policy(path)
+    return bool(payload) and str(payload.get("schema_version") or "") == STORAGE_POLICY_SCHEMA_VERSION
+
+
+def _storage_policy_managed_dirs_match(path: Path, workspace: Path) -> bool:
+    payload = _read_storage_policy(path)
+    if not payload:
+        return False
+    managed = dict(payload.get("managed_dirs") or {})
+    expected_root = (workspace / WORKSPACE_STATE_DIRNAME).resolve()
+    for dirname in MANAGED_STATE_DIRS:
+        actual = managed.get(dirname)
+        if not actual:
+            return False
+        try:
+            actual_path = Path(str(actual)).expanduser().resolve()
+        except OSError:
+            return False
+        if actual_path != (expected_root / dirname):
+            return False
+    return True
+
+
+def _read_storage_policy(path: Path) -> dict[str, Any] | None:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        payload = path.read_text(encoding="utf-8")
+        data = json.loads(payload)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
 

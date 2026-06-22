@@ -2992,11 +2992,11 @@ function Launcher() {
           <button
             type="button"
             className="primary-button"
-            disabled={!name.trim() || !projectFile.trim() || createProject.isPending}
+            disabled={!name.trim() || (entryMode !== "new" && !projectFile.trim()) || createProject.isPending}
             onClick={() =>
               createProject.mutate({
                 name,
-                project_file: projectFile,
+                project_file: projectFile || "",
                 workspace_root: workspaceRoot || undefined,
                 entry_mode: entryMode,
               })

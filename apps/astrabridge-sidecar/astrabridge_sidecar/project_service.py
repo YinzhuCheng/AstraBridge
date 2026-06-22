@@ -11,6 +11,8 @@ from .common import (
     PROJECT_SCHEMA_VERSION,
     WORKSPACE_STATE_DIRNAME,
     app_data_dir,
+    app_runtime_dir,
+    default_codex_home,
     now_iso,
     read_json,
     slugify,
@@ -38,6 +40,7 @@ MANAGED_STATE_FILES = (
     "thread_cache.json",
     "ui_state.json",
 )
+STORAGE_POLICY_SCHEMA_VERSION = "astrabridge-storage-policy-v1"
 
 
 class ProjectService:
@@ -55,10 +58,15 @@ class ProjectService:
         workspace_root: str | Path | None = None,
         entry_mode: str = "existing",
     ) -> dict[str, Any]:
-        project_path = self._normalize_project_path(project_file)
         if entry_mode not in {"existing", "new"}:
             raise ValueError("entry_mode must be existing or new.")
-        resolved_workspace = Path(workspace_root).expanduser().resolve() if workspace_root else project_path.with_suffix("")
+        requested_workspace = Path(workspace_root).expanduser().resolve() if workspace_root else None
+        project_path, resolved_workspace = self._resolve_creation_paths(
+            name=name,
+            project_file=project_file,
+            workspace_root=requested_workspace,
+            entry_mode=entry_mode,
+        )
         if entry_mode == "existing":
             if not resolved_workspace.exists() or not resolved_workspace.is_dir():
                 raise ValueError(f"Existing workspace does not exist: {resolved_workspace}")
@@ -87,7 +95,7 @@ class ProjectService:
             "updated_at": now_iso(),
         }
         payload = self._normalize_project_runtime_defaults(payload)
-        self._ensure_workspace_state(resolved_workspace)
+        self._ensure_workspace_state(resolved_workspace, project_path=project_path, entry_mode=entry_mode)
         write_json(project_path, payload)
         self._remember_project(payload)
         self.current_project = payload
@@ -118,7 +126,11 @@ class ProjectService:
         payload = self._normalize_project_runtime_defaults(payload)
         before_preferences = dict(payload.get("ui_preferences") or {})
         payload["ui_preferences"] = self._normalize_ui_preferences(before_preferences)
-        self._ensure_workspace_state(workspace_root)
+        self._ensure_workspace_state(
+            workspace_root,
+            project_path=project_path,
+            entry_mode=str(payload.get("entry_mode") or "existing"),
+        )
         runtime_changed = before_runtime != {
             "default_profile_id": payload.get("default_profile_id"),
             "default_model": payload.get("default_model"),
@@ -363,7 +375,7 @@ class ProjectService:
         if project_file.exists():
             raise ValueError(f"Project file already exists: {project_file}")
 
-    def _ensure_workspace_state(self, workspace_root: Path) -> None:
+    def _ensure_workspace_state(self, workspace_root: Path, *, project_path: Path | None = None, entry_mode: str | None = None) -> None:
         shell_root = workspace_root / WORKSPACE_STATE_DIRNAME
         for dirname in MANAGED_STATE_DIRS:
             path = shell_root / dirname
@@ -376,7 +388,89 @@ class ProjectService:
                     write_json(path, {})
             else:
                 path.touch(exist_ok=True)
+        self._write_storage_policy(
+            workspace_root,
+            project_path=project_path,
+            entry_mode=entry_mode,
+        )
         self._ensure_git_exclude(workspace_root)
+
+    def _write_storage_policy(
+        self,
+        workspace_root: Path,
+        *,
+        project_path: Path | None = None,
+        entry_mode: str | None = None,
+    ) -> None:
+        shell_root = workspace_root / WORKSPACE_STATE_DIRNAME
+        policy_path = shell_root / "storage_policy.json"
+        payload = {
+            "schema_version": STORAGE_POLICY_SCHEMA_VERSION,
+            "workspace_root": str(workspace_root.resolve()),
+            "state_root": str(shell_root.resolve()),
+            "project_file": str(project_path.resolve()) if project_path else str((self.current_project or {}).get("project_file") or ""),
+            "entry_mode": str(entry_mode or (self.current_project or {}).get("entry_mode") or ""),
+            "managed_dirs": {
+                dirname: str((shell_root / dirname).resolve())
+                for dirname in MANAGED_STATE_DIRS
+            },
+            "managed_files": {
+                filename: str((shell_root / filename).resolve())
+                for filename in MANAGED_STATE_FILES
+            },
+            "runtime": {
+                "app_data_root": str(app_data_dir()),
+                "codex_home_root": str(default_codex_home()),
+            },
+            "updated_at": now_iso(),
+        }
+        write_json(policy_path, payload)
+
+    def _resolve_creation_paths(
+        self,
+        *,
+        name: str,
+        project_file: str | Path,
+        workspace_root: Path | None,
+        entry_mode: str,
+    ) -> tuple[Path, Path]:
+        clean_project = str(project_file or "").strip()
+        if clean_project:
+            project_path = self._normalize_project_path(clean_project)
+            if workspace_root is not None:
+                return project_path, workspace_root
+            if entry_mode == "new":
+                return project_path, project_path.parent / "workspace"
+            return project_path, project_path.with_suffix("")
+        if entry_mode != "new":
+            raise ValueError("project_file is required for existing-workspace projects.")
+        if workspace_root is not None:
+            project_path = self._unique_project_path(workspace_root.parent, slugify(name or workspace_root.name or "astrabridge-project"))
+            return project_path, workspace_root
+        isolated_root, project_path = self._unique_isolated_project_bundle(slugify(name or "astrabridge-project"))
+        return project_path, isolated_root / "workspace"
+
+    def _unique_project_path(self, base_dir: Path, slug: str) -> Path:
+        candidate_dir = base_dir.expanduser().resolve()
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        for index in range(1, 200):
+            suffix = "" if index == 1 else f"-{index}"
+            candidate = candidate_dir / f"{slug}{suffix}{PROJECT_FILE_SUFFIX}"
+            if not candidate.exists():
+                return candidate
+        raise ValueError(f"Could not allocate a unique AstraBridge project file under {candidate_dir}")
+
+    def _unique_isolated_project_bundle(self, slug: str) -> tuple[Path, Path]:
+        projects_root = app_runtime_dir("projects")
+        for index in range(1, 200):
+            suffix = "" if index == 1 else f"-{index}"
+            bundle_root = (projects_root / f"{slug}{suffix}").resolve()
+            project_path = bundle_root / f"{slug}{suffix}{PROJECT_FILE_SUFFIX}"
+            workspace_root = bundle_root / "workspace"
+            if bundle_root.exists() or project_path.exists() or workspace_root.exists():
+                continue
+            return bundle_root, project_path
+        raise ValueError(f"Could not allocate an isolated AstraBridge project root under {projects_root}")
 
     def _ensure_git_exclude(self, workspace_root: Path) -> None:
         git_root = workspace_root / ".git"
