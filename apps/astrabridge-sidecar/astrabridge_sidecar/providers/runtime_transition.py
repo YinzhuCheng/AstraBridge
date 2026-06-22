@@ -65,6 +65,8 @@ class TransitionSummary:
     projection_mode: str
     dropped_artifacts: int
     repaired_tool_pairs: int
+    replayable_artifact_count: int
+    projection_preview: str | None
     kept_summary: bool
     warnings: list[str]
     context_budget: int | None
@@ -153,6 +155,8 @@ def summarize_transition(
     to_model: str | None,
     dropped_artifacts: int = 0,
     repaired_tool_pairs: int = 0,
+    replayable_artifact_count: int = 0,
+    projection_preview: str | None = None,
     warnings: list[str] | None = None,
     projection_mode: str = "task_context_fresh_thread",
     reasoning_effort: str | None = None,
@@ -192,6 +196,8 @@ def summarize_transition(
         projection_mode=projection_mode,
         dropped_artifacts=dropped_artifacts,
         repaired_tool_pairs=repaired_tool_pairs,
+        replayable_artifact_count=replayable_artifact_count,
+        projection_preview=str(projection_preview or "").strip() or None,
         kept_summary=True,
         warnings=list(dict.fromkeys(extra_warnings)),
         context_budget=target_runtime.context_budget,

@@ -261,6 +261,8 @@ class TaskConversationService:
         projection_mode = str(transition_summary.get("projection_mode") or "").strip()
         dropped_artifacts = int(transition_summary.get("dropped_artifacts") or 0)
         repaired_tool_pairs = int(transition_summary.get("repaired_tool_pairs") or 0)
+        replayable_artifact_count = int(transition_summary.get("replayable_artifact_count") or 0)
+        projection_preview = str(transition_summary.get("projection_preview") or "").strip()
         warning_count = len(list(transition_summary.get("warnings") or []))
         target_provider = str(handoff_event.get("provider_id") or "").strip()
         target_model = str(handoff_event.get("model") or "").strip()
@@ -275,8 +277,12 @@ class TaskConversationService:
             summary_parts.append(f"dropped_artifacts={dropped_artifacts}")
         if repaired_tool_pairs:
             summary_parts.append(f"repaired_tool_pairs={repaired_tool_pairs}")
+        if replayable_artifact_count:
+            summary_parts.append(f"replayable_artifacts={replayable_artifact_count}")
         if warning_count:
             summary_parts.append(f"warnings={warning_count}")
+        if projection_preview:
+            summary_parts.append(f'preview="{self._clip(projection_preview, 220)}"')
         summary = " ".join(part for part in summary_parts if part).strip()
         return {
             "turn_id": handoff_event.get("event_id"),
@@ -291,6 +297,8 @@ class TaskConversationService:
             "event_types": [str(item.get("event_type") or "") for item in events if str(item.get("event_type") or "").strip()],
             "handoff_from_thread_id": handoff_event.get("from_thread_id"),
             "handoff_to_thread_id": target_thread_id,
+            "projection_preview": projection_preview or None,
+            "replayable_artifact_count": replayable_artifact_count,
         }
 
     def _item_text(self, item: dict[str, Any]) -> str:

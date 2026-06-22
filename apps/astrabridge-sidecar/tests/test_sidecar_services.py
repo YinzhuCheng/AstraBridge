@@ -724,6 +724,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 reused_existing=False,
                 dropped_artifacts=2,
                 repaired_tool_pairs=1,
+                replayable_artifact_count=1,
+                projection_preview="Assistant: Reviewed the current task. | Tool: Tool result was unavailable in Codex history; continue from the available context.",
                 warnings=["Stripped provider-private fields during history projection: encrypted_reasoning."],
             )
 
@@ -738,6 +740,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(event["transition_summary"]["projection_mode"], "task_context_fresh_thread")
             self.assertEqual(event["transition_summary"]["dropped_artifacts"], 2)
             self.assertEqual(event["transition_summary"]["repaired_tool_pairs"], 1)
+            self.assertEqual(event["transition_summary"]["replayable_artifact_count"], 1)
+            self.assertIn("Reviewed the current task", event["transition_summary"]["projection_preview"])
             self.assertTrue(any("provider-private fields" in warning for warning in event["transition_summary"]["warnings"]))
             self.assertGreaterEqual(int(event["transition_summary"]["context_budget"]), 1000000)
             self.assertEqual(event["transition_summary"]["target_runtime"]["protocol"], "chat")
@@ -949,6 +953,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 reused_existing=False,
                 dropped_artifacts=1,
                 repaired_tool_pairs=2,
+                replayable_artifact_count=1,
+                projection_preview="Assistant: Build a release readiness scorecard. | Tool: Tool result was unavailable in Codex history; continue from the available context.",
                 warnings=["Cross-provider reasoning replay is disabled by target provider policy; preserved only visible summary."],
             )
             context = ProjectContextService(projects, task_service=tasks, task_conversation_service=conversation)
@@ -965,6 +971,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("Provider handoff", pack["task_conversation_digest"]["items"][1]["summary"])
             self.assertIn("dropped_artifacts=1", pack["task_conversation_digest"]["items"][1]["summary"])
             self.assertIn("repaired_tool_pairs=2", pack["task_conversation_digest"]["items"][1]["summary"])
+            self.assertIn("replayable_artifacts=1", pack["task_conversation_digest"]["items"][1]["summary"])
+            self.assertIn("Build a release readiness scorecard", pack["task_conversation_digest"]["items"][1]["projection_preview"])
+            self.assertIn("projection_preview=Assistant: Build a release readiness scorecard.", pack["text"])
 
     def test_coding_event_projection_maps_core_coding_turn_items(self) -> None:
         events = project_turn_to_coding_events(
@@ -1473,6 +1482,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(thread_id, "thread-deepseek-fresh")
             self.assertEqual(handoff["transition_summary"]["dropped_artifacts"], 1)
             self.assertEqual(handoff["transition_summary"]["repaired_tool_pairs"], 1)
+            self.assertEqual(handoff["transition_summary"]["replayable_artifact_count"], 0)
+            self.assertIn("requested tool call(s): read_file", handoff["transition_summary"]["projection_preview"])
             self.assertTrue(any("Opaque provider reasoning artifacts were dropped" in warning for warning in handoff["transition_summary"]["warnings"]))
             self.assertTrue(any("provider-private fields" in warning for warning in handoff["transition_summary"]["warnings"]))
             task = tasks.current_task()
@@ -10941,8 +10952,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         self.assertEqual(projected.dropped_artifacts, 1)
         self.assertEqual(projected.repaired_tool_pairs, 1)
+        self.assertEqual(projected.replayable_artifact_count, 0)
         self.assertTrue(any(item.get("role") == "tool" for item in projected.messages))
         self.assertTrue(any(item.get("role") == "system" for item in projected.messages))
+        self.assertIn("requested tool call(s): update_plan", projected.projection_preview or "")
         self.assertTrue(any("Opaque provider reasoning artifacts were dropped" in warning for warning in projected.warnings))
 
     def test_history_projector_fails_closed_for_unknown_target_provider(self) -> None:
@@ -10973,6 +10986,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertFalse(any("tool_calls" in item for item in projected.messages))
         self.assertTrue(any(item.get("role") == "system" for item in projected.messages))
         self.assertEqual(projected.replayable_artifacts, [])
+        self.assertEqual(projected.replayable_artifact_count, 0)
+        self.assertIn("Assistant: Planning next step.", projected.projection_preview or "")
         self.assertTrue(any("Unknown target provider" in warning for warning in projected.warnings))
         self.assertTrue(any("provider-private fields" in warning for warning in projected.warnings))
 
@@ -11021,7 +11036,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         self.assertEqual(projected.dropped_artifacts, 0)
         self.assertEqual(len(projected.replayable_artifacts), 1)
+        self.assertEqual(projected.replayable_artifact_count, 1)
         self.assertNotIn("thought_signature", projected.replayable_artifacts[0]["payload"])
+        self.assertIn("Assistant: Continue the same task.", projected.projection_preview or "")
         self.assertTrue(any("provider-private fields" in warning for warning in projected.warnings))
 
     def test_history_projector_strips_nested_provider_private_fields(self) -> None:

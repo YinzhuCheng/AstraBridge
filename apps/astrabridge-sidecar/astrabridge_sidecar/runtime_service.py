@@ -2697,6 +2697,8 @@ class RuntimeService:
         return {
             "dropped_artifacts": int(summary.get("dropped_artifacts") or 0),
             "repaired_tool_pairs": int(summary.get("repaired_tool_pairs") or 0),
+            "replayable_artifact_count": int(summary.get("replayable_artifact_count") or 0),
+            "projection_preview": str(summary.get("projection_preview") or "").strip() or None,
             "warnings": list(summary.get("warnings") or []),
         }
 
@@ -2722,7 +2724,8 @@ class RuntimeService:
             "repaired_tool_pairs": projected.repaired_tool_pairs,
             "warnings": projected.warnings,
             "projected_message_count": len(projected.messages),
-            "replayable_artifact_count": len(projected.replayable_artifacts),
+            "replayable_artifact_count": projected.replayable_artifact_count,
+            "projection_preview": projected.projection_preview,
         }
 
     def _thread_for_handoff_projection(self, source_thread_id: str | None) -> dict[str, Any] | None:

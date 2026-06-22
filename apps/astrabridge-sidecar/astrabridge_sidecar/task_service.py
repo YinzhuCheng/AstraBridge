@@ -329,6 +329,8 @@ class TaskService:
         context_budget_report: dict[str, Any] | None = None,
         dropped_artifacts: int = 0,
         repaired_tool_pairs: int = 0,
+        replayable_artifact_count: int = 0,
+        projection_preview: str | None = None,
         warnings: list[str] | None = None,
     ) -> dict[str, Any]:
         task = self.bind_thread(thread_id=to_thread_id, settings=settings, role="provider", make_active=True)
@@ -339,6 +341,8 @@ class TaskService:
             to_model=str(settings.get("model") or "") or None,
             dropped_artifacts=dropped_artifacts,
             repaired_tool_pairs=repaired_tool_pairs,
+            replayable_artifact_count=replayable_artifact_count,
+            projection_preview=projection_preview,
             warnings=warnings,
             projection_mode="reused_provider_thread" if reused_existing else "task_context_fresh_thread",
             reasoning_effort=str(settings.get("reasoning_effort") or "") or None,

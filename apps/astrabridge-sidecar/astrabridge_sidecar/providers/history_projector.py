@@ -72,6 +72,8 @@ class ProjectionResult:
     repaired_tool_pairs: int
     warnings: list[str]
     replayable_artifacts: list[dict[str, Any]] = field(default_factory=list)
+    replayable_artifact_count: int = 0
+    projection_preview: str | None = None
 
 
 class HistoryProjector:
@@ -244,6 +246,8 @@ class HistoryProjector:
             repaired_tool_pairs=repaired_tool_pairs,
             warnings=deduped_warnings,
             replayable_artifacts=replayable_artifacts,
+            replayable_artifact_count=len(replayable_artifacts),
+            projection_preview=self._projection_preview(projected),
         )
 
     def _can_replay_artifact(
@@ -379,3 +383,54 @@ class HistoryProjector:
         if len(text) <= limit:
             return text
         return text[:limit].rstrip() + "..."
+
+    def _projection_preview(self, messages: list[dict[str, Any]]) -> str | None:
+        chunks: list[str] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "").strip().lower()
+            content = self._message_preview_content(message)
+            if not content:
+                continue
+            prefix = {
+                "system": "System",
+                "user": "User",
+                "assistant": "Assistant",
+                "tool": "Tool",
+            }.get(role, "Message")
+            chunks.append(f"{prefix}: {content}")
+        if not chunks:
+            return None
+        return self._clip(" | ".join(chunks[-3:]), 480)
+
+    def _message_preview_content(self, message: dict[str, Any]) -> str:
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return " ".join(content.split())
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str) and item.strip():
+                    parts.append(" ".join(item.split()))
+                elif isinstance(item, dict):
+                    text = str(item.get("text") or item.get("content") or "").strip()
+                    if text:
+                        parts.append(" ".join(text.split()))
+            joined = " ".join(parts).strip()
+            if joined:
+                return joined
+        tool_calls = list(message.get("tool_calls") or [])
+        if tool_calls:
+            names = [
+                str((call.get("function") or {}).get("name") or call.get("name") or "").strip()
+                for call in tool_calls
+                if isinstance(call, dict)
+            ]
+            names = [name for name in names if name]
+            if names:
+                return f"requested tool call(s): {', '.join(names[:3])}"
+        tool_call_id = str(message.get("tool_call_id") or "").strip()
+        if tool_call_id:
+            return f"tool result for {tool_call_id}"
+        return ""

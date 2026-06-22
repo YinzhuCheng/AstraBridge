@@ -433,6 +433,8 @@ class ProjectContextService:
                 summary = str(item.get("summary") or "").strip().replace("\n", " ")
                 files = [str(path) for path in list(item.get("files") or [])[:4]]
                 commands = [str(command) for command in list(item.get("commands") or [])[:2]]
+                projection_preview = str(item.get("projection_preview") or "").strip().replace("\n", " ")
+                replayable_artifact_count = int(item.get("replayable_artifact_count") or 0)
                 prefix = (
                     f"- {item.get('provider_id') or ''}/{item.get('model') or ''} "
                     f"thread={item.get('source_thread_id') or ''}"
@@ -440,6 +442,10 @@ class ProjectContextService:
                 details = []
                 if summary:
                     details.append(summary[:600])
+                if projection_preview:
+                    details.append("projection_preview=" + projection_preview[:400])
+                if replayable_artifact_count:
+                    details.append(f"replayable_artifacts={replayable_artifact_count}")
                 if files:
                     details.append("files=" + ", ".join(files))
                 if commands:
