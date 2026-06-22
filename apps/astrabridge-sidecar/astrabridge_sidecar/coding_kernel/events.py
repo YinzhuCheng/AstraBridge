@@ -63,6 +63,45 @@ def project_turn_to_coding_events(
     return events
 
 
+def project_handoff_event_to_coding_events(
+    *,
+    task_id: str,
+    visible_thread_id: str,
+    handoff_event: dict[str, Any],
+    source: Literal["codex_app_server", "native_kernel", "transport", "ui", "sidecar"] = "sidecar",
+) -> list[dict[str, Any]]:
+    if not isinstance(handoff_event, dict):
+        return []
+    event_id = str(handoff_event.get("event_id") or "").strip() or "handoff"
+    provider_id = _string_or_none(handoff_event.get("provider_id"))
+    model_id = _string_or_none(handoff_event.get("model"))
+    timestamp = _string_or_none(handoff_event.get("created_at") or handoff_event.get("updated_at"))
+    payload = {
+        "from_thread_id": _string_or_none(handoff_event.get("from_thread_id")),
+        "to_thread_id": _string_or_none(handoff_event.get("to_thread_id")),
+        "profile_id": _string_or_none(handoff_event.get("profile_id")),
+        "provider_id": provider_id,
+        "model": model_id,
+        "reasoning_effort": _string_or_none(handoff_event.get("reasoning_effort")),
+        "reused_existing": bool(handoff_event.get("reused_existing")),
+        "transition_summary": dict(handoff_event.get("transition_summary") or {}),
+    }
+    event = CodingEvent(
+        event_id=event_id,
+        task_id=task_id,
+        visible_thread_id=visible_thread_id,
+        execution_thread_id=_string_or_none(handoff_event.get("to_thread_id")),
+        provider_id=provider_id,
+        model_id=model_id,
+        event_type="provider_handoff",
+        timestamp=timestamp,
+        payload=payload,
+        redaction_status="secret_free",
+        source=source,
+    )
+    return [event.to_dict()]
+
+
 def _event_payload(item_type: str, item: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
     if item_type in {"userMessage", "agentMessage", "assistantMessage"}:
         return (

@@ -31,7 +31,7 @@ from astrabridge_sidecar import lcr_web_service as lcr_web_service_module
 from astrabridge_sidecar import lcr_web_mcp_server
 from astrabridge_sidecar.app_server_client import AppServerClient, JsonRpcError
 from astrabridge_sidecar.asset_registry_service import AssetRegistryService
-from astrabridge_sidecar.coding_kernel import project_turn_to_coding_events
+from astrabridge_sidecar.coding_kernel import project_handoff_event_to_coding_events, project_turn_to_coding_events
 from astrabridge_sidecar.modal_service import ModalService
 from astrabridge_sidecar.checkpoint_service import CheckpointService
 from astrabridge_sidecar.dogfood_run_service import DogfoodRunService
@@ -696,6 +696,18 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     ],
                 }
             )
+            tasks.record_provider_handoff(
+                from_thread_id="thread-deepseek",
+                to_thread_id="thread-kimi",
+                settings={
+                    "profile_id": "kimi-default",
+                    "provider_id": "kimi",
+                    "model": "kimi-k2.6",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+                reused_existing=False,
+            )
             context = ProjectContextService(projects, task_service=tasks, task_conversation_service=conversation)
 
             pack = context.snapshot(thread_id="thread-deepseek")["context_pack"]
@@ -706,6 +718,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("Build a release readiness scorecard", pack["text"])
             self.assertIn("scorecard.py", pack["text"])
             self.assertEqual(pack["task_conversation_digest"]["items"][0]["event_types"], ["agent_message", "file_change"])
+            self.assertEqual(pack["task_conversation_digest"]["items"][1]["event_types"], ["provider_handoff"])
+            self.assertIn("Provider handoff", pack["task_conversation_digest"]["items"][1]["summary"])
 
     def test_coding_event_projection_maps_core_coding_turn_items(self) -> None:
         events = project_turn_to_coding_events(
@@ -731,6 +745,27 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(events[2]["payload"]["command"], "pytest -q")
         self.assertEqual(events[3]["payload"]["paths"], ["scorecard.py", "README.md"])
         self.assertEqual(events[4]["payload"]["transition"], "context_compaction")
+
+    def test_coding_event_projection_maps_provider_handoff_event(self) -> None:
+        events = project_handoff_event_to_coding_events(
+            task_id="task-1",
+            visible_thread_id="task:task-1",
+            handoff_event={
+                "event_id": "handoff-1",
+                "from_thread_id": "thread-openai",
+                "to_thread_id": "thread-kimi",
+                "provider_id": "kimi",
+                "model": "kimi-k2.6",
+                "reasoning_effort": "high",
+                "created_at": "2026-06-22T00:00:00+00:00",
+                "transition_summary": {"projection_mode": "task_context_fresh_thread"},
+            },
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_type"], "provider_handoff")
+        self.assertEqual(events[0]["execution_thread_id"], "thread-kimi")
+        self.assertEqual(events[0]["payload"]["transition_summary"]["projection_mode"], "task_context_fresh_thread")
 
     def test_default_task_inherits_thread_context_goal_and_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

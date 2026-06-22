@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from .common import now_iso, read_json, write_json
-from .coding_kernel import project_turn_to_coding_events
+from .coding_kernel import project_handoff_event_to_coding_events, project_turn_to_coding_events
 from .security import redact_sensitive
 
 
@@ -89,13 +90,24 @@ class TaskConversationService:
                 "items": [],
             }
         thread = dict(conversation.get("thread") or {})
-        digest_items: list[dict[str, Any]] = []
+        digest_entries: list[tuple[tuple[int, str, str], dict[str, Any]]] = []
         for turn in list(thread.get("turns") or [])[-MAX_DIGEST_ITEMS:]:
             if not isinstance(turn, dict):
                 continue
             item = self._digest_turn(turn)
             if item:
-                digest_items.append(item)
+                digest_entries.append((self._digest_sort_key(item, fallback_thread_id=str(turn.get("source_thread_id") or "")), item))
+        for handoff_event in list((conversation.get("task") or {}).get("handoff_events") or [])[-MAX_DIGEST_ITEMS:]:
+            if not isinstance(handoff_event, dict):
+                continue
+            item = self._digest_handoff_event(
+                handoff_event,
+                task_id=str((conversation.get("task") or {}).get("task_id") or ""),
+            )
+            if item:
+                digest_entries.append((self._digest_sort_key(item, fallback_thread_id=str(handoff_event.get("to_thread_id") or "")), item))
+        digest_entries.sort(key=lambda entry: entry[0])
+        digest_items = [entry[1] for entry in digest_entries[-MAX_DIGEST_ITEMS:]]
         return redact_sensitive(
             {
                 "schema_version": TASK_CONVERSATION_DIGEST_SCHEMA_VERSION,
@@ -188,6 +200,41 @@ class TaskConversationService:
             "event_types": [str(item.get("event_type") or "") for item in events[:8] if str(item.get("event_type") or "").strip()],
         }
 
+    def _digest_handoff_event(self, handoff_event: dict[str, Any], *, task_id: str) -> dict[str, Any] | None:
+        events = project_handoff_event_to_coding_events(
+            task_id=task_id,
+            visible_thread_id=f"task:{task_id}" if task_id else "task:unknown",
+            handoff_event=handoff_event,
+        )
+        if not events:
+            return None
+        transition_summary = dict(handoff_event.get("transition_summary") or {})
+        projection_mode = str(transition_summary.get("projection_mode") or "").strip()
+        target_provider = str(handoff_event.get("provider_id") or "").strip()
+        target_model = str(handoff_event.get("model") or "").strip()
+        target_thread_id = str(handoff_event.get("to_thread_id") or "").strip()
+        summary_parts = [
+            "Provider handoff",
+            f"to {target_provider}/{target_model}".strip("/"),
+        ]
+        if projection_mode:
+            summary_parts.append(f"via {projection_mode}")
+        summary = " ".join(part for part in summary_parts if part).strip()
+        return {
+            "turn_id": handoff_event.get("event_id"),
+            "source_thread_id": target_thread_id,
+            "provider_id": target_provider,
+            "model": target_model,
+            "started_at": handoff_event.get("created_at"),
+            "completed_at": handoff_event.get("created_at"),
+            "summary": summary,
+            "files": [],
+            "commands": [],
+            "event_types": [str(item.get("event_type") or "") for item in events if str(item.get("event_type") or "").strip()],
+            "handoff_from_thread_id": handoff_event.get("from_thread_id"),
+            "handoff_to_thread_id": target_thread_id,
+        }
+
     def _item_text(self, item: dict[str, Any]) -> str:
         direct = item.get("text") or item.get("message") or item.get("content")
         if isinstance(direct, str):
@@ -210,6 +257,21 @@ class TaskConversationService:
             if isinstance(value, str) and value.isdigit():
                 return (int(value), str(turn.get("source_thread_id") or ""), str(turn.get("id") or ""))
         return (0, str(turn.get("source_thread_id") or ""), str(turn.get("id") or ""))
+
+    def _digest_sort_key(self, item: dict[str, Any], *, fallback_thread_id: str) -> tuple[int, str, str]:
+        for key in ("started_at", "completed_at", "updated_at", "created_at"):
+            value = item.get(key)
+            if isinstance(value, (int, float)):
+                return (int(value), str(item.get("source_thread_id") or fallback_thread_id or ""), str(item.get("turn_id") or ""))
+            if isinstance(value, str) and value.isdigit():
+                return (int(value), str(item.get("source_thread_id") or fallback_thread_id or ""), str(item.get("turn_id") or ""))
+            if isinstance(value, str):
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    return (int(parsed.timestamp()), str(item.get("source_thread_id") or fallback_thread_id or ""), str(item.get("turn_id") or ""))
+                except Exception:
+                    pass
+        return (0, str(item.get("source_thread_id") or fallback_thread_id or ""), str(item.get("turn_id") or ""))
 
     def _route_for_thread(self, task: dict[str, Any], thread_id: str) -> dict[str, Any]:
         clean_thread_id = str(thread_id or "").strip()
