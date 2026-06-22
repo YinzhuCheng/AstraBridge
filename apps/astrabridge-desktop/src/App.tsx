@@ -1080,7 +1080,13 @@ function ReviewInspectorPanel({
       <div className="inspector-list" role="list" aria-label="修改文件">
         {files.length ? (
           files.slice(0, 12).map((file) => (
-            <button type="button" className={`inspector-list-row ${selectedPath === file.path ? "active" : ""}`} onClick={() => onSelectPath(file.path)} key={`${file.status}:${file.path}`}>
+            <button
+              type="button"
+              data-testid="review-file-row"
+              className={`inspector-list-row ${selectedPath === file.path ? "active" : ""}`}
+              onClick={() => onSelectPath(file.path)}
+              key={`${file.status}:${file.path}`}
+            >
               <span>{file.path}</span>
               <small>{file.status}</small>
             </button>
@@ -1131,7 +1137,7 @@ function TerminalInspectorPanel({
       <div className="inspector-list" role="list" aria-label="命令历史">
         {commandRows.length ? (
           commandRows.map((item) => (
-            <div className="inspector-list-row static-row" key={item.key}>
+            <div className="inspector-list-row static-row" data-testid="terminal-command-row" key={item.key}>
               <span>{item.summary}</span>
               <small>{item.status}</small>
             </div>
@@ -1191,7 +1197,7 @@ function WorkflowEvidencePanel({
       {checkpoints.length ? (
         <div className="inspector-list" role="list" aria-label="检查点事实">
           {checkpoints.slice(-4).map((item) => (
-            <div className="inspector-list-row static-row" key={item.save_id}>
+            <div className="inspector-list-row static-row" data-testid="workflow-checkpoint-row" key={item.save_id}>
               <span>{item.description}</span>
               <small>{item.save_id}</small>
             </div>
@@ -1201,7 +1207,11 @@ function WorkflowEvidencePanel({
       {diagnostics.length ? (
         <div className="inspector-list" role="list" aria-label="诊断事实">
           {diagnostics.slice(-4).map((item, index) => (
-            <div className="inspector-list-row static-row" key={`${item.kind}:${item.summary}:${index}`}>
+            <div
+              className="inspector-list-row static-row"
+              data-testid="workflow-diagnostic-row"
+              key={`${item.kind}:${item.summary}:${index}`}
+            >
               <span>{item.summary}</span>
               <small>{item.kind}</small>
             </div>
@@ -1321,7 +1331,13 @@ function FilesInspectorPanel({
       <input className="inspector-search" value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="筛选文件..." aria-label="筛选文件" />
       <div className="inspector-list inspector-file-list" role="list" aria-label="项目文件">
         {items.slice(0, 18).map((item) => (
-          <button type="button" className={`inspector-list-row ${selectedPath === item.path ? "active" : ""}`} onClick={() => onSelectPath(item.path)} key={item.path}>
+          <button
+            type="button"
+            data-testid="project-file-row"
+            className={`inspector-list-row ${selectedPath === item.path ? "active" : ""}`}
+            onClick={() => onSelectPath(item.path)}
+            key={item.path}
+          >
             <span>{item.path}</span>
             <small>{item.kind}</small>
           </button>

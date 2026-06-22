@@ -8328,9 +8328,37 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(smoke["browser_smoke"]["label"], "AstraBridge release workflow smoke")
             self.assertEqual(smoke["browser_smoke"]["verification_level"], "asserted")
             self.assertTrue(any(item.get("selector") == "[data-testid='review-panel']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(
+                any(
+                    item.get("type") == "expect_selector_count_at_least"
+                    and item.get("selector") == "[data-testid='review-file-row']"
+                    and item.get("count") == 1
+                    for item in actions
+                    if isinstance(item, dict)
+                )
+            )
+            self.assertTrue(
+                any(
+                    item.get("type") == "expect_selector_count_at_least"
+                    and item.get("selector") == "[data-testid='project-file-row']"
+                    and item.get("count") == 1
+                    for item in actions
+                    if isinstance(item, dict)
+                )
+            )
             self.assertTrue(any(item.get("selector") == "[data-testid='terminal-panel']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='checkpoint-modal']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='checkpoint-save']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='status-panel-goal']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(
+                any(
+                    item.get("type") == "expect_selector_count_at_least"
+                    and item.get("selector") == "[data-testid='workflow-checkpoint-row']"
+                    and item.get("count") == 1
+                    for item in final_assertions
+                    if isinstance(item, dict)
+                )
+            )
 
     def test_dogfood_browser_smoke_provider_switch_preset_exposes_workflow_facts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -8358,11 +8386,29 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(smoke["browser_smoke"]["label"], "AstraBridge provider switch workflow smoke")
             self.assertEqual(smoke["browser_smoke"]["verification_level"], "asserted")
             self.assertTrue(any(item.get("selector") == "[data-testid='composer-profile']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(
+                any(
+                    item.get("type") == "expect_selector_count_at_least"
+                    and item.get("selector") == "[data-testid='terminal-command-row']"
+                    and item.get("count") == 1
+                    for item in actions
+                    if isinstance(item, dict)
+                )
+            )
             self.assertTrue(any(item.get("selector") == "[data-testid='terminal-panel']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-handoffs']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-backend']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-evidence-panel']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-recovery']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(
+                any(
+                    item.get("type") == "expect_selector_count_at_least"
+                    and item.get("selector") == "[data-testid='workflow-diagnostic-row']"
+                    and item.get("count") == 1
+                    for item in final_assertions
+                    if isinstance(item, dict)
+                )
+            )
 
     def test_dogfood_browser_smoke_accepts_fill_and_select_actions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -8395,6 +8441,60 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn(
                 {"type": "select_value", "selector": "[data-testid='composer-profile']", "value": "kimi-default", "timeout_ms": 3000},
                 actions,
+            )
+
+    def test_dogfood_browser_smoke_accepts_selector_count_assertions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "index.html").write_text("<html><body>ok</body></html>", encoding="utf-8")
+            screenshot = root / "capture.png"
+            screenshot.write_bytes(b"png")
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            dogfood = DogfoodRunService(projects)
+
+            smoke = dogfood.browser_smoke(
+                {
+                    "url": (workspace / "index.html").resolve().as_uri(),
+                    "screenshot_path": str(screenshot),
+                    "actions": [
+                        {
+                            "type": "expect_selector_count_at_least",
+                            "selector": "[data-testid='project-file-row']",
+                            "count": 2,
+                            "timeout_ms": 4500,
+                        }
+                    ],
+                    "final_assertions": {
+                        "expect_selector_count_at_least": {
+                            "selector": "[data-testid='workflow-diagnostic-row']",
+                            "count": 1,
+                        }
+                    },
+                }
+            )
+
+            actions = list(smoke["browser_smoke"]["actions"] or [])
+            final_assertions = list(smoke["browser_smoke"]["final_assertions"] or [])
+            self.assertIn(
+                {
+                    "type": "expect_selector_count_at_least",
+                    "selector": "[data-testid='project-file-row']",
+                    "count": 2,
+                    "timeout_ms": 4500,
+                },
+                actions,
+            )
+            self.assertIn(
+                {
+                    "type": "expect_selector_count_at_least",
+                    "selector": "[data-testid='workflow-diagnostic-row']",
+                    "count": 1,
+                    "timeout_ms": 3000,
+                },
+                final_assertions,
             )
 
     def test_release_grade_provider_switch_workflow_integrates_checkpoint_review_tests_and_recovery(self) -> None:

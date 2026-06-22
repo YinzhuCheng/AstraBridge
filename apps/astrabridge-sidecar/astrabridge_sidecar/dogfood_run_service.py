@@ -345,12 +345,16 @@ class DogfoodRunService:
                     {"type": "expect_selector", "selector": "[data-testid='task-fact-handoffs']", "timeout_ms": 12000},
                     {"type": "click_selector", "selector": "[data-testid='inspector-tab-review']", "timeout_ms": 12000},
                     {"type": "expect_selector", "selector": "[data-testid='review-panel']", "timeout_ms": 12000},
+                    {"type": "expect_selector_count_at_least", "selector": "[data-testid='review-file-row']", "count": 1, "timeout_ms": 12000},
                     {"type": "click_selector", "selector": "[data-testid='inspector-tab-terminal']", "timeout_ms": 12000},
                     {"type": "expect_selector", "selector": "[data-testid='terminal-panel']", "timeout_ms": 12000},
+                    {"type": "expect_selector_count_at_least", "selector": "[data-testid='terminal-command-row']", "count": 1, "timeout_ms": 12000},
                     {"type": "click_selector", "selector": "[data-testid='inspector-tab-files']", "timeout_ms": 12000},
                     {"type": "expect_selector", "selector": "[data-testid='files-panel']", "timeout_ms": 12000},
+                    {"type": "expect_selector_count_at_least", "selector": "[data-testid='project-file-row']", "count": 1, "timeout_ms": 12000},
                     {"type": "click_selector", "selector": "[data-testid='checkpoint-open']", "timeout_ms": 12000},
                     {"type": "expect_selector", "selector": "[data-testid='checkpoint-modal']", "timeout_ms": 12000},
+                    {"type": "expect_selector", "selector": "[data-testid='checkpoint-save']", "timeout_ms": 12000},
                     {"type": "click_selector", "selector": "[data-testid='checkpoint-cancel']", "timeout_ms": 12000},
                     {"type": "click_selector", "selector": "[data-testid='inspector-tab-status']", "timeout_ms": 12000},
                     {"type": "expect_selector", "selector": "[data-testid='status-panel-goal']", "timeout_ms": 12000},
@@ -361,6 +365,7 @@ class DogfoodRunService:
                     {"type": "expect_selector", "selector": "[data-testid='task-fact-backend']", "timeout_ms": 12000},
                     {"type": "expect_selector", "selector": "[data-testid='workflow-evidence-panel']", "timeout_ms": 12000},
                     {"type": "expect_selector", "selector": "[data-testid='workflow-fact-recovery']", "timeout_ms": 12000},
+                    {"type": "expect_selector_count_at_least", "selector": "[data-testid='workflow-diagnostic-row']", "count": 1, "timeout_ms": 12000},
                 ],
             }
         if preset != BROWSER_SMOKE_PRESET_RELEASE_WORKFLOW:
@@ -376,12 +381,16 @@ class DogfoodRunService:
                 {"type": "expect_selector", "selector": "[data-testid='topbar-fork']", "timeout_ms": 12000},
                 {"type": "click_selector", "selector": "[data-testid='inspector-tab-review']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='review-panel']", "timeout_ms": 12000},
+                {"type": "expect_selector_count_at_least", "selector": "[data-testid='review-file-row']", "count": 1, "timeout_ms": 12000},
                 {"type": "click_selector", "selector": "[data-testid='inspector-tab-terminal']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='terminal-panel']", "timeout_ms": 12000},
+                {"type": "expect_selector_count_at_least", "selector": "[data-testid='terminal-command-row']", "count": 1, "timeout_ms": 12000},
                 {"type": "click_selector", "selector": "[data-testid='inspector-tab-files']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='files-panel']", "timeout_ms": 12000},
+                {"type": "expect_selector_count_at_least", "selector": "[data-testid='project-file-row']", "count": 1, "timeout_ms": 12000},
                 {"type": "click_selector", "selector": "[data-testid='checkpoint-open']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='checkpoint-modal']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='checkpoint-save']", "timeout_ms": 12000},
                 {"type": "click_selector", "selector": "[data-testid='checkpoint-cancel']", "timeout_ms": 12000},
                 {"type": "click_selector", "selector": "[data-testid='inspector-tab-browser']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='browser-panel']", "timeout_ms": 12000},
@@ -392,6 +401,8 @@ class DogfoodRunService:
                 {"type": "expect_selector", "selector": "[data-testid='app-shell']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='composer-send']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='status-panel-goal']", "timeout_ms": 12000},
+                {"type": "expect_selector_count_at_least", "selector": "[data-testid='workflow-checkpoint-row']", "count": 1, "timeout_ms": 12000},
+                {"type": "expect_selector_count_at_least", "selector": "[data-testid='workflow-diagnostic-row']", "count": 1, "timeout_ms": 12000},
             ],
         }
 
@@ -423,6 +434,18 @@ class DogfoodRunService:
                 selector = str(raw.get("selector") or "").strip()[:160]
                 if selector:
                     actions.append({"type": kind, "selector": selector, "timeout_ms": int(raw.get("timeout_ms") or 3000)})
+            elif kind == "expect_selector_count_at_least":
+                selector = str(raw.get("selector") or "").strip()[:160]
+                count = max(1, min(50, int(raw.get("count") or 1)))
+                if selector:
+                    actions.append(
+                        {
+                            "type": kind,
+                            "selector": selector,
+                            "count": count,
+                            "timeout_ms": int(raw.get("timeout_ms") or 3000),
+                        }
+                    )
             elif kind == "fill_selector":
                 selector = str(raw.get("selector") or "").strip()[:160]
                 value = str(raw.get("value") or "")[:4000]
@@ -459,7 +482,14 @@ class DogfoodRunService:
             nested = payload.get("finalAssertions")
         if isinstance(nested, dict):
             merged = dict(payload)
-            for key in ("expect_text", "expect_selector", "forbidden_text", "fail_if_text_visible", "assert_timeout_ms"):
+            for key in (
+                "expect_text",
+                "expect_selector",
+                "expect_selector_count_at_least",
+                "forbidden_text",
+                "fail_if_text_visible",
+                "assert_timeout_ms",
+            ):
                 if key in nested and key not in merged:
                     merged[key] = nested.get(key)
             payload = merged
@@ -473,6 +503,24 @@ class DogfoodRunService:
             actions.append({"type": "expect_text", "text": text, "timeout_ms": int(payload.get("assert_timeout_ms") or 3000)})
         for selector in self._string_list(payload.get("expect_selector")):
             actions.append({"type": "expect_selector", "selector": selector, "timeout_ms": int(payload.get("assert_timeout_ms") or 3000)})
+        count_assertions = payload.get("expect_selector_count_at_least")
+        if isinstance(count_assertions, dict):
+            count_assertions = [count_assertions]
+        if isinstance(count_assertions, list):
+            for raw in count_assertions[:20]:
+                if not isinstance(raw, dict):
+                    continue
+                selector = str(raw.get("selector") or "").strip()[:160]
+                count = max(1, min(50, int(raw.get("count") or 1)))
+                if selector:
+                    actions.append(
+                        {
+                            "type": "expect_selector_count_at_least",
+                            "selector": selector,
+                            "count": count,
+                            "timeout_ms": int(raw.get("timeout_ms") or payload.get("assert_timeout_ms") or 3000),
+                        }
+                    )
         forbidden = [
             *self._string_list(payload.get("forbidden_text")),
             *self._string_list(payload.get("fail_if_text_visible")),
@@ -780,6 +828,16 @@ async function launchBrowser() {
     } else if (action.type === 'expect_selector') {
       await page.locator(action.selector).first().waitFor({ state: 'visible', timeout: action.timeout_ms || 3000 });
       result.selector = action.selector;
+    } else if (action.type === 'expect_selector_count_at_least') {
+      const locator = page.locator(action.selector);
+      await locator.first().waitFor({ state: 'visible', timeout: action.timeout_ms || 3000 });
+      const count = await locator.count();
+      result.selector = action.selector;
+      result.count = count;
+      result.expected_count = action.count || 1;
+      if (count < (action.count || 1)) {
+        throw new Error(`Selector count ${count} below expected minimum ${action.count || 1}: ${action.selector}`);
+      }
     } else if (action.type === 'fill_selector') {
       await page.locator(action.selector).first().fill(action.value || '', { timeout: action.timeout_ms || 3000 });
       result.selector = action.selector;

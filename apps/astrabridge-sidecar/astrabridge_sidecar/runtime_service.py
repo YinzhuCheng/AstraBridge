@@ -3461,6 +3461,7 @@ for host in candidates:
                                                 "click_text_until_absent",
                                                 "click_selector",
                                                 "expect_selector",
+                                                "expect_selector_count_at_least",
                                                 "expect_text",
                                                 "wait_for_text_absent",
                                                 "press",
@@ -3471,6 +3472,7 @@ for host in candidates:
                                         },
                                         "text": {"type": "string"},
                                         "selector": {"type": "string"},
+                                        "count": {"type": "integer", "minimum": 1, "maximum": 50},
                                         "key": {"type": "string"},
                                         "ms": {"type": "integer", "minimum": 0, "maximum": 5000},
                                         "max_clicks": {"type": "integer", "minimum": 1, "maximum": 50},
@@ -3488,6 +3490,35 @@ for host in candidates:
                             "expect_selector": {
                                 "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}, "maxItems": 20}],
                                 "description": "Final-state CSS selector that must be visible before the screenshot counts as verified.",
+                            },
+                            "expect_selector_count_at_least": {
+                                "oneOf": [
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "selector": {"type": "string"},
+                                            "count": {"type": "integer", "minimum": 1, "maximum": 50},
+                                            "timeout_ms": {"type": "integer", "minimum": 100, "maximum": 30000},
+                                        },
+                                        "required": ["selector", "count"],
+                                        "additionalProperties": False,
+                                    },
+                                    {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "selector": {"type": "string"},
+                                                "count": {"type": "integer", "minimum": 1, "maximum": 50},
+                                                "timeout_ms": {"type": "integer", "minimum": 100, "maximum": 30000},
+                                            },
+                                            "required": ["selector", "count"],
+                                            "additionalProperties": False,
+                                        },
+                                        "maxItems": 20,
+                                    },
+                                ],
+                                "description": "Final-state CSS selector that must resolve to at least count visible nodes before the screenshot counts as verified.",
                             },
                             "forbidden_text": {
                                 "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}, "maxItems": 20}],
