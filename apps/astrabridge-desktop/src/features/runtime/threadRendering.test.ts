@@ -359,6 +359,17 @@ describe("thread rendering helpers", () => {
                 to_thread_id: "thread-kimi",
                 model: "kimi-k2.6",
                 reused_existing: true,
+                transition_summary: {
+                  projection_mode: "task_context_fresh_thread",
+                  dropped_artifacts: 1,
+                  repaired_tool_pairs: 2,
+                  replayable_artifact_count: 1,
+                  projection_preview: "Assistant: Continue the release-readiness task.",
+                  target_runtime: {
+                    protocol: "chat",
+                    base_url: "https://api.moonshot.ai/v1",
+                  },
+                },
               },
             },
           ],
@@ -376,6 +387,13 @@ describe("thread rendering helpers", () => {
     expect(block.activity.preview).toContain("kimi-k2.6");
     expect(block.activity.detail).toContain("thread-kimi");
     expect(block.activity.detail).toContain("reused existing lane");
+    expect(block.activity.detail).toContain("projection: task_context_fresh_thread");
+    expect(block.activity.detail).toContain("dropped artifacts: 1");
+    expect(block.activity.detail).toContain("repaired tool pairs: 2");
+    expect(block.activity.detail).toContain("replayable artifacts: 1");
+    expect(block.activity.detail).toContain("protocol: chat");
+    expect(block.activity.detail).toContain("base url: https://api.moonshot.ai/v1");
+    expect(block.activity.detail).toContain("projection preview: Assistant: Continue the release-readiness task.");
   });
 
   it("treats coding-event-only completed turns as persisted renderable content", () => {

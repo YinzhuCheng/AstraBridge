@@ -69,6 +69,19 @@ export type ProjectTaskHandoffEvent = {
   reasoning_effort?: string;
   permission_mode?: PermissionMode;
   reused_existing?: boolean;
+  transition_summary?: {
+    from_provider?: string | null;
+    to_provider?: string;
+    to_model?: string;
+    projection_mode?: string;
+    dropped_artifacts?: number;
+    repaired_tool_pairs?: number;
+    replayable_artifact_count?: number;
+    projection_preview?: string | null;
+    warnings?: string[];
+    target_runtime?: Record<string, unknown>;
+    transition_plan?: Record<string, unknown>;
+  };
   created_at: string;
 };
 

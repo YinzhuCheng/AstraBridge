@@ -379,6 +379,19 @@ function renderBlocksForCodingEvent(event: DecoratedCodingEvent, fallbackKey: st
       const toThreadId = codingEventPreview(payload, ["to_thread_id"]);
       const model = codingEventPreview(payload, ["model"]);
       const reused = payload.reused_existing === true;
+      const transitionSummary = payload.transition_summary && typeof payload.transition_summary === "object"
+        ? payload.transition_summary as Record<string, unknown>
+        : {};
+      const projectionMode = typeof transitionSummary.projection_mode === "string" ? transitionSummary.projection_mode.trim() : "";
+      const projectionPreview = typeof transitionSummary.projection_preview === "string" ? transitionSummary.projection_preview.trim() : "";
+      const droppedArtifacts = typeof transitionSummary.dropped_artifacts === "number" ? transitionSummary.dropped_artifacts : null;
+      const repairedToolPairs = typeof transitionSummary.repaired_tool_pairs === "number" ? transitionSummary.repaired_tool_pairs : null;
+      const replayableArtifactCount = typeof transitionSummary.replayable_artifact_count === "number"
+        ? transitionSummary.replayable_artifact_count
+        : null;
+      const targetRuntime = transitionSummary.target_runtime && typeof transitionSummary.target_runtime === "object"
+        ? transitionSummary.target_runtime as Record<string, unknown>
+        : {};
       return [{
         key,
         role: "activity",
@@ -387,7 +400,17 @@ function renderBlocksForCodingEvent(event: DecoratedCodingEvent, fallbackKey: st
           label: "执行通道已切换",
           status: "completed",
           preview: [event.provider_id, model].filter(Boolean).join(" / ") || "Provider handoff",
-          detail: [toThreadId ? `to thread: ${toThreadId}` : "", reused ? "reused existing lane" : ""].filter(Boolean).join("\n"),
+          detail: [
+            toThreadId ? `to thread: ${toThreadId}` : "",
+            reused ? "reused existing lane" : "",
+            projectionMode ? `projection: ${projectionMode}` : "",
+            targetRuntime.protocol ? `protocol: ${String(targetRuntime.protocol)}` : "",
+            targetRuntime.base_url ? `base url: ${String(targetRuntime.base_url)}` : "",
+            droppedArtifacts ? `dropped artifacts: ${String(droppedArtifacts)}` : "",
+            repairedToolPairs ? `repaired tool pairs: ${String(repairedToolPairs)}` : "",
+            replayableArtifactCount ? `replayable artifacts: ${String(replayableArtifactCount)}` : "",
+            projectionPreview ? `projection preview: ${projectionPreview}` : "",
+          ].filter(Boolean).join("\n"),
         },
       }];
     }
