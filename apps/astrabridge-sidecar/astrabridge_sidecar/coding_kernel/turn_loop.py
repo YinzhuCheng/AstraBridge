@@ -84,13 +84,6 @@ class RuntimeToolFacade:
                 },
             ),
             self._tool_definition(
-                "create_checkpoint",
-                "Create a workspace checkpoint under .astrabridge/saves with an optional description.",
-                {
-                    "description": {"type": "string", "description": "Optional checkpoint description."},
-                },
-            ),
-            self._tool_definition(
                 "read_file",
                 "Read one text or image file from the workspace.",
                 {
@@ -98,14 +91,25 @@ class RuntimeToolFacade:
                 },
                 required=("path",),
             ),
-            self._tool_definition(
-                "edit_preview",
-                "Preview a proposed file edit and return a synthetic diff without writing files.",
-                self._edit_parameters(),
-                required=("path",),
-            ),
         ]
         if self._authority.tier in {"A", "B"}:
+            definitions.extend(
+                [
+                    self._tool_definition(
+                        "create_checkpoint",
+                        "Create a workspace checkpoint under .astrabridge/saves with an optional description.",
+                        {
+                            "description": {"type": "string", "description": "Optional checkpoint description."},
+                        },
+                    ),
+                    self._tool_definition(
+                        "edit_preview",
+                        "Preview a proposed file edit and return a synthetic diff without writing files.",
+                        self._edit_parameters(),
+                        required=("path",),
+                    ),
+                ]
+            )
             definitions.extend(
                 [
                     self._tool_definition(
@@ -154,6 +158,8 @@ class RuntimeToolFacade:
         elif name == "list_checkpoints":
             result = self._project_tools.list_checkpoints(arguments.get("limit") or 20)
         elif name == "create_checkpoint":
+            if self._authority.tier not in {"A", "B"}:
+                raise ValueError("The selected model is not allowed to create checkpoints through the native kernel.")
             result = self._project_tools.create_checkpoint(arguments)
         elif name == "read_file":
             result = self._project_tools.read_file(str(arguments.get("path") or ""))
@@ -162,6 +168,8 @@ class RuntimeToolFacade:
         elif name == "run_tests":
             result = self._project_tools.run_tests(self._command_payload(arguments))
         elif name == "edit_preview":
+            if self._authority.tier not in {"A", "B"}:
+                raise ValueError("The selected model is not allowed to preview edits through the native kernel.")
             result = self._project_tools.edit_preview(self._edit_payload(arguments))
         elif name == "edit_apply":
             if self._authority.tier not in {"A", "B"}:

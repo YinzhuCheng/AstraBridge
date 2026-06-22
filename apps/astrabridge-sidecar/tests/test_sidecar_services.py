@@ -34,6 +34,7 @@ from astrabridge_sidecar import lcr_web_mcp_server
 from astrabridge_sidecar.app_server_client import AppServerClient, JsonRpcError
 from astrabridge_sidecar.asset_registry_service import AssetRegistryService
 from astrabridge_sidecar.coding_kernel import (
+    RuntimeToolFacade,
     available_operations_for_request,
     edit_operation_to_coding_event,
     project_handoff_event_to_coding_events,
@@ -11155,6 +11156,54 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(authority.tier, "B")
         self.assertEqual(authority.parallel_tool_call_status, "serial_only")
         self.assertTrue(any("parallel tool calls are disabled" in warning.lower() for warning in authority.ui_warnings))
+
+    def test_native_kernel_tier_c_limits_tools_to_review_only(self) -> None:
+        facade = RuntimeToolFacade(
+            SimpleNamespace(),
+            profile_id="glm-default",
+            provider_id="glm",
+            model_id="glm-5.2",
+            authority=SimpleNamespace(tier="C"),
+            permission_mode="auto",
+            thread_id="thread-glm",
+            turn_id="turn-glm",
+        )
+
+        definitions = facade.tool_definitions()
+        tool_names = [str((item.get("function") or {}).get("name") or "") for item in definitions]
+
+        self.assertIn("review_status", tool_names)
+        self.assertIn("review_diff", tool_names)
+        self.assertIn("files_tree", tool_names)
+        self.assertIn("terminal_history", tool_names)
+        self.assertIn("list_checkpoints", tool_names)
+        self.assertIn("read_file", tool_names)
+        self.assertNotIn("create_checkpoint", tool_names)
+        self.assertNotIn("edit_preview", tool_names)
+        self.assertNotIn("edit_apply", tool_names)
+        self.assertNotIn("run_command", tool_names)
+        self.assertNotIn("run_tests", tool_names)
+
+    def test_native_kernel_tier_c_rejects_checkpoint_and_edit_preview_execution(self) -> None:
+        tools = SimpleNamespace(
+            create_checkpoint=lambda arguments: {"ok": True, "arguments": arguments},
+            edit_preview=lambda arguments: {"ok": True, "arguments": arguments},
+        )
+        facade = RuntimeToolFacade(
+            tools,
+            profile_id="glm-default",
+            provider_id="glm",
+            model_id="glm-5.2",
+            authority=SimpleNamespace(tier="C"),
+            permission_mode="auto",
+            thread_id="thread-glm",
+            turn_id="turn-glm",
+        )
+
+        with self.assertRaisesRegex(ValueError, "not allowed to create checkpoints"):
+            facade.execute(ToolCall(id="call-1", name="create_checkpoint", arguments_json='{"description":"blocked"}'))
+        with self.assertRaisesRegex(ValueError, "not allowed to preview edits"):
+            facade.execute(ToolCall(id="call-2", name="edit_preview", arguments_json='{"path":"scorecard.py","content":"print(1)\\n"}'))
 
     def test_router_config_tracks_models_and_sanitized_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
