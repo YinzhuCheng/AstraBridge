@@ -54,7 +54,10 @@ class TaskService:
             current_task_id = str(task["task_id"])
         if thread_id:
             task = self._bind_thread_to_task(task, thread_id=thread_id, settings=settings or {}, role="provider", make_active=True)
-        state["tasks"] = self._replace_task(tasks, task)
+        updated_tasks = self._replace_task(tasks, task)
+        updated_tasks = self._enforce_task_thread_ownership(updated_tasks, owner_task=task)
+        task = self._find_task(updated_tasks, str(task.get("task_id") or "")) or task
+        state["tasks"] = updated_tasks
         state["current_task_id"] = current_task_id
         state["updated_at"] = now_iso()
         self._write_state(state)
@@ -68,7 +71,9 @@ class TaskService:
         state = self._state()
         tasks = [item for item in list(state.get("tasks") or []) if item.get("task_id") != task.get("task_id")]
         tasks.insert(0, task)
-        state["tasks"] = tasks[:100]
+        tasks = self._enforce_task_thread_ownership(tasks[:100], owner_task=task)
+        task = self._find_task(tasks, str(task.get("task_id") or "")) or task
+        state["tasks"] = tasks
         state["current_task_id"] = task["task_id"]
         state["updated_at"] = now_iso()
         self._write_state(state)
@@ -168,7 +173,10 @@ class TaskService:
         task = self.ensure_default_task(title=title, settings=settings)
         task = self._bind_thread_to_task(task, thread_id=thread_id, settings=settings or {}, role=role, make_active=make_active)
         state = self._state()
-        state["tasks"] = self._replace_task(list(state.get("tasks") or []), task)
+        updated_tasks = self._replace_task(list(state.get("tasks") or []), task)
+        updated_tasks = self._enforce_task_thread_ownership(updated_tasks, owner_task=task)
+        task = self._find_task(updated_tasks, str(task.get("task_id") or "")) or task
+        state["tasks"] = updated_tasks
         state["current_task_id"] = task["task_id"]
         state["updated_at"] = now_iso()
         self._write_state(state)
@@ -786,7 +794,10 @@ class TaskService:
 
     def _save_task(self, task: dict[str, Any]) -> None:
         state = self._state()
-        state["tasks"] = self._replace_task(list(state.get("tasks") or []), task)
+        updated_tasks = self._replace_task(list(state.get("tasks") or []), task)
+        updated_tasks = self._enforce_task_thread_ownership(updated_tasks, owner_task=task)
+        task = self._find_task(updated_tasks, str(task.get("task_id") or "")) or task
+        state["tasks"] = updated_tasks
         state["current_task_id"] = task["task_id"]
         state["updated_at"] = now_iso()
         self._write_state(state)
@@ -806,6 +817,62 @@ class TaskService:
 
     def _replace_task(self, tasks: list[dict[str, Any]], task: dict[str, Any]) -> list[dict[str, Any]]:
         return [task, *[item for item in tasks if item.get("task_id") != task.get("task_id")]][:100]
+
+    def _enforce_task_thread_ownership(self, tasks: list[dict[str, Any]], *, owner_task: dict[str, Any]) -> list[dict[str, Any]]:
+        owner_task_id = str(owner_task.get("task_id") or "").strip()
+        if not owner_task_id:
+            return tasks[:100]
+        owned_thread_ids = {
+            str(item.get("thread_id") or "").strip()
+            for item in [
+                *list(owner_task.get("provider_threads") or []),
+                *list(owner_task.get("fork_threads") or []),
+            ]
+            if isinstance(item, dict) and str(item.get("thread_id") or "").strip()
+        }
+        if not owned_thread_ids:
+            return tasks[:100]
+        normalized_tasks: list[dict[str, Any]] = []
+        for item in tasks[:100]:
+            if not isinstance(item, dict):
+                continue
+            task = dict(item)
+            task_id = str(task.get("task_id") or "").strip()
+            if task_id == owner_task_id:
+                normalized_tasks.append(task)
+                continue
+            changed = False
+            provider_threads = [
+                dict(entry)
+                for entry in list(task.get("provider_threads") or [])
+                if isinstance(entry, dict)
+            ]
+            filtered_provider_threads = [
+                entry for entry in provider_threads if str(entry.get("thread_id") or "").strip() not in owned_thread_ids
+            ]
+            if filtered_provider_threads != provider_threads:
+                task["provider_threads"] = filtered_provider_threads
+                changed = True
+            fork_threads = [
+                dict(entry)
+                for entry in list(task.get("fork_threads") or [])
+                if isinstance(entry, dict)
+            ]
+            filtered_fork_threads = [
+                entry for entry in fork_threads if str(entry.get("thread_id") or "").strip() not in owned_thread_ids
+            ]
+            if filtered_fork_threads != fork_threads:
+                task["fork_threads"] = filtered_fork_threads
+                changed = True
+            active_thread_id = str(task.get("active_provider_thread_id") or "").strip()
+            if active_thread_id and active_thread_id in owned_thread_ids:
+                task["active_provider_thread_id"] = None
+                changed = True
+            if changed:
+                task["updated_at"] = now_iso()
+                task, _ = self._normalize_task(task)
+            normalized_tasks.append(task)
+        return normalized_tasks[:100]
 
     def _same_context_ref(self, left: Any, right: Any) -> bool:
         if not isinstance(left, dict) or not isinstance(right, dict):

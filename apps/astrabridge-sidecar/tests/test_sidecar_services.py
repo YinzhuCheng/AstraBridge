@@ -1072,6 +1072,11 @@ class AstraBridgeServiceTests(unittest.TestCase):
             digest = conversation.digest(task_id=new_task["task_id"])
             self.assertEqual([item["turn_id"] for item in digest["items"]], ["turn-new"])
             self.assertNotIn("Unrelated old task prompt", json.dumps(digest, ensure_ascii=False))
+            snapshot = tasks.snapshot()
+            old_task = next(item for item in snapshot["tasks"] if item["title"] == "Old task")
+            refreshed_new = next(item for item in snapshot["tasks"] if item["task_id"] == new_task["task_id"])
+            self.assertFalse(any(str(item.get("thread_id") or "") == "thread-shared" for item in old_task["provider_threads"]))
+            self.assertEqual(refreshed_new["active_provider_thread_id"], "thread-shared")
 
     def test_project_context_pack_ignores_reused_thread_history_from_older_task(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1137,6 +1142,51 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("scorecard.py", pack["text"])
             self.assertNotIn("出一道数据结构题", pack["text"])
             self.assertEqual([item["turn_id"] for item in pack["task_conversation_digest"]["items"]], ["turn-new"])
+
+    def test_task_service_moves_provider_thread_ownership_to_new_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+
+            old_task = tasks.create_task(
+                "Old task",
+                thread_id="thread-shared",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "max",
+                    "permission_mode": "auto",
+                },
+            )
+            new_task = tasks.create_task(
+                "New task",
+                thread_id="thread-shared",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "max",
+                    "permission_mode": "auto",
+                },
+            )
+
+            snapshot = tasks.snapshot()
+            refreshed_old = next(item for item in snapshot["tasks"] if item["task_id"] == old_task["task_id"])
+            refreshed_new = next(item for item in snapshot["tasks"] if item["task_id"] == new_task["task_id"])
+
+            self.assertEqual(projects.current_project["current_task_id"], new_task["task_id"])
+            self.assertEqual(projects.current_project["current_thread_id"], "thread-shared")
+            self.assertEqual(refreshed_new["active_provider_thread_id"], "thread-shared")
+            self.assertFalse(refreshed_old["provider_threads"])
+            self.assertNotEqual(refreshed_old["active_provider_thread_id"], "thread-shared")
+            persisted = json.loads((workspace / ".astrabridge" / "tasks.json").read_text(encoding="utf-8"))
+            persisted_old = next(item for item in persisted["tasks"] if item["task_id"] == old_task["task_id"])
+            self.assertFalse(any(str(item.get("thread_id") or "") == "thread-shared" for item in persisted_old["provider_threads"]))
 
     def test_coding_event_projection_maps_core_coding_turn_items(self) -> None:
         events = project_turn_to_coding_events(
