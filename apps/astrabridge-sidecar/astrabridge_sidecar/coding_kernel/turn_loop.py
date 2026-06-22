@@ -353,6 +353,7 @@ class RuntimeToolFacade:
             "status": "completed",
             "success": bool(result.get("ok", True)),
             "arguments": redact_sensitive(arguments),
+            "codingEventPayload": redact_sensitive(summary),
             "contentItems": [
                 {
                     "type": "inputText",

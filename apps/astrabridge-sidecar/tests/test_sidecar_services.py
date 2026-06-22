@@ -943,6 +943,72 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(events[0]["execution_thread_id"], "thread-kimi")
         self.assertEqual(events[0]["payload"]["transition_summary"]["projection_mode"], "task_context_fresh_thread")
 
+    def test_coding_event_projection_maps_native_dynamic_tool_items(self) -> None:
+        events = project_turn_to_coding_events(
+            task_id="task-1",
+            visible_thread_id="task:task-1",
+            source="native_kernel",
+            turn={
+                "id": "turn-native-1",
+                "source_thread_id": "native-thread-1",
+                "provider_id": "deepseek",
+                "model": "deepseek-v4-pro",
+                "startedAt": 1,
+                "items": [
+                    {
+                        "type": "dynamicToolCall",
+                        "id": "tool-read",
+                        "tool": "read_file",
+                        "codingEventPayload": {"path": "scorecard.py", "kind": "text", "ok": True},
+                    },
+                    {
+                        "type": "dynamicToolCall",
+                        "id": "tool-save",
+                        "tool": "create_checkpoint",
+                        "codingEventPayload": {
+                            "checkpoint_save_id": "save-123",
+                            "checkpoint_description": "Before edit",
+                            "ok": True,
+                        },
+                    },
+                    {
+                        "type": "dynamicToolCall",
+                        "id": "tool-edit",
+                        "tool": "edit_apply",
+                        "codingEventPayload": {
+                            "path": "scorecard.py",
+                            "applied": True,
+                            "changed": True,
+                            "checkpoint_save_id": "save-123",
+                            "review_diff_path": "/api/project/review/diff?path=scorecard.py",
+                            "ok": True,
+                        },
+                    },
+                    {
+                        "type": "dynamicToolCall",
+                        "id": "tool-review",
+                        "tool": "review_status",
+                        "codingEventPayload": {
+                            "ok": True,
+                            "files": ["scorecard.py"],
+                            "paths": ["scorecard.py"],
+                            "item_count": 1,
+                        },
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(
+            [item["event_type"] for item in events],
+            ["file_read", "checkpoint_created", "edit_operation", "verification_result"],
+        )
+        self.assertEqual(events[0]["payload"]["path"], "scorecard.py")
+        self.assertEqual(events[1]["payload"]["save_id"], "save-123")
+        self.assertTrue(events[2]["payload"]["applied"])
+        self.assertEqual(events[3]["payload"]["tool"], "review_status")
+        self.assertEqual(events[3]["source"], "native_kernel")
+
     def test_default_task_inherits_thread_context_goal_and_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

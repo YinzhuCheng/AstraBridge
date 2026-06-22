@@ -155,6 +155,8 @@ def _event_payload(item_type: str, item: dict[str, Any]) -> tuple[str | None, di
         return ("plan_update", {"text": _text_preview(item)})
     if item_type == "reasoning":
         return ("reasoning_summary", {"text": _text_preview(item)})
+    if item_type == "dynamicToolCall":
+        return _dynamic_tool_event_payload(item)
     if item_type == "commandExecution":
         return (
             "command_execution",
@@ -193,6 +195,59 @@ def _event_payload(item_type: str, item: dict[str, Any]) -> tuple[str | None, di
                 "tool": str(item.get("tool") or ""),
                 "receiver_thread_ids": [str(value) for value in list(item.get("receiverThreadIds") or []) if str(value).strip()],
                 "prompt": _clip(str(item.get("prompt") or ""), 400),
+            },
+        )
+    return None, {}
+
+
+def _dynamic_tool_event_payload(item: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    tool = str(item.get("tool") or "").strip()
+    summary = item.get("codingEventPayload") or item.get("coding_event_payload") or {}
+    if not isinstance(summary, dict):
+        summary = {}
+    if tool == "read_file":
+        return (
+            "file_read",
+            {
+                "path": _string_or_none(summary.get("path")),
+                "kind": _string_or_none(summary.get("kind")),
+                "ok": bool(summary.get("ok", True)),
+            },
+        )
+    if tool == "create_checkpoint":
+        return (
+            "checkpoint_created",
+            {
+                "save_id": _string_or_none(summary.get("checkpoint_save_id")),
+                "description": _string_or_none(summary.get("checkpoint_description")),
+                "ok": bool(summary.get("ok", True)),
+            },
+        )
+    if tool in {"edit_preview", "edit_apply"}:
+        return (
+            "edit_operation",
+            {
+                "path": _string_or_none(summary.get("path")),
+                "applied": bool(summary.get("applied")),
+                "changed": bool(summary.get("changed")),
+                "checkpoint_save_id": _string_or_none(summary.get("checkpoint_save_id")),
+                "review_diff_path": _string_or_none(summary.get("review_diff_path")),
+                "ok": bool(summary.get("ok", True)),
+            },
+        )
+    if tool in {"review_status", "review_diff", "files_tree", "terminal_history", "list_checkpoints"}:
+        return (
+            "verification_result",
+            {
+                "tool": tool,
+                "ok": bool(summary.get("ok", True)),
+                "path": _string_or_none(summary.get("path")),
+                "checkpoint_count": summary.get("checkpoint_count"),
+                "command_count": summary.get("command_count"),
+                "item_count": summary.get("item_count"),
+                "files": list(summary.get("files") or [])[:6] if isinstance(summary.get("files"), list) else [],
+                "paths": list(summary.get("paths") or [])[:6] if isinstance(summary.get("paths"), list) else [],
+                "save_ids": list(summary.get("save_ids") or [])[:6] if isinstance(summary.get("save_ids"), list) else [],
             },
         )
     return None, {}
