@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..providers import get_provider_profile, resolve_provider_id
+from ..providers.tooling import assess_model_authority
 
 
 CODEX_CLI_BASELINE = "0.137.0"
@@ -113,6 +114,17 @@ def model_catalog_entry(
     temperature_ui_max = _optional_float(configured_model.get("temperature_ui_max"), 2.0)
     provider_temperature_min = _optional_float(configured_model.get("provider_temperature_min"), temperature_ui_min)
     provider_temperature_max = _optional_float(configured_model.get("provider_temperature_max"), temperature_ui_max)
+    authority = assess_model_authority(
+        {
+            **configured_model,
+            "supports_tool_calls": bool(configured_model.get("supports_mcp_tools", False) or apply_patch_tool_type),
+            "apply_patch_tool_type": apply_patch_tool_type,
+        }
+    )
+    ui_warnings = list(configured_model.get("ui_warnings") or [])
+    for warning in authority.ui_warnings:
+        if warning not in ui_warnings:
+            ui_warnings.append(warning)
     return {
         "slug": model_id,
         "id": model_id,
@@ -162,7 +174,10 @@ def model_catalog_entry(
         "goal_support": dict(configured_model.get("goal_support") or {}),
         "context_compaction_support": dict(configured_model.get("context_compaction_support") or {}),
         "modality_limits": dict(configured_model.get("modality_limits") or {}),
-        "ui_warnings": list(configured_model.get("ui_warnings") or []),
+        "ui_warnings": ui_warnings,
+        "authority_tier": authority.tier,
+        "authority_reason": authority.reason,
+        "parallel_tool_call_status": authority.parallel_tool_call_status,
         "input_modalities": input_modalities,
         "inputModalities": input_modalities,
         "supports_search_tool": bool(configured_model.get("supports_search_tool", False)),

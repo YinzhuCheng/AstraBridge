@@ -47,6 +47,12 @@ from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERR
 from astrabridge_sidecar.profile_service import ProfileService
 from astrabridge_sidecar.providers import classify_runtime_failure, get_provider_profile
 from astrabridge_sidecar.providers.history_projector import HistoryProjector, NeutralMessage, ReasoningArtifact
+from astrabridge_sidecar.providers.tooling import (
+    assess_model_authority,
+    repair_tool_arguments,
+    sanitize_function_parameters,
+    summarize_tool_output,
+)
 from astrabridge_sidecar.project_context_service import ProjectContextService
 from astrabridge_sidecar.project_service import DEFAULT_RUNTIME_HOST_ENV, DEFAULT_RUNTIME_WSL_DISTRO_ENV, ProjectService
 from astrabridge_sidecar.project_tools_service import ProjectToolsService
@@ -8728,6 +8734,36 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertNotIn("response", normalized.provider_data)
             self.assertTrue(any(item.code == "reasoning_only_notice_emitted" for item in normalized.warnings))
 
+    def test_chat_transport_repairs_duplicate_parallel_tool_calls_for_serial_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            adapter = router._adapter_for_provider("deepseek")  # noqa: SLF001
+
+            upstream = {
+                "id": "chat-tools-deepseek",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {"id": "dup", "function": {"name": "read_file", "arguments": "```json\n{\"path\":\"README.md\"}\n```"}},
+                                {"id": "dup", "function": {"name": "read_file", "arguments": "{\"path\":\"HANDOFF.md\"}"}},
+                            ],
+                        },
+                    }
+                ],
+            }
+
+            normalized = adapter.normalize_response(upstream, {"model": "deepseek/deepseek-v4-pro"})
+
+            self.assertEqual(len(normalized.tool_calls), 1)
+            self.assertEqual(normalized.tool_calls[0].name, "read_file")
+            self.assertEqual(normalized.tool_calls[0].arguments_json, "{\"path\":\"README.md\"}")
+            self.assertTrue(any(item.code == "tool_call_repair" for item in normalized.warnings))
+
     def test_deepseek_adapter_uses_adapter_profile_not_exact_provider_id(self) -> None:
         class UpstreamHandler(BaseHTTPRequestHandler):
             last_payload = None
@@ -9304,6 +9340,51 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertIn("[image result omitted", projected.messages[0]["content"])
         self.assertTrue(any("Downgraded image tool result" in warning for warning in projected.warnings))
 
+    def test_tool_call_argument_repair_wraps_malformed_json(self) -> None:
+        repaired, warnings = repair_tool_arguments("```json\n{\"path\": README.md}\n```")
+
+        self.assertEqual(repaired, "{\"raw\":\"{\\\"path\\\": README.md}\"}")
+        self.assertTrue(any("fenced" in warning.lower() for warning in warnings))
+        self.assertTrue(any("wrapped malformed" in warning.lower() for warning in warnings))
+
+    def test_tool_schema_policy_strips_unsupported_keys(self) -> None:
+        parameters, removed = sanitize_function_parameters(
+            {
+                "type": "object",
+                "properties": {"path": {"type": "string", "$schema": "bad"}},
+                "required": ["path"],
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+            }
+        )
+
+        self.assertEqual(parameters["type"], "object")
+        self.assertIn("properties", parameters)
+        self.assertIn("$schema", removed)
+        self.assertNotIn("$schema", json.dumps(parameters, ensure_ascii=False))
+
+    def test_tool_output_summary_truncates_oversized_output(self) -> None:
+        text, warnings = summarize_tool_output("x" * 5000, char_limit=128)
+
+        self.assertTrue(text.endswith("[truncated]"))
+        self.assertLessEqual(len(text), 140)
+        self.assertTrue(any("oversized tool output" in warning.lower() for warning in warnings))
+
+    def test_model_authority_assessment_marks_propose_only_as_tier_b(self) -> None:
+        authority = assess_model_authority(
+            {
+                "codex_agent_enabled": True,
+                "supports_tool_calls": True,
+                "supports_parallel_tool_calls": False,
+                "mcp_tool_call_policy": "conservative",
+                "apply_patch_tool_type": "json",
+                "tool_mode": "propose_only",
+            }
+        )
+
+        self.assertEqual(authority.tier, "B")
+        self.assertEqual(authority.parallel_tool_call_status, "serial_only")
+        self.assertTrue(any("parallel tool calls are disabled" in warning.lower() for warning in authority.ui_warnings))
+
     def test_router_config_tracks_models_and_sanitized_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             profiles = ProfileService(Path(temp) / "profiles.json")
@@ -9404,6 +9485,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(deepseek["input_modalities"], ["text"])
             self.assertFalse(deepseek["supports_parallel_tool_calls"])
             self.assertIsNone(deepseek["apply_patch_tool_type"])
+            self.assertEqual(deepseek["authority_tier"], "B")
             self.assertIn("max", {item["effort"] for item in deepseek["supported_reasoning_levels"]})
             self.assertEqual(deepseek["temperature_default"], 0.0)
             self.assertTrue(deepseek["supports_mcp_tools"])
@@ -9411,11 +9493,13 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("lcr_web", deepseek["mcp_verified_servers"])
             self.assertEqual(deepseek["mcp_smoke_status"], "pass_direct_tool_call")
             self.assertEqual(deepseek["tool_web_search_support"], "verified")
+            self.assertTrue(any("propose changes" in warning.lower() for warning in deepseek["ui_warnings"]))
             self.assertIn("request_user_input", deepseek["codex_builtin_tools"])
             self.assertIn("structured_summary_quality", deepseek["context_compaction_support"])
             self.assertIn("glm/glm-5.2", catalog_ids)
             self.assertIn("image", glm["input_modalities"])
             self.assertEqual(glm["default_reasoning_level"], "high")
+            self.assertEqual(glm["authority_tier"], "C")
             self.assertIn("image", kimi["input_modalities"])
             self.assertIn("https://platform.moonshot.ai/docs/overview", kimi["source_urls"])
             self.assertEqual(kimi["modality_limits"]["image_transport"], "chat_completions_base64_image_url")

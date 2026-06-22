@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from ..ir import NormalizedResponse, ProviderWarning, RawProviderArtifactRef, ReasoningState, ToolCall, Usage
+from ..tooling import (
+    enforce_tool_message_sequence,
+    normalize_tool_calls,
+    sanitize_tool_definitions,
+    summarize_tool_output,
+)
 
 
 LOCAL_IMAGE_MAX_BYTES = 100 * 1024 * 1024
@@ -55,7 +61,8 @@ class ProviderTransport(ABC):
         if exit_code is not None:
             parts.append(f"exit_code: {exit_code}")
         if output:
-            parts.append(f"output:\n{output}")
+            summarized_output, _warnings = summarize_tool_output(output)
+            parts.append(f"output:\n{summarized_output}")
         return "\n".join(parts) or "Command completed with no captured output."
 
     def _transition_summary_message(self, item: dict[str, Any]) -> str:
@@ -282,7 +289,8 @@ class ResponsesTransport(ProviderTransport):
         return list(raw_input or []) if isinstance(raw_input, list) else []
 
     def convert_tools(self, tools: Any) -> list[dict[str, Any]]:
-        return list(tools or [])
+        sanitized, _warnings = sanitize_tool_definitions(tools)
+        return sanitized if isinstance(tools, list) else []
 
     def normalize_response(self, raw: Any, original_payload: dict[str, Any]) -> NormalizedResponse:
         output = list((raw or {}).get("output") or [])
@@ -302,14 +310,26 @@ class ResponsesTransport(ProviderTransport):
                     if str(content.get("type") or "") == "output_text":
                         text_parts.append(str(content.get("text") or ""))
             elif item_type == "function_call":
-                tool_calls.append(
-                    ToolCall(
-                        id=str(item.get("call_id") or item.get("id") or "call_router"),
-                        name=str(item.get("name") or "tool"),
-                        arguments_json=str(item.get("arguments") or "{}"),
-                        provider_data={"response_item_id": item.get("id")},
-                    )
+                repaired_calls, repair_warnings = normalize_tool_calls(
+                    [
+                        {
+                            "id": item.get("call_id") or item.get("id"),
+                            "name": item.get("name"),
+                            "arguments": item.get("arguments"),
+                        }
+                    ],
+                    allow_parallel=bool(self.profile.get("supports_parallel_tool_calls", False)),
                 )
+                warnings.extend(self._warning("tool_call_repair", warning, "warning") for warning in repair_warnings)
+                for call in repaired_calls:
+                    tool_calls.append(
+                        ToolCall(
+                            id=str(call.get("id") or "call_router"),
+                            name=str((call.get("function") or {}).get("name") or "tool"),
+                            arguments_json=str((call.get("function") or {}).get("arguments") or "{}"),
+                            provider_data={"response_item_id": item.get("id")},
+                        )
+                    )
         usage = dict((raw or {}).get("usage") or {})
         normalized_usage = None
         if usage:
@@ -418,15 +438,19 @@ class ChatCompletionsTransport(ProviderTransport):
         reasoning_content = str(message.get("reasoning_content") or "")
         text = self._visible_text_or_reasoning_only_notice(str(message.get("content") or ""), reasoning_content, bool(message.get("tool_calls")))
         warnings: list[ProviderWarning] = []
+        repaired_calls, repair_warnings = normalize_tool_calls(
+            list(message.get("tool_calls") or []),
+            allow_parallel=bool(self.profile.get("supports_parallel_tool_calls", False)),
+        )
+        warnings.extend(self._warning("tool_call_repair", warning, "warning") for warning in repair_warnings)
         tool_calls = [
             ToolCall(
                 id=str(call.get("id") or "call_router"),
                 name=str((call.get("function") or {}).get("name") or "tool"),
-                arguments_json=self._safe_tool_arguments((call.get("function") or {}).get("arguments")),
+                arguments_json=str((call.get("function") or {}).get("arguments") or "{}"),
                 provider_data={},
             )
-            for call in list(message.get("tool_calls") or [])
-            if isinstance(call, dict)
+            for call in repaired_calls
         ]
         usage = dict(raw.get("usage") or {})
         normalized_usage = None
@@ -484,24 +508,7 @@ class ChatCompletionsTransport(ProviderTransport):
         return messages or [{"role": "user", "content": ""}]
 
     def convert_tools(self, tools: Any) -> list[dict[str, Any]]:
-        if not isinstance(tools, list):
-            return []
-        converted = []
-        for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            if str(tool.get("type") or "") != "function":
-                continue
-            converted.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool.get("name") or "tool",
-                        "description": tool.get("description") or "",
-                        "parameters": tool.get("parameters") or {},
-                    },
-                }
-            )
+        converted, _warnings = sanitize_tool_definitions(tools)
         return converted
 
     def client_response_from_upstream_json(self, upstream: dict[str, Any], original_payload: dict[str, Any]) -> dict[str, Any]:
@@ -763,46 +770,7 @@ class ChatCompletionsTransport(ProviderTransport):
         return "\n".join(parts) or "Command completed with no captured output."
 
     def _repair_tool_message_sequence(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        repaired: list[dict[str, Any]] = []
-        index = 0
-        while index < len(messages):
-            message = messages[index]
-            if message.get("role") != "assistant" or not message.get("tool_calls"):
-                if message.get("role") == "tool":
-                    repaired.append({"role": "user", "content": f"[orphan tool output for {message.get('tool_call_id') or 'unknown'}]\n{message.get('content') or ''}".strip()})
-                else:
-                    repaired.append(message)
-                index += 1
-                continue
-
-            merged_assistant = dict(message)
-            merged_calls = [dict(call) for call in list(message.get("tool_calls") or []) if isinstance(call, dict)]
-            merged_content = self._flatten_content(merged_assistant.get("content"))
-            index += 1
-            while index < len(messages) and messages[index].get("role") == "assistant" and messages[index].get("tool_calls"):
-                next_assistant = dict(messages[index])
-                next_content = self._flatten_content(next_assistant.get("content"))
-                if next_content and next_content not in merged_content:
-                    merged_content = f"{merged_content}\n{next_content}".strip()
-                if next_assistant.get("reasoning_content") and not merged_assistant.get("reasoning_content"):
-                    merged_assistant["reasoning_content"] = next_assistant.get("reasoning_content")
-                merged_calls.extend(dict(call) for call in list(next_assistant.get("tool_calls") or []) if isinstance(call, dict))
-                index += 1
-            merged_assistant["tool_calls"] = merged_calls
-            merged_assistant["content"] = merged_content or None
-            repaired.append(merged_assistant)
-            expected = [str(call.get("id") or "") for call in merged_calls if isinstance(call, dict)]
-            seen: set[str] = set()
-            while index < len(messages) and messages[index].get("role") == "tool":
-                tool_message = dict(messages[index])
-                tool_id = str(tool_message.get("tool_call_id") or "")
-                if tool_id:
-                    seen.add(tool_id)
-                repaired.append(tool_message)
-                index += 1
-            for tool_id in expected:
-                if tool_id and tool_id not in seen:
-                    repaired.append({"role": "tool", "tool_call_id": tool_id, "content": "Tool result was unavailable in Codex history; continue from the available context."})
+        repaired, _warnings = enforce_tool_message_sequence(messages)
         return repaired
 
     def _flatten_content(self, content: Any) -> str:
@@ -828,41 +796,20 @@ class ChatCompletionsTransport(ProviderTransport):
         return json.dumps(content, ensure_ascii=False) if content is not None else ""
 
     def _sanitize_chat_tool_calls(self, value: Any) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        calls = []
-        for index, call in enumerate(value):
-            if not isinstance(call, dict):
-                continue
-            function = dict(call.get("function") or {})
-            call_id = str(call.get("id") or call.get("call_id") or f"call_{index}")
-            calls.append(
-                {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": str(function.get("name") or call.get("name") or "tool"),
-                        "arguments": self._safe_tool_arguments(function.get("arguments") or call.get("arguments")),
-                    },
-                }
-            )
+        calls, _warnings = normalize_tool_calls(
+            value,
+            allow_parallel=bool(self.profile.get("supports_parallel_tool_calls", False)),
+        )
         return calls
 
     def _safe_tool_arguments(self, value: Any) -> str:
-        if isinstance(value, (dict, list)):
-            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        text = str(value or "").strip()
-        if not text:
+        calls, _warnings = normalize_tool_calls(
+            [{"name": "tool", "arguments": value}],
+            allow_parallel=True,
+        )
+        if not calls:
             return "{}"
-        if text.startswith("```"):
-            text = text.strip("`").strip()
-            if "\n" in text:
-                text = text.split("\n", 1)[1].strip()
-        try:
-            json.loads(text)
-            return text
-        except Exception:
-            return json.dumps({"raw": text}, ensure_ascii=False, separators=(",", ":"))
+        return str((calls[0].get("function") or {}).get("arguments") or "{}")
 
     def _transition_summary_message(self, item: dict[str, Any]) -> str:
         item_type = str(item.get("type") or "")

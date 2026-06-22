@@ -6,6 +6,7 @@ from typing import Any
 from .common import app_data_dir, now_iso, read_json, write_json
 from .model_catalog import current_generated_catalog
 from .providers import get_provider_profile, resolve_provider_id
+from .providers.tooling import assess_model_authority
 
 
 KNOWN_MODEL_CATALOG: dict[str, list[dict[str, Any]]] = {
@@ -451,6 +452,16 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
     temperature_ui_max = _optional_float(model.get("temperature_ui_max"), 2.0)
     provider_temperature_min = _optional_float(model.get("provider_temperature_min"), 0.0)
     provider_temperature_max = _optional_float(model.get("provider_temperature_max"), 2.0)
+    authority = assess_model_authority(
+        {
+            **model,
+            "supports_tool_calls": bool(model.get("supports_mcp_tools", False) or model.get("apply_patch_tool_type")),
+        }
+    )
+    ui_warnings = list(model.get("ui_warnings") or _default_ui_warnings(model, modalities))
+    for warning in authority.ui_warnings:
+        if warning not in ui_warnings:
+            ui_warnings.append(warning)
     return {
         "input_modalities": [str(item) for item in modalities if str(item).strip()] or ["text"],
         "model_kind": str(model.get("model_kind") or "chat"),
@@ -499,7 +510,10 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
         "goal_support": dict(model.get("goal_support") or {"thread_goal": "app_server_native"}),
         "context_compaction_support": dict(model.get("context_compaction_support") or _default_context_compaction_support()),
         "modality_limits": dict(model.get("modality_limits") or _default_modality_limits(modalities)),
-        "ui_warnings": list(model.get("ui_warnings") or _default_ui_warnings(model, modalities)),
+        "ui_warnings": ui_warnings,
+        "authority_tier": authority.tier,
+        "authority_reason": authority.reason,
+        "parallel_tool_call_status": authority.parallel_tool_call_status,
         "source_urls": list(model.get("source_urls") or []),
         "source_status": str(model.get("source_status") or "seeded"),
         "recommended": bool(model.get("recommended", False)),
