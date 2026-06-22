@@ -751,6 +751,8 @@ export type RuntimeSupervisorState = {
     summary: string;
     message?: string;
     actionable_hint?: string;
+    recommended_action?: string;
+    recoverability?: "retryable" | "recoverable" | "requires_user_action" | "fail_closed" | string;
     fallback_models?: string[];
     reasoning_downgrade_levels?: string[];
     requires_key_check?: boolean;
@@ -760,6 +762,21 @@ export type RuntimeSupervisorState = {
       label: string;
       reason: string;
       target?: string | null;
+      transition?: {
+        action?: string;
+        reason?: string;
+        restart_runtime?: boolean;
+        compact_before_send?: boolean;
+        target?: {
+          provider_id?: string;
+          model_id?: string;
+          protocol?: string;
+          env_key?: string;
+          base_url?: string;
+          reasoning_effort?: string;
+          reasoning_policy_mode?: string;
+        };
+      } | null;
     }>;
     thread_id?: string;
     turn_id?: string;

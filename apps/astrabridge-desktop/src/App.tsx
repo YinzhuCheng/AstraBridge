@@ -6,7 +6,7 @@ import { api } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
 import { composerReasoningOptions, preferredReasoningEffort } from "./features/runtime/reasoningOptions";
-import { runtimeErrorNoticeText } from "./features/runtime/runtimeErrorNotice";
+import { runtimeErrorNoticeActions, runtimeErrorNoticeText, type RuntimeErrorAction } from "./features/runtime/runtimeErrorNotice";
 import { summarizeTaskCard } from "./features/runtime/taskSummary";
 import { hasPersistedRenderableTurnContent, itemActivityFromPayload, summarizeTurnBlocks } from "./features/runtime/threadRendering";
 import { useAppStore } from "./store";
@@ -907,7 +907,19 @@ function PlanProgressTimeline({ plan }: { plan: RuntimeSupervisorState["plan"] |
   );
 }
 
-function EnvironmentStrip({ supervisor, fallback }: { supervisor?: RuntimeSupervisorState; fallback: { provider?: string; model?: string; effort?: string; permission?: string } }) {
+function EnvironmentStrip({
+  supervisor,
+  fallback,
+  recoveryActions = [],
+  recoveryPendingAction = null,
+  onRecoveryAction,
+}: {
+  supervisor?: RuntimeSupervisorState;
+  fallback: { provider?: string; model?: string; effort?: string; permission?: string };
+  recoveryActions?: RuntimeErrorAction[];
+  recoveryPendingAction?: string | null;
+  onRecoveryAction?: (action: RuntimeErrorAction) => void;
+}) {
   const environment = supervisor?.environment;
   const token = supervisor?.token;
   const git = environment?.git;
@@ -919,10 +931,34 @@ function EnvironmentStrip({ supervisor, fallback }: { supervisor?: RuntimeSuperv
   return (
     <section className={`environment-strip guard-${guardLevel}`}>
       {runtimeError ? (
-        <div className="environment-strip-row environment-strip-wide environment-error-row">
-          <span>运行时</span>
-          <strong>{runtimeError.category === "provider_timeout" ? "provider 超时" : runtimeError.category || "错误"}</strong>
-        </div>
+        <>
+          <div className="environment-strip-row environment-strip-wide environment-error-row">
+            <span>运行时</span>
+            <strong>{runtimeError.category === "provider_timeout" ? "provider 超时" : runtimeError.category || "错误"}</strong>
+          </div>
+          <div className="environment-strip-row environment-strip-wide environment-error-copy">
+            <span>恢复建议</span>
+            <strong>{runtimeErrorNoticeText(runtimeError)}</strong>
+            {recoveryActions.length > 0 ? (
+              <div className="environment-error-actions">
+                {recoveryActions.map((action) => {
+                  const pending = recoveryPendingAction === action.action;
+                  return (
+                    <button
+                      key={`${action.action}:${action.target ?? ""}:${action.label}`}
+                      type="button"
+                      className="ghost-button environment-action-button"
+                      disabled={pending || !onRecoveryAction}
+                      onClick={() => onRecoveryAction?.(action)}
+                    >
+                      {pending ? "处理中..." : action.label}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        </>
       ) : null}
       <div className="environment-strip-row">
         <span>提供方</span>
@@ -3057,6 +3093,17 @@ function AppShell() {
       queryClient.invalidateQueries({ queryKey: ["runtime-supervisor"] });
     },
   });
+  const restartRuntime = useMutation({
+    mutationFn: api.restartRuntime,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["runtime-environment"] });
+      queryClient.invalidateQueries({ queryKey: ["runtime-supervisor"] });
+      queryClient.invalidateQueries({ queryKey: ["thread"] });
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task-conversation"] });
+    },
+  });
   const supervisorDecision = useMutation({
     mutationFn: ({ action, threadId, turnId, profileId, model, effort, permissionMode }: { action: "continue" | "compact" | "fork" | "interrupt"; threadId: string; turnId?: string; profileId?: string; model?: string; effort?: string; permissionMode?: PermissionMode }) =>
       api.runtimeSupervisorDecision({ action, thread_id: threadId, turn_id: turnId, profile_id: profileId, model, effort, permission_mode: permissionMode }),
@@ -3334,6 +3381,14 @@ function AppShell() {
     ...(mcpUnverified ? [t(locale, "capability_warning_mcp")] : []),
     ...((activeModelEntry?.ui_warnings ?? []).slice(0, 2)),
   ];
+  const runtimeRecoveryActions = runtimeErrorNoticeActions(supervisor.data?.runtime_error ?? null);
+  const runtimeRecoveryPendingAction = restartRuntime.isPending
+    ? "restart_runtime_lane"
+    : compactThread.isPending
+      ? "compact_thread"
+      : forkThread.isPending
+        ? "fork_followup"
+        : null;
   const runtimeSecretLoaded = Boolean(runtime.data?.runtime_config.secret_loaded);
   const managerMode = llmSession.data?.mode ?? "anonymous";
   const managedKeyAvailable = managerMode === "managed_user" && Boolean((llmCatalog.data?.providers ?? []).find((provider) => provider.id === activeProfile?.provider_id)?.managed_key_available);
@@ -3805,6 +3860,76 @@ function AppShell() {
       permission_mode: activeSettings.permission_mode,
       name: name.trim() || undefined,
     });
+  }
+
+  function handleRuntimeRecoveryAction(action: RuntimeErrorAction) {
+    switch (action.action) {
+      case "restart_runtime_lane":
+        restartRuntime.mutate();
+        return;
+      case "compact_thread":
+        if (selectedThreadId) {
+          compactThread.mutate({ threadId: selectedThreadId, profileId: activeSettings.profile_id });
+        }
+        return;
+      case "fork_followup":
+        void handleForkThread();
+        return;
+      case "switch_model":
+        if (action.target) {
+          updateComposerSettings({ model: action.target });
+          setMainView("chat");
+        }
+        return;
+      case "downgrade_reasoning":
+        if (action.target) {
+          updateComposerSettings({ reasoning_effort: action.target });
+          setMainView("chat");
+        }
+        return;
+      case "refresh_provider_key":
+      case "verify_secret_mapping":
+        setMainView("setup");
+        return;
+      case "handoff_provider": {
+        const currentProviderId = activeProfile?.provider_id ?? "";
+        const alternative = composerProviderOptions.find((option) => option.providerId && option.providerId !== currentProviderId);
+        if (alternative) {
+          const nextProfile = (profiles.data?.profiles ?? []).find((profile) => profile.profile_id === alternative.profileId);
+          const nextProviderId = alternative.providerId;
+          const nextModel = pickPreferredModelForProvider(nextProviderId) ?? nextProfile?.model ?? activeSettings.model;
+          const nextModelEntry =
+            (llmCatalog.data?.models ?? []).find((model) => model.provider === nextProviderId && model.native_model === nextModel) ??
+            (routerConfig.data?.models ?? []).find((model) => model.provider === nextProviderId && model.native_model === nextModel) ??
+            null;
+          const nextEfforts = composerReasoningOptions(nextModelEntry, nextProfile, activeSettings.reasoning_effort);
+          updateComposerSettings({
+            profile_id: alternative.profileId,
+            model: nextModel,
+            reasoning_effort: nextEfforts.includes(nextProfile?.reasoning_effort ?? "")
+              ? nextProfile?.reasoning_effort
+              : preferredReasoningEffort(nextModelEntry, nextProfile, activeSettings.reasoning_effort),
+          });
+          setMainView("chat");
+          return;
+        }
+        setMainView("setup");
+        return;
+      }
+      case "disable_feature":
+        setMainView("setup");
+        return;
+      case "retry_same_lane":
+      case "inspect_runtime_notice":
+        setInspectorTab("status");
+        if (!rightSidebarOpen) toggleRightSidebar();
+        queryClient.invalidateQueries({ queryKey: ["runtime-supervisor"] });
+        queryClient.invalidateQueries({ queryKey: ["thread"] });
+        return;
+      default:
+        setInspectorTab("status");
+        if (!rightSidebarOpen) toggleRightSidebar();
+    }
   }
 
   function openSaveCheckpoint(block?: ThreadRenderBlock | null) {
@@ -4516,6 +4641,9 @@ function AppShell() {
                     effort: activeSettings.reasoning_effort,
                     permission: permissionLabel(locale, activeSettings.permission_mode),
                   }}
+                  recoveryActions={runtimeRecoveryActions}
+                  recoveryPendingAction={runtimeRecoveryPendingAction}
+                  onRecoveryAction={handleRuntimeRecoveryAction}
                 />
                 {supervisor.data?.guard.message ? <p className={`guard-copy guard-copy-${supervisor.data.guard.level}`}>{supervisor.data.guard.message}</p> : null}
               </section>

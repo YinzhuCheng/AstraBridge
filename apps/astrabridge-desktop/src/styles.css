@@ -2390,6 +2390,26 @@ textarea {
   color: var(--danger);
 }
 
+.environment-error-copy strong {
+  margin-top: 0.22rem;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.environment-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+}
+
+.environment-action-button {
+  min-height: 1.9rem;
+  padding-inline: 0.7rem;
+  font-size: 0.74rem;
+}
+
 .mini-guard {
   border: 1px solid var(--stroke);
   border-radius: 999px;

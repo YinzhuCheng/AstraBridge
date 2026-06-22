@@ -1,7 +1,31 @@
 import type { RuntimeSupervisorState } from "../../types";
 
-type RuntimeErrorNotice = RuntimeSupervisorState["runtime_error"];
-type RuntimeErrorAction = NonNullable<NonNullable<RuntimeErrorNotice>["recommended_actions"]>[number];
+export type RuntimeErrorNotice = RuntimeSupervisorState["runtime_error"];
+export type RuntimeErrorAction = NonNullable<NonNullable<RuntimeErrorNotice>["recommended_actions"]>[number];
+
+export function runtimeErrorNoticeActions(runtimeError: RuntimeErrorNotice): RuntimeErrorAction[] {
+  if (!runtimeError?.recommended_actions?.length) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const actions: RuntimeErrorAction[] = [];
+  for (const item of runtimeError.recommended_actions) {
+    const label = item.label?.trim();
+    if (!label) {
+      continue;
+    }
+    const key = `${item.action}:${item.target ?? ""}:${label}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    actions.push(item);
+    if (actions.length >= 3) {
+      break;
+    }
+  }
+  return actions;
+}
 
 export function runtimeErrorNoticeText(runtimeError: RuntimeErrorNotice): string {
   if (!runtimeError?.summary) {
@@ -11,7 +35,7 @@ export function runtimeErrorNoticeText(runtimeError: RuntimeErrorNotice): string
   if (runtimeError.actionable_hint?.trim()) {
     parts.push(runtimeError.actionable_hint.trim());
   }
-  const suggested = Array.from(new Set((runtimeError.recommended_actions ?? []).map((item: RuntimeErrorAction) => item.label?.trim()).filter(Boolean))).slice(0, 3);
+  const suggested = runtimeErrorNoticeActions(runtimeError).map((item: RuntimeErrorAction) => item.label.trim());
   if (suggested.length > 0) {
     parts.push(`Suggested: ${suggested.join(", ")}.`);
   }
