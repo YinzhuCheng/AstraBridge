@@ -49,7 +49,7 @@ from astrabridge_sidecar.lcr_web_service import LcrWebService
 from astrabridge_sidecar.lcr_web_mcp_server import _tools as lcr_web_mcp_tools
 from astrabridge_sidecar.metadata_service import MetadataService
 from astrabridge_sidecar.mcp_config_service import McpConfigService
-from astrabridge_sidecar.model_catalog import known_context_window, known_input_modalities, known_reasoning_efforts
+from astrabridge_sidecar.model_catalog import default_seed_providers, known_context_window, known_input_modalities, known_reasoning_efforts
 from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERROR, disabled_status
 from astrabridge_sidecar.profile_service import ProfileService
 from astrabridge_sidecar.providers import classify_runtime_failure, get_provider_profile
@@ -10314,6 +10314,31 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertAlmostEqual(float(qwen["provider_temperature_min"]), 0.00001)
         self.assertEqual(kimi["temperature_default"], 1.0)
         self.assertEqual(kimi["provider_temperature_max"], 1.0)
+
+    def test_provider_profiles_seed_catalog_provider_and_model_defaults(self) -> None:
+        qwen = get_provider_profile("qwen")
+        catalog_provider = qwen.to_catalog_provider()
+        model_defaults = qwen.to_model_defaults()
+
+        self.assertEqual(catalog_provider["id"], "qwen")
+        self.assertEqual(catalog_provider["adapter_type"], "responses")
+        self.assertEqual(catalog_provider["default_model"], "qwen3.7-plus")
+        self.assertEqual(catalog_provider["env_key"], "DASHSCOPE_API_KEY")
+        self.assertEqual(catalog_provider["supported_reasoning_levels"], ["low", "medium", "high", "xhigh"])
+        self.assertEqual(model_defaults["default_reasoning_level"], "high")
+        self.assertEqual(model_defaults["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
+        self.assertEqual(model_defaults["provider_profile_id"], "qwen")
+
+    def test_generated_catalog_seed_providers_match_provider_profiles(self) -> None:
+        seeded = {str(item["id"]): item for item in default_seed_providers()}
+        deepseek = get_provider_profile("deepseek").to_catalog_provider()
+        glm = get_provider_profile("glm").to_catalog_provider()
+
+        self.assertEqual(seeded["deepseek"]["base_url"], deepseek["base_url"])
+        self.assertEqual(seeded["deepseek"]["adapter_type"], deepseek["adapter_type"])
+        self.assertEqual(seeded["deepseek"]["default_model"], deepseek["default_model"])
+        self.assertEqual(seeded["glm"]["env_key"], glm["env_key"])
+        self.assertEqual(seeded["glm"]["supported_reasoning_levels"], glm["supported_reasoning_levels"])
 
     def test_router_config_uses_provider_profile_defaults_for_new_provider_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

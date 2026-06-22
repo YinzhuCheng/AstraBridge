@@ -111,21 +111,38 @@ class ProviderProfile:
     fallback_policy: FallbackPolicy
     safety_policy: ProviderSafetyPolicy
 
-    def to_router_provider(self) -> dict[str, object]:
-        adapter_type = "responses" if self.protocol in {"responses", "qwen_responses"} else "chat"
-        env_key = self.auth.env_vars[0] if self.auth.env_vars else "OPENAI_API_KEY"
+    def adapter_type(self) -> str:
+        return "responses" if self.protocol in {"responses", "qwen_responses"} else "chat"
+
+    def primary_env_key(self) -> str:
+        return self.auth.env_vars[0] if self.auth.env_vars else "OPENAI_API_KEY"
+
+    def to_catalog_provider(self) -> dict[str, object]:
         return {
             "id": self.id,
             "provider_id": self.id,
             "display_name": self.display_name,
             "enabled": True,
-            "adapter_type": adapter_type,
+            "adapter_type": self.adapter_type(),
             "base_url": self.base_url,
             "default_model": self.default_model,
-            "env_key": env_key,
+            "env_key": self.primary_env_key(),
             "auth_mode": "env_ref",
             "proxy_mode": "direct",
             "proxy_url": "",
+            "models_url": self.models_url,
+            "protocol": self.protocol,
+            "fallback_models": list(self.fallback_models),
+            "supported_reasoning_levels": list(self.reasoning_levels()),
+            "default_reasoning_level": self.default_reasoning_level(),
+            "reasoning_policy_mode": self.reasoning_policy.mode,
+            "edit_policy": self.edit_policy_payload(),
+            "capabilities": self.capability_payload(),
+        }
+
+    def to_router_provider(self) -> dict[str, object]:
+        return {
+            **self.to_catalog_provider(),
             "supported_reasoning_levels": list(self.reasoning_levels()),
             "default_reasoning_level": self.default_reasoning_level(),
             "reasoning_policy_mode": self.reasoning_policy.mode,
@@ -134,7 +151,7 @@ class ProviderProfile:
         }
 
     def to_default_profile(self) -> dict[str, object]:
-        env_key = self.auth.env_vars[0] if self.auth.env_vars else "OPENAI_API_KEY"
+        env_key = self.primary_env_key()
         profile_id = "openai-compatible" if self.id == "openai" else f"{self.id}-default"
         label = "OpenAI" if self.id == "openai" else self.display_name
         return {
@@ -145,7 +162,7 @@ class ProviderProfile:
             "base_url": self.base_url,
             "model": self.default_model,
             "reasoning_effort": self.default_profile_reasoning_effort(),
-            "wire_api": "responses" if self.protocol in {"responses", "qwen_responses"} else "chat",
+            "wire_api": self.adapter_type(),
             "env_key": env_key,
             "auth_mode": "env_ref",
             "secret_ref": f"env:{env_key}",
@@ -193,7 +210,7 @@ class ProviderProfile:
     def context_window(self) -> int | None:
         return self.context_policy.advertised_context_window or self.capabilities.max_context_tokens
 
-    def default_model_config(self) -> dict[str, object]:
+    def to_model_defaults(self) -> dict[str, object]:
         return {
             "advertised_context_window": self.context_window(),
             "input_modalities": list(self.context_policy.default_input_modalities),
@@ -227,6 +244,9 @@ class ProviderProfile:
             "provider_profile_id": self.id,
         }
 
+    def default_model_config(self) -> dict[str, object]:
+        return self.to_model_defaults()
+
     def profile_metadata_payload(self) -> dict[str, object]:
         blocked = {"auto_compact_token_limit", "tool_output_token_limit"}
-        return {key: value for key, value in self.default_model_config().items() if key not in blocked}
+        return {key: value for key, value in self.to_model_defaults().items() if key not in blocked}

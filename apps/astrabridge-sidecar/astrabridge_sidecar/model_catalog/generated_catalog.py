@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common import app_data_dir, now_iso, read_json, write_json
+from ..providers import all_provider_profiles
 
 
 GENERATED_CATALOG_SCHEMA = "astrabridge-generated-catalog-v1"
@@ -101,80 +102,7 @@ def default_catalog_sources() -> list[dict[str, Any]]:
 
 
 def default_seed_providers() -> list[dict[str, Any]]:
-    return [
-        {
-            "id": "yunwu",
-            "display_name": "Yunwu",
-            "enabled": True,
-            "adapter_type": "responses",
-            "base_url": "https://yunwu.ai/v1",
-            "default_model": "gpt-5.5",
-            "env_key": "YUNWU_API_KEY",
-            "auth_mode": "env_ref",
-            "proxy_mode": "direct",
-            "proxy_url": "",
-        },
-        {
-            "id": "openai",
-            "display_name": "OpenAI",
-            "enabled": True,
-            "adapter_type": "responses",
-            "base_url": "https://api.openai.com/v1",
-            "default_model": "gpt-5.5",
-            "env_key": "OPENAI_API_KEY",
-            "auth_mode": "env_ref",
-            "proxy_mode": "direct",
-            "proxy_url": "",
-        },
-        {
-            "id": "deepseek",
-            "display_name": "DeepSeek",
-            "enabled": True,
-            "adapter_type": "chat",
-            "base_url": "https://api.deepseek.com",
-            "default_model": "deepseek-v4-pro",
-            "env_key": "DEEPSEEK_API_KEY",
-            "auth_mode": "env_ref",
-            "proxy_mode": "direct",
-            "proxy_url": "",
-        },
-        {
-            "id": "kimi",
-            "display_name": "Kimi",
-            "enabled": True,
-            "adapter_type": "chat",
-            "base_url": "https://api.moonshot.cn/v1",
-            "default_model": "kimi-k2.6",
-            "env_key": "KIMI_API_KEY",
-            "auth_mode": "env_ref",
-            "proxy_mode": "direct",
-            "proxy_url": "",
-        },
-        {
-            "id": "qwen",
-            "display_name": "Qwen / DashScope",
-            "enabled": True,
-            "adapter_type": "responses",
-            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "default_model": "qwen3.7-plus",
-            "env_key": "DASHSCOPE_API_KEY",
-            "auth_mode": "env_ref",
-            "proxy_mode": "direct",
-            "proxy_url": "",
-        },
-        {
-            "id": "glm",
-            "display_name": "GLM / Z.AI",
-            "enabled": True,
-            "adapter_type": "chat",
-            "base_url": "https://open.bigmodel.cn/api/paas/v4",
-            "default_model": "glm-5.2",
-            "env_key": "GLM_API_KEY",
-            "auth_mode": "env_ref",
-            "proxy_mode": "direct",
-            "proxy_url": "",
-        },
-    ]
+    return [dict(profile.to_catalog_provider()) for profile in all_provider_profiles()]
 
 
 def default_seed_models() -> list[dict[str, Any]]:

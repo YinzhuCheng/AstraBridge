@@ -532,7 +532,7 @@ def _profile_model_defaults(provider_family: str | None) -> dict[str, Any]:
     if not provider_family:
         return {}
     try:
-        return dict(get_provider_profile(provider_family).default_model_config())
+        return dict(get_provider_profile(provider_family).to_model_defaults())
     except ValueError:
         return {}
 
