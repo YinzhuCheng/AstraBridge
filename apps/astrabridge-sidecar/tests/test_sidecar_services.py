@@ -12678,6 +12678,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
     def test_provider_profiles_seed_catalog_provider_and_model_defaults(self) -> None:
         qwen = get_provider_profile("qwen")
         catalog_provider = qwen.to_catalog_provider()
+        router_provider = qwen.to_router_provider()
         model_defaults = qwen.to_model_defaults()
 
         self.assertEqual(catalog_provider["id"], "qwen")
@@ -12696,6 +12697,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(catalog_provider["goal_support"]["thread_goal"], "app_server_native")
         self.assertEqual(catalog_provider["context_compaction_support"]["manual_compact"], "app_server_native")
         self.assertEqual(catalog_provider["codex_builtin_tools"]["shell_command"]["support"], "verified")
+        self.assertEqual(router_provider["model_defaults"]["default_reasoning_level"], model_defaults["default_reasoning_level"])
+        self.assertEqual(router_provider["model_defaults"]["temperature_adapter_policy"], model_defaults["temperature_adapter_policy"])
+        self.assertEqual(router_provider["model_defaults"]["planner_support"]["plan_mode"], "conservative")
         self.assertEqual(model_defaults["default_reasoning_level"], "high")
         self.assertEqual(model_defaults["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
         self.assertEqual(model_defaults["provider_profile_id"], "qwen")
@@ -12760,6 +12764,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(provider["goal_support"]["thread_goal"], "app_server_native")
             self.assertEqual(provider["context_compaction_support"]["manual_compact"], "app_server_native")
             self.assertEqual(provider["codex_builtin_tools"]["shell_command"]["support"], "verified")
+            self.assertEqual(provider["model_defaults"]["default_reasoning_level"], "xhigh")
+            self.assertEqual(provider["model_defaults"]["supports_mcp_tools"], True)
+            self.assertEqual(provider["model_defaults"]["planner_support"]["plan_mode"], "conservative")
             self.assertEqual(model["supported_reasoning_levels"], ["high", "xhigh", "max"])
             self.assertEqual(model["default_reasoning_level"], "xhigh")
             self.assertEqual(model["temperature_adapter_policy"], "pass_through_0_2")

@@ -310,6 +310,7 @@ export type RouterProvider = {
   logo_asset_path?: string;
   logo_license_note?: string;
   accent_color?: string;
+  model_defaults?: Partial<RouterModelEntry>;
   supported_reasoning_levels?: string[];
   default_reasoning_level?: string | null;
   reasoning_policy_mode?: string;

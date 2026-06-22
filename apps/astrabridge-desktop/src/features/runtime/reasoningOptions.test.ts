@@ -80,6 +80,56 @@ describe("reasoning options", () => {
     expect(preferredProviderReasoningEffort(provider, null)).toBe("xhigh");
   });
 
+  it("prefers provider model_defaults over duplicated top-level provider fields", () => {
+    const provider = {
+      id: "glm",
+      display_name: "GLM",
+      enabled: true,
+      adapter_type: "chat",
+      base_url: "https://open.bigmodel.cn/api/paas/v4",
+      default_model: "glm-5.2",
+      request_timeout_ms: 300000,
+      stream_idle_timeout_ms: 300000,
+      env_key: "GLM_API_KEY",
+      auth_mode: "env_ref",
+      proxy_mode: "direct",
+      proxy_url: "",
+      supported_reasoning_levels: ["high"],
+      default_reasoning_level: "high",
+      model_defaults: {
+        supported_reasoning_levels: ["low", "medium", "high", "xhigh"],
+        default_reasoning_level: "medium",
+        input_modalities: ["text", "image"],
+        supports_parallel_tool_calls: true,
+        supports_search_tool: true,
+        supports_mcp_tools: true,
+        mcp_tool_call_policy: "conservative",
+        temperature_default: 0.2,
+        temperature_ui_min: 0,
+        temperature_ui_max: 1,
+      },
+    } satisfies RouterProvider;
+
+    expect(providerReasoningOptions(provider, null)).toEqual(["low", "medium", "high", "xhigh"]);
+    expect(preferredProviderReasoningEffort(provider, null)).toBe("medium");
+    expect(providerTemperatureDefaults(provider)).toEqual({
+      temperature_default: 0.2,
+      temperature_ui_min: 0,
+      temperature_ui_max: 1,
+      provider_temperature_min: 0,
+      provider_temperature_max: 2,
+      temperature_adapter_policy: "pass_through_0_2",
+    });
+    expect(providerModelDraftDefaults(provider)).toMatchObject({
+      input_modalities: ["text", "image"],
+      supports_parallel_tool_calls: true,
+      supports_search_tool: true,
+      supports_mcp_tools: true,
+      mcp_tool_call_policy: "conservative",
+      default_reasoning_level: "medium",
+    });
+  });
+
   it("uses provider metadata for temperature defaults", () => {
     const provider = {
       id: "kimi",

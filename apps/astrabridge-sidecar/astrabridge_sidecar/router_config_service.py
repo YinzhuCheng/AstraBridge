@@ -54,6 +54,7 @@ PROFILE_MODEL_SEED_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
 }
 
 PROVIDER_METADATA_FIELDS = (
+    "model_defaults",
     "runtime_backend",
     "supported_reasoning_levels",
     "default_reasoning_level",

@@ -173,7 +173,9 @@ class ProviderProfile:
         }
 
     def to_router_provider(self) -> dict[str, object]:
-        return dict(self.to_catalog_provider())
+        payload = dict(self.to_catalog_provider())
+        payload["model_defaults"] = self.to_model_defaults()
+        return payload
 
     def to_default_profile(self) -> dict[str, object]:
         env_key = self.primary_env_key()
