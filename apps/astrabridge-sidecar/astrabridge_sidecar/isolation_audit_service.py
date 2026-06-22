@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import PROJECT_FILE_SUFFIX, WORKSPACE_STATE_DIRNAME
+from .project_service import MANAGED_STATE_DIRS
 from .security import SECRET_RE
 
 
@@ -42,6 +43,14 @@ class IsolationAuditService:
             checks.append(_check("workspace_no_owned_codex_state", not (workspace / ".codex").exists(), str(workspace / ".codex")))
             checks.append(_check("workspace_no_old_lcr_state", not (workspace / ".lcr").exists(), str(workspace / ".lcr")))
             checks.append(_check("workspace_no_old_codex_shell_state", not (workspace / ".codex-shell").exists(), str(workspace / ".codex-shell")))
+            for dirname in MANAGED_STATE_DIRS:
+                checks.append(
+                    _check(
+                        f"managed_state_dir_{dirname}_exists",
+                        (workspace / WORKSPACE_STATE_DIRNAME / dirname).is_dir(),
+                        str(workspace / WORKSPACE_STATE_DIRNAME / dirname),
+                    )
+                )
         checks.append(_check("isolated_codex_home_present", codex_home is not None and codex_home.exists(), str(codex_home) if codex_home else None))
         checks.append(
             _check(
@@ -77,6 +86,10 @@ class IsolationAuditService:
                 "project_file": str(project_file) if project_file else None,
                 "workspace_root": str(workspace) if workspace else None,
                 "astrabridge_state": str(workspace / WORKSPACE_STATE_DIRNAME) if workspace else None,
+                "managed_state_roots": {
+                    dirname: str(workspace / WORKSPACE_STATE_DIRNAME / dirname)
+                    for dirname in MANAGED_STATE_DIRS
+                } if workspace else {},
                 "isolated_codex_home": str(codex_home) if codex_home else None,
                 "official_codex_config": str(official_config) if official_config else None,
                 "expected_appdata": str(expected_appdata) if expected_appdata else None,

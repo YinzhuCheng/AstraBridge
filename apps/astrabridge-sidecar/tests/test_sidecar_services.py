@@ -563,6 +563,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIsNone(project["current_task_id"])
             self.assertEqual(project["recent_tasks"], [])
             self.assertTrue((workspace / ".astrabridge" / "attachments").exists())
+            self.assertTrue((workspace / ".astrabridge" / "captures").exists())
+            self.assertTrue((workspace / ".astrabridge" / "downloads").exists())
+            self.assertTrue((workspace / ".astrabridge" / "caches").exists())
+            self.assertTrue((workspace / ".astrabridge" / "reviews").exists())
             self.assertTrue((workspace / ".astrabridge" / "runtime_events.jsonl").exists())
 
             with self.assertRaises(ValueError):
@@ -2442,7 +2446,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 ]
             )
 
-            context = ToolContextService(projects, tasks).build(tool_name="lcr_browser_smoke")
+            context = ToolContextService(projects, tasks).build(tool_name="astrabridge_browser_smoke")
             self.assertIn("src/app.ts", context["verification_refs"])
             self.assertIn("thread-deepseek", context["diagnostic_refs"][0])
 
@@ -3185,8 +3189,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             )
 
             names = {tool["name"] for tool in params["dynamicTools"]}
-            self.assertIn("lcr_browser_smoke", names)
-            smoke_tool = [tool for tool in params["dynamicTools"] if tool["name"] == "lcr_browser_smoke"][0]
+            self.assertIn("astrabridge_browser_smoke", names)
+            smoke_tool = [tool for tool in params["dynamicTools"] if tool["name"] == "astrabridge_browser_smoke"][0]
             self.assertEqual(smoke_tool["inputSchema"]["properties"]["actions"]["maxItems"], 80)
             self.assertIn("file:///mnt/d", smoke_tool["description"])
             self.assertIn("do not start an ad-hoc HTTP server", smoke_tool["description"])
@@ -3208,7 +3212,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             tools = runtime._lcr_dynamic_tools()  # noqa: SLF001
 
             names = {tool["name"] for tool in tools}
-            self.assertIn("lcr_browser_smoke", names)
+            self.assertIn("astrabridge_browser_smoke", names)
 
     def test_runtime_dynamic_yunwu_tool_call_returns_app_server_content_items(self) -> None:
         class FakeYunwuImage:
@@ -3433,20 +3437,20 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 {
                     "threadId": "thread-1",
                     "turnId": "turn-1",
-                    "tool": "lcr_browser_smoke",
+                    "tool": "astrabridge_browser_smoke",
                     "arguments": {"url": "http://127.0.0.1:8123/", "label": "map smoke"},
                 },
             )
 
             self.assertTrue(result["success"])
             text = result["contentItems"][0]["text"]
-            self.assertIn("lcr_browser_smoke", text)
+            self.assertIn("astrabridge_browser_smoke", text)
             self.assertIn("D:/workspace/.astrabridge/captures/smoke.png", text)
             self.assertIn("tool_context", text)
             event_payload = json.dumps(runtime.list_events()["events"][-1], ensure_ascii=False)
-            self.assertIn('"server": "lcr_browser"', event_payload)
+            self.assertIn('"server": "astrabridge_browser"', event_payload)
             self.assertIn("tool_event_verified", event_payload)
-            self.assertIn("lcr_browser_smoke", event_payload)
+            self.assertIn("astrabridge_browser_smoke", event_payload)
             self.assertIn("tool_context", event_payload)
 
     def test_runtime_read_thread_overlays_dynamic_tool_items_from_events(self) -> None:
@@ -4230,15 +4234,15 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                         {
                                             "type": "dynamicToolCall",
                                             "id": "tool-1",
-                                            "tool": "lcr_browser_smoke",
+                                            "tool": "astrabridge_browser_smoke",
                                             "status": "completed",
                                             "contentItems": [
                                                 {
                                                     "type": "inputText",
-                                                    "text": "AstraBridge dynamic tool result for lcr_browser_smoke:\n"
+                                                    "text": "AstraBridge dynamic tool result for astrabridge_browser_smoke:\n"
                                                     + json.dumps(
                                                         {
-                                                            "tool": "lcr_browser_smoke",
+                                                            "tool": "astrabridge_browser_smoke",
                                                             "label": "map smoke",
                                                             "status": "pass",
                                                             "screenshot_path": "D:/workspace/.astrabridge/captures/map.png",
@@ -4272,8 +4276,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             item = result["thread"]["turns"][0]["items"][1]
             evidence = item["lcrVerifiedEvidence"]
             self.assertTrue(evidence["verified"])
-            self.assertEqual(evidence["tool"], "lcr_browser_smoke")
-            self.assertEqual(evidence["server"], "lcr_browser")
+            self.assertEqual(evidence["tool"], "astrabridge_browser_smoke")
+            self.assertEqual(evidence["server"], "astrabridge_browser")
             self.assertIn("D:/workspace/.astrabridge/captures/map.png", evidence["paths"])
             self.assertTrue(any("browser smoke map smoke pass" in line for line in evidence["summary"]))
 
@@ -9869,6 +9873,11 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 )
                 self.assertTrue(audit["ok"])
                 self.assertEqual(audit["paths"]["astrabridge_state"], str(workspace / ".astrabridge"))
+                self.assertEqual(audit["paths"]["managed_state_roots"]["captures"], str(workspace / ".astrabridge" / "captures"))
+                self.assertEqual(audit["paths"]["managed_state_roots"]["downloads"], str(workspace / ".astrabridge" / "downloads"))
+                checks = {item["name"]: item for item in audit["checks"]}
+                self.assertTrue(checks["managed_state_dir_captures_exists"]["ok"])
+                self.assertTrue(checks["managed_state_dir_downloads_exists"]["ok"])
                 self.assertIsNotNone(audit["official_codex"]["config_sha256"])
         finally:
             if original_override is None:
@@ -12514,6 +12523,16 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertNotIn("run", smoke)
             self.assertEqual(smoke["run_summary"]["latest_capture"]["path"], str(screenshot))
             self.assertEqual(smoke["run_summary"]["latest_milestone"]["label"], "Browser smoke: local file smoke")
+            failure_smoke = dogfood.browser_smoke(
+                {
+                    "url": (workspace / "index.html").resolve().as_uri(),
+                    "label": "local file smoke with request failure",
+                    "screenshot_path": str(screenshot),
+                    "request_failures": [{"url": "http://127.0.0.1:4174/assets/index.js", "resource_type": "script", "error_text": "net::ERR_INSUFFICIENT_RESOURCES"}],
+                }
+            )
+            self.assertEqual(failure_smoke["browser_smoke"]["status"], "fail")
+            self.assertEqual(failure_smoke["browser_smoke"]["request_failures"][0]["resource_type"], "script")
             full_smoke = dogfood.browser_smoke(
                 {
                     "url": (workspace / "index.html").resolve().as_uri(),

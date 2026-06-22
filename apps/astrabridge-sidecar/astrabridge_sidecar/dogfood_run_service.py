@@ -126,6 +126,7 @@ class DogfoodRunService:
             "status": "unknown",
             "http_status": None,
             "console_errors": [str(item)[:300] for item in list(payload.get("console_errors") or [])[:20]],
+            "request_failures": list(payload.get("request_failures") or [])[:20],
             "screenshot_path": str(payload.get("screenshot_path") or "").strip(),
             "screenshot_status": "provided" if str(payload.get("screenshot_path") or "").strip() else "pending",
             "created_at": now_iso(),
@@ -314,6 +315,7 @@ class DogfoodRunService:
         } or bool(record.get("screenshot_error"))
         if (
             record.get("console_errors")
+            or record.get("request_failures")
             or action_failed
             or (http_status is not None and http_status >= 400)
             or has_blocked_screenshot
@@ -717,10 +719,19 @@ async function launchBrowser() {
   const browser = launched.browser;
   const page = await browser.newPage({ viewport: { width: 1365, height: 900 } });
   const consoleErrors = [];
+  const requestFailures = [];
   page.on('console', message => {
     if (['error', 'warning'].includes(message.type())) consoleErrors.push(`${message.type()}: ${message.text()}`.slice(0, 300));
   });
   page.on('pageerror', error => consoleErrors.push(`pageerror: ${String(error.message || error)}`.slice(0, 300)));
+  page.on('requestfailed', request => {
+    requestFailures.push({
+      url: String(request.url() || '').slice(0, 300),
+      method: String(request.method() || '').slice(0, 32),
+      resource_type: String(request.resourceType() || '').slice(0, 40),
+      error_text: String(request.failure()?.errorText || 'request failed').slice(0, 200)
+    });
+  });
   let status = null;
   const actionResults = [];
   async function captureScreenshot(outputPath) {
@@ -815,7 +826,7 @@ async function launchBrowser() {
     }
     await page.waitForTimeout(250);
     const capture = await captureScreenshot(process.argv[3]);
-    console.log(JSON.stringify({ ok: true, status, console_errors: consoleErrors.slice(0, 20), screenshot_path: capture.path, screenshot_status: capture.status, browser_executable: launched.executable, action_results: actionResults }));
+    console.log(JSON.stringify({ ok: true, status, console_errors: consoleErrors.slice(0, 20), request_failures: requestFailures.slice(0, 20), screenshot_path: capture.path, screenshot_status: capture.status, browser_executable: launched.executable, action_results: actionResults }));
   } catch (error) {
     let screenshotPath = null;
     let screenshotStatus = 'blocked_capture_failed';
@@ -830,6 +841,7 @@ async function launchBrowser() {
       ok: Boolean(screenshotPath),
       status,
       console_errors: consoleErrors.slice(0, 20),
+      request_failures: requestFailures.slice(0, 20),
       error: String(error.message || error),
       screenshot_path: screenshotPath,
       screenshot_status: screenshotStatus,
@@ -896,7 +908,11 @@ async function launchBrowser() {
                 record["screenshot_error"] = str(result.get("error"))[:300]
             merged_errors = [*record.get("console_errors", []), *list(result.get("console_errors") or [])]
             record["console_errors"] = [str(item)[:300] for item in merged_errors[:20]]
+            merged_failures = [*list(record.get("request_failures") or []), *list(result.get("request_failures") or [])]
+            record["request_failures"] = merged_failures[:20]
             if record["console_errors"]:
+                record["status"] = "fail"
+            elif record["request_failures"]:
                 record["status"] = "fail"
             elif record.get("http_status") and int(record["http_status"]) >= 400:
                 record["status"] = "fail"
@@ -907,6 +923,8 @@ async function launchBrowser() {
         if result.get("action_results"):
             record["action_results"] = result.get("action_results")
             record["status"] = "fail"
+        if result.get("request_failures"):
+            record["request_failures"] = list(result.get("request_failures") or [])[:20]
         if result.get("error"):
             record["screenshot_error"] = str(result.get("error"))[:300]
 

@@ -754,7 +754,7 @@ function SaveCheckpointModal({
 }) {
   return (
     <div className="modal-scrim">
-      <div className="modal-card checkpoint-modal">
+      <div className="modal-card checkpoint-modal" data-testid="checkpoint-modal">
         <div className="card-header">
           <h2>保存检查点</h2>
           <span className="status-tag">.astrabridge/saves</span>
@@ -1133,7 +1133,14 @@ function BrowserInspectorPanel({
   onRunProviderSwitchSmoke,
 }: {
   supervisor?: RuntimeSupervisorState;
-  latestSmoke?: { label?: string; status?: string; url?: string; console_errors?: string[]; screenshot_path?: string } | null;
+  latestSmoke?: {
+    label?: string;
+    status?: string;
+    url?: string;
+    console_errors?: string[];
+    request_failures?: Array<{ url?: string; method?: string; resource_type?: string; error_text?: string }>;
+    screenshot_path?: string;
+  } | null;
   isRunningReleaseSmoke?: boolean;
   isRunningProviderSwitchSmoke?: boolean;
   onRunReleaseSmoke: () => void;
@@ -1160,6 +1167,10 @@ function BrowserInspectorPanel({
             <span>控制台</span>
             <strong>{browser.console_errors?.length ?? 0} 个错误</strong>
           </div>
+          <div className="tool-row">
+            <span>请求失败</span>
+            <strong>{browser.request_failures?.length ?? 0} 个</strong>
+          </div>
           {browser.screenshot_path ? (
             <div className="tool-row tool-row-wide">
               <span>截图</span>
@@ -1170,6 +1181,14 @@ function BrowserInspectorPanel({
       ) : (
         <p className="muted compact-copy">还没有 browser smoke 结果。</p>
       )}
+      {browser?.request_failures?.length ? (
+        <pre className="tool-preview">
+          {browser.request_failures
+            .slice(0, 4)
+            .map((item) => [item.method, item.resource_type, item.error_text, item.url].filter(Boolean).join(" | "))
+            .join("\n")}
+        </pre>
+      ) : null}
       <div className="inspector-actions">
         <button type="button" className="ghost-button inspector-inline-action" disabled={isRunningReleaseSmoke} onClick={onRunReleaseSmoke}>
           {isRunningReleaseSmoke ? "运行中..." : "运行工作流 smoke"}

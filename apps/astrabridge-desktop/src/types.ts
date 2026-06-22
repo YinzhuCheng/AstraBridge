@@ -813,6 +813,12 @@ export type DogfoodBrowserSmoke = {
   status: string;
   http_status?: number | null;
   console_errors?: string[];
+  request_failures?: Array<{
+    url?: string;
+    method?: string;
+    resource_type?: string;
+    error_text?: string;
+  }>;
   screenshot_path?: string;
   screenshot_status?: string;
   screenshot_error?: string;

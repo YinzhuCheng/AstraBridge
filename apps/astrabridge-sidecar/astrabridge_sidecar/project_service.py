@@ -24,6 +24,20 @@ DEFAULT_RUNTIME_HOST_ENV = "ASTRABRIDGE_DEFAULT_EXECUTION_HOST"
 DEFAULT_RUNTIME_WSL_DISTRO_ENV = "ASTRABRIDGE_DEFAULT_WSL_DISTRO"
 _DEFAULT_RUNTIME_PREFS_CACHE: dict[str, str] | None = None
 _VALID_REASONING_EFFORTS = {"off", "auto", "minimal", "low", "medium", "high", "xhigh"}
+MANAGED_STATE_DIRS = (
+    "attachments",
+    "captures",
+    "downloads",
+    "caches",
+    "reviews",
+    "tmp",
+)
+MANAGED_STATE_FILES = (
+    "runtime_events.jsonl",
+    "approvals.jsonl",
+    "thread_cache.json",
+    "ui_state.json",
+)
 
 
 class ProjectService:
@@ -226,6 +240,12 @@ class ProjectService:
         path.mkdir(parents=True, exist_ok=True)
         return path.resolve()
 
+    def require_managed_state_dir(self, name: str, *parts: str) -> Path:
+        normalized = str(name or "").strip().lower()
+        if normalized not in MANAGED_STATE_DIRS:
+            raise ValueError(f"Unsupported managed AstraBridge state directory: {name}")
+        return self.require_shell_subdir(normalized, *parts)
+
     def update_project(self, patch: dict[str, Any]) -> dict[str, Any]:
         if not self.current_project:
             raise ValueError("No project is open.")
@@ -345,22 +365,17 @@ class ProjectService:
 
     def _ensure_workspace_state(self, workspace_root: Path) -> None:
         shell_root = workspace_root / WORKSPACE_STATE_DIRNAME
-        for path in [
-            shell_root / "attachments",
-            shell_root / "tmp",
-            shell_root / "runtime_events.jsonl",
-            shell_root / "approvals.jsonl",
-            shell_root / "thread_cache.json",
-            shell_root / "ui_state.json",
-        ]:
+        for dirname in MANAGED_STATE_DIRS:
+            path = shell_root / dirname
+            path.mkdir(parents=True, exist_ok=True)
+        for filename in MANAGED_STATE_FILES:
+            path = shell_root / filename
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.suffix == ".json":
                 if not path.exists():
                     write_json(path, {})
-            elif path.suffix == ".jsonl":
-                path.touch(exist_ok=True)
             else:
-                path.mkdir(parents=True, exist_ok=True)
+                path.touch(exist_ok=True)
         self._ensure_git_exclude(workspace_root)
 
     def _ensure_git_exclude(self, workspace_root: Path) -> None:

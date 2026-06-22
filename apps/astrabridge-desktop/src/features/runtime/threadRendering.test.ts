@@ -8,8 +8,8 @@ describe("thread rendering helpers", () => {
     const blocks = renderBlocksForItem({
       type: "dynamicToolCall",
       id: "tool-1",
-      namespace: "lcr_browser",
-      tool: "lcr_browser_smoke",
+      namespace: "astrabridge_browser",
+      tool: "astrabridge_browser_smoke",
       arguments: { url: "http://127.0.0.1:4174" },
       status: "completed",
       contentItems: null,
@@ -26,7 +26,7 @@ describe("thread rendering helpers", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0].role).toBe("tool");
     expect(blocks[0]).toMatchObject({
-      title: "lcr_browser.lcr_browser_smoke",
+      title: "astrabridge_browser.astrabridge_browser_smoke",
       status: "completed",
     });
     if (blocks[0].role !== "tool") throw new Error("expected tool block");

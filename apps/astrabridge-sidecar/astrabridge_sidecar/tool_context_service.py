@@ -7,7 +7,9 @@ from typing import Any
 from .security import redact_sensitive
 
 
-TOOL_CONTEXT_SCHEMA_VERSION = "lcr-tool-context-envelope-v1"
+BROWSER_SMOKE_TOOL_NAME = "astrabridge_browser_smoke"
+LEGACY_BROWSER_SMOKE_TOOL_NAME = "lcr_browser_smoke"
+TOOL_CONTEXT_SCHEMA_VERSION = "astrabridge-tool-context-envelope-v1"
 
 _TEXT_LIMITS = {
     "schema_version": 80,
@@ -263,7 +265,7 @@ def _default_output_contract(tool_name: str) -> str:
         return "Return source URLs, concise summaries, confidence/freshness notes, and unresolved questions. Do not claim facts without a source URL."
     if tool_name.startswith("yunwu_image_"):
         return "Return requested_n, actual_n, local paths, dimensions, format, alpha status, validation warnings, and intended game usage."
-    if tool_name == "lcr_browser_smoke":
+    if tool_name in {BROWSER_SMOKE_TOOL_NAME, LEGACY_BROWSER_SMOKE_TOOL_NAME}:
         return "Return screenshot path, URL, pass/fail status, console error count, and any blocking failure reason."
     if tool_name.startswith("asset_"):
         return "Return asset_id, manifest key, promoted path, validation status, and screenshot evidence when available."

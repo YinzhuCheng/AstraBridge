@@ -54,6 +54,9 @@ TURN_RUNTIME_PIN_SECONDS = 300.0
 VALID_COLLABORATION_MODES = {"default", "plan"}
 VALID_CONTEXT_MODES = {"default", "full", "minimal_text", "minimal_visual", "no_context"}
 VALID_EXECUTION_BACKENDS = {"app_server", "native_kernel"}
+BROWSER_SMOKE_TOOL_NAME = "astrabridge_browser_smoke"
+LEGACY_BROWSER_SMOKE_TOOL_NAME = "lcr_browser_smoke"
+BROWSER_SMOKE_TOOL_ALIASES = {BROWSER_SMOKE_TOOL_NAME, LEGACY_BROWSER_SMOKE_TOOL_NAME}
 
 
 class RuntimeService:
@@ -2429,7 +2432,7 @@ class RuntimeService:
             return {"success": False, "contentItems": [{"type": "inputText", "text": f"AstraBridge dynamic tool failed: {message}"}]}
 
     def _call_lcr_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if tool == "lcr_browser_smoke":
+        if tool in BROWSER_SMOKE_TOOL_ALIASES:
             return self._call_lcr_browser_smoke_dynamic_tool(arguments)
         if tool.startswith("lcr_web_"):
             return self._call_lcr_web_dynamic_tool(tool, arguments)
@@ -2446,10 +2449,10 @@ class RuntimeService:
     def _summarize_lcr_dynamic_tool_result(self, tool: str, result: dict[str, Any]) -> dict[str, Any]:
         if tool.startswith("yunwu_image_"):
             return summarize_yunwu_image_result(result)
-        if tool == "lcr_browser_smoke":
+        if tool in BROWSER_SMOKE_TOOL_ALIASES:
             record = dict(result.get("browser_smoke") or {})
             return {
-                "tool": "lcr_browser_smoke",
+                "tool": BROWSER_SMOKE_TOOL_NAME,
                 "path": result.get("path"),
                 "status": record.get("status"),
                 "http_status": record.get("http_status"),
@@ -2458,14 +2461,15 @@ class RuntimeService:
                 "screenshot_path": record.get("screenshot_path"),
                 "screenshot_status": record.get("screenshot_status"),
                 "console_errors": list(record.get("console_errors") or [])[:10],
+                "request_failures": list(record.get("request_failures") or [])[:10],
                 "error": record.get("error"),
                 "tool_event_verified": True,
             }
         return result
 
     def _dynamic_tool_server(self, tool: str) -> str:
-        if tool == "lcr_browser_smoke":
-            return "lcr_browser"
+        if tool in BROWSER_SMOKE_TOOL_ALIASES:
+            return "astrabridge_browser"
         if tool.startswith("lcr_web_"):
             return "lcr_web"
         if tool.startswith("yunwu_image_"):
@@ -3401,7 +3405,7 @@ for host in candidates:
         if self._dogfood_run is not None:
             dynamic_tools.append(
                 {
-                    "name": "lcr_browser_smoke",
+                    "name": BROWSER_SMOKE_TOOL_NAME,
                     "description": (
                         "Run a local browser smoke test for a localhost, 127.0.0.1, or file:// URL, optionally "
                         "performing simple UI actions, then record console errors and a screenshot in the AstraBridge "
@@ -4118,7 +4122,7 @@ for host in candidates:
 
     def _dynamic_tool_evidence_lines(self, tool: str, summary: dict[str, Any], fallback_text: str) -> list[str]:
         lines: list[str] = []
-        if tool == "lcr_browser_smoke":
+        if tool in BROWSER_SMOKE_TOOL_ALIASES:
             status = summary.get("status")
             label = summary.get("label")
             if status or label:
@@ -4128,6 +4132,9 @@ for host in candidates:
             errors = summary.get("console_errors")
             if isinstance(errors, list):
                 lines.append(f"console errors: {len(errors)}")
+            request_failures = summary.get("request_failures")
+            if isinstance(request_failures, list):
+                lines.append(f"request failures: {len(request_failures)}")
         elif tool.startswith("lcr_web_"):
             if summary.get("record_id"):
                 lines.append(f"research record: {summary.get('record_id')}")
