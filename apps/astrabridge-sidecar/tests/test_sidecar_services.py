@@ -63,11 +63,13 @@ from astrabridge_sidecar.providers.history_projector import (
     sanitize_provider_private_state,
 )
 from astrabridge_sidecar.providers.ir import NormalizedResponse, ToolCall
+from astrabridge_sidecar.providers.transports.openai_chat import OpenAIChatTransport
 from astrabridge_sidecar.providers.tooling import (
     assess_model_authority,
     repair_tool_arguments,
     sanitize_function_parameters,
     summarize_tool_output,
+    tool_output_char_limit,
 )
 from astrabridge_sidecar.project_context_service import ProjectContextService
 from astrabridge_sidecar.project_service import DEFAULT_RUNTIME_HOST_ENV, DEFAULT_RUNTIME_WSL_DISTRO_ENV, ProjectService
@@ -11140,6 +11142,65 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertTrue(text.endswith("[truncated]"))
         self.assertLessEqual(len(text), 140)
         self.assertTrue(any("oversized tool output" in warning.lower() for warning in warnings))
+
+    def test_tool_output_char_limit_uses_context_budget_with_cap(self) -> None:
+        self.assertEqual(tool_output_char_limit(None), 4000)
+        self.assertEqual(tool_output_char_limit(100), 4000)
+        self.assertEqual(tool_output_char_limit(3000), 12000)
+        self.assertEqual(tool_output_char_limit(12000), 32000)
+
+    def test_chat_transport_uses_profile_tool_output_limit_for_command_results(self) -> None:
+        transport = OpenAIChatTransport(
+            SimpleNamespace(),
+            {
+                "provider_id": "openai",
+                "model": "gpt-5.5",
+                "tool_output_token_limit": 32,
+            },
+        )
+
+        text = transport._command_execution_tool_result(  # noqa: SLF001
+            {
+                "command": "pytest -q",
+                "status": "completed",
+                "aggregatedOutput": "x" * 5000,
+                "exitCode": 0,
+            }
+        )
+
+        self.assertIn("[truncated]", text)
+        self.assertLess(len(text), 4400)
+
+    def test_native_kernel_tool_messages_use_model_output_limit(self) -> None:
+        facade = RuntimeToolFacade(
+            SimpleNamespace(),
+            profile_id="glm-default",
+            provider_id="glm",
+            model_id="glm-5.2",
+            authority=SimpleNamespace(tier="B"),
+            permission_mode="auto",
+            thread_id="thread-glm",
+            turn_id="turn-glm",
+            tool_output_char_limit=512,
+        )
+
+        payload = json.loads(
+            facade.tool_result_message(
+                "run_command",
+                {
+                    "ok": True,
+                    "status": "completed",
+                    "command": "python -m pytest",
+                    "cwd": "workspace",
+                    "exit_code": 0,
+                    "approved": True,
+                    "output": "x" * 5000,
+                },
+            )
+        )
+
+        self.assertIn("[truncated]", str(payload.get("output") or ""))
+        self.assertLessEqual(len(str(payload.get("output") or "")), 524)
 
     def test_model_authority_assessment_marks_propose_only_as_tier_b(self) -> None:
         authority = assess_model_authority(

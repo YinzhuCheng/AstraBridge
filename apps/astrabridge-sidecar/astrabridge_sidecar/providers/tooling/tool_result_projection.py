@@ -5,6 +5,18 @@ from typing import Any
 
 
 DEFAULT_TOOL_OUTPUT_CHAR_LIMIT = 4000
+MAX_TOOL_OUTPUT_CHAR_LIMIT = 32000
+APPROX_CHARS_PER_TOKEN = 4
+
+
+def tool_output_char_limit(token_limit: Any, *, default: int = DEFAULT_TOOL_OUTPUT_CHAR_LIMIT) -> int:
+    try:
+        parsed = int(token_limit)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return max(default, min(MAX_TOOL_OUTPUT_CHAR_LIMIT, parsed * APPROX_CHARS_PER_TOKEN))
 
 
 def summarize_tool_output(value: Any, *, char_limit: int = DEFAULT_TOOL_OUTPUT_CHAR_LIMIT) -> tuple[str, list[str]]:

@@ -7,6 +7,7 @@ from typing import Any
 from ..common import new_id, now_iso
 from ..providers.ir import NormalizedResponse, ToolCall
 from ..providers.tooling.model_authority import AuthorityAssessment, assess_model_authority
+from ..providers.tooling import summarize_tool_output, tool_output_char_limit
 from ..security import redact_sensitive
 
 
@@ -38,6 +39,7 @@ class RuntimeToolFacade:
         permission_mode: str,
         thread_id: str,
         turn_id: str,
+        tool_output_char_limit: int = 20000,
     ) -> None:
         self._project_tools = project_tools
         self._profile_id = profile_id
@@ -47,6 +49,7 @@ class RuntimeToolFacade:
         self._permission_mode = permission_mode
         self._thread_id = thread_id
         self._turn_id = turn_id
+        self._tool_output_char_limit = max(512, int(tool_output_char_limit or 20000))
 
     def tool_definitions(self) -> list[dict[str, Any]]:
         definitions: list[dict[str, Any]] = [
@@ -183,11 +186,15 @@ class RuntimeToolFacade:
 
     def tool_result_message(self, name: str, result: dict[str, Any]) -> str:
         if name == "read_file":
+            content, _warnings = summarize_tool_output(
+                str(result.get("content") or "") if result.get("kind") == "text" else result.get("message"),
+                char_limit=self._tool_output_char_limit,
+            )
             payload = {
                 "path": result.get("path"),
                 "kind": result.get("kind"),
                 "size": result.get("size"),
-                "content": str(result.get("content") or "")[:20000] if result.get("kind") == "text" else result.get("message"),
+                "content": content,
             }
             return json.dumps(redact_sensitive(payload), ensure_ascii=False)
         if name == "terminal_history":
@@ -210,6 +217,7 @@ class RuntimeToolFacade:
             }
             return json.dumps(redact_sensitive(payload), ensure_ascii=False)
         if name in {"run_command", "run_tests"}:
+            output, _warnings = summarize_tool_output(str(result.get("output") or ""), char_limit=self._tool_output_char_limit)
             payload = {
                 "ok": result.get("ok"),
                 "status": result.get("status"),
@@ -217,20 +225,21 @@ class RuntimeToolFacade:
                 "cwd": result.get("cwd"),
                 "exit_code": result.get("exit_code"),
                 "approved": result.get("approved"),
-                "output": str(result.get("output") or "")[:20000],
+                "output": output,
             }
             return json.dumps(redact_sensitive(payload), ensure_ascii=False)
         if name == "review_diff":
+            diff, _warnings = summarize_tool_output(str(result.get("diff") or ""), char_limit=self._tool_output_char_limit)
             payload = {
                 "ok": result.get("ok"),
                 "path": result.get("path"),
-                "diff": str(result.get("diff") or "")[:20000],
+                "diff": diff,
                 "error": result.get("error"),
             }
             return json.dumps(redact_sensitive(payload), ensure_ascii=False)
         if name in {"edit_preview", "edit_apply"}:
             preview = dict(result.get("preview") or {})
-            preview["diff"] = str(preview.get("diff") or "")[:20000]
+            preview["diff"], _warnings = summarize_tool_output(str(preview.get("diff") or ""), char_limit=self._tool_output_char_limit)
             payload = {
                 "ok": result.get("ok"),
                 "applied": result.get("applied"),
@@ -440,6 +449,7 @@ class NativeCodingTurnLoop:
         if authority.tier == "D":
             raise ValueError("The selected model is not eligible for native kernel execution.")
         turn_id = new_id("turn")
+        output_limit = tool_output_char_limit(model_record.get("tool_output_token_limit"), default=20000)
         facade = RuntimeToolFacade(
             self._project_tools,
             profile_id=profile_id,
@@ -449,6 +459,7 @@ class NativeCodingTurnLoop:
             permission_mode=permission_mode,
             thread_id=thread_id,
             turn_id=turn_id,
+            tool_output_char_limit=output_limit,
         )
         started_at = int(__import__("time").time() * 1000)
         existing_thread = dict(self._runtime._read_native_thread(thread_id) or {})  # noqa: SLF001

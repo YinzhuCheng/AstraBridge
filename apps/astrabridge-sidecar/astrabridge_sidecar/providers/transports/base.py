@@ -16,6 +16,7 @@ from ..tooling import (
     normalize_tool_calls,
     sanitize_tool_definitions,
     summarize_tool_output,
+    tool_output_char_limit,
 )
 
 
@@ -61,9 +62,12 @@ class ProviderTransport(ABC):
         if exit_code is not None:
             parts.append(f"exit_code: {exit_code}")
         if output:
-            summarized_output, _warnings = summarize_tool_output(output)
+            summarized_output, _warnings = summarize_tool_output(output, char_limit=self._tool_output_char_limit())
             parts.append(f"output:\n{summarized_output}")
         return "\n".join(parts) or "Command completed with no captured output."
+
+    def _tool_output_char_limit(self) -> int:
+        return tool_output_char_limit(self.profile.get("tool_output_token_limit"))
 
     def _transition_summary_message(self, item: dict[str, Any]) -> str:
         item_type = str(item.get("type") or "")
@@ -766,7 +770,8 @@ class ChatCompletionsTransport(ProviderTransport):
         if exit_code is not None:
             parts.append(f"exit_code: {exit_code}")
         if output:
-            parts.append(f"output:\n{output}")
+            summarized_output, _warnings = summarize_tool_output(output, char_limit=self._tool_output_char_limit())
+            parts.append(f"output:\n{summarized_output}")
         return "\n".join(parts) or "Command completed with no captured output."
 
     def _repair_tool_message_sequence(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
