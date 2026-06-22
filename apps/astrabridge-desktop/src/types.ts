@@ -545,6 +545,54 @@ export type ResponseDiagnostics = {
   raw_ref?: ResponseDiagnosticsRawRef;
 };
 
+export type RuntimeFailureTransitionTarget = {
+  provider_id?: string;
+  model_id?: string;
+  protocol?: string;
+  env_key?: string;
+  base_url?: string;
+  reasoning_effort?: string;
+  reasoning_policy_mode?: string;
+};
+
+export type RuntimeFailureTransition = {
+  action?: string;
+  reason?: string;
+  restart_runtime?: boolean;
+  compact_before_send?: boolean;
+  target?: RuntimeFailureTransitionTarget;
+} | null;
+
+export type RuntimeFailureAction = {
+  action: string;
+  label: string;
+  reason: string;
+  target?: string | null;
+  transition?: RuntimeFailureTransition;
+};
+
+export type RuntimeFailureNotice = {
+  level: "warning" | "danger" | string;
+  category: string;
+  provider?: string;
+  model?: string;
+  summary: string;
+  message?: string;
+  actionable_hint?: string;
+  recommended_action?: string;
+  recoverability?: "retryable" | "recoverable" | "requires_user_action" | "fail_closed" | string;
+  fallback_models?: string[];
+  reasoning_downgrade_levels?: string[];
+  requires_key_check?: boolean;
+  provider_switch_recommended?: boolean;
+  native_status?: number;
+  native_code?: string | null;
+  recommended_actions?: RuntimeFailureAction[];
+  thread_id?: string;
+  turn_id?: string;
+  last_updated_at?: string | null;
+};
+
 export type RouterTestResult = {
   ok: boolean;
   provider: string;
@@ -556,6 +604,7 @@ export type RouterTestResult = {
   response_excerpt: string;
   preview_warnings?: string[];
   response_diagnostics?: ResponseDiagnostics | null;
+  failure_notice?: RuntimeFailureNotice | null;
   timestamp?: string;
 };
 
@@ -781,45 +830,7 @@ export type RuntimeSupervisorState = {
     turn_id?: string;
   };
   thread_status: { type?: string; activeFlags?: string[]; [key: string]: unknown };
-  runtime_error?: {
-    level: "warning" | "danger" | string;
-    category: string;
-    provider?: string;
-    model?: string;
-    summary: string;
-    message?: string;
-    actionable_hint?: string;
-    recommended_action?: string;
-    recoverability?: "retryable" | "recoverable" | "requires_user_action" | "fail_closed" | string;
-    fallback_models?: string[];
-    reasoning_downgrade_levels?: string[];
-    requires_key_check?: boolean;
-    provider_switch_recommended?: boolean;
-    recommended_actions?: Array<{
-      action: string;
-      label: string;
-      reason: string;
-      target?: string | null;
-      transition?: {
-        action?: string;
-        reason?: string;
-        restart_runtime?: boolean;
-        compact_before_send?: boolean;
-        target?: {
-          provider_id?: string;
-          model_id?: string;
-          protocol?: string;
-          env_key?: string;
-          base_url?: string;
-          reasoning_effort?: string;
-          reasoning_policy_mode?: string;
-        };
-      } | null;
-    }>;
-    thread_id?: string;
-    turn_id?: string;
-    last_updated_at?: string | null;
-  } | null;
+  runtime_error?: RuntimeFailureNotice | null;
   environment: {
     project_name?: string;
     cwd?: string;

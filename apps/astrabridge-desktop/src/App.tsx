@@ -9,7 +9,7 @@ import { modelAuthorityState } from "./features/runtime/modelAuthorityNotice";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
 import { formatResponseDiagnostics, summarizeResponseDiagnosticsInline } from "./features/runtime/responseDiagnostics";
 import { composerReasoningOptions, preferredProviderReasoningEffort, preferredReasoningEffort, providerReasoningOptions, providerTemperatureDefaults } from "./features/runtime/reasoningOptions";
-import { runtimeErrorNoticeActions, runtimeErrorNoticeText, type RuntimeErrorAction } from "./features/runtime/runtimeErrorNotice";
+import { runtimeErrorNoticeActions, runtimeErrorNoticeInline, runtimeErrorNoticeText, type RuntimeErrorAction } from "./features/runtime/runtimeErrorNotice";
 import { summarizeTaskCard } from "./features/runtime/taskSummary";
 import { hasPersistedRenderableTurnContent, itemActivityFromPayload, summarizeTurnBlocks } from "./features/runtime/threadRendering";
 import { useAppStore } from "./store";
@@ -33,6 +33,7 @@ import type {
   ProjectReviewStatus,
   ProjectTerminalHistory,
   ReasoningConfig,
+  RuntimeFailureNotice,
   RouterConfigResponse,
   RouterModelEntry,
   RouterProvider,
@@ -1543,7 +1544,9 @@ function RouterControlCenter({
   const testManagedKey = useMutation({
     mutationFn: api.llmManagerTestKey,
     onSuccess: (data) => {
-      setTestOutput(formatResponseDiagnostics(data.result.response_diagnostics) ?? data.result.response_excerpt ?? JSON.stringify(data.result, null, 2));
+      const diagnosticsText = formatResponseDiagnostics(data.result.response_diagnostics);
+      const failureText = runtimeErrorNoticeText(data.result.failure_notice ?? null);
+      setTestOutput(diagnosticsText ?? (failureText || data.result.response_excerpt || JSON.stringify(data.result, null, 2)));
       queryClient.invalidateQueries({ queryKey: ["llm-manager-keys"] });
       queryClient.invalidateQueries({ queryKey: ["llm-manager-catalog"] });
       queryClient.invalidateQueries({ queryKey: ["runtime-environment"] });
@@ -1693,7 +1696,9 @@ function RouterControlCenter({
     const sourceProvider = providerDraft ?? selectedProvider;
     if (!sourceProvider) return;
     const result = await api.testProvider({ provider_id: sourceProvider.id, model_id: modelDraft?.id, stream });
-    setTestOutput(formatResponseDiagnostics(result.response_diagnostics) ?? result.response_excerpt);
+    const diagnosticsText = formatResponseDiagnostics(result.response_diagnostics);
+    const failureText = runtimeErrorNoticeText(result.failure_notice ?? null);
+    setTestOutput(diagnosticsText ?? (failureText || result.response_excerpt));
     queryClient.invalidateQueries({ queryKey: ["router-config"] });
     queryClient.invalidateQueries({ queryKey: ["runtime-environment"] });
   }
@@ -2629,12 +2634,13 @@ function RouterControlCenter({
               <div className="manager-list manager-list-tall">
                 {(llmHealth.data?.results ?? []).slice(-12).reverse().map((result, index) => {
                   const diagnosticsSummary = summarizeResponseDiagnosticsInline(result.response_diagnostics);
+                  const failureSummary = runtimeErrorNoticeInline((result.failure_notice as RuntimeFailureNotice | null | undefined) ?? null);
                   return (
                     <div className="manager-row" key={`${String(result.run_id ?? "run")}-${index}`}>
                       <span>
                         <strong>{String(result.model ?? "-")}</strong>
                         <small>{String(result.provider ?? "")} / {String(result.effort ?? "")} / web {String(result.web_smoke_status ?? "n/a")} / {String(result.connectivity ?? result.reason ?? "")}</small>
-                        {diagnosticsSummary ? <small>{diagnosticsSummary}</small> : null}
+                        {diagnosticsSummary ? <small>{diagnosticsSummary}</small> : failureSummary ? <small>{failureSummary}</small> : null}
                       </span>
                       <span className="manager-row-side">
                         <small>{result.ok ? "pass" : result.skipped ? "blocked" : "fail"}</small>

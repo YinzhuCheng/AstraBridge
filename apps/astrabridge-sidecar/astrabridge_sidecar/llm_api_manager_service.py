@@ -379,8 +379,14 @@ class LlmApiManagerService:
                                 **web_result,
                                 "preview_warnings": list(raw.get("preview_warnings") or raw.get("warnings") or []),
                                 "response_diagnostics": dict(raw.get("response_diagnostics") or {}),
+                                "failure_notice": dict(raw.get("failure_notice") or {}),
                                 "adapter_warnings": list((raw.get("response_diagnostics") or {}).get("warnings") or raw.get("adapter_warnings") or []),
-                                "response_excerpt": str((raw.get("response_diagnostics") or {}).get("text_excerpt") or raw.get("response_excerpt") or "")[:300],
+                                "response_excerpt": str(
+                                    (raw.get("response_diagnostics") or {}).get("text_excerpt")
+                                    or (raw.get("failure_notice") or {}).get("summary")
+                                    or raw.get("response_excerpt")
+                                    or ""
+                                )[:300],
                                 "last_verified_at": now_iso(),
                             }
                         except Exception as exc:  # noqa: BLE001
@@ -635,6 +641,7 @@ class LlmApiManagerService:
             "last_web_verified_at": result.get("last_web_verified_at"),
             "adapter_warnings": list(result.get("adapter_warnings") or []),
             "response_diagnostics": dict(result.get("response_diagnostics") or {}),
+            "failure_notice": dict(result.get("failure_notice") or {}),
             "last_verified_at": result.get("last_verified_at") or now_iso(),
             "reason": result.get("reason"),
         }

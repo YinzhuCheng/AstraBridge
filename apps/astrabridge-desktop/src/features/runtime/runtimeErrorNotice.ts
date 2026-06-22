@@ -1,7 +1,7 @@
-import type { RuntimeSupervisorState } from "../../types";
+import type { RuntimeFailureAction, RuntimeFailureNotice } from "../../types";
 
-export type RuntimeErrorNotice = RuntimeSupervisorState["runtime_error"];
-export type RuntimeErrorAction = NonNullable<NonNullable<RuntimeErrorNotice>["recommended_actions"]>[number];
+export type RuntimeErrorNotice = RuntimeFailureNotice | null | undefined;
+export type RuntimeErrorAction = RuntimeFailureAction;
 
 export function runtimeErrorNoticeActions(runtimeError: RuntimeErrorNotice): RuntimeErrorAction[] {
   if (!runtimeError?.recommended_actions?.length) {
@@ -40,4 +40,11 @@ export function runtimeErrorNoticeText(runtimeError: RuntimeErrorNotice): string
     parts.push(`Suggested: ${suggested.join(", ")}.`);
   }
   return parts.join(" ").trim();
+}
+
+export function runtimeErrorNoticeInline(runtimeError: RuntimeErrorNotice): string {
+  if (!runtimeError?.summary) {
+    return "";
+  }
+  return runtimeError.actionable_hint?.trim() ? `${runtimeError.summary.trim()} ${runtimeError.actionable_hint.trim()}`.trim() : runtimeError.summary.trim();
 }

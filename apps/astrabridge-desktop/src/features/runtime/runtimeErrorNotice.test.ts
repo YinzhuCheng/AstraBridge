@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { RuntimeSupervisorState } from "../../types";
-import { runtimeErrorNoticeActions, runtimeErrorNoticeText } from "./runtimeErrorNotice";
+import { runtimeErrorNoticeActions, runtimeErrorNoticeInline, runtimeErrorNoticeText } from "./runtimeErrorNotice";
 
 describe("runtime error notice", () => {
   it("combines summary, hint, and suggested recovery actions", () => {
@@ -24,6 +24,18 @@ describe("runtime error notice", () => {
 
   it("returns an empty string when no runtime error is present", () => {
     expect(runtimeErrorNoticeText(null)).toBe("");
+  });
+
+  it("summarizes inline failure text without the suggested-actions suffix", () => {
+    const runtimeError = {
+      level: "danger",
+      category: "auth_failure",
+      summary: "Provider authentication failed.",
+      actionable_hint: "Reload the provider key before retrying.",
+      recommended_actions: [{ action: "refresh_provider_key", label: "Reload Key", reason: "Reload the key.", target: null }],
+    } satisfies NonNullable<RuntimeSupervisorState["runtime_error"]>;
+
+    expect(runtimeErrorNoticeInline(runtimeError)).toBe("Provider authentication failed. Reload the provider key before retrying.");
   });
 
   it("deduplicates and caps recovery actions", () => {

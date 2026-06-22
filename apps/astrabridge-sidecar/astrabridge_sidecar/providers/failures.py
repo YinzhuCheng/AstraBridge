@@ -222,7 +222,19 @@ def classify_runtime_failure(
                 _fallback_model_action(parsed.provider, fallback_models, "Switch to a smaller fallback model if available."),
             ),
         )
-    if any(token in lowered for token in ["401", "unauthorized", "invalid api key", "incorrect api key", "authentication", "auth failed"]):
+    if any(
+        token in lowered
+        for token in [
+            "401",
+            "unauthorized",
+            "invalid api key",
+            "incorrect api key",
+            "authentication",
+            "auth failed",
+            "secret is not loaded for env key",
+            "no managed key or environment value",
+        ]
+    ):
         return _notice(
             category="auth_failure",
             summary="Provider authentication failed.",
@@ -386,12 +398,13 @@ def _provider_profile(provider_id: str) -> ProviderProfile | None:
 def _fallback_models(profile: ProviderProfile | None, current_model: str) -> tuple[str, ...]:
     if profile is None:
         return ()
+    current_native_model = current_model.split("/", 1)[1] if "/" in current_model else current_model
     preferred = profile.fallback_policy.fallback_models or profile.fallback_models
     seen: set[str] = set()
     models: list[str] = []
     for model in preferred:
         normalized = str(model or "").strip()
-        if not normalized or normalized == current_model or normalized in seen:
+        if not normalized or normalized in {current_model, current_native_model} or normalized in seen:
             continue
         seen.add(normalized)
         models.append(normalized)

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .model_catalog import known_context_window, model_catalog_entry
-from .providers import get_provider_profile, resolve_provider_id, summarize_response_diagnostics
+from .providers import classify_runtime_failure, get_provider_profile, resolve_provider_id, summarize_response_diagnostics
 from .providers.transports import (
     ChatCompletionsTransport as RegistryChatCompletionsTransport,
     DeepSeekChatTransport as RegistryDeepSeekChatTransport,
@@ -1466,88 +1466,92 @@ class RouterService:
         provider = self._provider_by_id(provider_id)
         model = self._normalize_model_id(provider_id, model_id or provider.get("default_model") or provider.get("model"))
         payload = {"model": model, "input": "Reply with exactly: ok", "stream": stream}
-        parsed_preview = self.preview_payload(payload)
-        preview_warnings = list(parsed_preview.get("warnings") or [])
-        diagnostics: dict[str, Any] | None = None
-        response_excerpt = ""
-        content_type = "application/json; charset=utf-8"
-        status = 200
-        ok = True
-        if stream:
-            buffer = _BufferHandler()
-            self.forward_response(payload, buffer)
-            status = buffer.status_code
-            ok = status == 200
-            content_type = buffer.headers.get("Content-Type")
-            response_excerpt = buffer.wfile.getvalue().decode("utf-8", errors="replace")[:1200]
-        else:
-            completed = self.complete_response(payload)
-            normalized = completed["normalized"]
-            diagnostics = summarize_response_diagnostics(normalized, text_limit=1200)
-            response_excerpt = str(diagnostics.get("text_excerpt") or "")[:1200]
-        result = {
-            "ok": ok,
-            "provider": provider_id,
-            "model": model,
-            "stream": stream,
-            "status": status,
-            "content_type": content_type,
-            "preview": parsed_preview["upstream_payload"],
-            "preview_warnings": preview_warnings,
-            "warnings": preview_warnings,
-            "response_excerpt": response_excerpt,
-            "response_diagnostics": diagnostics,
-        }
+        result = self._provider_test_result(payload, stream=stream)
         if self._router_config is not None:
             self._router_config.record_test_result(result)
         return result
 
     def test_model_case(self, *, provider_id: str, model_id: str, effort: str | None = None, temperature: float | None = None, stream: bool = False) -> dict[str, Any]:
-        provider = self._provider_by_id(provider_id)
         model_id = self._normalize_model_id(provider_id, model_id)
         payload: dict[str, Any] = {"model": model_id, "input": "Reply with exactly: ok", "stream": stream}
         if effort:
             payload["reasoning"] = {"effort": effort}
         if temperature is not None:
             payload["temperature"] = temperature
-        parsed_preview = self.preview_payload(payload)
-        preview_warnings = list(parsed_preview.get("warnings") or [])
-        diagnostics: dict[str, Any] | None = None
-        response_excerpt = ""
-        content_type = "application/json; charset=utf-8"
-        status = 200
-        ok = True
-        if stream:
-            buffer = _BufferHandler()
-            self.forward_response(payload, buffer)
-            status = buffer.status_code
-            ok = status == 200
-            content_type = buffer.headers.get("Content-Type")
-            response_excerpt = buffer.wfile.getvalue().decode("utf-8", errors="replace")[:1200]
-        else:
-            completed = self.complete_response(payload)
-            normalized = completed["normalized"]
-            diagnostics = summarize_response_diagnostics(normalized, text_limit=1200)
-            response_excerpt = str(diagnostics.get("text_excerpt") or "")[:1200]
+        provider = self._provider_by_id(provider_id)
         result = {
-            "ok": ok,
-            "provider": provider_id,
-            "model": model_id,
+            **self._provider_test_result(payload, stream=stream),
             "native_model": provider.get("model"),
             "effort": effort,
             "temperature": temperature,
-            "stream": stream,
-            "status": status,
-            "content_type": content_type,
-            "preview_warnings": preview_warnings,
-            "warnings": preview_warnings,
-            "preview": parsed_preview["upstream_payload"],
-            "response_excerpt": response_excerpt,
-            "response_diagnostics": diagnostics,
         }
         if self._router_config is not None:
             self._router_config.record_test_result(result)
         return result
+
+    def _provider_test_result(self, payload: dict[str, Any], *, stream: bool) -> dict[str, Any]:
+        provider_id, model_id = self._provider_and_model_from_payload(payload)
+        parsed_preview: dict[str, Any] | None = None
+        preview_warnings: list[str] = []
+        try:
+            parsed_preview = self.preview_payload(payload)
+            preview_warnings = list(parsed_preview.get("warnings") or [])
+            diagnostics: dict[str, Any] | None = None
+            failure_notice: dict[str, Any] | None = None
+            response_excerpt = ""
+            content_type = "application/json; charset=utf-8"
+            status = 200
+            ok = True
+            if stream:
+                buffer = _BufferHandler()
+                self.forward_response(payload, buffer)
+                status = buffer.status_code
+                ok = status == 200
+                content_type = buffer.headers.get("Content-Type")
+                raw_text = buffer.wfile.getvalue().decode("utf-8", errors="replace")[:1200]
+                if ok:
+                    response_excerpt = raw_text
+                else:
+                    failure_notice = self._failure_notice_payload(raw_text, provider_id=provider_id, model_id=model_id)
+                    response_excerpt = self._failure_excerpt(failure_notice, fallback=raw_text)
+            else:
+                completed = self.complete_response(payload)
+                normalized = completed["normalized"]
+                diagnostics = summarize_response_diagnostics(normalized, text_limit=1200)
+                response_excerpt = str(diagnostics.get("text_excerpt") or "")[:1200]
+            result = {
+                "ok": ok,
+                "provider": provider_id,
+                "model": model_id,
+                "stream": stream,
+                "status": status,
+                "content_type": content_type,
+                "preview": (parsed_preview or {}).get("upstream_payload") or {},
+                "preview_warnings": preview_warnings,
+                "warnings": preview_warnings,
+                "response_excerpt": response_excerpt,
+                "response_diagnostics": diagnostics,
+            }
+            if failure_notice:
+                result["failure_notice"] = failure_notice
+            return result
+        except Exception as exc:  # noqa: BLE001
+            failure_notice = self._failure_notice_payload(str(exc), provider_id=provider_id, model_id=model_id)
+            result = {
+                "ok": False,
+                "provider": provider_id,
+                "model": model_id,
+                "stream": stream,
+                "status": int(failure_notice.get("native_status") or 400),
+                "content_type": "application/json; charset=utf-8",
+                "preview": (parsed_preview or {}).get("upstream_payload") or {},
+                "preview_warnings": preview_warnings,
+                "warnings": preview_warnings,
+                "response_excerpt": self._failure_excerpt(failure_notice, fallback=str(exc)[:1200]),
+                "response_diagnostics": None,
+                "failure_notice": failure_notice,
+            }
+            return result
 
     def _normalize_model_id(self, provider_id: str, model_id: Any) -> str:
         raw = str(model_id or "").strip()
@@ -1675,17 +1679,81 @@ class RouterService:
             message = str(error.get("message") or message)
         except Exception:
             pass
-        hint = self._provider_error_hint(message, fallback="Check provider auth, request shape, or reasoning/tool compatibility.")
-        return {
-            "error": {
-                "type": "provider_error",
-                "provider": profile.get("provider_id"),
-                "native_status": status,
-                "native_code": native_code,
-                "message": message,
-                "actionable_hint": hint,
-            }
-        }
+        notice = self._failure_notice_payload(
+            message if message == text.strip() else text,
+            provider_id=str(profile.get("provider_id") or ""),
+            model_id=str(profile.get("model") or ""),
+            native_status=status,
+            native_code=str(native_code or "").strip() or None,
+        )
+        context_hint = self._provider_error_hint(message, fallback="")
+        if context_hint:
+            notice["actionable_hint"] = context_hint
+        return {"error": notice}
+
+    def _provider_and_model_from_payload(self, payload: dict[str, Any]) -> tuple[str, str]:
+        model_text = str(payload.get("model") or "").strip()
+        provider = ""
+        model = model_text
+        if "/" in model_text:
+            provider, model = model_text.split("/", 1)
+        if not provider:
+            try:
+                profile = self._resolve_profile(payload)
+            except Exception:
+                return "", model_text
+            provider = str(profile.get("provider_id") or "").strip()
+            model = str(profile.get("model") or model or "").strip()
+        normalized_model = f"{provider}/{model}" if provider and model and "/" not in model else (model_text or model)
+        return provider, normalized_model
+
+    def _failure_notice_payload(
+        self,
+        raw_message: str,
+        *,
+        provider_id: str,
+        model_id: str,
+        native_status: int | None = None,
+        native_code: str | None = None,
+    ) -> dict[str, Any]:
+        parsed_error: dict[str, Any] | None = None
+        try:
+            parsed = json.loads(str(raw_message or ""))
+            if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
+                parsed_error = dict(parsed.get("error") or {})
+        except Exception:
+            parsed_error = None
+        notice = (
+            parsed_error
+            if parsed_error and parsed_error.get("category") and parsed_error.get("actionable_hint")
+            else classify_runtime_failure(
+                str(raw_message or ""),
+                current_provider=provider_id or None,
+                current_model=model_id or None,
+            ).to_payload()
+        )
+        payload = redact_sensitive(dict(notice or {}))
+        payload.setdefault("type", "provider_error")
+        payload.setdefault("provider", provider_id or payload.get("provider") or "")
+        payload.setdefault("model", model_id or payload.get("model") or "")
+        if native_status is not None and payload.get("native_status") is None:
+            payload["native_status"] = native_status
+        if native_code and payload.get("native_code") is None:
+            payload["native_code"] = native_code
+        if not str(payload.get("actionable_hint") or "").strip():
+            payload["actionable_hint"] = self._provider_error_hint(
+                str(payload.get("message") or raw_message or ""),
+                fallback="Check provider auth, request shape, router state, or upstream connectivity.",
+            )
+        return payload
+
+    @staticmethod
+    def _failure_excerpt(failure_notice: dict[str, Any], *, fallback: str) -> str:
+        summary = str(failure_notice.get("summary") or "").strip()
+        hint = str(failure_notice.get("actionable_hint") or "").strip()
+        message = str(failure_notice.get("message") or "").strip()
+        text = " ".join(part for part in [summary, hint] if part).strip() or message or fallback
+        return text[:1200]
 
     @staticmethod
     def _provider_error_hint(message: str, *, fallback: str) -> str:

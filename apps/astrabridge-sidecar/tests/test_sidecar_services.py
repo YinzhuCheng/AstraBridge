@@ -7910,6 +7910,69 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 ["output_types", "provider_response_id"],
             )
 
+    def test_llm_manager_health_preserves_secret_safe_failure_notice(self) -> None:
+        class FailureRouter(DummyRouter):
+            def test_model_case(self, *, provider_id: str, model_id: str, effort: str | None = None, temperature: float | None = None, stream: bool = False) -> dict[str, object]:
+                notice = classify_runtime_failure(
+                    "429 rate limit exceeded",
+                    current_provider=provider_id,
+                    current_model=model_id,
+                ).to_payload()
+                return {
+                    "ok": False,
+                    "provider": provider_id,
+                    "model": model_id,
+                    "status": 429,
+                    "stream": stream,
+                    "preview": {},
+                    "preview_warnings": [],
+                    "response_excerpt": notice["summary"],
+                    "response_diagnostics": None,
+                    "failure_notice": notice,
+                }
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService(root / "profiles.json")
+            config = RouterConfigService(profiles, root / "router.json")
+            config.upsert_provider(
+                {
+                    "id": "deepseek",
+                    "display_name": "DeepSeek",
+                    "adapter_type": "chat",
+                    "base_url": "https://api.deepseek.com",
+                    "default_model": "deepseek-v4-pro",
+                    "env_key": "DEEPSEEK_API_KEY",
+                }
+            )
+            config.upsert_model(
+                {
+                    "id": "deepseek/deepseek-v4-pro",
+                    "provider": "deepseek",
+                    "native_model": "deepseek-v4-pro",
+                    "display_name": "DeepSeek V4 Pro",
+                    "enabled": True,
+                    "adapter_profile": "default",
+                }
+            )
+            manager = LlmApiManagerService(config, FailureRouter(), root / "manager")
+            manager.create_user({"username": "user", "password": "vault-password-123"})
+            manager.login({"username": "user", "password": "vault-password-123"})
+            manager.save_key({"provider_id": "deepseek", "label": "DeepSeek", "secret": "unit_secret_deepseek_value", "env_key": "DEEPSEEK_API_KEY"})
+
+            health = manager.run_health({"model_ids": ["deepseek/deepseek-v4-pro"], "efforts": ["high"], "temperatures": [0]})
+
+            result = health["results"][0]
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["failure_notice"]["category"], "rate_limit")
+            self.assertEqual(result["failure_notice"]["recommended_action"], "switch_model")
+            self.assertEqual(result["response_excerpt"], "Provider rate limit blocked the turn.")
+            self.assertEqual(
+                health["model_health"]["deepseek/deepseek-v4-pro"]["failure_notice"]["category"],
+                "rate_limit",
+            )
+            self.assertNotIn("unit_secret", json.dumps(result, ensure_ascii=False))
+
     def test_llm_manager_effective_catalog_merges_generated_provider_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -8673,6 +8736,116 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 os.environ.pop("TEST_ROUTER_PROVIDER_KEY", None)
             else:
                 os.environ["TEST_ROUTER_PROVIDER_KEY"] = original_provider_token
+
+    def test_router_test_provider_returns_structured_failure_notice_for_missing_secret(self) -> None:
+        original_provider_token = os.environ.pop("TEST_ROUTER_MISSING_PROVIDER_KEY", None)
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                profiles = ProfileService(Path(temp) / "profiles.json")
+                profiles.upsert_profile(
+                    {
+                        "profile_id": "deepseek-missing",
+                        "label": "DeepSeek Missing",
+                        "type": "custom_provider",
+                        "provider_id": "deepseek",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-pro",
+                        "reasoning_effort": "xhigh",
+                        "wire_api": "chat",
+                        "env_key": "TEST_ROUTER_MISSING_PROVIDER_KEY",
+                        "auth_mode": "env_ref",
+                        "proxy_mode": "direct",
+                        "proxy_url": "",
+                    }
+                )
+                router = RouterService(profiles, port=0)
+
+                result = router.test_provider("deepseek", "deepseek-v4-pro", stream=False)
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["provider"], "deepseek")
+                self.assertEqual(result["model"], "deepseek/deepseek-v4-pro")
+                self.assertEqual(result["status"], 400)
+                self.assertEqual(result["failure_notice"]["category"], "auth_failure")
+                self.assertEqual(result["failure_notice"]["recommended_action"], "refresh_provider_key")
+                self.assertEqual(result["failure_notice"]["recoverability"], "requires_user_action")
+                self.assertIn("key", result["failure_notice"]["actionable_hint"].lower())
+                self.assertNotIn("unit_secret", json.dumps(result, ensure_ascii=False).lower())
+        finally:
+            if original_provider_token is None:
+                os.environ.pop("TEST_ROUTER_MISSING_PROVIDER_KEY", None)
+            else:
+                os.environ["TEST_ROUTER_MISSING_PROVIDER_KEY"] = original_provider_token
+
+    def test_router_test_provider_preserves_structured_upstream_failure_notice(self) -> None:
+        class UpstreamHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                _ = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                body = json.dumps(
+                    {
+                        "error": {
+                            "message": "rate limit exceeded for this model",
+                            "type": "rate_limit_error",
+                            "code": "rate_limit_error",
+                        }
+                    }
+                ).encode("utf-8")
+                self.send_response(429)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args) -> None:  # noqa: A003
+                return
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
+        upstream_port = upstream.server_address[1]
+        threading.Thread(target=upstream.serve_forever, daemon=True).start()
+        original_provider_token = os.environ.get("TEST_ROUTER_RATE_LIMIT_KEY")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                profiles = ProfileService(Path(temp) / "profiles.json")
+                profiles.upsert_profile(
+                    {
+                        "profile_id": "deepseek-rate-limit",
+                        "label": "DeepSeek Rate Limit",
+                        "type": "custom_provider",
+                        "provider_id": "deepseek",
+                        "base_url": f"http://127.0.0.1:{upstream_port}",
+                        "model": "deepseek-v4-pro",
+                        "reasoning_effort": "xhigh",
+                        "wire_api": "chat",
+                        "env_key": "TEST_ROUTER_RATE_LIMIT_KEY",
+                        "auth_mode": "env_ref",
+                        "proxy_mode": "direct",
+                        "proxy_url": "",
+                    }
+                )
+                os.environ["TEST_ROUTER_RATE_LIMIT_KEY"] = "unit_secret_router_rate_limit"
+                router = RouterService(profiles, port=0)
+
+                result = router.test_provider("deepseek", "deepseek-v4-pro", stream=False)
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["status"], 429)
+                self.assertEqual(result["failure_notice"]["category"], "rate_limit")
+                self.assertEqual(result["failure_notice"]["native_status"], 429)
+                self.assertEqual(result["failure_notice"]["native_code"], "rate_limit_error")
+                self.assertEqual(result["failure_notice"]["recommended_action"], "switch_model")
+                self.assertEqual(result["failure_notice"]["recommended_actions"][0]["action"], "switch_model")
+                self.assertEqual(result["failure_notice"]["recommended_actions"][0]["target"], "deepseek-v4-flash")
+                self.assertEqual(
+                    result["response_excerpt"],
+                    "Provider rate limit blocked the turn. Retry later, downgrade to a lighter model, or move the task to another provider lane.",
+                )
+        finally:
+            upstream.shutdown()
+            upstream.server_close()
+            if original_provider_token is None:
+                os.environ.pop("TEST_ROUTER_RATE_LIMIT_KEY", None)
+            else:
+                os.environ["TEST_ROUTER_RATE_LIMIT_KEY"] = original_provider_token
 
     def test_router_service_uses_instance_token_not_inherited_environment(self) -> None:
         original_router_token = os.environ.get(ROUTER_ENV_KEY)
