@@ -41,6 +41,7 @@ from astrabridge_sidecar.coding_kernel import (
     project_turn_to_coding_events,
     request_from_payload,
     select_edit_strategy,
+    task_refs_from_coding_events,
 )
 from astrabridge_sidecar.modal_service import ModalService
 from astrabridge_sidecar.checkpoint_service import CheckpointService
@@ -90,6 +91,7 @@ from astrabridge_sidecar.runtime_service import RuntimeService
 from astrabridge_sidecar.server import AppContext, Handler, sse_frame, turn_text_from_payload
 from astrabridge_sidecar.task_conversation_service import TaskConversationService
 from astrabridge_sidecar.task_service import TaskService
+from astrabridge_sidecar.tool_context_service import ToolContextService
 from astrabridge_sidecar.wsl_dependency_service import WslDependencyService
 from astrabridge_sidecar.yunwu_image_mcp_server import _normalize_path_for_os as yunwu_image_normalize_path_for_os
 from astrabridge_sidecar.yunwu_image_mcp_server import _tools as yunwu_image_mcp_tools
@@ -2066,6 +2068,203 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(len(reconciled["context_pack_refs"]), 1)
             self.assertEqual(len(reconciled["asset_context_refs"]), 1)
             self.assertEqual([item["thread_id"] for item in reconciled["fork_threads"]], ["fork-1", "fork-2"])
+
+    def test_task_refs_from_coding_events_extracts_verification_and_diagnostics(self) -> None:
+        refs = task_refs_from_coding_events(
+            [
+                {
+                    "event_id": "checkpoint:1",
+                    "event_type": "checkpoint_created",
+                    "timestamp": "2026-06-22T10:00:00+08:00",
+                    "provider_id": "deepseek",
+                    "model_id": "deepseek-v4-pro",
+                    "payload": {"save_id": "save-1", "description": "Before review"},
+                },
+                {
+                    "event_id": "edit:1",
+                    "event_type": "edit_operation",
+                    "timestamp": "2026-06-22T10:01:00+08:00",
+                    "provider_id": "deepseek",
+                    "model_id": "deepseek-v4-pro",
+                    "payload": {
+                        "path": "src/app.ts",
+                        "checkpoint_save_id": "save-1",
+                    },
+                },
+                {
+                    "event_id": "handoff:1",
+                    "event_type": "provider_handoff",
+                    "timestamp": "2026-06-22T10:02:00+08:00",
+                    "provider_id": "kimi",
+                    "model_id": "kimi-k2.7-code",
+                    "payload": {
+                        "from_thread_id": "thread-deepseek",
+                        "to_thread_id": "thread-kimi",
+                        "reused_existing": False,
+                    },
+                },
+            ]
+        )
+
+        self.assertEqual(refs["checkpoint_refs"][0]["save_id"], "save-1")
+        self.assertEqual(refs["verification_refs"][0]["path"], "src/app.ts")
+        self.assertEqual(refs["diagnostic_refs"][0]["to_thread_id"], "thread-kimi")
+
+    def test_task_service_record_coding_events_populates_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "DeepSeek task",
+                thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+
+            tasks.record_coding_events(
+                [
+                    {
+                        "event_id": "checkpoint:1",
+                        "event_type": "checkpoint_created",
+                        "timestamp": "2026-06-22T10:00:00+08:00",
+                        "payload": {"save_id": "save-1", "description": "Before review"},
+                    },
+                    {
+                        "event_id": "edit:1",
+                        "event_type": "edit_operation",
+                        "timestamp": "2026-06-22T10:01:00+08:00",
+                        "payload": {"path": "src/app.ts", "checkpoint_save_id": "save-1"},
+                    },
+                    {
+                        "event_id": "handoff:1",
+                        "event_type": "provider_handoff",
+                        "timestamp": "2026-06-22T10:02:00+08:00",
+                        "payload": {"from_thread_id": "thread-deepseek", "to_thread_id": "thread-kimi"},
+                    },
+                    {
+                        "event_id": "handoff:1",
+                        "event_type": "provider_handoff",
+                        "timestamp": "2026-06-22T10:02:00+08:00",
+                        "payload": {"from_thread_id": "thread-deepseek", "to_thread_id": "thread-kimi"},
+                    },
+                ]
+            )
+
+            current = tasks.current_task()
+            self.assertEqual([item["save_id"] for item in current["checkpoint_refs"]], ["save-1"])
+            self.assertEqual([item["event_id"] for item in current["verification_refs"]], ["edit:1"])
+            self.assertEqual([item["event_id"] for item in current["diagnostic_refs"]], ["handoff:1"])
+
+    def test_runtime_thread_snapshot_projects_coding_event_refs_into_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "DeepSeek task",
+                thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            conversation = TaskConversationService(projects, tasks)
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                task_service=tasks,
+                task_conversation=conversation,
+            )
+
+            runtime._record_task_thread_snapshot(  # noqa: SLF001
+                {
+                    "id": "thread-deepseek",
+                    "provider_id": "deepseek",
+                    "turns": [
+                        {
+                            "id": "turn-1",
+                            "coding_events": [
+                                {
+                                    "event_id": "edit:1",
+                                    "event_type": "edit_operation",
+                                    "timestamp": "2026-06-22T10:01:00+08:00",
+                                    "payload": {"path": "src/app.ts", "checkpoint_save_id": "save-1"},
+                                },
+                                {
+                                    "event_id": "handoff:1",
+                                    "event_type": "provider_handoff",
+                                    "timestamp": "2026-06-22T10:02:00+08:00",
+                                    "payload": {"from_thread_id": "thread-deepseek", "to_thread_id": "thread-kimi"},
+                                },
+                            ],
+                        }
+                    ],
+                }
+            )
+
+            current = tasks.current_task()
+            self.assertEqual(current["verification_refs"][0]["event_id"], "edit:1")
+            self.assertEqual(current["diagnostic_refs"][0]["event_id"], "handoff:1")
+
+    def test_tool_context_and_compact_task_include_coding_event_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "DeepSeek task",
+                thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            tasks.record_coding_events(
+                [
+                    {
+                        "event_id": "edit:1",
+                        "event_type": "edit_operation",
+                        "timestamp": "2026-06-22T10:01:00+08:00",
+                        "payload": {"path": "src/app.ts", "checkpoint_save_id": "save-1"},
+                    },
+                    {
+                        "event_id": "handoff:1",
+                        "event_type": "provider_handoff",
+                        "timestamp": "2026-06-22T10:02:00+08:00",
+                        "payload": {"from_thread_id": "thread-deepseek", "to_thread_id": "thread-kimi"},
+                    },
+                ]
+            )
+
+            context = ToolContextService(projects, tasks).build(tool_name="lcr_browser_smoke")
+            self.assertIn("src/app.ts", context["verification_refs"])
+            self.assertIn("thread-deepseek", context["diagnostic_refs"][0])
+
+            handler = Handler.__new__(Handler)
+            compact = handler._compact_task(tasks.current_task())  # type: ignore[attr-defined]
+            self.assertEqual(compact["verification_refs"][0]["event_id"], "edit:1")
+            self.assertEqual(compact["diagnostic_refs"][0]["event_id"], "handoff:1")
 
     def test_runtime_ensure_client_restarts_running_client_when_signature_changes(self) -> None:
         class FakeRuntimeConfig:

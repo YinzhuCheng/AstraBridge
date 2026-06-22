@@ -230,6 +230,26 @@ class ProjectToolsService:
         if isinstance(manifest, dict) and self._tasks is not None:
             try:
                 self._tasks.record_checkpoint(manifest)
+                self._tasks.record_coding_events(
+                    [
+                        {
+                            "event_id": f"checkpoint:{manifest.get('save_id') or 'unknown'}",
+                            "task_id": context.get("task_id"),
+                            "visible_thread_id": context.get("visible_thread_id"),
+                            "execution_thread_id": context.get("execution_thread_id"),
+                            "provider_id": context.get("provider_id"),
+                            "model_id": context.get("model_id"),
+                            "event_type": "checkpoint_created",
+                            "timestamp": manifest.get("created_at") or now_iso(),
+                            "payload": {
+                                "save_id": manifest.get("save_id"),
+                                "description": manifest.get("description") or manifest.get("default_description"),
+                            },
+                            "redaction_status": "secret_free",
+                            "source": "sidecar",
+                        }
+                    ]
+                )
             except Exception:
                 pass
         return response
@@ -304,6 +324,11 @@ class ProjectToolsService:
             model_id=context["model_id"],
             operation=event_payload,
         )
+        if self._tasks is not None:
+            try:
+                self._tasks.record_coding_events([event])
+            except Exception:
+                pass
         if apply and applied:
             self._record_edit_event(event)
         return {

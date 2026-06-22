@@ -782,6 +782,8 @@ class ProjectContextService:
             "goal",
             "plan",
             "checkpoint_refs",
+            "verification_refs",
+            "diagnostic_refs",
             "asset_context_refs",
             "context_pack_refs",
             "updated_at",
@@ -803,6 +805,8 @@ class ProjectContextService:
             if _provider_model_pair_is_plausible(item)
         ][-10:]
         compact["checkpoint_refs"] = list(compact.get("checkpoint_refs") or [])[:10]
+        compact["verification_refs"] = list(compact.get("verification_refs") or [])[:10]
+        compact["diagnostic_refs"] = list(compact.get("diagnostic_refs") or [])[:10]
         compact["asset_context_refs"] = list(compact.get("asset_context_refs") or [])[:10]
         compact["context_pack_refs"] = list(compact.get("context_pack_refs") or [])[:10]
         return compact

@@ -408,6 +408,25 @@ class RuntimeService:
         return {"thread": thread}
 
     def _record_task_thread_snapshot(self, thread: dict[str, Any]) -> None:
+        if self._tasks is not None:
+            try:
+                coding_events: list[dict[str, Any]] = []
+                for turn in list(thread.get("turns") or []):
+                    if not isinstance(turn, dict):
+                        continue
+                    for event in list(turn.get("coding_events") or []):
+                        if isinstance(event, dict):
+                            coding_events.append(event)
+                if coding_events:
+                    self._tasks.record_coding_events(coding_events)
+            except Exception as exc:  # noqa: BLE001
+                self._record_event(
+                    {
+                        "type": "task_coding_event_projection_failed",
+                        "thread_id": str(thread.get("id") or thread.get("thread_id") or ""),
+                        "error": str(exc)[:300],
+                    }
+                )
         if self._task_conversation is None:
             return
         try:

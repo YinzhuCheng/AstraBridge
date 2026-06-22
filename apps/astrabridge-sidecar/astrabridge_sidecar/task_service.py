@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Any
 
+from .coding_kernel import task_refs_from_coding_events
 from .common import WORKSPACE_STATE_DIRNAME, new_id, now_iso, read_json, write_json
 from .providers.runtime_transition import summarize_transition
 from .security import SECRET_RE, SecurityError, redact_sensitive
@@ -437,6 +438,29 @@ class TaskService:
         task["updated_at"] = now_iso()
         self._save_task(task)
 
+    def record_coding_events(self, events: list[dict[str, Any]] | None) -> None:
+        task = self.current_task()
+        if not task:
+            return
+        refs = task_refs_from_coding_events(events)
+        checkpoint_refs = [
+            *list(refs.get("checkpoint_refs") or []),
+            *list(task.get("checkpoint_refs") or []),
+        ]
+        verification_refs = [
+            *list(refs.get("verification_refs") or []),
+            *list(task.get("verification_refs") or []),
+        ]
+        diagnostic_refs = [
+            *list(refs.get("diagnostic_refs") or []),
+            *list(task.get("diagnostic_refs") or []),
+        ]
+        task["checkpoint_refs"] = self._dedupe_records(checkpoint_refs, key_fields=("save_id",), limit=40)
+        task["verification_refs"] = self._dedupe_records(verification_refs, key_fields=("event_id",), limit=40)
+        task["diagnostic_refs"] = self._dedupe_records(diagnostic_refs, key_fields=("event_id",), limit=40)
+        task["updated_at"] = now_iso()
+        self._save_task(task)
+
     def record_context_ref(self, *, pack_type: str, path: str, generated_at: str, summary: dict[str, Any] | None = None) -> None:
         task = self.current_task()
         if not task:
@@ -475,6 +499,8 @@ class TaskService:
             "goal": None,
             "plan": None,
             "checkpoint_refs": [],
+            "verification_refs": [],
+            "diagnostic_refs": [],
             "asset_context_refs": [],
             "context_pack_refs": [],
             "created_at": now,
@@ -615,6 +641,16 @@ class TaskService:
         pruned_checkpoints = self._dedupe_records(original_checkpoints, key_fields=("save_id",))
         if pruned_checkpoints != original_checkpoints:
             normalized["checkpoint_refs"] = pruned_checkpoints
+            changed = True
+        original_verification_refs = list(normalized.get("verification_refs") or [])
+        pruned_verification_refs = self._dedupe_records(original_verification_refs, key_fields=("event_id",))
+        if pruned_verification_refs != original_verification_refs:
+            normalized["verification_refs"] = pruned_verification_refs
+            changed = True
+        original_diagnostic_refs = list(normalized.get("diagnostic_refs") or [])
+        pruned_diagnostic_refs = self._dedupe_records(original_diagnostic_refs, key_fields=("event_id",))
+        if pruned_diagnostic_refs != original_diagnostic_refs:
+            normalized["diagnostic_refs"] = pruned_diagnostic_refs
             changed = True
         original_asset_refs = list(normalized.get("asset_context_refs") or [])
         pruned_asset_refs = self._dedupe_records(original_asset_refs, key_fields=("pack_type", "path"))

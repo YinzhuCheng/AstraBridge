@@ -1237,6 +1237,8 @@ class Handler(BaseHTTPRequestHandler):
             "goal": task.get("goal"),
             "plan": task.get("plan"),
             "checkpoint_refs": list(task.get("checkpoint_refs") or [])[:10],
+            "verification_refs": list(task.get("verification_refs") or [])[:10],
+            "diagnostic_refs": list(task.get("diagnostic_refs") or [])[:10],
             "asset_context_refs": list(task.get("asset_context_refs") or [])[:6],
             "context_pack_refs": list(task.get("context_pack_refs") or [])[:6],
             "created_at": str(task.get("created_at") or ""),

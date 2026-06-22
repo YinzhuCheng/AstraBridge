@@ -33,6 +33,8 @@ _LIST_LIMITS = {
     "context_refs": (8, 420),
     "asset_context_refs": (6, 420),
     "checkpoint_refs": (6, 260),
+    "verification_refs": (6, 260),
+    "diagnostic_refs": (6, 260),
 }
 
 _SECRET_TERMS_RE = re.compile(
@@ -81,7 +83,15 @@ class ToolContextService:
         )
         explicit = sanitize_tool_context(provided)
         merged = {**base, **explicit}
-        for key in ("evidence_requirements", "forbidden_inputs", "context_refs", "asset_context_refs", "checkpoint_refs"):
+        for key in (
+            "evidence_requirements",
+            "forbidden_inputs",
+            "context_refs",
+            "asset_context_refs",
+            "checkpoint_refs",
+            "verification_refs",
+            "diagnostic_refs",
+        ):
             merged[key] = _merge_lists(base.get(key), explicit.get(key), key)
         return sanitize_tool_context(merged)
 
@@ -103,6 +113,25 @@ class ToolContextService:
             str(item.get("description") or item.get("save_id") or "")
             for item in list(task.get("checkpoint_refs") or [])[:6]
         ]
+        verification_refs = [
+            str(item.get("path") or item.get("review_diff_path") or item.get("tool") or item.get("event_id") or "")
+            for item in list(task.get("verification_refs") or [])[:6]
+        ]
+        diagnostic_refs = [
+            str(
+                item.get("command")
+                or item.get("transition")
+                or item.get("tool")
+                or (
+                    f"{item.get('from_thread_id')} -> {item.get('to_thread_id')}"
+                    if item.get("from_thread_id") or item.get("to_thread_id")
+                    else ""
+                )
+                or item.get("event_id")
+                or ""
+            )
+            for item in list(task.get("diagnostic_refs") or [])[:6]
+        ]
         return {
             "schema_version": TOOL_CONTEXT_SCHEMA_VERSION,
             "tool_name": tool_name,
@@ -121,6 +150,8 @@ class ToolContextService:
             "context_refs": context_refs,
             "asset_context_refs": asset_refs,
             "checkpoint_refs": checkpoints,
+            "verification_refs": verification_refs,
+            "diagnostic_refs": diagnostic_refs,
             "evidence_requirements": list(evidence_requirements or DEFAULT_EVIDENCE_REQUIREMENTS),
             "forbidden_inputs": list(forbidden_inputs or DEFAULT_FORBIDDEN_INPUTS),
             "output_contract": output_contract or _default_output_contract(tool_name),

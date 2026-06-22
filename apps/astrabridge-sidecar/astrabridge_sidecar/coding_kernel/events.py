@@ -142,6 +142,81 @@ def edit_operation_to_coding_event(
     return event.to_dict()
 
 
+def task_refs_from_coding_events(events: list[dict[str, Any]] | None) -> dict[str, list[dict[str, Any]]]:
+    checkpoint_refs: list[dict[str, Any]] = []
+    verification_refs: list[dict[str, Any]] = []
+    diagnostic_refs: list[dict[str, Any]] = []
+    for item in list(events or []):
+        if not isinstance(item, dict):
+            continue
+        event_type = str(item.get("event_type") or "").strip()
+        payload = dict(item.get("payload") or {}) if isinstance(item.get("payload"), dict) else {}
+        event_id = _string_or_none(item.get("event_id"))
+        timestamp = _string_or_none(item.get("timestamp"))
+        provider_id = _string_or_none(item.get("provider_id"))
+        model_id = _string_or_none(item.get("model_id"))
+        if event_type == "checkpoint_created":
+            save_id = _string_or_none(payload.get("save_id"))
+            if save_id:
+                checkpoint_refs.append(
+                    {
+                        "save_id": save_id,
+                        "description": _string_or_none(payload.get("description")),
+                        "created_at": timestamp,
+                        "event_id": event_id,
+                        "provider_id": provider_id,
+                        "model": model_id,
+                    }
+                )
+        elif event_type in {"verification_result", "edit_operation", "file_read"}:
+            verification = {
+                "event_id": event_id,
+                "kind": event_type,
+                "tool": _string_or_none(payload.get("tool")),
+                "path": _string_or_none(payload.get("path")),
+                "checkpoint_save_id": _string_or_none(payload.get("checkpoint_save_id")),
+                "review_diff_path": _string_or_none(payload.get("review_diff_path")),
+                "ok": bool(payload.get("ok", True)),
+                "files": list(payload.get("files") or [])[:6] if isinstance(payload.get("files"), list) else [],
+                "paths": list(payload.get("paths") or [])[:6] if isinstance(payload.get("paths"), list) else [],
+                "save_ids": list(payload.get("save_ids") or [])[:6] if isinstance(payload.get("save_ids"), list) else [],
+                "created_at": timestamp,
+                "provider_id": provider_id,
+                "model": model_id,
+            }
+            if any(
+                verification.get(key)
+                for key in ("tool", "path", "checkpoint_save_id", "review_diff_path")
+            ) or verification["files"] or verification["paths"] or verification["save_ids"]:
+                verification_refs.append(verification)
+        elif event_type in {"provider_handoff", "runtime_transition", "command_execution"}:
+            diagnostic = {
+                "event_id": event_id,
+                "kind": event_type,
+                "transition": _string_or_none(payload.get("transition")),
+                "tool": _string_or_none(payload.get("tool")),
+                "command": _string_or_none(payload.get("command")),
+                "status": _string_or_none(payload.get("status")),
+                "exit_code": payload.get("exit_code"),
+                "from_thread_id": _string_or_none(payload.get("from_thread_id")),
+                "to_thread_id": _string_or_none(payload.get("to_thread_id")),
+                "reused_existing": bool(payload.get("reused_existing")) if "reused_existing" in payload else None,
+                "created_at": timestamp,
+                "provider_id": provider_id,
+                "model": model_id,
+            }
+            if any(
+                diagnostic.get(key) is not None and diagnostic.get(key) != ""
+                for key in ("transition", "tool", "command", "status", "exit_code", "from_thread_id", "to_thread_id", "reused_existing")
+            ):
+                diagnostic_refs.append(diagnostic)
+    return {
+        "checkpoint_refs": checkpoint_refs,
+        "verification_refs": verification_refs,
+        "diagnostic_refs": diagnostic_refs,
+    }
+
+
 def _event_payload(item_type: str, item: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
     if item_type in {"userMessage", "agentMessage", "assistantMessage"}:
         return (
