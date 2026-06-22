@@ -53,7 +53,7 @@ from astrabridge_sidecar.mcp_config_service import McpConfigService
 from astrabridge_sidecar.model_catalog import default_seed_models, default_seed_providers, known_context_window, known_input_modalities, known_reasoning_efforts
 from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERROR, disabled_status
 from astrabridge_sidecar.profile_service import ProfileService
-from astrabridge_sidecar.providers import classify_runtime_failure, get_provider_profile
+from astrabridge_sidecar.providers import classify_runtime_failure, get_provider_profile, summarize_response_diagnostics
 from astrabridge_sidecar.providers.history_projector import (
     HistoryProjector,
     NeutralMessage,
@@ -7845,6 +7845,71 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 docs.shutdown()
                 docs.server_close()
 
+    def test_llm_manager_health_preserves_secret_safe_response_diagnostics(self) -> None:
+        class DiagnosticsRouter(DummyRouter):
+            def test_model_case(self, *, provider_id: str, model_id: str, effort: str | None = None, temperature: float | None = None, stream: bool = False) -> dict[str, object]:
+                result = super().test_model_case(
+                    provider_id=provider_id,
+                    model_id=model_id,
+                    effort=effort,
+                    temperature=temperature,
+                    stream=stream,
+                )
+                result["preview_warnings"] = ["Temperature omitted for provider policy."]
+                result["response_diagnostics"] = {
+                    "text_excerpt": "ok",
+                    "warnings": [{"code": "tool_call_repair", "severity": "warning", "message": "Malformed JSON was repaired."}],
+                    "provider_data_keys": ["output_types", "provider_response_id"],
+                    "raw_ref": {
+                        "kind": "responses_output",
+                        "locator": "resp_health_123",
+                        "redaction_status": "redacted",
+                        "summary": "Redacted provider response artifact.",
+                    },
+                }
+                return result
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService(root / "profiles.json")
+            config = RouterConfigService(profiles, root / "router.json")
+            config.upsert_provider(
+                {
+                    "id": "deepseek",
+                    "display_name": "DeepSeek",
+                    "adapter_type": "chat",
+                    "base_url": "https://api.deepseek.com",
+                    "default_model": "deepseek-v4-pro",
+                    "env_key": "DEEPSEEK_API_KEY",
+                }
+            )
+            config.upsert_model(
+                {
+                    "id": "deepseek/deepseek-v4-pro",
+                    "provider": "deepseek",
+                    "native_model": "deepseek-v4-pro",
+                    "display_name": "DeepSeek V4 Pro",
+                    "enabled": True,
+                    "adapter_profile": "default",
+                }
+            )
+            manager = LlmApiManagerService(config, DiagnosticsRouter(), root / "manager")
+            manager.create_user({"username": "user", "password": "vault-password-123"})
+            manager.login({"username": "user", "password": "vault-password-123"})
+            manager.save_key({"provider_id": "deepseek", "label": "DeepSeek", "secret": "unit_secret_deepseek_value", "env_key": "DEEPSEEK_API_KEY"})
+
+            health = manager.run_health({"model_ids": ["deepseek/deepseek-v4-pro"], "efforts": ["high"], "temperatures": [0]})
+
+            result = health["results"][0]
+            self.assertEqual(result["temperature_policy"], "warn")
+            self.assertEqual(result["response_diagnostics"]["warnings"][0]["code"], "tool_call_repair")
+            self.assertEqual(result["response_diagnostics"]["raw_ref"]["redaction_status"], "redacted")
+            self.assertNotIn("secret", json.dumps(result, ensure_ascii=False).lower())
+            self.assertEqual(
+                health["model_health"]["deepseek/deepseek-v4-pro"]["response_diagnostics"]["provider_data_keys"],
+                ["output_types", "provider_response_id"],
+            )
+
     def test_llm_manager_effective_catalog_merges_generated_provider_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -8592,6 +8657,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 native_smoke = router.test_provider("openai", "gpt-5.5", stream=False)
                 self.assertTrue(native_smoke["ok"])
                 self.assertEqual(native_smoke["model"], "openai/gpt-5.5")
+                self.assertIn("output_types", native_smoke["response_diagnostics"]["provider_data_keys"])
+                self.assertEqual(native_smoke["response_diagnostics"]["raw_ref"]["redaction_status"], "redacted")
                 self.assertEqual(UpstreamHandler.last_payload["model"], "gpt-5.5")
         finally:
             upstream.shutdown()
@@ -9756,6 +9823,35 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertNotIn("response", normalized.provider_data)
             self.assertEqual(normalized.provider_data["output_types"], ["reasoning", "message"])
             self.assertEqual(normalized.warnings, [])
+
+    def test_response_diagnostics_summary_stays_secret_safe(self) -> None:
+        normalized = NormalizedResponse(
+            text="Answer body " + ("x" * 400),
+            reasoning_summary="First reason",
+            reasoning_state={
+                "provider_id": "openai",
+                "model_id": "openai/gpt-5.5",
+                "replayable": False,
+                "visible_summary": "reasoning summary",
+                "opaque_artifacts": [{"encrypted": "hidden"}],
+            },
+            tool_calls=[ToolCall(id="call_1", name="read_file", arguments_json="{\"path\":\"README.md\"}")],
+            usage={"input_tokens": 10, "output_tokens": 4, "reasoning_tokens": 2, "total_tokens": 14},
+            finish_reason="stop",
+            provider_data={"provider_response_id": "resp_123", "raw_payload": {"secret": "never-store"}},
+            warnings=[{"code": "tool_call_repair", "severity": "warning", "message": "Malformed JSON was repaired."}],
+            raw_ref={"kind": "responses_output", "locator": "resp_123", "redaction_status": "redacted", "summary": "Redacted raw response artifact."},
+        )
+
+        diagnostics = summarize_response_diagnostics(normalized)
+
+        self.assertTrue(diagnostics["text_excerpt"].startswith("Answer body"))
+        self.assertEqual(diagnostics["warnings"][0]["code"], "tool_call_repair")
+        self.assertEqual(diagnostics["reasoning_state"]["opaque_artifact_count"], 1)
+        self.assertNotIn("opaque_artifacts", diagnostics["reasoning_state"])
+        self.assertEqual(diagnostics["raw_ref"]["redaction_status"], "redacted")
+        self.assertEqual(sorted(diagnostics["provider_data_keys"]), ["provider_response_id", "raw_payload"])
+        self.assertNotIn("provider_data", diagnostics)
 
     def test_chat_transport_normalizes_reasoning_notice_without_raw_payload_leak(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -366,7 +366,7 @@ class LlmApiManagerService:
                                 "connectivity": "pass" if raw.get("ok") else "fail",
                                 "streaming": "pass" if payload.get("stream", False) and raw.get("ok") else "fail" if payload.get("stream", False) else "not_requested",
                                 "reasoning_effort": "pass" if raw.get("ok") else "fail",
-                                "temperature_policy": "pass" if not raw.get("warnings") else "warn",
+                                "temperature_policy": "pass" if not (raw.get("preview_warnings") or raw.get("warnings")) else "warn",
                                 "modalities": "metadata_only",
                                 "mcp_tools": str(model.get("mcp_smoke_status") or "untested"),
                                 "codex_builtin_tools": "metadata_only",
@@ -377,8 +377,10 @@ class LlmApiManagerService:
                                 "auto_compact": str((model.get("context_compaction_support") or {}).get("auto_compact") or "configured_unverified"),
                                 "compact_summary_quality": str((model.get("context_compaction_support") or {}).get("structured_summary_quality") or "untested"),
                                 **web_result,
-                                "adapter_warnings": list(raw.get("warnings") or []),
-                                "response_excerpt": str(raw.get("response_excerpt") or "")[:300],
+                                "preview_warnings": list(raw.get("preview_warnings") or raw.get("warnings") or []),
+                                "response_diagnostics": dict(raw.get("response_diagnostics") or {}),
+                                "adapter_warnings": list((raw.get("response_diagnostics") or {}).get("warnings") or raw.get("adapter_warnings") or []),
+                                "response_excerpt": str((raw.get("response_diagnostics") or {}).get("text_excerpt") or raw.get("response_excerpt") or "")[:300],
                                 "last_verified_at": now_iso(),
                             }
                         except Exception as exc:  # noqa: BLE001
@@ -632,6 +634,7 @@ class LlmApiManagerService:
             "citation_quality": result.get("citation_quality", "untested"),
             "last_web_verified_at": result.get("last_web_verified_at"),
             "adapter_warnings": list(result.get("adapter_warnings") or []),
+            "response_diagnostics": dict(result.get("response_diagnostics") or {}),
             "last_verified_at": result.get("last_verified_at") or now_iso(),
             "reason": result.get("reason"),
         }

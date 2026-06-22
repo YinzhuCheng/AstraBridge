@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .model_catalog import known_context_window, model_catalog_entry
-from .providers import get_provider_profile, resolve_provider_id
+from .providers import get_provider_profile, resolve_provider_id, summarize_response_diagnostics
 from .providers.transports import (
     ChatCompletionsTransport as RegistryChatCompletionsTransport,
     DeepSeekChatTransport as RegistryDeepSeekChatTransport,
@@ -1238,6 +1238,7 @@ class RouterService:
         response.close()
         raw = json.loads(body.decode("utf-8") or "{}")
         normalized = adapter.normalize_response(raw, payload)
+        diagnostics = summarize_response_diagnostics(normalized)
         self._record(
             "responses_completed",
             {
@@ -1247,7 +1248,7 @@ class RouterService:
                 "adapter": adapter.describe(),
                 "request": redact_sensitive(payload),
                 "upstream_request": redact_sensitive(upstream_payload),
-                "warnings": [warning.code for warning in list(normalized.warnings or [])],
+                "response_diagnostics": diagnostics,
             },
         )
         return {
@@ -1466,17 +1467,36 @@ class RouterService:
         model = self._normalize_model_id(provider_id, model_id or provider.get("default_model") or provider.get("model"))
         payload = {"model": model, "input": "Reply with exactly: ok", "stream": stream}
         parsed_preview = self.preview_payload(payload)
-        buffer = _BufferHandler()
-        self.forward_response(payload, buffer)
+        preview_warnings = list(parsed_preview.get("warnings") or [])
+        diagnostics: dict[str, Any] | None = None
+        response_excerpt = ""
+        content_type = "application/json; charset=utf-8"
+        status = 200
+        ok = True
+        if stream:
+            buffer = _BufferHandler()
+            self.forward_response(payload, buffer)
+            status = buffer.status_code
+            ok = status == 200
+            content_type = buffer.headers.get("Content-Type")
+            response_excerpt = buffer.wfile.getvalue().decode("utf-8", errors="replace")[:1200]
+        else:
+            completed = self.complete_response(payload)
+            normalized = completed["normalized"]
+            diagnostics = summarize_response_diagnostics(normalized, text_limit=1200)
+            response_excerpt = str(diagnostics.get("text_excerpt") or "")[:1200]
         result = {
-            "ok": buffer.status_code == 200,
+            "ok": ok,
             "provider": provider_id,
             "model": model,
             "stream": stream,
-            "status": buffer.status_code,
-            "content_type": buffer.headers.get("Content-Type"),
+            "status": status,
+            "content_type": content_type,
             "preview": parsed_preview["upstream_payload"],
-            "response_excerpt": buffer.wfile.getvalue().decode("utf-8", errors="replace")[:1200],
+            "preview_warnings": preview_warnings,
+            "warnings": preview_warnings,
+            "response_excerpt": response_excerpt,
+            "response_diagnostics": diagnostics,
         }
         if self._router_config is not None:
             self._router_config.record_test_result(result)
@@ -1491,21 +1511,39 @@ class RouterService:
         if temperature is not None:
             payload["temperature"] = temperature
         parsed_preview = self.preview_payload(payload)
-        buffer = _BufferHandler()
-        self.forward_response(payload, buffer)
+        preview_warnings = list(parsed_preview.get("warnings") or [])
+        diagnostics: dict[str, Any] | None = None
+        response_excerpt = ""
+        content_type = "application/json; charset=utf-8"
+        status = 200
+        ok = True
+        if stream:
+            buffer = _BufferHandler()
+            self.forward_response(payload, buffer)
+            status = buffer.status_code
+            ok = status == 200
+            content_type = buffer.headers.get("Content-Type")
+            response_excerpt = buffer.wfile.getvalue().decode("utf-8", errors="replace")[:1200]
+        else:
+            completed = self.complete_response(payload)
+            normalized = completed["normalized"]
+            diagnostics = summarize_response_diagnostics(normalized, text_limit=1200)
+            response_excerpt = str(diagnostics.get("text_excerpt") or "")[:1200]
         result = {
-            "ok": buffer.status_code == 200,
+            "ok": ok,
             "provider": provider_id,
             "model": model_id,
             "native_model": provider.get("model"),
             "effort": effort,
             "temperature": temperature,
             "stream": stream,
-            "status": buffer.status_code,
-            "content_type": buffer.headers.get("Content-Type"),
-            "warnings": parsed_preview.get("warnings") or [],
+            "status": status,
+            "content_type": content_type,
+            "preview_warnings": preview_warnings,
+            "warnings": preview_warnings,
             "preview": parsed_preview["upstream_payload"],
-            "response_excerpt": buffer.wfile.getvalue().decode("utf-8", errors="replace")[:1200],
+            "response_excerpt": response_excerpt,
+            "response_diagnostics": diagnostics,
         }
         if self._router_config is not None:
             self._router_config.record_test_result(result)

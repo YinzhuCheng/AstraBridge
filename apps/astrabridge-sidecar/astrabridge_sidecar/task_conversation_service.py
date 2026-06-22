@@ -6,6 +6,7 @@ from typing import Any
 
 from .common import now_iso, read_json, write_json
 from .coding_kernel import project_handoff_event_to_coding_events, project_turn_to_coding_events
+from .providers import summarize_normalized_response
 from .providers.history_projector import sanitize_provider_private_state
 from .security import redact_sensitive
 
@@ -360,69 +361,7 @@ class TaskConversationService:
         )
 
     def _summarize_normalized_response(self, value: dict[str, Any]) -> dict[str, Any]:
-        tool_calls = []
-        for item in list(value.get("tool_calls") or []):
-            if not isinstance(item, dict):
-                continue
-            tool_calls.append(
-                {
-                    "id": str(item.get("id") or "")[:120],
-                    "name": str(item.get("name") or "")[:120],
-                }
-            )
-        usage = dict(value.get("usage") or {}) if isinstance(value.get("usage"), dict) else {}
-        warnings = []
-        for item in list(value.get("warnings") or []):
-            if isinstance(item, dict):
-                warnings.append(
-                    {
-                        "code": str(item.get("code") or "")[:120],
-                        "severity": str(item.get("severity") or "")[:32],
-                        "message": self._clip(str(item.get("message") or ""), 400),
-                    }
-                )
-            else:
-                warnings.append({"message": self._clip(str(item), 400)})
-        reasoning_state = value.get("reasoning_state")
-        reasoning_summary: dict[str, Any] | None = None
-        if isinstance(reasoning_state, dict):
-            reasoning_summary = {
-                "provider_id": str(reasoning_state.get("provider_id") or "")[:120],
-                "model_id": str(reasoning_state.get("model_id") or "")[:200],
-                "replayable": bool(reasoning_state.get("replayable")),
-                "visible_summary": self._clip(str(reasoning_state.get("visible_summary") or ""), 800) or None,
-                "opaque_artifact_count": len(list(reasoning_state.get("opaque_artifacts") or [])),
-            }
-        raw_ref = value.get("raw_ref")
-        raw_ref_summary: dict[str, Any] | None = None
-        if isinstance(raw_ref, dict):
-            raw_ref_summary = {
-                "kind": str(raw_ref.get("kind") or "")[:120],
-                "locator": self._clip(str(raw_ref.get("locator") or ""), 300),
-                "redaction_status": str(raw_ref.get("redaction_status") or "")[:32],
-                "summary": self._clip(str(raw_ref.get("summary") or ""), 300) or None,
-            }
-        provider_data = value.get("provider_data")
-        provider_data_keys = sorted(str(key) for key in provider_data.keys()) if isinstance(provider_data, dict) else []
-        result = {
-            "text": self._clip(str(value.get("text") or ""), 1200),
-            "reasoning_summary": self._clip(str(value.get("reasoning_summary") or ""), 800) or None,
-            "tool_calls": tool_calls[:8],
-            "finish_reason": self._clip(str(value.get("finish_reason") or ""), 120) or None,
-            "warnings": warnings[:8],
-            "provider_data_keys": provider_data_keys[:20],
-        }
-        if usage:
-            result["usage"] = {
-                key: usage.get(key)
-                for key in ("input_tokens", "output_tokens", "reasoning_tokens", "total_tokens")
-                if usage.get(key) is not None
-            }
-        if reasoning_summary:
-            result["reasoning_state"] = reasoning_summary
-        if raw_ref_summary:
-            result["raw_ref"] = raw_ref_summary
-        return result
+        return summarize_normalized_response(value)
 
     @staticmethod
     def _clip(text: str, limit: int) -> str:
