@@ -326,6 +326,7 @@ class TaskService:
         to_thread_id: str,
         settings: dict[str, Any],
         reused_existing: bool,
+        context_budget_report: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         task = self.bind_thread(thread_id=to_thread_id, settings=settings, role="provider", make_active=True)
         source_settings = self._provider_thread_settings(task, from_thread_id)
@@ -335,6 +336,7 @@ class TaskService:
             to_model=str(settings.get("model") or "") or None,
             projection_mode="reused_provider_thread" if reused_existing else "task_context_fresh_thread",
             reasoning_effort=str(settings.get("reasoning_effort") or "") or None,
+            context_budget_report=context_budget_report,
         )
         event = {
             "event_id": new_id("handoff"),

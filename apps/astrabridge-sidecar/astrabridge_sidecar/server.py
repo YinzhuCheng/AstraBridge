@@ -102,7 +102,15 @@ class AppContext:
         self.dogfood = DogfoodRunService(self.projects)
         self.checkpoints = CheckpointService(self.projects)
         self.task_conversation = TaskConversationService(self.projects, self.tasks)
-        self.project_context = ProjectContextService(self.projects, self.dogfood, self.assets, self.tasks, self.task_conversation)
+        self.project_context = ProjectContextService(
+            self.projects,
+            self.dogfood,
+            self.assets,
+            self.tasks,
+            self.task_conversation,
+            router_config_service=self.router_config,
+            profile_service=self.profiles,
+        )
         self.runtime = RuntimeService(
             self.projects,
             self.modals,
@@ -486,7 +494,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(self.context.assets.snapshot())
                 return
             if path == "/api/project/context":
-                self.send_json(self.context.project_context.snapshot(thread_id=self._optional_query_string(query, "thread_id")))
+                self.send_json(
+                    self.context.project_context.snapshot(
+                        thread_id=self._optional_query_string(query, "thread_id"),
+                        profile_id=self._optional_query_string(query, "profile_id"),
+                        provider_id=self._optional_query_string(query, "provider_id"),
+                        model_id=self._optional_query_string(query, "model_id"),
+                    )
+                )
                 return
             if path == "/api/project/task-conversation":
                 self.send_json(self.context.task_conversation.conversation(task_id=self._optional_query_string(query, "task_id")))
@@ -837,7 +852,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(response)
                 return
             if path == "/api/project/context/rebuild":
-                response = self.context.project_context.snapshot(thread_id=self._optional_string(payload, "thread_id"))
+                response = self.context.project_context.snapshot(
+                    thread_id=self._optional_string(payload, "thread_id"),
+                    profile_id=self._optional_string(payload, "profile_id"),
+                    provider_id=self._optional_string(payload, "provider_id"),
+                    model_id=self._optional_string(payload, "model_id"),
+                )
                 self._record_ui_state_event("project_context_rebuilt", {"thread_id": self._optional_string(payload, "thread_id")})
                 self.send_json(response)
                 return

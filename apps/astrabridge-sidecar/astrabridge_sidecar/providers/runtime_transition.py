@@ -68,6 +68,7 @@ class TransitionSummary:
     kept_summary: bool
     warnings: list[str]
     context_budget: int | None
+    context_budget_report: dict[str, Any] | None
     selected_edit_policy: dict[str, str]
     target_runtime: dict[str, Any]
     transition_plan: dict[str, Any]
@@ -156,6 +157,7 @@ def summarize_transition(
     projection_mode: str = "task_context_fresh_thread",
     reasoning_effort: str | None = None,
     request_timeout_seconds: float = DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS,
+    context_budget_report: dict[str, Any] | None = None,
 ) -> TransitionSummary:
     profile = get_provider_profile(to_provider)
     target_model = str(to_model or profile.default_model or "").strip()
@@ -168,6 +170,9 @@ def summarize_transition(
     cross_provider = bool(from_provider and from_provider != to_provider)
     if cross_provider:
         extra_warnings.append("Cross-provider handoff uses AstraBridge task context instead of raw provider-state replay.")
+    compact_before_send = bool((context_budget_report or {}).get("compact_recommended"))
+    if compact_before_send:
+        extra_warnings.append("Target model context budget is tight; compacted project context should be preferred before the next long turn.")
     transition_plan = build_transition_plan(
         action="provider_handoff",
         reason="Continue the same visible task on a provider-isolated execution lane.",
@@ -176,6 +181,7 @@ def summarize_transition(
         reasoning_effort=reasoning_effort or profile.default_reasoning_level(),
         request_timeout_seconds=request_timeout_seconds,
         context_strategy=projection_mode,
+        compact_before_send=compact_before_send,
         drop_reasoning_replay=cross_provider,
         notes=extra_warnings,
     )
@@ -189,6 +195,7 @@ def summarize_transition(
         kept_summary=True,
         warnings=list(dict.fromkeys(extra_warnings)),
         context_budget=target_runtime.context_budget,
+        context_budget_report=dict(context_budget_report or {}) or None,
         selected_edit_policy={
             "small": profile.edit_policy.small,
             "medium": profile.edit_policy.medium,

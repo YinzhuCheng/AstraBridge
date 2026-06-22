@@ -742,6 +742,9 @@ class RuntimeService:
             attachments or [],
             thread_id=effective_thread_id,
             context_mode=normalized_context_mode,
+            profile_id=str(profile.get("profile_id") or ""),
+            provider_id=str(profile.get("provider_id") or ""),
+            model_id=str(model or profile.get("model") or ""),
         )
         params = {
             "threadId": effective_thread_id,
@@ -795,6 +798,9 @@ class RuntimeService:
                 attachments or [],
                 thread_id=effective_thread_id,
                 context_mode=normalized_context_mode,
+                profile_id=str(profile.get("profile_id") or ""),
+                provider_id=str(profile.get("provider_id") or ""),
+                model_id=str(model or profile.get("model") or ""),
             )
             params["threadId"] = effective_thread_id
             params["input"] = inputs
@@ -1371,11 +1377,18 @@ class RuntimeService:
         reusable_thread_id = str((reusable or {}).get("thread_id") or "")
         if reusable_thread_id and reusable_thread_id != source_thread_id:
             if self._thread_exists(client, reusable_thread_id):
+                context_budget_report = self._project_context_budget_report(
+                    thread_id=source_thread_id or reusable_thread_id,
+                    profile_id=str(desired.get("profile_id") or ""),
+                    provider_id=str(desired.get("provider_id") or ""),
+                    model_id=str(desired.get("model") or ""),
+                )
                 handoff_event = self._tasks.record_provider_handoff(
                     from_thread_id=source_thread_id,
                     to_thread_id=reusable_thread_id,
                     settings={**desired, "name": reusable.get("name") or desired.get("name")},
                     reused_existing=True,
+                    context_budget_report=context_budget_report,
                 )
                 self._projects.switch_thread(reusable_thread_id)
                 self._record_event(
@@ -1472,11 +1485,18 @@ class RuntimeService:
             raise RuntimeError("Provider handoff did not return a target thread id.")
         desired["name"] = thread.get("name") or desired.get("name")
         self._cache_thread_entry(target_thread_id, desired)
+        context_budget_report = self._project_context_budget_report(
+            thread_id=source_thread_id or target_thread_id,
+            profile_id=str(desired.get("profile_id") or ""),
+            provider_id=str(desired.get("provider_id") or ""),
+            model_id=str(desired.get("model") or ""),
+        )
         handoff_event = self._tasks.record_provider_handoff(
             from_thread_id=source_thread_id,
             to_thread_id=target_thread_id,
             settings=desired,
             reused_existing=False,
+            context_budget_report=context_budget_report,
         )
         self._record_event(
             {
@@ -1511,11 +1531,18 @@ class RuntimeService:
             raise RuntimeError("thread/start did not return a target thread id.")
         desired["name"] = thread.get("name") or desired.get("name")
         self._cache_thread_entry(target_thread_id, desired)
+        context_budget_report = self._project_context_budget_report(
+            thread_id=source_thread_id or target_thread_id,
+            profile_id=str(desired.get("profile_id") or ""),
+            provider_id=str(desired.get("provider_id") or ""),
+            model_id=str(desired.get("model") or ""),
+        )
         handoff_event = self._tasks.record_provider_handoff(
             from_thread_id=source_thread_id,
             to_thread_id=target_thread_id,
             settings=desired,
             reused_existing=False,
+            context_budget_report=context_budget_report,
         )
         self._projects.switch_thread(target_thread_id)
         self._record_event(
@@ -1563,11 +1590,18 @@ class RuntimeService:
         self._cache_thread_entry(target_thread_id, desired)
         handoff_event = None
         if self._tasks is not None:
+            context_budget_report = self._project_context_budget_report(
+                thread_id=missing_thread_id or target_thread_id,
+                profile_id=str(desired.get("profile_id") or ""),
+                provider_id=str(desired.get("provider_id") or ""),
+                model_id=str(desired.get("model") or ""),
+            )
             handoff_event = self._tasks.record_provider_handoff(
                 from_thread_id=missing_thread_id,
                 to_thread_id=target_thread_id,
                 settings=desired,
                 reused_existing=False,
+                context_budget_report=context_budget_report,
             )
         self._projects.switch_thread(target_thread_id)
         self._record_event(
@@ -2347,6 +2381,9 @@ class RuntimeService:
         attachments: list[dict[str, Any]],
         thread_id: str | None = None,
         context_mode: str | None = None,
+        profile_id: str | None = None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
     ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         clean_text = text.strip()
@@ -2358,7 +2395,16 @@ class RuntimeService:
                 "Do not inspect repository files, run commands, or use tools unless the user explicitly asks for that in this turn."
             )
             clean_text = f"{mode_note}\n\n{clean_text}" if clean_text else mode_note
-        project_context_items = self._project_context_inputs(thread_id=thread_id) if include_context else []
+        project_context_items = (
+            self._project_context_inputs(
+                thread_id=thread_id,
+                profile_id=profile_id,
+                provider_id=provider_id,
+                model_id=model_id,
+            )
+            if include_context
+            else []
+        )
         project_context_text = "\n\n".join(str(item.get("text") or "") for item in project_context_items if item.get("type") == "text").strip()
         project_mentions = [item for item in project_context_items if item.get("type") == "mention"]
         asset_context_items = self._asset_context_inputs() if include_context else []
@@ -2438,14 +2484,52 @@ class RuntimeService:
             raise ValueError(f"Unsupported context mode: {context_mode}. Supported context modes: {valid}")
         return "default" if mode == "full" else mode
 
-    def _project_context_inputs(self, *, thread_id: str | None = None) -> list[dict[str, Any]]:
+    def _project_context_inputs(
+        self,
+        *,
+        thread_id: str | None = None,
+        profile_id: str | None = None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         if self._project_context is None:
             return []
         try:
-            return list(self._project_context.context_inputs(thread_id=thread_id))
+            return list(
+                self._project_context.context_inputs(
+                    thread_id=thread_id,
+                    profile_id=profile_id,
+                    provider_id=provider_id,
+                    model_id=model_id,
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             self._record_event({"type": "project_context_pack_failed", "error": str(exc)[:300]})
             return []
+
+    def _project_context_budget_report(
+        self,
+        *,
+        thread_id: str | None = None,
+        profile_id: str | None = None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if self._project_context is None:
+            return None
+        try:
+            snapshot = self._project_context.snapshot(
+                thread_id=thread_id,
+                profile_id=profile_id,
+                provider_id=provider_id,
+                model_id=model_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._record_event({"type": "project_context_budget_failed", "error": str(exc)[:300]})
+            return None
+        pack = dict(snapshot.get("context_pack") or {})
+        report = dict(pack.get("budget_report") or {})
+        return report or None
 
     def _asset_context_inputs(self) -> list[dict[str, Any]]:
         if self._asset_registry is None:

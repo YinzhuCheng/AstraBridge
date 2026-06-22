@@ -6,6 +6,9 @@ import re
 from typing import Any
 
 from .common import WORKSPACE_STATE_DIRNAME, now_iso, read_json, write_json
+from .coding_kernel import ContextSection, build_context_budget, estimate_tool_schema_tokens
+from .model_catalog import compact_limit
+from .providers import get_provider_profile
 from .security import SECRET_RE, SecurityError, redact_sensitive
 from .task_service import _display_thread_name
 
@@ -103,15 +106,33 @@ class ProjectContextService:
     restarting the sidecar without exposing raw runtime logs or secrets.
     """
 
-    def __init__(self, project_service, dogfood_service=None, asset_registry_service=None, task_service=None, task_conversation_service=None) -> None:
+    def __init__(
+        self,
+        project_service,
+        dogfood_service=None,
+        asset_registry_service=None,
+        task_service=None,
+        task_conversation_service=None,
+        router_config_service=None,
+        profile_service=None,
+    ) -> None:
         self._projects = project_service
         self._dogfood = dogfood_service
         self._assets = asset_registry_service
         self._tasks = task_service
         self._task_conversation = task_conversation_service
+        self._router_config = router_config_service
+        self._profiles = profile_service
 
-    def snapshot(self, *, thread_id: str | None = None) -> dict[str, Any]:
-        pack = self._build_pack(thread_id=thread_id)
+    def snapshot(
+        self,
+        *,
+        thread_id: str | None = None,
+        profile_id: str | None = None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+    ) -> dict[str, Any]:
+        pack = self._build_pack(thread_id=thread_id, profile_id=profile_id, provider_id=provider_id, model_id=model_id)
         write_json(self._path(), pack)
         path = str(self._path())
         if self._tasks is not None:
@@ -129,9 +150,16 @@ class ProjectContextService:
                 pass
         return {"context_pack": pack, "path": path, "context_pack_path": path}
 
-    def context_inputs(self, *, thread_id: str | None = None) -> list[dict[str, Any]]:
+    def context_inputs(
+        self,
+        *,
+        thread_id: str | None = None,
+        profile_id: str | None = None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         try:
-            pack = self.snapshot(thread_id=thread_id)["context_pack"]
+            pack = self.snapshot(thread_id=thread_id, profile_id=profile_id, provider_id=provider_id, model_id=model_id)["context_pack"]
         except Exception:
             return []
         text = str(pack.get("text") or "").strip()
@@ -215,7 +243,14 @@ class ProjectContextService:
         self._reject_secret_like(current)
         write_json(self._state_path(), current)
 
-    def _build_pack(self, *, thread_id: str | None) -> dict[str, Any]:
+    def _build_pack(
+        self,
+        *,
+        thread_id: str | None,
+        profile_id: str | None = None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+    ) -> dict[str, Any]:
         project = dict(self._projects.current_project or {})
         state = self._state()
         thread_cache = read_json(self._shell_root() / "thread_cache.json", {"by_id": {}})
@@ -237,7 +272,24 @@ class ProjectContextService:
         dogfood = self._dogfood_summary(task=task)
         assets = self._asset_summary()
         file_map = self._project_file_map()
-        text = self._text(project, selected_thread_id, thread_entry, recent_threads, task, task_conversation_digest, dogfood, assets, file_map)
+        target = self._target_context_model(
+            profile_id=profile_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            project=project,
+            task=task_full,
+            thread_entry=thread_entry,
+        )
+        sections = self._text_sections(project, selected_thread_id, thread_entry, recent_threads, task, task_conversation_digest, dogfood, assets, file_map)
+        text, budget_report = build_context_budget(
+            sections=sections,
+            provider_id=target.get("provider_id"),
+            model_id=target.get("model_id"),
+            context_window=target.get("context_window"),
+            effective_context_window_percent=target.get("effective_context_window_percent") or 80,
+            auto_compact_token_limit=target.get("auto_compact_token_limit"),
+            tool_schema_token_estimate=target.get("tool_schema_token_estimate") or 0,
+        )
         pack = {
             "schema_version": PROJECT_CONTEXT_SCHEMA_VERSION,
             "generated_at": now_iso(),
@@ -260,6 +312,9 @@ class ProjectContextService:
             "dogfood": dogfood,
             "assets": assets,
             "project_file_map": file_map,
+            "context_sections": [item.to_dict() for item in budget_report.section_estimates],
+            "budget_report": budget_report.to_dict(),
+            "target_model_context": target,
             "rules": [
                 "Use this project context pack after thread switches, compact, fork, or sidecar restart.",
                 "Do not read .astrabridge/runtime_events.jsonl or .astrabridge/approvals.jsonl unless the user explicitly asks.",
@@ -272,7 +327,7 @@ class ProjectContextService:
         self._reject_secret_like(pack)
         return pack
 
-    def _text(
+    def _text_sections(
         self,
         project: dict[str, Any],
         thread_id: str,
@@ -283,77 +338,95 @@ class ProjectContextService:
         dogfood: dict[str, Any],
         assets: dict[str, Any],
         file_map: dict[str, Any],
-    ) -> str:
-        lines = [
+    ) -> list[ContextSection]:
+        intro_lines = [
             "AstraBridge Project Context Pack (auto-injected, secret-free)",
             "Freshness rule: this pack supersedes any older auto-injected AstraBridge Project/Asset Context Pack text already present in the thread history.",
             "If counts, paths, goals, plans, or asset refs conflict, use this newest pack and the referenced JSON files.",
+        ]
+        project_lines = [
             f"Project: {project.get('name') or 'untitled'}",
             f"Workspace: {project.get('workspace_root') or ''}",
             f"Current task: {task.get('title') or task.get('task_id') or 'none'}",
             f"Current thread: {thread_id or 'none'}",
             f"Default runtime: profile={project.get('default_profile_id') or ''} model={project.get('default_model') or ''} effort={project.get('default_effort') or ''}",
         ]
+        sections: list[ContextSection] = [
+            ContextSection("intro", "Intro", 0, "\n".join(intro_lines), essential=True),
+            ContextSection("project", "Project", 1, "\n".join(project_lines), essential=True),
+        ]
         if file_map.get("status") == "ok":
+            file_lines: list[str] = []
             entry_files = list(file_map.get("entry_files") or [])
             source_files = list(file_map.get("source_files") or [])
             if entry_files or source_files:
-                lines.append("Project file map (real paths observed at context-pack generation time):")
+                file_lines.append("Project file map (real paths observed at context-pack generation time):")
                 if entry_files:
-                    lines.append("Entry files: " + ", ".join(str(item) for item in entry_files[:12]))
+                    file_lines.append("Entry files: " + ", ".join(str(item) for item in entry_files[:12]))
                 if source_files:
-                    lines.append("Source files include:")
+                    file_lines.append("Source files include:")
                     for item in source_files[:PROJECT_FILE_MAP_TEXT_MAX_FILES]:
                         if isinstance(item, dict):
-                            lines.append(f"- {item.get('path')} role={item.get('role')}")
+                            file_lines.append(f"- {item.get('path')} role={item.get('role')}")
                     omitted = int(file_map.get("omitted") or 0)
                     if omitted > 0:
-                        lines.append(f"- ... {omitted} more source files omitted from this text; inspect the workspace before naming unlisted paths.")
-                lines.append(
+                        file_lines.append(f"- ... {omitted} more source files omitted from this text; inspect the workspace before naming unlisted paths.")
+                file_lines.append(
                     "File-map rule: use only listed real paths unless you first inspect/list the workspace; "
                     "do not invent paths such as game/map/... from project type alone."
                 )
+                sections.append(ContextSection("file_map", "Project File Map", 2, "\n".join(file_lines)))
         elif file_map.get("status"):
-            lines.append(f"Project file map: unavailable ({file_map.get('status')}); list the workspace before naming files.")
+            sections.append(
+                ContextSection(
+                    "file_map",
+                    "Project File Map",
+                    2,
+                    f"Project file map: unavailable ({file_map.get('status')}); list the workspace before naming files.",
+                )
+            )
         provider_threads = list(task.get("provider_threads") or [])
+        task_lines: list[str] = []
         if task:
-            lines.append(
+            task_lines.append(
                 "Task continuity: provider switches are internal handoffs within this same user-visible task; "
                 "do not treat a provider-thread switch as a new objective."
             )
             if task.get("goal"):
                 goal = task.get("goal")
                 if isinstance(goal, dict) and goal.get("objective"):
-                    lines.append(f"Task goal: {goal.get('objective')}")
+                    task_lines.append(f"Task goal: {goal.get('objective')}")
                 elif isinstance(goal, str):
-                    lines.append(f"Task goal: {goal}")
+                    task_lines.append(f"Task goal: {goal}")
             if task.get("plan"):
                 plan = dict(task.get("plan") or {})
                 steps = [str(item.get("step") or item) for item in list(plan.get("steps") or plan.get("plan") or [])[:6]]
                 if steps and not self._plan_is_completed(plan):
-                    lines.append("Task plan:")
-                    lines.extend(f"- {step}" for step in steps)
+                    task_lines.append("Task plan:")
+                    task_lines.extend(f"- {step}" for step in steps)
                 elif steps:
-                    lines.append("Task plan record: previously completed; use the dogfood next step or the next real plan update for the active step.")
+                    task_lines.append("Task plan record: previously completed; use the dogfood next step or the next real plan update for the active step.")
             if provider_threads:
-                lines.append("Provider threads for this task:")
+                task_lines.append("Provider threads for this task:")
                 for item in provider_threads[:8]:
-                    lines.append(
+                    task_lines.append(
                         f"- {item.get('thread_id')} profile={item.get('profile_id') or ''} "
                         f"model={item.get('model') or ''} effort={item.get('reasoning_effort') or ''}"
                     )
             handoff_events = list(task.get("handoff_events") or [])
             if handoff_events:
                 latest = dict(handoff_events[-1])
-                lines.append(
+                task_lines.append(
                     f"Latest provider handoff: {latest.get('from_thread_id') or 'none'} -> {latest.get('to_thread_id') or ''} "
                     f"profile={latest.get('profile_id') or ''} model={latest.get('model') or ''} effort={latest.get('reasoning_effort') or ''}"
                 )
+        if task_lines:
+            sections.append(ContextSection("task", "Task", 3, "\n".join(task_lines), essential=True))
         if task_conversation_digest.get("status") == "ok":
-            lines.append(
+            digest_lines = [
                 "Task conversation digest: "
                 f"threads={task_conversation_digest.get('thread_count') or 0} turns={task_conversation_digest.get('turn_count') or 0}"
-            )
+            ]
             for item in list(task_conversation_digest.get("items") or [])[-8:]:
                 if not isinstance(item, dict):
                     continue
@@ -372,63 +445,152 @@ class ProjectContextService:
                 if commands:
                     details.append("commands=" + " | ".join(commands))
                 if details:
-                    lines.append(f"{prefix}: " + " ; ".join(details))
+                    digest_lines.append(f"{prefix}: " + " ; ".join(details))
+            sections.append(ContextSection("task_digest", "Task Conversation Digest", 4, "\n".join(digest_lines)))
         if thread_entry:
-            lines.append(
+            thread_lines = [
                 "Selected thread settings: "
                 f"name={thread_entry.get('name') or ''} model={thread_entry.get('model') or ''} "
                 f"effort={thread_entry.get('reasoning_effort') or ''} permission={thread_entry.get('permission_mode') or ''}"
-            )
+            ]
             if thread_entry.get("missing_reason"):
-                lines.append(
+                thread_lines.append(
                     f"Selected thread availability: missing ({thread_entry.get('missing_reason')}); "
                     "continue this same task by recovering or handoffing the provider thread, not by inventing a new objective."
                 )
             goal = thread_entry.get("goal")
             if isinstance(goal, dict) and goal.get("objective"):
-                lines.append(f"Selected thread goal: {goal.get('objective')}")
+                thread_lines.append(f"Selected thread goal: {goal.get('objective')}")
             latest_plan = thread_entry.get("latest_plan")
             if isinstance(latest_plan, dict):
                 steps = [str(item.get("step") or item) for item in list(latest_plan.get("steps") or [])[:6]]
                 if steps:
-                    lines.append("Latest selected-thread plan:")
-                    lines.extend(f"- {step}" for step in steps)
+                    thread_lines.append("Latest selected-thread plan:")
+                    thread_lines.extend(f"- {step}" for step in steps)
+            sections.append(ContextSection("selected_thread", "Selected Thread", 5, "\n".join(thread_lines)))
         if dogfood.get("enabled"):
-            lines.append(
+            dogfood_lines = [
                 f"Dogfood: phase={dogfood.get('phase')} status={dogfood.get('status')} provider={dogfood.get('current_provider')}"
-            )
+            ]
             if dogfood.get("goal"):
-                lines.append(f"Dogfood goal: {dogfood.get('goal')}")
+                dogfood_lines.append(f"Dogfood goal: {dogfood.get('goal')}")
             if dogfood.get("next_step"):
-                lines.append(f"Dogfood next step: {dogfood.get('next_step')}")
+                dogfood_lines.append(f"Dogfood next step: {dogfood.get('next_step')}")
             if dogfood.get("latest_milestone"):
                 milestone = dict(dogfood.get("latest_milestone") or {})
-                lines.append(f"Latest milestone: {milestone.get('label')} status={milestone.get('status')}")
+                dogfood_lines.append(f"Latest milestone: {milestone.get('label')} status={milestone.get('status')}")
+            sections.append(ContextSection("dogfood", "Dogfood", 6, "\n".join(dogfood_lines)))
         if assets.get("total"):
-            lines.append(
+            asset_lines = [
                 f"Asset memory: total={assets.get('total')} promoted_or_in_use={assets.get('promoted_or_in_use')} "
                 f"approved_unpromoted={assets.get('approved_unpromoted')} needs_review={assets.get('needs_review')}"
-            )
-            lines.append(f"Asset context: {assets.get('context_pack_path') or ''}")
+            ]
+            asset_lines.append(f"Asset context: {assets.get('context_pack_path') or ''}")
+            sections.append(ContextSection("assets", "Assets", 7, "\n".join(asset_lines)))
         if recent_threads:
-            lines.append("Recent threads:")
+            recent_lines = ["Recent threads:"]
             for item in recent_threads[:8]:
-                lines.append(
+                recent_lines.append(
                     f"- {item.get('thread_id')} name={item.get('name') or ''} model={item.get('model') or ''} updated={item.get('updated_at') or ''}"
                 )
-        lines.extend(
-            [
-                "Rules:",
-                "- Treat this pack as an orientation index, not as complete truth; inspect referenced project files before editing.",
-                "- Context pack JSON paths are orientation references only; do not call MCP resources/read for them unless AstraBridge explicitly exposes a matching MCP server.",
-                "- Do not use generated/sliced assets in game code until they are promoted into the game manifest.",
-                "- If context seems stale after thread switching, ask for or trigger a project-context refresh before continuing.",
-                "- Ignore older auto-injected Project/Asset Context Pack blocks when this pack has a newer generated_at timestamp.",
-                "- On provider handoff, continue the same task goal/plan/assets unless the user explicitly creates a new chat/task or fork branch.",
-                "- For web research, use AstraBridge web research and batched search tools before raw curl/wget/python HTTP loops; only fall back when those tools fail and you explain why.",
-            ]
+            sections.append(ContextSection("recent_threads", "Recent Threads", 8, "\n".join(recent_lines)))
+        rules_lines = [
+            "Rules:",
+            "- Treat this pack as an orientation index, not as complete truth; inspect referenced project files before editing.",
+            "- Context pack JSON paths are orientation references only; do not call MCP resources/read for them unless AstraBridge explicitly exposes a matching MCP server.",
+            "- Do not use generated/sliced assets in game code until they are promoted into the game manifest.",
+            "- If context seems stale after thread switching, ask for or trigger a project-context refresh before continuing.",
+            "- Ignore older auto-injected Project/Asset Context Pack blocks when this pack has a newer generated_at timestamp.",
+            "- On provider handoff, continue the same task goal/plan/assets unless the user explicitly creates a new chat/task or fork branch.",
+            "- For web research, use AstraBridge web research and batched search tools before raw curl/wget/python HTTP loops; only fall back when those tools fail and you explain why.",
+        ]
+        sections.append(ContextSection("rules", "Rules", 9, "\n".join(rules_lines), essential=True))
+        return sections
+
+    def _target_context_model(
+        self,
+        *,
+        profile_id: str | None,
+        provider_id: str | None,
+        model_id: str | None,
+        project: dict[str, Any],
+        task: dict[str, Any],
+        thread_entry: dict[str, Any],
+    ) -> dict[str, Any]:
+        resolved_profile_id = str(
+            profile_id
+            or thread_entry.get("profile_id")
+            or (task.get("composer_settings") or {}).get("profile_id")
+            or project.get("default_profile_id")
+            or ""
+        ).strip()
+        resolved_provider_id = str(
+            provider_id
+            or thread_entry.get("provider_id")
+            or (task.get("composer_settings") or {}).get("provider_id")
+            or ""
+        ).strip()
+        resolved_model_id = str(
+            model_id
+            or thread_entry.get("model")
+            or (task.get("composer_settings") or {}).get("model")
+            or project.get("default_model")
+            or ""
+        ).strip()
+        model_record = self._resolve_model_record(
+            profile_id=resolved_profile_id or None,
+            provider_id=resolved_provider_id or None,
+            model_id=resolved_model_id or None,
         )
-        return "\n".join(lines)
+        context_window = int(model_record.get("advertised_context_window") or model_record.get("max_context_window") or 0) or None
+        effective_percent = int(model_record.get("effective_context_window_percent") or 80)
+        auto_compact_limit = model_record.get("auto_compact_token_limit")
+        if context_window and not auto_compact_limit:
+            auto_compact_limit = compact_limit(context_window)
+        return {
+            "profile_id": resolved_profile_id or None,
+            "provider_id": resolved_provider_id or None,
+            "model_id": resolved_model_id or None,
+            "context_window": context_window,
+            "effective_context_window_percent": effective_percent,
+            "auto_compact_token_limit": int(auto_compact_limit) if auto_compact_limit not in {None, ""} else None,
+            "tool_schema_token_estimate": estimate_tool_schema_tokens(model_record),
+        }
+
+    def _resolve_model_record(self, *, profile_id: str | None, provider_id: str | None, model_id: str | None) -> dict[str, Any]:
+        if self._router_config is not None and provider_id and model_id:
+            full_id = f"{provider_id}/{model_id}"
+            for item in self._router_config.models():
+                if str(item.get("id") or "") in {model_id, full_id}:
+                    return dict(item)
+                if str(item.get("provider") or "") == provider_id and str(item.get("native_model") or "") == model_id:
+                    return dict(item)
+        if profile_id and self._profiles is not None:
+            try:
+                profile = self._profiles.resolve_runtime_profile(profile_id)
+                canonical_provider = str(profile.get("provider_id") or provider_id or "").strip()
+                canonical_model = str(profile.get("model") or model_id or "").strip()
+                provider_profile = get_provider_profile(canonical_provider)
+                return {
+                    "id": f"{canonical_provider}/{canonical_model or provider_profile.default_model}",
+                    "provider": canonical_provider,
+                    "native_model": canonical_model or provider_profile.default_model,
+                    **provider_profile.default_model_config(),
+                }
+            except Exception:
+                pass
+        if provider_id:
+            try:
+                provider_profile = get_provider_profile(provider_id)
+                return {
+                    "id": f"{provider_id}/{model_id or provider_profile.default_model}",
+                    "provider": provider_id,
+                    "native_model": model_id or provider_profile.default_model,
+                    **provider_profile.default_model_config(),
+                }
+            except Exception:
+                pass
+        return {}
 
     def _task_conversation_digest(self, task: dict[str, Any] | None) -> dict[str, Any]:
         if self._task_conversation is None or not isinstance(task, dict):

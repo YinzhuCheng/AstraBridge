@@ -6158,6 +6158,152 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue((workspace / ".astrabridge" / "project_context_pack.json").is_file())
             self.assertTrue((workspace / ".astrabridge" / "project_context_state.json").is_file())
 
+    def test_project_context_snapshot_reports_ordered_sections_and_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "index.html").write_text("<div id='app'></div>\n", encoding="utf-8")
+            (workspace / "README.md").write_text("# Demo\n" + ("alpha beta gamma delta\n" * 120), encoding="utf-8")
+            (workspace / "js").mkdir()
+            (workspace / "js" / "main.js").write_text("export const demo = true;\n", encoding="utf-8")
+            projects = ProjectService(root / "projects.json")
+            projects.create_project("Budget Project", root / "budget.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Budget task",
+                thread_id="thread-openai",
+                settings={
+                    "profile_id": "openai-compatible",
+                    "provider_id": "openai",
+                    "model": "gpt-5.5",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            service = ProjectContextService(projects, task_service=tasks)
+
+            pack = service.snapshot(thread_id="thread-openai")["context_pack"]
+            section_ids = [item["section_id"] for item in pack["context_sections"]]
+            report = pack["budget_report"]
+
+            self.assertEqual(section_ids, ["intro", "project", "file_map", "task", "selected_thread", "recent_threads", "rules"])
+            self.assertEqual(report["schema_version"], "astrabridge-context-budget-v1")
+            self.assertEqual(report["provider_id"], "openai")
+            self.assertEqual(report["model_id"], "gpt-5.5")
+            self.assertGreater(report["usable_prompt_budget_tokens"], 0)
+            self.assertLessEqual(report["selected_text_tokens"], report["usable_prompt_budget_tokens"])
+            self.assertEqual(section_ids, [item["section_id"] for item in report["section_estimates"]])
+
+    def test_runtime_project_context_budget_report_changes_with_target_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "index.html").write_text("<div id='app'></div>\n", encoding="utf-8")
+            (workspace / "README.md").write_text("# Demo\n" + ("context-heavy-line\n" * 500), encoding="utf-8")
+            (workspace / "src").mkdir()
+            for index in range(24):
+                (workspace / "src" / f"file_{index}.ts").write_text(f"export const item{index} = {index};\n", encoding="utf-8")
+
+            projects = ProjectService(root / "projects.json")
+            projects.create_project("Budget Project", root / "budget.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Budget task",
+                thread_id="thread-openai",
+                settings={
+                    "profile_id": "openai-compatible",
+                    "provider_id": "openai",
+                    "model": "gpt-5.5",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            router_config.upsert_model(
+                {
+                    "id": "deepseek/deepseek-v4-pro",
+                    "provider": "deepseek",
+                    "native_model": "deepseek-v4-pro",
+                    "display_name": "DeepSeek V4 Pro",
+                    "advertised_context_window": 4096,
+                    "effective_context_window_percent": 40,
+                    "auto_compact_token_limit": 900,
+                    "apply_patch_tool_type": "json",
+                    "supports_mcp_tools": True,
+                }
+            )
+            context = ProjectContextService(
+                projects,
+                task_service=tasks,
+                router_config_service=router_config,
+                profile_service=profiles,
+            )
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), project_context=context, task_service=tasks)
+
+            openai_report = runtime._project_context_budget_report(  # noqa: SLF001
+                thread_id="thread-openai",
+                profile_id="openai-compatible",
+                provider_id="openai",
+                model_id="gpt-5.5",
+            )
+            deepseek_report = runtime._project_context_budget_report(  # noqa: SLF001
+                thread_id="thread-openai",
+                profile_id="deepseek-default",
+                provider_id="deepseek",
+                model_id="deepseek-v4-pro",
+            )
+
+            self.assertEqual(openai_report["model_id"], "gpt-5.5")
+            self.assertEqual(deepseek_report["model_id"], "deepseek-v4-pro")
+            self.assertGreater(openai_report["usable_prompt_budget_tokens"], deepseek_report["usable_prompt_budget_tokens"])
+            self.assertTrue(deepseek_report["compact_recommended"])
+
+    def test_task_provider_handoff_carries_context_budget_report_into_transition_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Task",
+                thread_id="thread-openai",
+                settings={
+                    "profile_id": "openai-compatible",
+                    "provider_id": "openai",
+                    "model": "gpt-5.5",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+
+            event = tasks.record_provider_handoff(
+                from_thread_id="thread-openai",
+                to_thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "max",
+                    "permission_mode": "auto",
+                },
+                reused_existing=False,
+                context_budget_report={
+                    "provider_id": "deepseek",
+                    "model_id": "deepseek-v4-pro",
+                    "compact_recommended": True,
+                    "usable_prompt_budget_tokens": 512,
+                },
+            )
+
+            self.assertTrue(event["transition_summary"]["transition_plan"]["compact_before_send"])
+            self.assertEqual(event["transition_summary"]["context_budget_report"]["model_id"], "deepseek-v4-pro")
+            self.assertTrue(any("context budget is tight" in item.lower() for item in event["transition_summary"]["warnings"]))
+
     def test_project_context_pack_includes_secret_free_real_file_map(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
