@@ -10427,6 +10427,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 self.assertEqual(audit["paths"]["astrabridge_state"], str(workspace / ".astrabridge"))
                 self.assertEqual(audit["paths"]["managed_state_roots"]["captures"], str(workspace / ".astrabridge" / "captures"))
                 self.assertEqual(audit["paths"]["managed_state_roots"]["downloads"], str(workspace / ".astrabridge" / "downloads"))
+                self.assertEqual(audit["paths"]["downloads_root"], storage_policy["runtime"]["downloads_root"])
+                self.assertEqual(audit["paths"]["caches_root"], storage_policy["runtime"]["caches_root"])
+                self.assertEqual(audit["paths"]["tmp_root"], storage_policy["runtime"]["tmp_root"])
                 checks = {item["name"]: item for item in audit["checks"]}
                 self.assertTrue(checks["workspace_storage_policy_exists"]["ok"])
                 self.assertTrue(checks["workspace_storage_policy_schema"]["ok"])

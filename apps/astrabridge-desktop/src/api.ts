@@ -10,6 +10,7 @@ import type {
   EffectiveCatalogResponse,
   ExecutionHost,
   GoalResponse,
+  IsolationAuditResponse,
   LlmEffectiveCatalogResponse,
   LlmHealthResultsResponse,
   LlmManagerKeysResponse,
@@ -288,6 +289,7 @@ export const api = {
   rebuildDogfoodAssets: () => jsonRequest<AssetRegistryResponse>("/api/dogfood/assets/rebuild", {}),
   prepareReleaseWorkflowDemo: () => jsonRequest<ReleaseWorkflowDemoResponse>("/api/project/demo/release-workflow/prepare", {}),
   prepareNativeKernelWorkflowDemo: () => jsonRequest<NativeKernelDemoResponse>("/api/project/demo/native-kernel/prepare", {}),
+  isolationAudit: () => request<IsolationAuditResponse>("/api/audit/isolation"),
   markDogfoodAsset: (payload: { asset_id: string; status?: string; quality_status?: string; integration_status?: string; role?: string; purpose?: string; notes?: string }) =>
     jsonRequest<AssetRegistryResponse>("/api/dogfood/assets/mark", payload),
   promoteDogfoodAsset: (payload: { asset_id: string; target_name?: string; manifest_section?: "sprites" | "tiles" | "hud"; entity?: string; state?: string; tile_key?: string; role?: string }) =>

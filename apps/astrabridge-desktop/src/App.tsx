@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
 import { summarizeCodingEventInspector } from "./features/runtime/codingEventInspector";
+import { isolationAuditSummary, projectCaptureRoot, suggestedDogfoodScreenshotPath } from "./features/runtime/isolationAudit";
 import { summarizeTaskInspectorEvidence } from "./features/runtime/taskInspectorEvidence";
 import { modelAuthorityState } from "./features/runtime/modelAuthorityNotice";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
@@ -75,6 +76,16 @@ function currentBrowserSmokeUrl() {
     return "http://127.0.0.1:8123/";
   }
   return window.location.href;
+}
+
+function stringifyDetail(value: unknown) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function summarizeRelativeTime(value: number | string | null | undefined) {
@@ -1476,6 +1487,7 @@ function RouterControlCenter({
   locale: "en" | "zh-CN";
   queryClient: ReturnType<typeof useQueryClient>;
 }) {
+  const project = useAppStore((store) => store.project);
   const routerConfig = useQuery({ queryKey: ["router-config"], queryFn: api.routerConfig, refetchInterval: 5000 });
   const llmSession = useQuery({ queryKey: ["llm-manager-session"], queryFn: api.llmManagerSession, refetchInterval: 5000 });
   const llmKeys = useQuery({ queryKey: ["llm-manager-keys"], queryFn: api.llmManagerKeys, refetchInterval: 5000 });
@@ -1525,6 +1537,28 @@ function RouterControlCenter({
     queryFn: () => api.effectiveCatalog(modelDraft?.id),
     enabled: Boolean(modelDraft?.id),
   });
+  const isolationAudit = useQuery({
+    queryKey: ["isolation-audit", project?.project_id],
+    queryFn: api.isolationAudit,
+    enabled: Boolean(project?.project_id),
+    refetchInterval: 15000,
+    retry: false,
+  });
+  const captureRoot = useMemo(() => projectCaptureRoot(project), [project]);
+  const suggestedScreenshotPath = useMemo(
+    () => suggestedDogfoodScreenshotPath(project, dogfoodSmokeLabel),
+    [project, dogfoodSmokeLabel],
+  );
+  const isolationSummary = useMemo(() => isolationAuditSummary(isolationAudit.data), [isolationAudit.data]);
+
+  useEffect(() => {
+    const current = dogfoodScreenshotPath.trim();
+    if (!suggestedScreenshotPath) return;
+    const usingLegacyDefault = /^d:\\workflow(\\|$)/i.test(current);
+    if ((!current || usingLegacyDefault) && current !== suggestedScreenshotPath) {
+      setDogfoodScreenshotPath(suggestedScreenshotPath);
+    }
+  }, [dogfoodScreenshotPath, suggestedScreenshotPath]);
 
   const saveProvider = useMutation({
     mutationFn: api.saveProvider,
@@ -2378,11 +2412,52 @@ function RouterControlCenter({
             </label>
             <div className="field-row">
               <button type="button" className="ghost-button" onClick={() => wslDependencies.refetch()} disabled={wslDependencies.isFetching}>Recheck</button>
+              <button type="button" className="ghost-button" onClick={() => isolationAudit.refetch()} disabled={isolationAudit.isFetching}>Refresh isolation audit</button>
               <button type="button" className="ghost-button" onClick={() => writeWslScripts.mutate()} disabled={writeWslScripts.isPending}>Generate scripts</button>
               <button type="button" className="primary-button" onClick={() => launchWslInstaller.mutate()} disabled={launchWslInstaller.isPending}>Run installer</button>
             </div>
           </div>
           {wslDependencies.error ? <p className="error-text">{String((wslDependencies.error as Error).message ?? wslDependencies.error)}</p> : null}
+          {isolationAudit.error ? <p className="error-text">{String((isolationAudit.error as Error).message ?? isolationAudit.error)}</p> : null}
+          {isolationAudit.data ? (
+            <section className="metadata-section">
+              <div className="section-header">
+                <h4>Isolation boundary audit</h4>
+                <span className={`status-tag ${isolationAudit.data.ok ? "status-ok" : ""}`}>
+                  {isolationSummary.failed === 0 ? "pass" : `${isolationSummary.failed} fail`}
+                </span>
+              </div>
+              <div className="mcp-health-row">
+                <span>{isolationSummary.passed}/{isolationSummary.total} checks passed</span>
+                <span>{isolationAudit.data.process_boundary.execution_host || "unknown host"}</span>
+                <span>sidecar {isolationAudit.data.ports.sidecar ?? "n/a"}</span>
+                <span>router {isolationAudit.data.ports.router ?? "n/a"}</span>
+              </div>
+              <div className="env-list">
+                <div><span>Workspace state</span><strong>{isolationAudit.data.paths.astrabridge_state || "n/a"}</strong></div>
+                <div><span>Project runtime root</span><strong>{isolationAudit.data.paths.project_runtime_root || "n/a"}</strong></div>
+                <div><span>Isolated CODEX_HOME</span><strong>{isolationAudit.data.paths.isolated_codex_home || "n/a"}</strong></div>
+                <div><span>Downloads root</span><strong>{isolationAudit.data.paths.downloads_root || "n/a"}</strong></div>
+                <div><span>Caches root</span><strong>{isolationAudit.data.paths.caches_root || "n/a"}</strong></div>
+                <div><span>Temp root</span><strong>{isolationAudit.data.paths.tmp_root || "n/a"}</strong></div>
+              </div>
+              {isolationSummary.failed ? (
+                <div className="manager-list">
+                  {isolationSummary.failedChecks.slice(0, 8).map((check) => (
+                    <div className="manager-row" key={check.name}>
+                      <span>
+                        <strong>{check.name}</strong>
+                        <small>isolation check failed</small>
+                      </span>
+                      <code>{stringifyDetail(check.detail) || "no detail"}</code>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">Project state, runtime roots, and isolated CODEX_HOME all match the current storage policy.</p>
+              )}
+            </section>
+          ) : null}
           {writeWslScripts.error || launchWslInstaller.error ? <p className="error-text">{String(((writeWslScripts.error || launchWslInstaller.error) as Error).message ?? writeWslScripts.error ?? launchWslInstaller.error)}</p> : null}
           <div className="wsl-check-grid">
             {(wslDependencies.data?.checks ?? []).map((check) => (
@@ -2613,7 +2688,7 @@ function RouterControlCenter({
                       <code>{capturePath(capture)}</code>
                     </div>
                   ))}
-                  {activeDogfood.captures.length === 0 ? <p className="muted">No screenshots registered yet. Save screenshots under D:\workflow and register them after each milestone.</p> : null}
+                  {activeDogfood.captures.length === 0 ? <p className="muted">No screenshots registered yet. Browser smoke auto-saves under {captureRoot || "the project .astrabridge/captures root"} and manual captures can be registered from there.</p> : null}
                 </div>
               </section>
               <section className="manager-section">
@@ -2622,8 +2697,9 @@ function RouterControlCenter({
                 <label className="field"><span>URL</span><input value={dogfoodSmokeUrl} onChange={(event) => setDogfoodSmokeUrl(event.target.value)} /></label>
                 <div className="form-grid">
                   <label className="field"><span>Label</span><input value={dogfoodSmokeLabel} onChange={(event) => setDogfoodSmokeLabel(event.target.value)} /></label>
-                  <label className="field"><span>Screenshot path</span><input value={dogfoodScreenshotPath} onChange={(event) => setDogfoodScreenshotPath(event.target.value)} placeholder="D:\\workflow\\...\\captures\\shot.png" /></label>
+                  <label className="field"><span>Screenshot path</span><input value={dogfoodScreenshotPath} onChange={(event) => setDogfoodScreenshotPath(event.target.value)} placeholder={suggestedScreenshotPath || ".astrabridge\\captures\\browser-smoke.png"} /></label>
                 </div>
+                <p className="muted">Leave the screenshot path as suggested to keep captures inside the current project boundary.</p>
                 <button type="button" className="ghost-button" onClick={() => runDogfoodBrowserSmoke.mutate()} disabled={runDogfoodBrowserSmoke.isPending}>Run browser smoke</button>
                 {activeDogfood.browser_smokes?.slice(-3).reverse().map((smoke) => (
                   <div className={`manager-row dogfood-smoke-${smoke.status}`} key={`${smoke.url}-${smoke.created_at}`}>
@@ -2649,7 +2725,7 @@ function RouterControlCenter({
               <section className="manager-section">
                 <h4>Autonomy rules for the next agent turn</h4>
                 <p className="muted">Paste this into the next DS/Kimi turn when the run starts or resumes. It keeps the model from reading huge .astrabridge logs and forces self-verification.</p>
-                <pre className="modal-json">Do not read .astrabridge/runtime_events.jsonl or .astrabridge/approvals.jsonl unless the user explicitly asks. Use project summaries, screenshots, and asset_manifest.json instead. After each milestone: run the game, inspect console errors, save a screenshot to D:\workflow\magical-girl-tower-dogfood\captures, describe the issue, then fix it. Respect budgets: Kimi 50 CNY, DeepSeek 50 CNY, Yunwu GPT 50 USD, Yunwu image 200 images. Stop at 100% and warn at 80%.</pre>
+                <pre className="modal-json">{`Do not read .astrabridge/runtime_events.jsonl or .astrabridge/approvals.jsonl unless the user explicitly asks. Use project summaries, screenshots, and asset_manifest.json instead. After each milestone: run the game, inspect console errors, save a screenshot to ${captureRoot || ".astrabridge\\captures"}, describe the issue, then fix it. Respect budgets: Kimi 50 CNY, DeepSeek 50 CNY, Yunwu GPT 50 USD, Yunwu image 200 images. Stop at 100% and warn at 80%.`}</pre>
               </section>
             </div>
           ) : (

@@ -216,6 +216,47 @@ export type RuntimeEnvironment = {
   };
 };
 
+export type IsolationAuditCheck = {
+  name: string;
+  ok: boolean;
+  detail?: unknown;
+};
+
+export type IsolationAuditResponse = {
+  ok: boolean;
+  checks: IsolationAuditCheck[];
+  paths: {
+    project_file?: string | null;
+    workspace_root?: string | null;
+    astrabridge_state?: string | null;
+    managed_state_roots?: Record<string, string>;
+    isolated_codex_home?: string | null;
+    project_runtime_root?: string | null;
+    downloads_root?: string | null;
+    caches_root?: string | null;
+    tmp_root?: string | null;
+    official_codex_config?: string | null;
+    expected_appdata?: string | null;
+    expected_codex_home?: string | null;
+  };
+  official_codex: {
+    exists: boolean;
+    managed_by_app: boolean;
+    router_configured: boolean;
+    config_sha256?: string | null;
+  };
+  ports: {
+    sidecar?: number | null;
+    router?: number | null;
+    router_base_url?: string | null;
+  };
+  process_boundary: {
+    app_server_running: boolean;
+    codex_cli?: string | null;
+    execution_host?: string | null;
+  };
+};
+
 export type WslDependencyCheck = {
   id: string;
   label: string;
