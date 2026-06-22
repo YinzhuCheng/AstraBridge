@@ -230,7 +230,7 @@ class LlmApiManagerService:
 
     def effective_catalog(self) -> dict[str, Any]:
         mode = str(self._session.get("mode") or "anonymous")
-        providers = self._router_config.providers()
+        providers = self._effective_providers()
         configured_models = {str(item.get("id") or ""): dict(item) for item in self._router_config.models()}
         generated = current_generated_catalog()
         models = [{**item, **configured_models.get(str(item.get("id") or ""), {})} for item in generated.models]
@@ -261,6 +261,37 @@ class LlmApiManagerService:
             "warnings": warnings,
             "generated_at": now_iso(),
         }
+
+    def _effective_providers(self) -> list[dict[str, Any]]:
+        generated = current_generated_catalog()
+        generated_by_id = {str(item.get("id") or item.get("provider_id") or ""): dict(item) for item in generated.providers if isinstance(item, dict)}
+        configured = [dict(item) for item in self._router_config.providers() if isinstance(item, dict)]
+        configured_by_id = {str(item.get("id") or item.get("provider_id") or ""): item for item in configured}
+        provider_ids: list[str] = []
+        for item in generated.providers:
+            provider_id = str(item.get("id") or item.get("provider_id") or "")
+            if provider_id and provider_id not in provider_ids:
+                provider_ids.append(provider_id)
+        for item in configured:
+            provider_id = str(item.get("id") or item.get("provider_id") or "")
+            if provider_id and provider_id not in provider_ids:
+                provider_ids.append(provider_id)
+        merged: list[dict[str, Any]] = []
+        for provider_id in provider_ids:
+            combined = self._merge_provider_record(generated_by_id.get(provider_id, {}), configured_by_id.get(provider_id, {}))
+            if combined:
+                merged.append(combined)
+        return merged
+
+    def _merge_provider_record(self, baseline: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(baseline)
+        for key, value in override.items():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            merged[key] = value
+        return merged
 
     def health_results(self) -> dict[str, Any]:
         payload = read_json(self.health_path, {})

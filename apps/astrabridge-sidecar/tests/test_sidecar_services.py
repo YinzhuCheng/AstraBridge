@@ -7708,6 +7708,42 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 docs.shutdown()
                 docs.server_close()
 
+    def test_llm_manager_effective_catalog_merges_generated_provider_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            class SparseConfig:
+                @staticmethod
+                def providers() -> list[dict[str, Any]]:
+                    return [
+                        {
+                            "id": "qwen",
+                            "display_name": "",
+                            "enabled": True,
+                            "adapter_type": "responses",
+                            "base_url": "",
+                            "default_model": "",
+                            "env_key": "DASHSCOPE_API_KEY",
+                            "auth_mode": "env_ref",
+                            "proxy_mode": "direct",
+                            "proxy_url": "",
+                        }
+                    ]
+
+                @staticmethod
+                def models() -> list[dict[str, Any]]:
+                    return []
+
+            manager = LlmApiManagerService(SparseConfig(), DummyRouter(), root / "manager")
+            catalog = manager.effective_catalog()
+            provider = next(item for item in catalog["providers"] if item["id"] == "qwen")
+
+            self.assertEqual(provider["display_name"], "Qwen / DashScope")
+            self.assertEqual(provider["base_url"], "https://dashscope.aliyuncs.com/compatible-mode/v1")
+            self.assertEqual(provider["default_model"], "qwen3.7-plus")
+            self.assertEqual(provider["supported_reasoning_levels"], ["low", "medium", "high", "xhigh"])
+            self.assertEqual(provider["reasoning_policy_mode"], "enable_thinking")
+
     def test_runtime_config_embeds_isolated_mcp_config(self) -> None:
         original = os.environ.pop("TEST_MCP_PROVIDER_KEY", None)
         try:
