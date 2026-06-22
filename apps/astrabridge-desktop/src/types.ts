@@ -592,6 +592,7 @@ export type RuntimeFailureTransitionTarget = {
   provider_id?: string;
   model_id?: string;
   protocol?: string;
+  runtime_backend?: string;
   env_key?: string;
   base_url?: string;
   reasoning_effort?: string;

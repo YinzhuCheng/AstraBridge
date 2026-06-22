@@ -30,6 +30,14 @@ function transitionTargetScore(target: RuntimeFailureTransitionTarget | undefine
     return Number.NEGATIVE_INFINITY;
   }
   let score = targetProviderId ? 100 : 0;
+  const targetRuntimeBackend = String(target.runtime_backend ?? "").trim();
+  if (targetRuntimeBackend) {
+    const profileBackend = String(profile.execution_backend ?? "").trim();
+    if (profileBackend && profileBackend !== targetRuntimeBackend) {
+      return Number.NEGATIVE_INFINITY;
+    }
+    if (profileBackend === targetRuntimeBackend) score += 24;
+  }
   if (target.base_url && profile.base_url === target.base_url) score += 20;
   if (target.env_key && profile.env_key === target.env_key) score += 16;
   const targetModel = nativeModelId(target.model_id);

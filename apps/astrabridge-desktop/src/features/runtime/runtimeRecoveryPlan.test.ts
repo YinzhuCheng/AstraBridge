@@ -13,6 +13,7 @@ const profiles: Profile[] = [
     model: "deepseek-v4-pro",
     reasoning_effort: "xhigh",
     wire_api: "chat",
+    execution_backend: "app_server",
     env_key: "DEEPSEEK_API_KEY",
     auth_mode: "env_ref",
     proxy_mode: "direct",
@@ -29,6 +30,7 @@ const profiles: Profile[] = [
     model: "qwen3.7-plus",
     reasoning_effort: "high",
     wire_api: "responses",
+    execution_backend: "app_server",
     env_key: "DASHSCOPE_API_KEY",
     auth_mode: "env_ref",
     proxy_mode: "direct",
@@ -45,6 +47,7 @@ const profiles: Profile[] = [
     model: "qwen3.6-flash",
     reasoning_effort: "medium",
     wire_api: "responses",
+    execution_backend: "native_kernel",
     env_key: "MIRROR_QWEN_KEY",
     auth_mode: "env_ref",
     proxy_mode: "direct",
@@ -112,6 +115,7 @@ describe("runtime recovery plan", () => {
       {
         provider_id: "qwen",
         model_id: "qwen/qwen3.6-flash",
+        runtime_backend: "native_kernel",
         base_url: "https://mirror.example/v1",
         env_key: "MIRROR_QWEN_KEY",
       },
@@ -134,6 +138,7 @@ describe("runtime recovery plan", () => {
         target: {
           provider_id: "qwen",
           model_id: "qwen/qwen3.6-flash",
+          runtime_backend: "native_kernel",
           base_url: "https://mirror.example/v1",
           env_key: "MIRROR_QWEN_KEY",
         },
@@ -240,5 +245,19 @@ describe("runtime recovery plan", () => {
     });
 
     expect(patch).toBeNull();
+  });
+
+  it("fails closed when the transition runtime backend does not match any local profile", () => {
+    const profile = resolveRecoveryProfile(
+      {
+        provider_id: "deepseek",
+        model_id: "deepseek/deepseek-v4-pro",
+        runtime_backend: "native_kernel",
+      },
+      profiles,
+      profiles[0],
+    );
+
+    expect(profile).toBeNull();
   });
 });

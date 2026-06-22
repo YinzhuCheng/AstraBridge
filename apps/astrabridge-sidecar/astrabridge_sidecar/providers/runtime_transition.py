@@ -14,6 +14,7 @@ class RuntimeTransitionTarget:
     provider_id: str
     model_id: str
     protocol: str
+    runtime_backend: str
     base_url: str
     env_key: str
     context_budget: int | None
@@ -102,6 +103,7 @@ def build_transition_target(
         provider_id=profile.id,
         model_id=target_model,
         protocol=protocol,
+        runtime_backend=profile.runtime_backend,
         base_url=profile.base_url,
         env_key=env_key,
         context_budget=context_budget,
