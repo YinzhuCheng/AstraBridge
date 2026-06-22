@@ -57,8 +57,11 @@ class TaskConversationService:
             snapshot = dict(snapshots.get(thread_id) or {})
             if not snapshot:
                 continue
+            cutoff = self._task_route_cutoff(route=route, task=task)
             for turn in list(snapshot.get("turns") or []):
                 if not isinstance(turn, dict):
+                    continue
+                if cutoff is not None and self._turn_unix_timestamp(turn) < cutoff:
                     continue
                 turns.append(self._annotate_turn(dict(turn), snapshot=snapshot, route=route))
         for handoff_event in list(task.get("handoff_events") or []):
@@ -316,19 +319,25 @@ class TaskConversationService:
         return ""
 
     def _turn_sort_key(self, turn: dict[str, Any]) -> tuple[int, str, str]:
+        turn_ts = self._turn_unix_timestamp(turn)
+        if turn_ts is not None:
+            return (turn_ts, str(turn.get("source_thread_id") or ""), str(turn.get("id") or ""))
+        return (0, str(turn.get("source_thread_id") or ""), str(turn.get("id") or ""))
+
+    def _turn_unix_timestamp(self, turn: dict[str, Any]) -> int | None:
         for key in ("startedAt", "completedAt", "updatedAt", "createdAt"):
             value = turn.get(key)
             if isinstance(value, (int, float)):
-                return (int(value), str(turn.get("source_thread_id") or ""), str(turn.get("id") or ""))
+                return int(value)
             if isinstance(value, str) and value.isdigit():
-                return (int(value), str(turn.get("source_thread_id") or ""), str(turn.get("id") or ""))
+                return int(value)
             if isinstance(value, str):
                 try:
                     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-                    return (int(parsed.timestamp()), str(turn.get("source_thread_id") or ""), str(turn.get("id") or ""))
+                    return int(parsed.timestamp())
                 except Exception:
                     pass
-        return (0, str(turn.get("source_thread_id") or ""), str(turn.get("id") or ""))
+        return None
 
     def _merge_coding_events(self, existing: list[Any], projected: list[dict[str, Any]]) -> list[dict[str, Any]]:
         merged: list[dict[str, Any]] = []
@@ -407,6 +416,29 @@ class TaskConversationService:
 
     def _path(self):
         return self._projects.require_shell_state_root() / "task_transcripts.json"
+
+    def _task_route_cutoff(self, *, route: dict[str, Any], task: dict[str, Any]) -> int | None:
+        for candidate in (route.get("created_at"), task.get("created_at")):
+            parsed = self._parse_timestamp(candidate)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _parse_timestamp(self, value: Any) -> int | None:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            if text.isdigit():
+                return int(text)
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                return int(parsed.timestamp())
+            except Exception:
+                return None
+        return None
 
     def _truncate_large_strings(self, value: Any) -> Any:
         if is_dataclass(value):

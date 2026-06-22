@@ -800,6 +800,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "permission_mode": "auto",
                 },
             )
+            task_created_at = datetime.fromisoformat(str(task["created_at"]).replace("Z", "+00:00")).timestamp()
             handoff = tasks.record_provider_handoff(
                 from_thread_id="thread-deepseek",
                 to_thread_id="thread-kimi",
@@ -823,7 +824,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "turns": [
                         {
                             "id": "turn-1",
-                            "startedAt": int(handoff_at) - 1,
+                            "startedAt": max(int(task_created_at), int(handoff_at) - 1),
                             "items": [
                                 {"type": "userMessage", "id": "user-1", "text": "Build a release readiness scorecard."},
                                 {"type": "agentMessage", "id": "agent-1", "text": "Created scorecard.py"},
@@ -952,6 +953,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "permission_mode": "auto",
                 },
             )
+            task_created_at = datetime.fromisoformat(str(task["created_at"]).replace("Z", "+00:00")).timestamp()
             conversation = TaskConversationService(projects, tasks)
             conversation.record_thread_snapshot(
                 {
@@ -959,7 +961,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "turns": [
                         {
                             "id": "turn-1",
-                            "startedAt": 1,
+                            "startedAt": int(task_created_at) + 1,
                             "items": [
                                 {"type": "userMessage", "id": "user-1", "text": "Build a release readiness scorecard."},
                                 {"type": "fileChange", "id": "file-1", "changes": [{"path": "scorecard.py"}]},
@@ -994,14 +996,147 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("Task conversation digest", pack["text"])
             self.assertIn("Build a release readiness scorecard", pack["text"])
             self.assertIn("scorecard.py", pack["text"])
-            self.assertEqual(pack["task_conversation_digest"]["items"][0]["event_types"], ["agent_message", "file_change"])
-            self.assertEqual(pack["task_conversation_digest"]["items"][1]["event_types"], ["provider_handoff"])
-            self.assertIn("Provider handoff", pack["task_conversation_digest"]["items"][1]["summary"])
-            self.assertIn("dropped_artifacts=1", pack["task_conversation_digest"]["items"][1]["summary"])
-            self.assertIn("repaired_tool_pairs=2", pack["task_conversation_digest"]["items"][1]["summary"])
-            self.assertIn("replayable_artifacts=1", pack["task_conversation_digest"]["items"][1]["summary"])
-            self.assertIn("Build a release readiness scorecard", pack["task_conversation_digest"]["items"][1]["projection_preview"])
+            digest_items = list(pack["task_conversation_digest"]["items"])
+            file_item = next(item for item in digest_items if item.get("turn_id") == "turn-1")
+            handoff_item = next(item for item in digest_items if "provider_handoff" in list(item.get("event_types") or []))
+            self.assertEqual(file_item["event_types"], ["agent_message", "file_change"])
+            self.assertEqual(handoff_item["event_types"], ["provider_handoff"])
+            self.assertIn("Provider handoff", handoff_item["summary"])
+            self.assertIn("dropped_artifacts=1", handoff_item["summary"])
+            self.assertIn("repaired_tool_pairs=2", handoff_item["summary"])
+            self.assertIn("replayable_artifacts=1", handoff_item["summary"])
+            self.assertIn("Build a release readiness scorecard", handoff_item["projection_preview"])
             self.assertIn("projection_preview=Assistant: Build a release readiness scorecard.", pack["text"])
+
+    def test_task_conversation_filters_turns_before_thread_joined_current_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Old task",
+                thread_id="thread-shared",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "max",
+                    "permission_mode": "auto",
+                },
+            )
+            new_task = tasks.create_task(
+                "New task",
+                thread_id="thread-shared",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "max",
+                    "permission_mode": "auto",
+                },
+            )
+            conversation = TaskConversationService(projects, tasks)
+            now_ts = int(time.time())
+            conversation.record_thread_snapshot(
+                {
+                    "id": "thread-shared",
+                    "status": {"type": "idle"},
+                    "turns": [
+                        {
+                            "id": "turn-old",
+                            "startedAt": now_ts - 60,
+                            "items": [
+                                {"type": "userMessage", "id": "user-old", "text": "Unrelated old task prompt."},
+                                {"type": "agentMessage", "id": "agent-old", "text": "Old answer."},
+                            ],
+                        },
+                        {
+                            "id": "turn-new",
+                            "startedAt": now_ts + 60,
+                            "items": [
+                                {"type": "userMessage", "id": "user-new", "text": "Implement the scorecard for the new task."},
+                                {"type": "agentMessage", "id": "agent-new", "text": "Created scorecard.py for the new task."},
+                            ],
+                        },
+                    ],
+                }
+            )
+
+            composite = conversation.conversation(task_id=new_task["task_id"])["thread"]
+
+            self.assertEqual([turn["id"] for turn in composite["turns"]], ["turn-new"])
+            self.assertEqual(composite["turns"][0]["provider_id"], "deepseek")
+            digest = conversation.digest(task_id=new_task["task_id"])
+            self.assertEqual([item["turn_id"] for item in digest["items"]], ["turn-new"])
+            self.assertNotIn("Unrelated old task prompt", json.dumps(digest, ensure_ascii=False))
+
+    def test_project_context_pack_ignores_reused_thread_history_from_older_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Old task",
+                thread_id="thread-shared",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "max",
+                    "permission_mode": "auto",
+                },
+            )
+            new_task = tasks.create_task(
+                "Release workflow task",
+                thread_id="thread-shared",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "max",
+                    "permission_mode": "auto",
+                },
+            )
+            conversation = TaskConversationService(projects, tasks)
+            now_ts = int(time.time())
+            conversation.record_thread_snapshot(
+                {
+                    "id": "thread-shared",
+                    "turns": [
+                        {
+                            "id": "turn-old",
+                            "startedAt": now_ts - 60,
+                            "items": [
+                                {"type": "userMessage", "id": "user-old", "text": "出一道数据结构题"},
+                                {"type": "agentMessage", "id": "agent-old", "text": "这里是一道旧题。"},
+                            ],
+                        },
+                        {
+                            "id": "turn-new",
+                            "startedAt": now_ts + 60,
+                            "items": [
+                                {"type": "userMessage", "id": "user-new", "text": "Implement a minimal release readiness scorecard."},
+                                {"type": "fileChange", "id": "file-new", "changes": [{"path": "scorecard.py"}]},
+                            ],
+                        },
+                    ],
+                }
+            )
+            context = ProjectContextService(projects, task_service=tasks, task_conversation_service=conversation)
+
+            pack = context.snapshot(thread_id="thread-shared")["context_pack"]
+
+            self.assertEqual(pack["task_conversation_digest"]["task_id"], new_task["task_id"])
+            self.assertIn("Implement a minimal release readiness scorecard", pack["text"])
+            self.assertIn("scorecard.py", pack["text"])
+            self.assertNotIn("出一道数据结构题", pack["text"])
+            self.assertEqual([item["turn_id"] for item in pack["task_conversation_digest"]["items"]], ["turn-new"])
 
     def test_coding_event_projection_maps_core_coding_turn_items(self) -> None:
         events = project_turn_to_coding_events(
@@ -3345,6 +3480,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
         class FakeClient:
             def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:
                 if method == "thread/read":
+                    future_started_at = int(time.time()) + 60
                     return {
                         "thread": {
                             "id": "thread-deepseek",
@@ -3353,7 +3489,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                             "turns": [
                                 {
                                     "id": "turn-1",
-                                    "startedAt": 1,
+                                    "startedAt": future_started_at,
                                     "items": [
                                         {"type": "userMessage", "id": "user-1", "text": "Keep the same visible chat."},
                                         {"type": "agentMessage", "id": "agent-1", "text": "Done."},
@@ -7973,6 +8109,32 @@ class AstraBridgeServiceTests(unittest.TestCase):
             )
             self.assertEqual(len(smoke_85["browser_smoke"]["actions"]), 80)
             self.assertEqual(smoke_85["browser_smoke"]["action_warning"], "truncated_to_80_actions")
+
+    def test_dogfood_browser_smoke_release_workflow_preset_expands_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "index.html").write_text("<!doctype html><title>ok</title>", encoding="utf-8")
+            screenshot = root / "capture.png"
+            screenshot.write_bytes(b"png")
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            dogfood = DogfoodRunService(projects)
+
+            smoke = dogfood.browser_smoke(
+                {
+                    "url": (workspace / "index.html").resolve().as_uri(),
+                    "preset": "astrabridge_release_workflow_v1",
+                    "screenshot_path": str(screenshot),
+                }
+            )
+
+            actions = list(smoke["browser_smoke"]["actions"] or [])
+            self.assertEqual(smoke["browser_smoke"]["preset"], "astrabridge_release_workflow_v1")
+            self.assertEqual(smoke["browser_smoke"]["label"], "AstraBridge release workflow smoke")
+            self.assertTrue(any(item.get("selector") == "[data-testid='review-panel']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='checkpoint-modal']" for item in actions if isinstance(item, dict)))
 
     def test_checkpoint_service_git_save_load_without_git_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

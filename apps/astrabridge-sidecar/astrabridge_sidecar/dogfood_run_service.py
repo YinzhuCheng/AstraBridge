@@ -18,6 +18,7 @@ DOGFOOD_SECRET_VALUE_RE = re.compile(
 )
 DOGFOOD_SECRET_FIELD_PARTS = ("api_key", "apikey", "authorization", "cookie", "password", "secret", "token")
 MAX_BROWSER_SMOKE_ACTIONS = 80
+BROWSER_SMOKE_PRESET_RELEASE_WORKFLOW = "astrabridge_release_workflow_v1"
 
 
 DEFAULT_DOGFOOD_RUN: dict[str, Any] = {
@@ -112,9 +113,11 @@ class DogfoodRunService:
         url = str(payload.get("url") or "").strip()
         if not url.startswith(("http://127.0.0.1:", "http://localhost:", "file:///")):
             raise ValueError("Browser smoke URL must be local: 127.0.0.1, localhost, or file://.")
-        label = str(payload.get("label") or "browser smoke").strip()
-        raw_actions = list(payload.get("actions") or [])
-        final_assertions = self._browser_final_assertion_actions(payload)
+        preset = str(payload.get("preset") or "").strip()
+        preset_config = self._browser_smoke_preset(preset)
+        label = str(payload.get("label") or preset_config.get("label") or "browser smoke").strip()
+        raw_actions = [*list(preset_config.get("actions") or []), *list(payload.get("actions") or [])]
+        final_assertions = [*list(preset_config.get("final_assertions") or []), *self._browser_final_assertion_actions(payload)]
         actions = self._browser_actions([*raw_actions, *final_assertions])
         record = {
             "label": label,
@@ -126,6 +129,8 @@ class DogfoodRunService:
             "screenshot_status": "provided" if str(payload.get("screenshot_path") or "").strip() else "pending",
             "created_at": now_iso(),
         }
+        if preset:
+            record["preset"] = preset
         if actions:
             record["actions"] = actions
         if final_assertions:
@@ -320,6 +325,34 @@ class DogfoodRunService:
             record.pop("error", None)
         elif screenshot_status in {"captured", "provided"} and record.get("status") == "unknown":
             record["status"] = "pass"
+
+    def _browser_smoke_preset(self, preset: str) -> dict[str, Any]:
+        if not preset:
+            return {}
+        if preset != BROWSER_SMOKE_PRESET_RELEASE_WORKFLOW:
+            raise ValueError(f"Unsupported browser smoke preset: {preset}")
+        return {
+            "label": "AstraBridge release workflow smoke",
+            "actions": [
+                {"type": "expect_selector", "selector": "[data-testid='app-shell']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='message-stream']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='composer']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='composer-send']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='topbar-compact']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='topbar-fork']", "timeout_ms": 12000},
+                {"type": "click_selector", "selector": "[data-testid='inspector-tab-review']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='review-panel']", "timeout_ms": 12000},
+                {"type": "click_selector", "selector": "[data-testid='inspector-tab-files']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='files-panel']", "timeout_ms": 12000},
+                {"type": "click_selector", "selector": "[data-testid='checkpoint-open']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='checkpoint-modal']", "timeout_ms": 12000},
+                {"type": "click_selector", "selector": "[data-testid='checkpoint-cancel']", "timeout_ms": 12000},
+                {"type": "click_selector", "selector": "[data-testid='inspector-tab-browser']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='browser-panel']", "timeout_ms": 12000},
+                {"type": "click_selector", "selector": "[data-testid='inspector-tab-status']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='status-panel-goal']", "timeout_ms": 12000},
+            ],
+        }
 
     def _browser_actions(self, raw_actions: Any) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []

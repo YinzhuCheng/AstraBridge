@@ -278,7 +278,7 @@ export const api = {
   saveDogfoodRun: (payload: Partial<DogfoodRun>) => jsonRequest<DogfoodRunResponse>("/api/dogfood/run/save", payload as Record<string, unknown>),
   addDogfoodCapture: (payload: { path: string; label?: string; provider?: string }) =>
     jsonRequest<DogfoodRunResponse & { capture: Record<string, unknown> }>("/api/dogfood/captures/add", payload),
-  dogfoodBrowserSmoke: (payload: { url: string; label?: string; screenshot_path?: string; console_errors?: string[]; auto_milestone?: boolean; include_run?: boolean; actions?: Array<Record<string, unknown>> }) =>
+  dogfoodBrowserSmoke: (payload: { url: string; label?: string; preset?: string; screenshot_path?: string; console_errors?: string[]; auto_milestone?: boolean; include_run?: boolean; actions?: Array<Record<string, unknown>> }) =>
     jsonRequest<Partial<DogfoodRunResponse> & { browser_smoke: Record<string, unknown>; run_summary?: Record<string, unknown> }>("/api/dogfood/browser-smoke", payload),
   dogfoodMilestone: (payload: { label: string; provider?: string; model?: string; goal?: string; plan_step?: string; status?: string; captures?: string[]; capture_paths?: string[]; validation?: string[] | Record<string, unknown>; validation_result?: string | Record<string, unknown>; failure_reason?: string; next_step?: string; next_action?: string; include_run?: boolean }) =>
     jsonRequest<Partial<DogfoodRunResponse> & { milestone: Record<string, unknown>; run_summary?: Record<string, unknown> }>("/api/dogfood/milestone", payload),

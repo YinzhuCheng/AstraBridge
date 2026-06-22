@@ -60,8 +60,17 @@ const DEFAULT_GAMEPLAY_SMOKE_ACTIONS: Array<Record<string, unknown>> = [
   { type: "wait_ms", ms: 1200 },
 ];
 
+const RELEASE_WORKFLOW_SMOKE_PRESET = "astrabridge_release_workflow_v1";
+
 function localAssetUrl(path: string) {
   return isTauri() ? convertFileSrc(path) : `file://${path.replace(/\\/g, "/")}`;
+}
+
+function currentBrowserSmokeUrl() {
+  if (typeof window === "undefined") {
+    return "http://127.0.0.1:8123/";
+  }
+  return window.location.href;
 }
 
 function summarizeRelativeTime(value: number | string | null | undefined) {
@@ -639,7 +648,7 @@ function ChatMessageRow({
             <button type="button" className="message-action-button" title="创建分支线程" aria-label="创建分支线程" onClick={onFork}>
               <GitFork size={14} strokeWidth={1.8} aria-hidden="true" />
             </button>
-            <button type="button" className="message-action-button" title="保存检查点" aria-label="保存检查点" onClick={onSave}>
+            <button type="button" data-testid="checkpoint-open" className="message-action-button" title="保存检查点" aria-label="保存检查点" onClick={onSave}>
               <Save size={14} strokeWidth={1.8} aria-hidden="true" />
             </button>
           </footer>
@@ -760,10 +769,10 @@ function SaveCheckpointModal({
         </label>
         {error ? <p className="error-text">{String((error as Error).message ?? error)}</p> : null}
         <div className="modal-actions">
-          <button type="button" className="primary-button" disabled={isPending} onClick={onSave}>
+          <button type="button" data-testid="checkpoint-save" className="primary-button" disabled={isPending} onClick={onSave}>
             {isPending ? "保存中..." : "保存"}
           </button>
-          <button type="button" className="ghost-button" onClick={onCancel}>取消</button>
+          <button type="button" data-testid="checkpoint-cancel" className="ghost-button" onClick={onCancel}>取消</button>
         </div>
       </div>
     </div>
@@ -800,7 +809,7 @@ function TextEntryModal({
 
   return (
     <div className="modal-scrim">
-      <div className="modal-card checkpoint-modal">
+      <div className="modal-card checkpoint-modal" data-testid="checkpoint-modal">
         <div className="card-header">
           <h2>{request.title}</h2>
         </div>
@@ -1021,7 +1030,7 @@ function InspectorTabButton({
   onClick: (tab: InspectorTab) => void;
 }) {
   return (
-    <button type="button" className={`inspector-tab-button ${active ? "active" : ""}`} onClick={() => onClick(tab)} title={label}>
+    <button type="button" data-testid={`inspector-tab-${tab}`} className={`inspector-tab-button ${active ? "active" : ""}`} onClick={() => onClick(tab)} title={label}>
       {icon}
       <span>{label}</span>
     </button>
@@ -1047,7 +1056,7 @@ function ReviewInspectorPanel({
   const files = (review?.files?.length ? review.files : fallback?.reviewFiles) ?? [];
   const fallbackDetail = selectedPath ? fallback?.detailByPath[selectedPath] : "";
   return (
-    <section className="inspector-tool-panel">
+    <section className="inspector-tool-panel" data-testid="review-panel">
       <div className="section-header">
         <h2>审查</h2>
         <span className="diff-progress-pill">
@@ -1126,7 +1135,7 @@ function BrowserInspectorPanel({
 }) {
   const browser = latestSmoke ?? supervisor?.browser;
   return (
-    <section className="inspector-tool-panel">
+    <section className="inspector-tool-panel" data-testid="browser-panel">
       <div className="section-header">
         <h2>浏览器</h2>
         <span className={`status-tag ${browser?.status === "pass" ? "status-ok" : ""}`}>{browser?.status ? productStatusLabel(browser.status) : "未运行"}</span>
@@ -1156,7 +1165,7 @@ function BrowserInspectorPanel({
         <p className="muted compact-copy">还没有 browser smoke 结果。</p>
       )}
       <button type="button" className="ghost-button inspector-inline-action" disabled={isRunning} onClick={onRunSmoke}>
-        {isRunning ? "运行中..." : "运行浏览器 smoke"}
+        {isRunning ? "运行中..." : "运行工作流 smoke"}
       </button>
     </section>
   );
@@ -1184,7 +1193,7 @@ function FilesInspectorPanel({
   const items = (tree?.items?.length ? tree.items : fallback?.recentFiles) ?? [];
   const fallbackDetail = selectedPath ? fallback?.detailByPath[selectedPath] : "";
   return (
-    <section className="inspector-tool-panel">
+    <section className="inspector-tool-panel" data-testid="files-panel">
       <div className="section-header">
         <h2>项目文件</h2>
         <span className="status-tag">{items.length}</span>
@@ -3157,10 +3166,10 @@ function AppShell() {
   const inspectorBrowserSmoke = useMutation({
     mutationFn: () =>
       api.dogfoodBrowserSmoke({
-        url: supervisor.data?.browser?.url || "http://127.0.0.1:8123/",
-        label: "inspector gameplay smoke",
+        url: currentBrowserSmokeUrl(),
+        label: "inspector release workflow smoke",
+        preset: RELEASE_WORKFLOW_SMOKE_PRESET,
         include_run: true,
-        actions: DEFAULT_GAMEPLAY_SMOKE_ACTIONS,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["runtime-supervisor"] });
@@ -4169,6 +4178,7 @@ function AppShell() {
   const sidebarTasks = !archivedVisible ? (projectTasks.data?.tasks ?? []) : [];
   return (
     <div
+      data-testid="app-shell"
       className="shell-grid"
       style={{
         gridTemplateColumns: `${leftPane.width}px 8px minmax(0, 1fr) ${rightSidebarOpen ? `8px ${rightPane.width}px` : ""}`,
@@ -4312,15 +4322,16 @@ function AppShell() {
                 <button
                   type="button"
                   className="ghost-button topbar-compact-action"
+                  data-testid="topbar-compact"
                   disabled={!selectedThreadId || compactThread.isPending}
                   onClick={() => compactThread.mutate({ threadId: selectedThreadId ?? "", profileId: activeSettings.profile_id })}
                 >
                   {compactThread.isPending ? t(locale, "loading") : t(locale, "compact_context")}
                 </button>
-                <button type="button" className="ghost-button" onClick={handleForkThread} disabled={!selectedThreadId}>
+                <button type="button" className="ghost-button" data-testid="topbar-fork" onClick={handleForkThread} disabled={!selectedThreadId}>
                   {locale === "zh-CN" ? "创建分支线程" : t(locale, "fork_thread")}
                 </button>
-                <button type="button" className="ghost-button" onClick={toggleRightSidebar}>
+                <button type="button" className="ghost-button" data-testid="topbar-toggle-inspector" onClick={toggleRightSidebar}>
                   {rightSidebarOpen ? t(locale, "hide_inspector") : t(locale, "show_inspector")}
                 </button>
               </>
@@ -4394,7 +4405,7 @@ function AppShell() {
           </section>
         ) : null}
 
-        <div className="message-stream">
+        <div className="message-stream" data-testid="message-stream">
           {activeThread?.forkedFromId ? (
             <div className="task-fork-row">
               <span>分支来源线程</span>
@@ -4441,7 +4452,7 @@ function AppShell() {
           {!selectedThread.isLoading && !taskConversation.isLoading && blocks.length === 0 ? <div className="empty-state">{t(locale, "no_messages")}</div> : null}
         </div>
 
-        <footer className="composer">
+        <footer className="composer" data-testid="composer">
           <div className="attachment-bar">
             {attachments.map((attachment, index) => (
               <div className="attachment-card" key={attachment.id}>
@@ -4464,7 +4475,7 @@ function AppShell() {
               </div>
             ))}
           </div>
-          <textarea value={composerText} onChange={(event) => setComposerText(event.target.value)} rows={6} placeholder={t(locale, "composer_placeholder")} />
+          <textarea data-testid="composer-input" value={composerText} onChange={(event) => setComposerText(event.target.value)} rows={6} placeholder={t(locale, "composer_placeholder")} />
           <div className="composer-controls composer-toolbar">
             <div className="composer-toolbar-left">
               <button type="button" className="composer-plus" onClick={handleAddAttachments} aria-label={t(locale, "add_files")}>
@@ -4576,6 +4587,7 @@ function AppShell() {
               <button
               type="button"
               className="primary-button composer-send"
+              data-testid="composer-send"
               disabled={
                 imageAttachmentUnsupported ||
                 Boolean(activeModelAuthority?.sendBlocked) ||
@@ -4615,7 +4627,7 @@ function AppShell() {
 
           {inspectorTab === "status" ? (
             <>
-              <section className="pane-section inspector-section">
+              <section className="pane-section inspector-section" data-testid="status-panel-goal">
                 <div className="section-header">
                   <h2>{t(locale, "goal")}</h2>
                 </div>
