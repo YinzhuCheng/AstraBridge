@@ -4,6 +4,7 @@ import { Files, GitCompare, GitFork, Globe2, ListChecks, Save, Terminal } from "
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
+import { modelAuthorityState } from "./features/runtime/modelAuthorityNotice";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
 import { composerReasoningOptions, preferredReasoningEffort } from "./features/runtime/reasoningOptions";
 import { runtimeErrorNoticeActions, runtimeErrorNoticeText, type RuntimeErrorAction } from "./features/runtime/runtimeErrorNotice";
@@ -3369,6 +3370,7 @@ function AppShell() {
       null
     );
   }, [activeProfile?.provider_id, activeSettings.model, llmCatalog.data?.models, routerConfig.data?.models]);
+  const activeModelAuthority = useMemo(() => modelAuthorityState(activeModelEntry), [activeModelEntry]);
   const composerEffortOptions = useMemo(
     () => composerReasoningOptions(activeModelEntry, activeProfile, activeSettings.reasoning_effort),
     [activeModelEntry, activeProfile, activeSettings.reasoning_effort],
@@ -3376,10 +3378,12 @@ function AppShell() {
   const imageAttachmentUnsupported = attachments.some((attachment) => attachment.kind === "image") && !(activeModelEntry?.input_modalities ?? ["text"]).includes("image");
   const mcpEnabled = (mcpConfig.data?.servers ?? []).some((server) => server.enabled);
   const mcpUnverified = mcpEnabled && activeModelEntry && !activeModelEntry.supports_mcp_tools;
+  const authorityWarnings = activeModelAuthority?.notices ?? [];
   const capabilityWarnings = [
+    ...authorityWarnings,
     ...(imageAttachmentUnsupported ? [t(locale, "capability_warning_image")] : []),
     ...(mcpUnverified ? [t(locale, "capability_warning_mcp")] : []),
-    ...((activeModelEntry?.ui_warnings ?? []).slice(0, 2)),
+    ...((activeModelEntry?.ui_warnings ?? []).filter((warning) => !authorityWarnings.includes(warning)).slice(0, 2)),
   ];
   const runtimeRecoveryActions = runtimeErrorNoticeActions(supervisor.data?.runtime_error ?? null);
   const runtimeRecoveryPendingAction = restartRuntime.isPending
@@ -4545,7 +4549,13 @@ function AppShell() {
               <button
               type="button"
               className="primary-button composer-send"
-              disabled={imageAttachmentUnsupported || (!composerText.trim() && attachments.length === 0) || startTurn.isPending || createThread.isPending}
+              disabled={
+                imageAttachmentUnsupported ||
+                Boolean(activeModelAuthority?.sendBlocked) ||
+                (!composerText.trim() && attachments.length === 0) ||
+                startTurn.isPending ||
+                createThread.isPending
+              }
               onClick={handleSend}
               aria-label={startTurn.isPending || createThread.isPending ? t(locale, "loading") : t(locale, "send")}
             >

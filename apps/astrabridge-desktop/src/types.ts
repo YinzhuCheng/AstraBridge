@@ -306,6 +306,9 @@ export type RouterModelEntry = {
   context_compaction_support?: Record<string, string>;
   modality_limits?: Record<string, unknown>;
   ui_warnings?: string[];
+  authority_tier?: "A" | "B" | "C" | "D" | string;
+  authority_reason?: string;
+  parallel_tool_call_status?: "verified" | "serial_only" | "disabled" | string;
   source_urls?: string[];
   source_status?: string;
   recommended?: boolean;
