@@ -3169,6 +3169,124 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         permission_mode="auto",
                     )
 
+    def test_runtime_start_turn_native_kernel_can_create_and_list_checkpoints(self) -> None:
+        class FakeNativeRouter:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete_response(self, payload: dict[str, object]) -> dict[str, object]:
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                        "adapter": "chat_completions",
+                        "normalized": NormalizedResponse(
+                            text="",
+                            reasoning_summary="Create a checkpoint before I summarize it.",
+                            reasoning_state=None,
+                            tool_calls=[
+                                ToolCall(
+                                    id="call-checkpoint-create",
+                                    name="create_checkpoint",
+                                    arguments_json='{"description":"Native checkpoint"}',
+                                )
+                            ],
+                            usage=None,
+                            finish_reason="tool_calls",
+                        ),
+                    }
+                if self.calls == 2:
+                    return {
+                        "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                        "adapter": "chat_completions",
+                        "normalized": NormalizedResponse(
+                            text="",
+                            reasoning_summary="Inspect the saved checkpoint list.",
+                            reasoning_state=None,
+                            tool_calls=[
+                                ToolCall(
+                                    id="call-checkpoint-list",
+                                    name="list_checkpoints",
+                                    arguments_json='{"limit":5}',
+                                )
+                            ],
+                            usage=None,
+                            finish_reason="tool_calls",
+                        ),
+                    }
+                return {
+                    "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                    "adapter": "chat_completions",
+                    "normalized": NormalizedResponse(
+                        text="Created one checkpoint and confirmed it is visible in the workspace saves list.",
+                        reasoning_summary=None,
+                        reasoning_state=None,
+                        tool_calls=[],
+                        usage=None,
+                        finish_reason="stop",
+                    ),
+                }
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "scorecard.py").write_text("print('checkpoint target')\n", encoding="utf-8")
+
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            task = tasks.create_task(
+                "Native checkpoint",
+                thread_id="native-thread-checkpoint",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                    "execution_backend": "native_kernel",
+                },
+            )
+            profiles = ProfileService(store_path=root / "profiles.json")
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                task_service=tasks,
+                profile_service=profiles,
+            )
+            tools = ProjectToolsService(projects, runtime, checkpoints=CheckpointService(projects), tasks=tasks, profiles=profiles)
+            runtime.attach_project_tools(tools)
+            runtime.attach_router(FakeNativeRouter())
+
+            profile = profiles.resolve_runtime_profile("deepseek-default")
+            with patch.dict(os.environ, {"ASTRABRIDGE_ENABLE_NATIVE_KERNEL": "1"}, clear=False):
+                runtime.start_turn(
+                    profile,
+                    thread_id="native-thread-checkpoint",
+                    text="Create a checkpoint and confirm it exists.",
+                    attachments=[],
+                    model="deepseek-v4-pro",
+                    effort="high",
+                    permission_mode="auto",
+                )
+
+            saves_root = projects.require_shell_state_root() / "saves"
+            manifests = sorted(saves_root.glob("*/manifest.json"))
+            self.assertEqual(len(manifests), 1)
+            thread = runtime.read_thread(profile, "native-thread-checkpoint")["thread"]
+            item_types = [item["type"] for item in thread["turns"][0]["items"]]
+            self.assertIn("dynamicToolCall", item_types)
+            dynamic_items = [item for item in thread["turns"][0]["items"] if item["type"] == "dynamicToolCall"]
+            self.assertTrue(any(str(item.get("tool") or "") == "create_checkpoint" for item in dynamic_items))
+            self.assertTrue(any(str(item.get("tool") or "") == "list_checkpoints" for item in dynamic_items))
+
+            refreshed_task = tasks.current_task()
+            checkpoint_refs = list((refreshed_task or {}).get("checkpoint_refs") or [])
+            self.assertEqual(len(checkpoint_refs), 1)
+            self.assertEqual(str(checkpoint_refs[0].get("description") or ""), "Native checkpoint")
+            self.assertEqual(str((refreshed_task or {}).get("task_id") or ""), task["task_id"])
+
     def test_runtime_read_thread_decorates_existing_dynamic_tool_evidence(self) -> None:
         class FakeClient:
             def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:

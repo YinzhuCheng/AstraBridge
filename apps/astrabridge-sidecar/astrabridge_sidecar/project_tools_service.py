@@ -196,6 +196,43 @@ class ProjectToolsService:
             "updated_at": now_iso(),
         }
 
+    def list_checkpoints(self, limit: int = 20) -> dict[str, Any]:
+        if self._checkpoints is None:
+            return {"saves": [], "saves_root": "", "available": False}
+        response = dict(self._checkpoints.list_saves() or {})
+        saves = list(response.get("saves") or [])
+        bounded_limit = max(1, min(int(limit or 20), 100))
+        response["saves"] = saves[:bounded_limit]
+        response["available"] = True
+        response["truncated"] = len(saves) > bounded_limit
+        response["updated_at"] = now_iso()
+        return response
+
+    def create_checkpoint(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._checkpoints is None:
+            raise ValueError("Checkpoint service is not available.")
+        request = dict(payload or {})
+        context = self._edit_context(request, target_exists=False)
+        thread_name = "Current thread"
+        if self._tasks is not None:
+            active = self._tasks.active_provider_thread(include_missing_fallback=True) or {}
+            thread_name = str(active.get("name") or "").strip() or thread_name
+        save_payload = {
+            "thread_id": context.get("execution_thread_id"),
+            "thread_name": request.get("thread_name") or thread_name,
+            "description": request.get("description") or "",
+            "provider": context.get("provider_id") or "",
+            "model": context.get("model_id") or "",
+        }
+        response = self._checkpoints.create(save_payload, system=bool(request.get("system")))
+        manifest = (response.get("save") or response.get("manifest") or response) if isinstance(response, dict) else {}
+        if isinstance(manifest, dict) and self._tasks is not None:
+            try:
+                self._tasks.record_checkpoint(manifest)
+            except Exception:
+                pass
+        return response
+
     def resolve_model_record(self, provider_id: str | None, model_id: str | None, *, target_exists: bool = False) -> dict[str, Any]:
         return self._resolve_model_record(provider_id, model_id, target_exists=target_exists)
 

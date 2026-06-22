@@ -56,6 +56,27 @@ class RuntimeToolFacade:
                 },
             ),
             self._tool_definition(
+                "terminal_history",
+                "Read bounded recent terminal and command execution history recorded for the current workspace.",
+                {
+                    "limit": {"type": "integer", "description": "Optional result cap."},
+                },
+            ),
+            self._tool_definition(
+                "list_checkpoints",
+                "List recent AstraBridge checkpoints for the current workspace.",
+                {
+                    "limit": {"type": "integer", "description": "Optional result cap."},
+                },
+            ),
+            self._tool_definition(
+                "create_checkpoint",
+                "Create a workspace checkpoint under .astrabridge/saves with an optional description.",
+                {
+                    "description": {"type": "string", "description": "Optional checkpoint description."},
+                },
+            ),
+            self._tool_definition(
                 "read_file",
                 "Read one text or image file from the workspace.",
                 {
@@ -90,6 +111,12 @@ class RuntimeToolFacade:
             result = self._project_tools.review_diff(arguments.get("path"))
         elif name == "files_tree":
             result = self._project_tools.files_tree(arguments.get("query"), arguments.get("limit") or 200)
+        elif name == "terminal_history":
+            result = self._project_tools.terminal_history(arguments.get("limit") or 30)
+        elif name == "list_checkpoints":
+            result = self._project_tools.list_checkpoints(arguments.get("limit") or 20)
+        elif name == "create_checkpoint":
+            result = self._project_tools.create_checkpoint(arguments)
         elif name == "read_file":
             result = self._project_tools.read_file(str(arguments.get("path") or ""))
         elif name == "edit_preview":
@@ -111,6 +138,25 @@ class RuntimeToolFacade:
                 "kind": result.get("kind"),
                 "size": result.get("size"),
                 "content": str(result.get("content") or "")[:20000] if result.get("kind") == "text" else result.get("message"),
+            }
+            return json.dumps(redact_sensitive(payload), ensure_ascii=False)
+        if name == "terminal_history":
+            payload = {
+                "execution_host": result.get("execution_host"),
+                "commands": list(result.get("commands") or [])[:20],
+            }
+            return json.dumps(redact_sensitive(payload), ensure_ascii=False)
+        if name == "list_checkpoints":
+            payload = {
+                "available": result.get("available"),
+                "truncated": result.get("truncated"),
+                "saves": list(result.get("saves") or [])[:12],
+            }
+            return json.dumps(redact_sensitive(payload), ensure_ascii=False)
+        if name == "create_checkpoint":
+            payload = {
+                "save": result.get("save") or result.get("manifest"),
+                "path": result.get("path"),
             }
             return json.dumps(redact_sensitive(payload), ensure_ascii=False)
         if name == "review_diff":
@@ -204,6 +250,18 @@ class RuntimeToolFacade:
         elif call.name == "review_status":
             summary["git"] = dict(result.get("git") or {})
             summary["files"] = [str(item.get("path") or "") for item in list(result.get("files") or [])[:6] if isinstance(item, dict)]
+        elif call.name == "terminal_history":
+            commands = list(result.get("commands") or [])
+            summary["command_count"] = len(commands)
+            summary["commands"] = [str(item.get("summary") or item.get("command") or "")[:120] for item in commands[:6] if isinstance(item, dict)]
+        elif call.name == "list_checkpoints":
+            saves = list(result.get("saves") or [])
+            summary["checkpoint_count"] = len(saves)
+            summary["save_ids"] = [str(item.get("save_id") or "") for item in saves[:6] if isinstance(item, dict)]
+        elif call.name == "create_checkpoint":
+            save = dict(result.get("save") or result.get("manifest") or {})
+            summary["checkpoint_save_id"] = save.get("save_id")
+            summary["checkpoint_description"] = save.get("description")
         elif call.name == "read_file":
             summary["kind"] = result.get("kind")
             if result.get("kind") == "text":
