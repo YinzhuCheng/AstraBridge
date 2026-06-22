@@ -1101,7 +1101,7 @@ function ReviewInspectorPanel({
 
 function TerminalInspectorPanel({ supervisor, history }: { supervisor?: RuntimeSupervisorState; history?: ProjectTerminalHistory }) {
   return (
-    <section className="inspector-tool-panel">
+    <section className="inspector-tool-panel" data-testid="terminal-panel">
       <div className="section-header">
         <h2>终端</h2>
         <span className="status-tag">{history?.execution_host ?? (supervisor?.environment.cwd ? "已连接" : "未连接")}</span>

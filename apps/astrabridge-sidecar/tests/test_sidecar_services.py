@@ -8186,6 +8186,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(smoke["browser_smoke"]["label"], "AstraBridge release workflow smoke")
             self.assertEqual(smoke["browser_smoke"]["verification_level"], "asserted")
             self.assertTrue(any(item.get("selector") == "[data-testid='review-panel']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='terminal-panel']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='checkpoint-modal']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='status-panel-goal']" for item in final_assertions if isinstance(item, dict)))
 
@@ -8215,6 +8216,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(smoke["browser_smoke"]["label"], "AstraBridge provider switch workflow smoke")
             self.assertEqual(smoke["browser_smoke"]["verification_level"], "asserted")
             self.assertTrue(any(item.get("selector") == "[data-testid='composer-profile']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='terminal-panel']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-handoffs']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-backend']" for item in final_assertions if isinstance(item, dict)))
 
@@ -8250,6 +8252,233 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 {"type": "select_value", "selector": "[data-testid='composer-profile']", "value": "kimi-default", "timeout_ms": 3000},
                 actions,
             )
+
+    def test_release_grade_provider_switch_workflow_integrates_checkpoint_review_tests_and_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            subprocess = __import__("subprocess")
+            subprocess.check_call(["git", "init"], cwd=str(workspace), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.check_call(["git", "config", "user.email", "astrabridge@example.invalid"], cwd=str(workspace))
+            subprocess.check_call(["git", "config", "user.name", "AstraBridge Test"], cwd=str(workspace))
+            (workspace / "checks.json").write_text(
+                json.dumps(
+                    [
+                        {"name": "build", "ok": True},
+                        {"name": "lint", "ok": False},
+                    ],
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (workspace / "scorecard.py").write_text(
+                "import json\n\n"
+                "def summarize_checks(path='checks.json'):\n"
+                "    with open(path, 'r', encoding='utf-8') as handle:\n"
+                "        json.load(handle)\n"
+                "    return []\n",
+                encoding="utf-8",
+            )
+            (workspace / "test_scorecard.py").write_text(
+                "import unittest\n"
+                "from scorecard import summarize_checks\n\n"
+                "class ScorecardTests(unittest.TestCase):\n"
+                "    def test_summary_contains_status_lines(self):\n"
+                "        self.assertEqual(summarize_checks(), ['PASS build', 'FAIL lint'])\n\n"
+                "if __name__ == '__main__':\n"
+                "    unittest.main()\n",
+                encoding="utf-8",
+            )
+            subprocess.check_call(["git", "add", "checks.json", "scorecard.py", "test_scorecard.py"], cwd=str(workspace))
+            subprocess.check_call(["git", "commit", "-m", "baseline"], cwd=str(workspace), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Release workflow demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            task = tasks.create_task(
+                "Release workflow",
+                thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            route_started_at = int(
+                datetime.fromisoformat(str(task["provider_threads"][0]["created_at"]).replace("Z", "+00:00")).timestamp()
+            )
+
+            class FakeClient:
+                def __init__(self) -> None:
+                    self.requests: list[tuple[str, dict[str, object]]] = []
+
+                def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:
+                    payload = dict(params or {})
+                    self.requests.append((method, payload))
+                    if method == "thread/read":
+                        thread_id = str(payload.get("threadId") or "")
+                        if thread_id == "thread-deepseek":
+                            return {
+                                "thread": {
+                                    "id": "thread-deepseek",
+                                    "displayName": "DeepSeek lane",
+                                    "shellSettings": {
+                                        "profile_id": "deepseek-default",
+                                        "provider_id": "deepseek",
+                                        "model": "deepseek-v4-pro",
+                                        "reasoning_effort": "high",
+                                        "permission_mode": "auto",
+                                    },
+                                    "turns": [
+                                        {
+                                            "id": "turn-deepseek",
+                                            "startedAt": route_started_at + 1,
+                                            "completedAt": route_started_at + 2,
+                                            "items": [
+                                                {"type": "userMessage", "id": "user-1", "content": [{"type": "input_text", "text": "Inspect the release scorecard workspace."}]},
+                                                {"type": "agentMessage", "id": "agent-1", "text": "I inspected the workspace and found a failing scorecard implementation."},
+                                            ],
+                                        }
+                                    ],
+                                }
+                            }
+                        if thread_id == "thread-kimi-fresh":
+                            return {
+                                "thread": {
+                                    "id": "thread-kimi-fresh",
+                                    "displayName": "Kimi lane",
+                                    "shellSettings": {
+                                        "profile_id": "kimi-default",
+                                        "provider_id": "kimi",
+                                        "model": "kimi-k2.6",
+                                        "reasoning_effort": "high",
+                                        "permission_mode": "auto",
+                                    },
+                                    "turns": [
+                                        {
+                                            "id": "turn-kimi",
+                                            "startedAt": route_started_at + 4,
+                                            "completedAt": route_started_at + 5,
+                                            "items": [
+                                                {"type": "userMessage", "id": "user-2", "content": [{"type": "input_text", "text": "Continue the same task, fix the scorecard, and rerun tests."}]},
+                                                {"type": "agentMessage", "id": "agent-2", "text": "I switched lanes, created a recovery plan, and I am ready to fix the scorecard."},
+                                            ],
+                                        }
+                                    ],
+                                }
+                            }
+                        raise AssertionError(f"unexpected thread/read id: {thread_id}")
+                    if method == "thread/start":
+                        return {"thread": {"id": "thread-kimi-fresh", "name": "Kimi lane"}}
+                    if method == "turn/start":
+                        thread_id = str(payload.get("threadId") or "")
+                        if thread_id == "thread-deepseek":
+                            return {"turn": {"id": "turn-deepseek", "status": "completed"}}
+                        if thread_id == "thread-kimi-fresh":
+                            return {"turn": {"id": "turn-kimi", "status": "completed"}}
+                        raise AssertionError(f"unexpected turn/start id: {thread_id}")
+                    raise AssertionError(f"Unexpected method {method}")
+            profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            conversation = TaskConversationService(projects, tasks)
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                task_service=tasks,
+                task_conversation=conversation,
+                profile_service=profiles,
+            )
+            tools = ProjectToolsService(projects, runtime, checkpoints=CheckpointService(projects), tasks=tasks, profiles=profiles, router_config=router_config)
+            runtime.attach_project_tools(tools)
+            client = FakeClient()
+            runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id")}  # type: ignore[method-assign]  # noqa: ARG005
+            runtime._ensure_client = lambda runtime_status: client  # type: ignore[method-assign]  # noqa: ARG005
+
+            first_turn = runtime.start_turn(
+                {"profile_id": "deepseek-default", "provider_id": "deepseek", "model": "deepseek-v4-pro", "reasoning_effort": "high"},
+                thread_id="thread-deepseek",
+                text="Inspect the release readiness scorecard workspace.",
+                attachments=[],
+                model="deepseek-v4-pro",
+                effort="high",
+                permission_mode="auto",
+            )
+            switched_turn = runtime.start_turn(
+                {"profile_id": "kimi-default", "provider_id": "kimi", "model": "kimi-k2.6", "reasoning_effort": "high"},
+                thread_id="thread-deepseek",
+                text="Continue the same task, fix the scorecard, and rerun tests.",
+                attachments=[],
+                model="kimi-k2.6",
+                effort="high",
+                permission_mode="auto",
+            )
+
+            self.assertEqual(first_turn["thread_id"], "thread-deepseek")
+            self.assertEqual(switched_turn["thread_id"], "thread-kimi-fresh")
+            self.assertEqual(str((switched_turn.get("handoff") or {}).get("type") or ""), "provider_handoff")
+            self.assertEqual(tasks.current_task()["active_provider_thread_id"], "thread-kimi-fresh")
+
+            runtime.read_thread({"profile_id": "deepseek-default", "provider_id": "deepseek"}, "thread-deepseek")
+            runtime.read_thread({"profile_id": "kimi-default", "provider_id": "kimi"}, "thread-kimi-fresh")
+            composite = conversation.conversation(task_id=task["task_id"])["thread"]
+            composite_turn_ids = [turn["id"] for turn in composite["turns"]]
+            self.assertEqual(composite_turn_ids, ["turn-deepseek", tasks.current_task()["handoff_events"][-1]["event_id"], "turn-kimi"])
+
+            files = tools.files_tree()
+            self.assertTrue(any(item["path"] == "scorecard.py" for item in files["items"]))
+            preview = tools.read_file("checks.json")
+            self.assertEqual(preview["kind"], "text")
+            self.assertIn("\"build\"", preview["content"])
+
+            failing = tools.run_tests({"command": "python -m unittest -q test_scorecard"})
+            self.assertFalse(failing["ok"])
+            self.assertEqual(failing["status"], "failed")
+            self.assertIn("FAIL", failing["output"])
+
+            checkpoint = tools.create_checkpoint({"description": "Before fixing scorecard"})
+            self.assertTrue(str((checkpoint.get("save") or {}).get("save_id") or ""))
+
+            edit = tools.edit_apply(
+                {
+                    "path": "scorecard.py",
+                    "content": (
+                        "import json\n\n"
+                        "def summarize_checks(path='checks.json'):\n"
+                        "    with open(path, 'r', encoding='utf-8') as handle:\n"
+                        "        checks = json.load(handle)\n"
+                        "    return [f\"{'PASS' if item['ok'] else 'FAIL'} {item['name']}\" for item in checks]\n"
+                    ),
+                    "profile_id": "kimi-default",
+                }
+            )
+            self.assertTrue(edit["applied"])
+            self.assertEqual(edit["event"]["provider_id"], "kimi")
+
+            review = tools.review_diff("scorecard.py")
+            self.assertTrue(review["ok"])
+            self.assertIn("PASS", review["diff"])
+
+            status = tools.review_status()
+            self.assertTrue(any(item["path"] == "scorecard.py" for item in status["files"]))
+
+            passing = tools.run_tests({"command": "python -m unittest -q test_scorecard"})
+            self.assertTrue(passing["ok"])
+            self.assertEqual(passing["status"], "completed")
+
+            history = tools.terminal_history(limit=10)
+            commands = list(history["commands"])
+            self.assertTrue(any(item["status"] == "failed" for item in commands))
+            self.assertTrue(any(item["status"] == "completed" for item in commands))
+            self.assertTrue(any("python -m unittest -q test_scorecard" in str(item.get("command") or "") for item in commands))
+
+            refreshed_task = tasks.current_task()
+            self.assertTrue(list(refreshed_task.get("checkpoint_refs") or []))
+            self.assertTrue(list(refreshed_task.get("handoff_events") or []))
+            self.assertTrue(list(refreshed_task.get("verification_refs") or []))
 
     def test_checkpoint_service_git_save_load_without_git_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
