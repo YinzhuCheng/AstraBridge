@@ -163,6 +163,13 @@ class TaskConversationService:
             else:
                 items.append(item)
         annotated["items"] = items
+        event_source = "native_kernel" if str(snapshot.get("shellSettings", {}).get("execution_backend") or route.get("execution_backend") or "").strip() == "native_kernel" else "codex_app_server"
+        annotated["coding_events"] = project_turn_to_coding_events(
+            task_id=str(snapshot.get("task_id") or ""),
+            visible_thread_id=f"task:{str(snapshot.get('task_id') or '')}" if snapshot.get("task_id") else f"thread:{thread_id or 'unknown'}",
+            turn=annotated,
+            source=event_source,
+        )
         return annotated
 
     def _digest_turn(self, turn: dict[str, Any]) -> dict[str, Any] | None:

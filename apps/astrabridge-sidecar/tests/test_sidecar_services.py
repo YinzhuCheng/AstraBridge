@@ -829,6 +829,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(thread["turns"][0]["provider_id"], "deepseek")
             self.assertEqual(thread["turns"][1]["provider_id"], "kimi")
             self.assertEqual(thread["turns"][1]["items"][0]["provider_id"], "kimi")
+            self.assertEqual(thread["turns"][0]["coding_events"][0]["event_type"], "agent_message")
+            self.assertEqual(thread["turns"][1]["coding_events"][0]["event_type"], "agent_message")
             transcript_text = (workspace / ".astrabridge" / "task_transcripts.json").read_text(encoding="utf-8")
             self.assertIn("task_transcripts", str(result["transcript_path"]))
             self.assertNotIn("should-not-persist", transcript_text)
@@ -2985,11 +2987,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
             runtime._prepare_runtime = lambda _profile, require_secret=False: {"configured": True, "provider_id": "deepseek"}  # type: ignore[method-assign]
 
             runtime.read_thread({"profile_id": "deepseek-default", "provider_id": "deepseek"}, "thread-deepseek")
+            direct = runtime.read_thread({"profile_id": "deepseek-default", "provider_id": "deepseek"}, "thread-deepseek")["thread"]
             composite = conversation.conversation(task_id=task["task_id"])["thread"]
 
             self.assertEqual(composite["id"], f"task:{task['task_id']}")
             self.assertEqual(composite["turns"][0]["provider_id"], "deepseek")
             self.assertEqual(composite["turns"][0]["items"][0]["provider_id"], "deepseek")
+            self.assertEqual(direct["turns"][0]["coding_events"][0]["event_type"], "agent_message")
+            self.assertEqual(composite["turns"][0]["coding_events"][0]["event_type"], "agent_message")
 
     def test_runtime_start_turn_native_kernel_executes_review_flow_and_merges_native_thread(self) -> None:
         class FakeNativeRouter:

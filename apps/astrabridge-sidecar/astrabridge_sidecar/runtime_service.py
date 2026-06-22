@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .app_server_client import AppServerClient, JsonRpcError
+from .coding_kernel import project_turn_to_coding_events
 from .common import WORKSPACE_STATE_DIRNAME, append_jsonl, new_id, now_iso, read_json, write_json
 from .dogfood_run_service import MAX_BROWSER_SMOKE_ACTIONS
 from .lcr_web_mcp_server import _tools as lcr_web_dynamic_tools
@@ -351,6 +352,7 @@ class RuntimeService:
         if native_thread is not None:
             decorated = self._decorate_thread(native_thread)
             decorated = self._decorate_dynamic_tool_evidence(decorated)
+            decorated = self._decorate_turn_coding_events(decorated)
             decorated = self._decorate_turn_completion_quality(decorated)
             self._record_task_thread_snapshot(decorated)
             return {"thread": decorated}
@@ -389,6 +391,7 @@ class RuntimeService:
         thread = self._decorate_thread(dict(result.get("thread") or {}))
         thread = self._overlay_dynamic_tool_events(thread)
         thread = self._decorate_dynamic_tool_evidence(thread)
+        thread = self._decorate_turn_coding_events(thread)
         thread = self._decorate_turn_completion_quality(thread)
         normalized_status = self._normalize_thread_status(thread)
         if isinstance(normalized_status, dict):
@@ -3656,6 +3659,54 @@ for host in candidates:
         if thread_id:
             normalized_status = self._overlay_cached_thread_status(thread_id, normalized_status)
         return {**thread, "status": normalized_status, "shellSettings": settings, "displayName": display_name}
+
+    def _decorate_turn_coding_events(self, thread: dict[str, Any]) -> dict[str, Any]:
+        turns = list(thread.get("turns") or [])
+        if not turns:
+            return thread
+        thread_id = str(thread.get("id") or "")
+        task_id = self._task_id_for_thread(thread_id)
+        execution_backend = str((thread.get("shellSettings") or {}).get("execution_backend") or "").strip()
+        source = "native_kernel" if execution_backend == "native_kernel" else "codex_app_server"
+        decorated_turns: list[dict[str, Any]] = []
+        changed = False
+        for turn in turns:
+            if not isinstance(turn, dict):
+                decorated_turns.append(turn)
+                continue
+            enriched = dict(turn)
+            if thread_id and not enriched.get("source_thread_id") and not enriched.get("sourceThreadId"):
+                enriched["source_thread_id"] = thread_id
+            if not enriched.get("provider_id") and not enriched.get("providerId"):
+                provider_id = str((thread.get("shellSettings") or {}).get("provider_id") or "").strip()
+                if provider_id:
+                    enriched["provider_id"] = provider_id
+            if not enriched.get("model"):
+                model = str((thread.get("shellSettings") or {}).get("model") or "").strip()
+                if model:
+                    enriched["model"] = model
+            coding_events = project_turn_to_coding_events(
+                task_id=task_id,
+                visible_thread_id=thread_id or "thread:unknown",
+                turn=enriched,
+                source=source,
+            )
+            if enriched.get("coding_events") != coding_events:
+                enriched["coding_events"] = coding_events
+                changed = True
+            decorated_turns.append(enriched)
+        return {**thread, "turns": decorated_turns} if changed else thread
+
+    def _task_id_for_thread(self, thread_id: str) -> str:
+        if not thread_id or self._tasks is None:
+            return ""
+        snapshot = self._tasks.snapshot() or {}
+        for task in list(snapshot.get("tasks") or []):
+            if not isinstance(task, dict):
+                continue
+            if any(str(item.get("thread_id") or "") == thread_id for item in list(task.get("provider_threads") or []) if isinstance(item, dict)):
+                return str(task.get("task_id") or "")
+        return ""
 
     def _normalize_thread_status(self, thread: dict[str, Any]) -> dict[str, Any] | Any:
         status = thread.get("status")
