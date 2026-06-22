@@ -558,8 +558,12 @@ export type RuntimeFailureTransitionTarget = {
 export type RuntimeFailureTransition = {
   action?: string;
   reason?: string;
+  reasoning_effort?: string | null;
+  context_strategy?: string;
   restart_runtime?: boolean;
   compact_before_send?: boolean;
+  drop_reasoning_replay?: boolean;
+  notes?: string[];
   target?: RuntimeFailureTransitionTarget;
 } | null;
 

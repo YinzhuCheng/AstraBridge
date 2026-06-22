@@ -7,6 +7,7 @@ import { t, permissionLabel } from "./features/i18n/catalog";
 import { summarizeCodingEventInspector } from "./features/runtime/codingEventInspector";
 import { modelAuthorityState } from "./features/runtime/modelAuthorityNotice";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
+import { resolveRecoveryComposerPatch } from "./features/runtime/runtimeRecoveryPlan";
 import { formatResponseDiagnostics, summarizeResponseDiagnosticsInline } from "./features/runtime/responseDiagnostics";
 import { composerReasoningOptions, preferredProviderReasoningEffort, preferredReasoningEffort, providerReasoningOptions, providerTemperatureDefaults } from "./features/runtime/reasoningOptions";
 import { runtimeErrorNoticeActions, runtimeErrorNoticeInline, runtimeErrorNoticeText, type RuntimeErrorAction } from "./features/runtime/runtimeErrorNotice";
@@ -3926,6 +3927,20 @@ function AppShell() {
   }
 
   function handleRuntimeRecoveryAction(action: RuntimeErrorAction) {
+    const recoveryPatch = resolveRecoveryComposerPatch({
+      action,
+      current: {
+        profile_id: activeSettings.profile_id,
+        model: activeSettings.model,
+        reasoning_effort: activeSettings.reasoning_effort,
+      },
+      activeProfile,
+      profiles: profiles.data?.profiles ?? [],
+      models: [
+        ...(llmCatalog.data?.models ?? []),
+        ...(routerConfig.data?.models ?? []),
+      ],
+    });
     switch (action.action) {
       case "restart_runtime_lane":
         restartRuntime.mutate();
@@ -3939,14 +3954,14 @@ function AppShell() {
         void handleForkThread();
         return;
       case "switch_model":
-        if (action.target) {
-          updateComposerSettings({ model: action.target });
+        if (recoveryPatch && Object.keys(recoveryPatch).length > 0) {
+          updateComposerSettings(recoveryPatch);
           setMainView("chat");
         }
         return;
       case "downgrade_reasoning":
-        if (action.target) {
-          updateComposerSettings({ reasoning_effort: action.target });
+        if (recoveryPatch && Object.keys(recoveryPatch).length > 0) {
+          updateComposerSettings(recoveryPatch);
           setMainView("chat");
         }
         return;
@@ -3955,24 +3970,8 @@ function AppShell() {
         setMainView("setup");
         return;
       case "handoff_provider": {
-        const currentProviderId = activeProfile?.provider_id ?? "";
-        const alternative = composerProviderOptions.find((option) => option.providerId && option.providerId !== currentProviderId);
-        if (alternative) {
-          const nextProfile = (profiles.data?.profiles ?? []).find((profile) => profile.profile_id === alternative.profileId);
-          const nextProviderId = alternative.providerId;
-          const nextModel = pickPreferredModelForProvider(nextProviderId) ?? nextProfile?.model ?? activeSettings.model;
-          const nextModelEntry =
-            (llmCatalog.data?.models ?? []).find((model) => model.provider === nextProviderId && model.native_model === nextModel) ??
-            (routerConfig.data?.models ?? []).find((model) => model.provider === nextProviderId && model.native_model === nextModel) ??
-            null;
-          const nextEfforts = composerReasoningOptions(nextModelEntry, nextProfile, activeSettings.reasoning_effort);
-          updateComposerSettings({
-            profile_id: alternative.profileId,
-            model: nextModel,
-            reasoning_effort: nextEfforts.includes(nextProfile?.reasoning_effort ?? "")
-              ? nextProfile?.reasoning_effort
-              : preferredReasoningEffort(nextModelEntry, nextProfile, activeSettings.reasoning_effort),
-          });
+        if (recoveryPatch && Object.keys(recoveryPatch).length > 0) {
+          updateComposerSettings(recoveryPatch);
           setMainView("chat");
           return;
         }
