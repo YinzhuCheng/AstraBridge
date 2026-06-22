@@ -116,6 +116,7 @@ export type Profile = {
   model: string;
   reasoning_effort: string;
   wire_api: string;
+  execution_backend?: string;
   env_key: string;
   auth_mode: "session_paste" | "env_ref" | "key_file" | "os_keychain";
   proxy_mode: "direct" | "system" | "custom";
@@ -235,6 +236,7 @@ export type RouterProvider = {
   display_name: string;
   enabled: boolean;
   adapter_type: string;
+  runtime_backend?: string;
   base_url: string;
   auth_key_ref?: string | null;
   default_model: string;

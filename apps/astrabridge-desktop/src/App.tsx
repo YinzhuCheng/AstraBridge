@@ -1853,6 +1853,7 @@ function RouterControlCenter({
                 display_name: "",
                 enabled: true,
                 adapter_type: "responses",
+                runtime_backend: "app_server",
                 base_url: "",
                 auth_key_ref: null,
                 default_model: "",

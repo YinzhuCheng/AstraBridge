@@ -11062,6 +11062,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
         qwen = get_provider_profile("qwen").to_default_profile()
         kimi = get_provider_profile("kimi").to_default_profile()
 
+        self.assertEqual(deepseek["execution_backend"], "app_server")
         self.assertEqual(deepseek["supported_reasoning_levels"], ["high", "xhigh", "max"])
         self.assertEqual(deepseek["default_reasoning_level"], "xhigh")
         self.assertEqual(deepseek["supports_mcp_tools"], True)
@@ -11079,6 +11080,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         self.assertEqual(catalog_provider["id"], "qwen")
         self.assertEqual(catalog_provider["adapter_type"], "responses")
+        self.assertEqual(catalog_provider["runtime_backend"], "app_server")
         self.assertEqual(catalog_provider["default_model"], "qwen3.7-plus")
         self.assertEqual(catalog_provider["env_key"], "DASHSCOPE_API_KEY")
         self.assertEqual(catalog_provider["supported_reasoning_levels"], ["low", "medium", "high", "xhigh"])
@@ -11136,6 +11138,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             self.assertEqual(provider["supported_reasoning_levels"], ["high", "xhigh", "max"])
             self.assertEqual(provider["default_reasoning_level"], "xhigh")
+            self.assertEqual(provider["runtime_backend"], "app_server")
             self.assertEqual(provider["temperature_adapter_policy"], "pass_through_0_2")
             self.assertEqual(provider["effective_context_window_percent"], 80)
             self.assertEqual(provider["fallback_models"], ["deepseek-v4-pro", "deepseek-v4-flash"])
@@ -11146,6 +11149,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(model["supported_reasoning_levels"], ["high", "xhigh", "max"])
             self.assertEqual(model["default_reasoning_level"], "xhigh")
             self.assertEqual(model["temperature_adapter_policy"], "pass_through_0_2")
+            self.assertEqual(profile["wire_api"], "chat")
+            self.assertEqual(profile["execution_backend"], "app_server")
             self.assertEqual(profile["supported_reasoning_levels"], ["high", "xhigh", "max"])
             self.assertEqual(profile["reasoning_effort"], "xhigh")
 
@@ -11154,30 +11159,30 @@ class AstraBridgeServiceTests(unittest.TestCase):
             profiles = ProfileService(Path(temp) / "profiles.json")
             created = profiles.upsert_profile(
                 {
-                    "profile_id": "qwen-custom",
-                    "label": "Qwen Custom",
+                    "profile_id": "deepseek-custom",
+                    "label": "DeepSeek Custom",
                     "type": "custom_provider",
-                    "provider_id": "qwen",
-                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                    "model": "qwen3.7-plus",
-                    "wire_api": "responses",
-                    "env_key": "DASHSCOPE_API_KEY",
+                    "provider_id": "deepseek",
+                    "base_url": "https://api.deepseek.com",
+                    "model": "deepseek-v4-pro",
+                    "env_key": "DEEPSEEK_API_KEY",
                     "auth_mode": "env_ref",
                     "proxy_mode": "direct",
                     "proxy_url": "",
                 }
             )
 
-            self.assertEqual(created["supported_reasoning_levels"], ["low", "medium", "high", "xhigh"])
-            self.assertEqual(created["default_reasoning_level"], "high")
-            self.assertEqual(created["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
-            self.assertAlmostEqual(float(created["provider_temperature_min"]), 0.00001)
+            self.assertEqual(created["wire_api"], "chat")
+            self.assertEqual(created["execution_backend"], "app_server")
+            self.assertEqual(created["supported_reasoning_levels"], ["high", "xhigh", "max"])
+            self.assertEqual(created["default_reasoning_level"], "xhigh")
+            self.assertEqual(created["temperature_adapter_policy"], "pass_through_0_2")
             self.assertEqual(created["effective_context_window_percent"], 80)
-            self.assertEqual(created["fallback_models"], ["qwen3.7-plus", "qwen3.7-max-2026-06-08", "qwen3.6-flash"])
-            self.assertEqual(created["edit_policy"]["medium"], "structured_edit")
+            self.assertEqual(created["fallback_models"], ["deepseek-v4-pro", "deepseek-v4-flash"])
+            self.assertEqual(created["edit_policy"]["medium"], "patch")
             self.assertTrue(created["capabilities"]["supports_reasoning"])
             self.assertEqual(created["input_modalities"], ["text"])
-            self.assertEqual(created["supports_mcp_tools"], False)
+            self.assertEqual(created["supports_mcp_tools"], True)
             self.assertEqual(created["web_search_tool_type"], "text")
 
     def test_router_config_seeds_profile_fallback_models_without_static_catalog_duplicates(self) -> None:

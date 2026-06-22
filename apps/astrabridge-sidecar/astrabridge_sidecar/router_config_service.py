@@ -47,6 +47,7 @@ PROFILE_MODEL_SEED_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
 }
 
 PROVIDER_METADATA_FIELDS = (
+    "runtime_backend",
     "supported_reasoning_levels",
     "default_reasoning_level",
     "reasoning_policy_mode",
@@ -136,6 +137,7 @@ class RouterConfigService:
             "display_name": display_name,
             "enabled": bool(provider.get("enabled", True)),
             "adapter_type": str(provider.get("adapter_type") or provider.get("wire_api") or ("responses" if registry_profile and registry_profile.protocol in {"responses", "qwen_responses"} else "responses")),
+            "runtime_backend": str(provider.get("runtime_backend") or provider.get("execution_backend") or (registry_profile.runtime_backend if registry_profile else "app_server")),
             "base_url": base_url,
             "auth_key_ref": provider.get("auth_key_ref"),
             "default_model": str(provider.get("default_model") or provider.get("model") or (registry_profile.default_model if registry_profile else "")).strip(),
@@ -303,6 +305,7 @@ class RouterConfigService:
             "display_name": str(profile.get("label") or provider_id),
             "enabled": True,
             "adapter_type": str(profile.get("wire_api") or "responses"),
+            "runtime_backend": str(profile.get("execution_backend") or profile.get("runtime_backend") or "app_server"),
             "base_url": str(profile.get("base_url") or ""),
             "auth_key_ref": profile.get("secret_ref"),
             "default_model": str(profile.get("model") or ""),
@@ -345,6 +348,7 @@ class RouterConfigService:
                     or str(self.reasoning().get("global_effort") or "high")
                 ),
                 "wire_api": provider.get("adapter_type") or "responses",
+                "execution_backend": provider.get("runtime_backend") or provider.get("execution_backend") or registry_defaults.get("execution_backend") or "app_server",
                 "env_key": provider.get("env_key") or "OPENAI_API_KEY",
                 "auth_mode": provider.get("auth_mode") or "env_ref",
                 "secret_ref": provider.get("auth_key_ref"),

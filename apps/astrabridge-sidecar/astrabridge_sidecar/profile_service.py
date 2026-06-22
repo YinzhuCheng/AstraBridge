@@ -47,6 +47,10 @@ PROVIDER_DEFAULT_METADATA_FIELDS = (
     "downgrade_reasoning_levels",
     "drop_unsupported_modalities",
 )
+PROVIDER_DEFAULT_CORE_FIELDS = (
+    "wire_api",
+    "execution_backend",
+)
 
 
 def _metadata_value_present(value: Any) -> bool:
@@ -87,6 +91,11 @@ class ProfileService:
             if profile_id not in existing:
                 existing[profile_id] = profile
                 changed = True
+        for profile_id, profile in list(existing.items()):
+            normalized_profile, normalized_changed = self._apply_provider_defaults(dict(profile))
+            if normalized_changed or normalized_profile != profile:
+                existing[profile_id] = normalized_profile
+                changed = True
         ordered = sorted(existing.values(), key=lambda item: str(item.get("profile_id")))
         if changed or profiles != ordered:
             payload["profiles"] = ordered
@@ -120,15 +129,6 @@ class ProfileService:
         payload = self.list_profiles()
         existing = {item["profile_id"]: item for item in payload["profiles"]}
         current = existing.get(profile_id, {})
-        provider_defaults = self._provider_defaults(str(profile.get("provider_id") or current.get("provider_id") or ""))
-        resolved_reasoning_effort = (
-            str(profile.get("reasoning_effort") or "").strip()
-            or str(current.get("reasoning_effort") or "").strip()
-            or str(profile.get("default_reasoning_level") or "").strip()
-            or str(current.get("default_reasoning_level") or "").strip()
-            or str(provider_defaults.get("default_reasoning_level") or "").strip()
-            or "high"
-        )
         merged = {
             **current,
             **profile,
@@ -138,23 +138,10 @@ class ProfileService:
             "env_key": env_key,
             "proxy_mode": proxy_mode,
             "proxy_url": proxy_url,
-            "reasoning_effort": resolved_reasoning_effort,
             "updated_at": now_iso(),
         }
         merged.setdefault("created_at", now_iso())
-        for field in PROVIDER_DEFAULT_METADATA_FIELDS:
-            if _metadata_value_present(merged.get(field)):
-                continue
-            value = provider_defaults.get(field)
-            if not _metadata_value_present(value):
-                continue
-            if isinstance(value, list):
-                merged[field] = list(value)
-            elif isinstance(value, dict):
-                merged[field] = dict(value)
-            else:
-                merged[field] = value
-        merged.setdefault("wire_api", "responses")
+        merged, _ = self._apply_provider_defaults(merged)
         merged.setdefault("secret_ref", None)
         existing[profile_id] = merged
         payload["profiles"] = sorted(existing.values(), key=lambda item: item["profile_id"])
@@ -240,7 +227,8 @@ class ProfileService:
             item = dict(profile)
             item.setdefault("created_at", created_at)
             item.setdefault("updated_at", created_at)
-            profiles.append(item)
+            normalized_item, _ = self._apply_provider_defaults(item)
+            profiles.append(normalized_item)
         return profiles
 
     @staticmethod
@@ -255,6 +243,36 @@ class ProfileService:
         defaults = dict(profile.profile_metadata_payload())
         defaults.setdefault("supported_reasoning_levels", list(profile.reasoning_levels()))
         defaults.setdefault("default_reasoning_level", profile.default_reasoning_level())
+        defaults.setdefault("wire_api", profile.adapter_type())
+        defaults.setdefault("execution_backend", profile.runtime_backend)
         return defaults
+
+    def _apply_provider_defaults(self, profile: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        changed = False
+        provider_defaults = self._provider_defaults(str(profile.get("provider_id") or ""))
+        resolved_reasoning_effort = (
+            str(profile.get("reasoning_effort") or "").strip()
+            or str(profile.get("default_reasoning_level") or "").strip()
+            or str(provider_defaults.get("default_reasoning_level") or "").strip()
+            or "high"
+        )
+        if str(profile.get("reasoning_effort") or "").strip() != resolved_reasoning_effort:
+            profile["reasoning_effort"] = resolved_reasoning_effort
+            changed = True
+        for field in PROVIDER_DEFAULT_METADATA_FIELDS:
+            if _metadata_value_present(profile.get(field)):
+                continue
+            value = provider_defaults.get(field)
+            if not _metadata_value_present(value):
+                continue
+            profile[field] = dict(value) if isinstance(value, dict) else list(value) if isinstance(value, list) else value
+            changed = True
+        for field, fallback in (("wire_api", "responses"), ("execution_backend", "app_server")):
+            if _metadata_value_present(profile.get(field)):
+                continue
+            value = provider_defaults.get(field)
+            profile[field] = value if _metadata_value_present(value) else fallback
+            changed = True
+        return profile, changed
 
 

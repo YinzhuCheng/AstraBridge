@@ -23,6 +23,8 @@ class ProviderCapabilities:
     supports_prompt_cache: bool
     max_context_tokens: int | None = None
     max_output_tokens: int | None = None
+    preferred_edit_mode: Literal["patch", "replace", "structured_edit", "propose_only"] | None = None
+    authority_tier: Literal["A", "B", "C", "D"] | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,7 @@ class ProviderProfile:
     context_policy: ContextPolicy
     fallback_policy: FallbackPolicy
     safety_policy: ProviderSafetyPolicy
+    runtime_backend: Literal["app_server", "native_kernel"] = "app_server"
 
     def adapter_type(self) -> str:
         return "responses" if self.protocol in {"responses", "qwen_responses"} else "chat"
@@ -124,6 +127,7 @@ class ProviderProfile:
             "display_name": self.display_name,
             "enabled": True,
             "adapter_type": self.adapter_type(),
+            "runtime_backend": self.runtime_backend,
             "base_url": self.base_url,
             "default_model": self.default_model,
             "env_key": self.primary_env_key(),
@@ -152,6 +156,7 @@ class ProviderProfile:
             "model": self.default_model,
             "reasoning_effort": self.default_profile_reasoning_effort(),
             "wire_api": self.adapter_type(),
+            "execution_backend": self.runtime_backend,
             "env_key": env_key,
             "auth_mode": "env_ref",
             "secret_ref": f"env:{env_key}",
@@ -170,6 +175,8 @@ class ProviderProfile:
             "supports_reasoning": self.capabilities.supports_reasoning,
             "supports_reasoning_replay": self.capabilities.supports_reasoning_replay,
             "supports_prompt_cache": self.capabilities.supports_prompt_cache,
+            "preferred_edit_mode": self.capabilities.preferred_edit_mode,
+            "authority_tier": self.capabilities.authority_tier,
             "max_context_tokens": self.capabilities.max_context_tokens,
             "max_output_tokens": self.capabilities.max_output_tokens,
             "input_modalities": list(self.context_policy.default_input_modalities),
@@ -182,6 +189,7 @@ class ProviderProfile:
             "reasoning_policy_mode": self.reasoning_policy.mode,
             "input_modalities": list(self.context_policy.default_input_modalities),
             "edit_policy": self.edit_policy_payload(),
+            "runtime_backend": self.runtime_backend,
             "capabilities": self.capability_payload(),
             "apply_patch_tool_type": self.tool_policy.apply_patch_tool_type,
             "web_search_tool_type": self.tool_policy.web_search_tool_type,
