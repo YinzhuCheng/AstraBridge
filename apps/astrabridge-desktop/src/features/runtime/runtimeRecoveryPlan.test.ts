@@ -94,6 +94,20 @@ const models: RouterModelEntry[] = [
     supported_reasoning_levels: ["low", "medium", "high"],
     default_reasoning_level: "high",
     default_for_provider: true,
+    deprecated: true,
+  },
+  {
+    id: "qwen/qwen3.7-plus",
+    provider: "qwen",
+    native_model: "qwen3.7-plus",
+    display_name: "Qwen 3.7 Plus",
+    enabled: true,
+    advertised_context_window: 1000000,
+    ui_context_hint_only: true,
+    adapter_profile: "default",
+    supported_reasoning_levels: ["low", "medium", "high"],
+    default_reasoning_level: "high",
+    recommended: true,
   },
   {
     id: "qwen/qwen3.6-flash",
@@ -157,6 +171,35 @@ describe("runtime recovery plan", () => {
       profile_id: "qwen-mirror",
       model: "qwen3.6-flash",
       reasoning_effort: "medium",
+    });
+  });
+
+  it("prefers a non-deprecated recommended provider model for provider handoff fallback", () => {
+    const action: RuntimeFailureAction = {
+      action: "handoff_provider",
+      label: "Switch Provider",
+      reason: "Move to qwen lane.",
+      transition: {
+        action: "handoff_provider",
+        reason: "move to qwen",
+        target: {
+          provider_id: "qwen",
+        },
+      },
+    };
+
+    const patch = resolveRecoveryComposerPatch({
+      action,
+      current: { profile_id: "deepseek-default", model: "deepseek-v4-pro", reasoning_effort: "xhigh" },
+      activeProfile: profiles[0],
+      profiles,
+      models,
+    });
+
+    expect(patch).toEqual({
+      profile_id: "qwen-default",
+      model: "qwen3.7-plus",
+      reasoning_effort: "high",
     });
   });
 

@@ -61,7 +61,8 @@ class TaskConversationService:
             for turn in list(snapshot.get("turns") or []):
                 if not isinstance(turn, dict):
                     continue
-                if cutoff is not None and self._turn_unix_timestamp(turn) < cutoff:
+                turn_ts = self._turn_unix_timestamp(turn)
+                if cutoff is not None and turn_ts is not None and (turn_ts + 999) < cutoff:
                     continue
                 turns.append(self._annotate_turn(dict(turn), snapshot=snapshot, route=route))
         for handoff_event in list(task.get("handoff_events") or []):
@@ -328,13 +329,13 @@ class TaskConversationService:
         for key in ("startedAt", "completedAt", "updatedAt", "createdAt"):
             value = turn.get(key)
             if isinstance(value, (int, float)):
-                return int(value)
+                return self._epoch_millis(value)
             if isinstance(value, str) and value.isdigit():
-                return int(value)
+                return self._epoch_millis(int(value))
             if isinstance(value, str):
                 try:
                     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-                    return int(parsed.timestamp())
+                    return int(parsed.timestamp() * 1000)
                 except Exception:
                     pass
         return None
@@ -358,13 +359,13 @@ class TaskConversationService:
         for key in ("started_at", "completed_at", "updated_at", "created_at"):
             value = item.get(key)
             if isinstance(value, (int, float)):
-                return (int(value), str(item.get("source_thread_id") or fallback_thread_id or ""), str(item.get("turn_id") or ""))
+                return (self._epoch_millis(value), str(item.get("source_thread_id") or fallback_thread_id or ""), str(item.get("turn_id") or ""))
             if isinstance(value, str) and value.isdigit():
-                return (int(value), str(item.get("source_thread_id") or fallback_thread_id or ""), str(item.get("turn_id") or ""))
+                return (self._epoch_millis(int(value)), str(item.get("source_thread_id") or fallback_thread_id or ""), str(item.get("turn_id") or ""))
             if isinstance(value, str):
                 try:
                     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-                    return (int(parsed.timestamp()), str(item.get("source_thread_id") or fallback_thread_id or ""), str(item.get("turn_id") or ""))
+                    return (int(parsed.timestamp() * 1000), str(item.get("source_thread_id") or fallback_thread_id or ""), str(item.get("turn_id") or ""))
                 except Exception:
                     pass
         return (0, str(item.get("source_thread_id") or fallback_thread_id or ""), str(item.get("turn_id") or ""))
@@ -426,19 +427,26 @@ class TaskConversationService:
 
     def _parse_timestamp(self, value: Any) -> int | None:
         if isinstance(value, (int, float)):
-            return int(value)
+            return self._epoch_millis(value)
         if isinstance(value, str):
             text = value.strip()
             if not text:
                 return None
             if text.isdigit():
-                return int(text)
+                return self._epoch_millis(int(text))
             try:
                 parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-                return int(parsed.timestamp())
+                return int(parsed.timestamp() * 1000)
             except Exception:
                 return None
         return None
+
+    @staticmethod
+    def _epoch_millis(value: int | float) -> int:
+        parsed = float(value)
+        if abs(parsed) < 1_000_000_000_000:
+            return int(parsed * 1000)
+        return int(parsed)
 
     def _truncate_large_strings(self, value: Any) -> Any:
         if is_dataclass(value):

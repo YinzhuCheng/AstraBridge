@@ -86,19 +86,26 @@ def build_transition_target(
     model_id: str | None = None,
     request_timeout_seconds: float = DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS,
 ) -> RuntimeTransitionTarget:
+    from ..model_catalog.catalog import fallback_model_ids, preferred_provider_model_record
+
     profile = get_provider_profile(provider_id)
-    target_model = str(model_id or profile.default_model or "").strip()
+    preferred_model = preferred_provider_model_record(profile.id, include_deprecated=False)
+    target_model = str(
+        model_id
+        or (preferred_model or {}).get("native_model")
+        or profile.default_model
+        or ""
+    ).strip()
     protocol = "responses" if profile.protocol in {"responses", "qwen_responses"} else "chat"
     env_key = profile.auth.env_vars[0] if profile.auth.env_vars else "OPENAI_API_KEY"
-    context_budget = profile.context_window()
-    fallback_models = tuple(
-        item
-        for item in (
-            str(value or "").strip()
-            for value in (profile.fallback_policy.fallback_models or profile.fallback_models)
-        )
-        if item and item != target_model
-    )
+    context_budget = int((preferred_model or {}).get("advertised_context_window") or profile.context_window() or 0) or None
+    fallback_models = fallback_model_ids(profile.id, target_model, include_deprecated=False)
+    supported_reasoning_levels = tuple(
+        str(item).strip().lower()
+        for item in list((preferred_model or {}).get("supported_reasoning_levels") or profile.reasoning_levels())
+        if str(item).strip()
+    ) or profile.reasoning_levels()
+    default_reasoning_level = str((preferred_model or {}).get("default_reasoning_level") or profile.default_reasoning_level()).strip().lower()
     return RuntimeTransitionTarget(
         provider_id=profile.id,
         model_id=target_model,
@@ -109,8 +116,8 @@ def build_transition_target(
         context_budget=context_budget,
         request_timeout_seconds=request_timeout_seconds,
         reasoning_policy_mode=profile.reasoning_policy.mode,
-        default_reasoning_level=profile.default_reasoning_level(),
-        supported_reasoning_levels=profile.reasoning_levels(),
+        default_reasoning_level=default_reasoning_level,
+        supported_reasoning_levels=supported_reasoning_levels,
         temperature_adapter_policy=profile.safety_policy.temperature_adapter_policy,
         fallback_models=fallback_models,
     )

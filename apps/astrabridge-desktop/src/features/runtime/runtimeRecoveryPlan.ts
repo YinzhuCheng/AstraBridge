@@ -70,12 +70,21 @@ function resolveRecoveryModelEntry(providerId: string, nativeModel: string, mode
 }
 
 function preferredProviderModel(providerId: string, models: RouterModelEntry[], profile: Profile | null | undefined, currentModel: string): string {
-  const providerModels = models.filter((model) => model.provider === providerId);
-  const exactDefault =
-    providerModels.find((model) => model.default_for_provider) ??
-    providerModels.find((model) => model.recommended) ??
-    providerModels[0] ??
-    null;
+  const providerModels = models
+    .filter((model) => model.provider === providerId && model.enabled !== false)
+    .sort((left, right) => {
+      const leftDeprecated = Number(Boolean(left.deprecated));
+      const rightDeprecated = Number(Boolean(right.deprecated));
+      if (leftDeprecated !== rightDeprecated) return leftDeprecated - rightDeprecated;
+      const leftDefault = Number(Boolean(left.default_for_provider));
+      const rightDefault = Number(Boolean(right.default_for_provider));
+      if (leftDefault !== rightDefault) return rightDefault - leftDefault;
+      const leftRecommended = Number(Boolean(left.recommended));
+      const rightRecommended = Number(Boolean(right.recommended));
+      if (leftRecommended !== rightRecommended) return rightRecommended - leftRecommended;
+      return String(left.native_model ?? left.id ?? "").localeCompare(String(right.native_model ?? right.id ?? ""));
+    });
+  const exactDefault = providerModels[0] ?? null;
   return exactDefault?.native_model ?? profile?.model ?? currentModel;
 }
 

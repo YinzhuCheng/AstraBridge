@@ -7,11 +7,14 @@ from .catalog import (
     catalog_entry_from_record,
     effective_model_record,
     effective_model_records,
+    fallback_model_ids,
     known_context_window,
     known_input_modalities,
     known_reasoning_efforts,
     model_catalog_entry,
     normalize_input_modalities,
+    preferred_provider_model_record,
+    provider_model_records,
     tool_output_truncation_limit,
 )
 from .generated_catalog import (
@@ -48,10 +51,13 @@ __all__ = [
     "default_seed_providers",
     "effective_model_record",
     "effective_model_records",
+    "fallback_model_ids",
     "known_context_window",
     "known_input_modalities",
     "known_reasoning_efforts",
     "model_catalog_entry",
     "normalize_input_modalities",
+    "preferred_provider_model_record",
+    "provider_model_records",
     "tool_output_truncation_limit",
 ]

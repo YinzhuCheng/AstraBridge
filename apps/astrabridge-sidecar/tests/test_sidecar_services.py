@@ -58,9 +58,11 @@ from astrabridge_sidecar.model_catalog import (
     default_seed_providers,
     effective_model_record,
     effective_model_records,
+    fallback_model_ids,
     known_context_window,
     known_input_modalities,
     known_reasoning_efforts,
+    preferred_provider_model_record,
 )
 from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERROR, disabled_status
 from astrabridge_sidecar.profile_service import ProfileService
@@ -11711,6 +11713,25 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             self.assertEqual(normalized["reasoning_effort"], "xhigh")
 
+    def test_runtime_config_service_defaults_model_from_generated_catalog_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            service = RuntimeConfigService(Path(temp) / "codex_home")
+            normalized = service._normalize_profile(  # noqa: SLF001
+                {
+                    "profile_id": "qwen-manual",
+                    "label": "Qwen Manual",
+                    "provider_id": "qwen",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "wire_api": "responses",
+                    "env_key": "DASHSCOPE_API_KEY",
+                    "auth_mode": "env_ref",
+                    "proxy_mode": "direct",
+                    "proxy_url": "",
+                }
+            )
+
+            self.assertEqual(normalized["model"], "qwen3.7-plus")
+
     def test_history_projector_repairs_missing_tool_results_and_drops_cross_provider_reasoning(self) -> None:
         projected = HistoryProjector().project(
             source_provider="deepseek",
@@ -12281,6 +12302,35 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertIsNotNone(deepseek_alt)
         self.assertEqual(deepseek_alt["display_name"], "DeepSeek Alt V4 Pro")
         self.assertEqual(deepseek_alt["supported_reasoning_levels"], ["high"])
+
+    def test_catalog_helpers_prefer_non_deprecated_default_and_expose_fallbacks(self) -> None:
+        configured = [
+            {
+                "id": "deepseek/deepseek-v4-pro",
+                "provider": "deepseek",
+                "native_model": "deepseek-v4-pro",
+                "display_name": "DeepSeek V4 Pro",
+                "enabled": True,
+                "default_for_provider": False,
+                "recommended": True,
+            },
+            {
+                "id": "deepseek/deepseek-v4-flash",
+                "provider": "deepseek",
+                "native_model": "deepseek-v4-flash",
+                "display_name": "DeepSeek V4 Flash",
+                "enabled": True,
+                "default_for_provider": True,
+                "deprecated": True,
+            },
+        ]
+
+        preferred = preferred_provider_model_record("deepseek", configured, include_deprecated=False)
+        fallbacks = fallback_model_ids("deepseek", "deepseek-v4-pro", configured, include_deprecated=False)
+
+        self.assertIsNotNone(preferred)
+        self.assertEqual(preferred["native_model"], "deepseek-v4-pro")
+        self.assertEqual(fallbacks, ())
 
     def test_metadata_seed_import_and_effective_catalog_are_conservative(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

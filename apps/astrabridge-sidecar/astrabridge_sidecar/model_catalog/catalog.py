@@ -150,6 +150,67 @@ def effective_model_record(
     return None
 
 
+def provider_model_records(
+    provider_id: str,
+    configured_models: list[dict[str, Any]] | None = None,
+    *,
+    include_disabled: bool = False,
+    include_deprecated: bool = True,
+) -> list[dict[str, Any]]:
+    provider_text = str(provider_id or "").strip()
+    if not provider_text:
+        return []
+    records: list[dict[str, Any]] = []
+    for item in effective_model_records(configured_models, include_disabled=True):
+        if str(item.get("provider") or "").strip() != provider_text:
+            continue
+        if not include_disabled and not bool(item.get("enabled", True)):
+            continue
+        if not include_deprecated and bool(item.get("deprecated", False)):
+            continue
+        records.append(item)
+    return sorted(records, key=_provider_model_sort_key)
+
+
+def preferred_provider_model_record(
+    provider_id: str,
+    configured_models: list[dict[str, Any]] | None = None,
+    *,
+    include_deprecated: bool = False,
+) -> dict[str, Any] | None:
+    records = provider_model_records(
+        provider_id,
+        configured_models,
+        include_disabled=False,
+        include_deprecated=include_deprecated,
+    )
+    return records[0] if records else None
+
+
+def fallback_model_ids(
+    provider_id: str,
+    current_model: str,
+    configured_models: list[dict[str, Any]] | None = None,
+    *,
+    include_deprecated: bool = False,
+) -> tuple[str, ...]:
+    current_native_model = str(current_model or "").split("/", 1)[1] if "/" in str(current_model or "") else str(current_model or "")
+    seen: set[str] = set()
+    models: list[str] = []
+    for item in provider_model_records(
+        provider_id,
+        configured_models,
+        include_disabled=False,
+        include_deprecated=include_deprecated,
+    ):
+        native_model = str(item.get("native_model") or "").strip()
+        if not native_model or native_model in {str(current_model or "").strip(), current_native_model} or native_model in seen:
+            continue
+        seen.add(native_model)
+        models.append(native_model)
+    return tuple(models)
+
+
 def model_catalog_entry(
     *,
     model_id: str,
@@ -323,6 +384,14 @@ def _optional_positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _provider_model_sort_key(item: dict[str, Any]) -> tuple[int, int, int]:
+    return (
+        0 if bool(item.get("default_for_provider", False)) else 1,
+        0 if bool(item.get("recommended", False)) else 1,
+        1 if bool(item.get("deprecated", False)) else 0,
+    )
 
 
 def _profile_for(provider_id: str, model: str) -> Any | None:

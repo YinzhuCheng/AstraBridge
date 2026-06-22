@@ -11,6 +11,7 @@ from .model_catalog import (
     ASTRABRIDGE_MODEL_CATALOG_FILENAME,
     ASTRABRIDGE_MODELS_CACHE_FILENAME,
     effective_model_record,
+    preferred_provider_model_record,
     compact_limit,
     known_context_window,
     model_catalog_entry,
@@ -218,7 +219,8 @@ class RuntimeConfigService:
         if not ENV_KEY_RE.match(env_key):
             raise SecurityError("env_key must be a valid environment variable name.")
         proxy_mode, proxy_url = self._normalize_proxy(profile)
-        model = str(profile.get("model") or "gpt-5").strip()
+        preferred_model = preferred_provider_model_record(provider_id, include_deprecated=False)
+        model = str(profile.get("model") or (preferred_model or {}).get("native_model") or "gpt-5").strip()
         if not model:
             raise SecurityError("model is required.")
         effective_model = effective_model_record(provider_id, model)

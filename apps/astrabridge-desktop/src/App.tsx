@@ -3416,10 +3416,16 @@ function AppShell() {
     const candidates = sourceModels
       .filter((model) => model.enabled && model.provider === providerId)
       .sort((left, right) => {
-        const leftRank = Number(Boolean(left.default_for_provider)) * 100 + Number(Boolean(left.recommended)) * 10 - Number(Boolean(left.deprecated));
-        const rightRank = Number(Boolean(right.default_for_provider)) * 100 + Number(Boolean(right.recommended)) * 10 - Number(Boolean(right.deprecated));
-        if (leftRank !== rightRank) return rightRank - leftRank;
-        return (left.display_name || left.native_model).localeCompare(right.display_name || right.native_model);
+        const leftDeprecated = Number(Boolean(left.deprecated));
+        const rightDeprecated = Number(Boolean(right.deprecated));
+        if (leftDeprecated !== rightDeprecated) return leftDeprecated - rightDeprecated;
+        const leftDefault = Number(Boolean(left.default_for_provider));
+        const rightDefault = Number(Boolean(right.default_for_provider));
+        if (leftDefault !== rightDefault) return rightDefault - leftDefault;
+        const leftRecommended = Number(Boolean(left.recommended));
+        const rightRecommended = Number(Boolean(right.recommended));
+        if (leftRecommended !== rightRecommended) return rightRecommended - leftRecommended;
+        return String(left.display_name || left.native_model).localeCompare(String(right.display_name || right.native_model));
       });
     return candidates[0]?.native_model ?? null;
   };

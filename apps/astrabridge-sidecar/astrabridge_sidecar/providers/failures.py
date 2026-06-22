@@ -118,7 +118,7 @@ def classify_runtime_failure(
     parsed = parse_runtime_error(raw_message, current_provider=current_provider, current_model=current_model)
     lowered = parsed.message.lower()
     profile = _provider_profile(parsed.provider)
-    fallback_models = _fallback_models(profile, parsed.model)
+    fallback_models = _fallback_models(parsed.provider, parsed.model)
     downgrade_levels = _downgrade_reasoning_levels(profile)
 
     if "winerror 10060" in lowered or "timed out" in lowered or "timeout" in lowered:
@@ -395,7 +395,15 @@ def _provider_profile(provider_id: str) -> ProviderProfile | None:
         return None
 
 
-def _fallback_models(profile: ProviderProfile | None, current_model: str) -> tuple[str, ...]:
+def _fallback_models(provider_id: str, current_model: str) -> tuple[str, ...]:
+    if not provider_id:
+        return ()
+    from ..model_catalog.catalog import fallback_model_ids
+
+    catalog_models = fallback_model_ids(provider_id, current_model, include_deprecated=False)
+    if catalog_models:
+        return catalog_models
+    profile = _provider_profile(provider_id)
     if profile is None:
         return ()
     current_native_model = current_model.split("/", 1)[1] if "/" in current_model else current_model
