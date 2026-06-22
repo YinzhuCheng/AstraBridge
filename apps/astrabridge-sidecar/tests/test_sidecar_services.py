@@ -63,6 +63,7 @@ from astrabridge_sidecar.model_catalog import (
     known_input_modalities,
     known_reasoning_efforts,
     preferred_provider_model_record,
+    resolved_web_capability_fields,
 )
 from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERROR, disabled_status
 from astrabridge_sidecar.profile_service import ProfileService
@@ -12478,6 +12479,26 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertIsNotNone(preferred)
         self.assertEqual(preferred["native_model"], "deepseek-v4-pro")
         self.assertEqual(fallbacks, ())
+
+    def test_catalog_helper_resolves_web_capability_defaults_and_metadata_only_overrides(self) -> None:
+        base = resolved_web_capability_fields({})
+        metadata_only = resolved_web_capability_fields(
+            {"mcp_smoke_status": "verified_context7"},
+            tool_default="not_requested",
+            smoke_default="not_requested",
+            citation_default="not_requested",
+            mcp_fallback_to_smoke=True,
+        )
+
+        self.assertEqual(base["native_web_search_support"], "unverified")
+        self.assertEqual(base["tool_web_search_support"], "unverified")
+        self.assertEqual(base["mcp_web_support"], "unverified")
+        self.assertEqual(base["web_smoke_status"], "untested")
+        self.assertEqual(base["citation_quality"], "untested")
+        self.assertEqual(metadata_only["tool_web_search_support"], "not_requested")
+        self.assertEqual(metadata_only["web_smoke_status"], "not_requested")
+        self.assertEqual(metadata_only["citation_quality"], "not_requested")
+        self.assertEqual(metadata_only["mcp_web_support"], "verified_context7")
 
     def test_metadata_seed_import_and_effective_catalog_are_conservative(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -16,6 +16,7 @@ from .catalog import (
     normalize_input_modalities,
     preferred_provider_model_record,
     provider_model_records,
+    resolved_web_capability_fields,
     tool_output_truncation_limit,
 )
 from .generated_catalog import (
@@ -61,5 +62,6 @@ __all__ = [
     "normalize_input_modalities",
     "preferred_provider_model_record",
     "provider_model_records",
+    "resolved_web_capability_fields",
     "tool_output_truncation_limit",
 ]

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import app_data_dir, new_id, now_iso, read_json, write_json
-from .model_catalog import current_generated_catalog, effective_model_records
+from .model_catalog import current_generated_catalog, effective_model_records, resolved_web_capability_fields
 
 
 VAULT_SCHEMA = "astrabridge-llm-vault-v1"
@@ -645,28 +645,28 @@ class LlmApiManagerService:
         }
 
     def _mark_model_health(self, model: dict[str, Any], result: dict[str, Any]) -> None:
+        defaults = resolved_web_capability_fields(model)
         updated = {
             **model,
-            "native_web_search_support": result.get("native_web_search_support", model.get("native_web_search_support") or "unverified"),
-            "tool_web_search_support": result.get("tool_web_search_support", model.get("tool_web_search_support") or "unverified"),
-            "mcp_web_support": result.get("mcp_web_support", model.get("mcp_web_support") or "unverified"),
-            "web_smoke_status": result.get("web_smoke_status", model.get("web_smoke_status") or "untested"),
-            "citation_quality": result.get("citation_quality", model.get("citation_quality") or "untested"),
-            "last_web_verified_at": result.get("last_web_verified_at") or model.get("last_web_verified_at"),
+            "native_web_search_support": result.get("native_web_search_support", defaults["native_web_search_support"]),
+            "tool_web_search_support": result.get("tool_web_search_support", defaults["tool_web_search_support"]),
+            "mcp_web_support": result.get("mcp_web_support", defaults["mcp_web_support"]),
+            "web_smoke_status": result.get("web_smoke_status", defaults["web_smoke_status"]),
+            "citation_quality": result.get("citation_quality", defaults["citation_quality"]),
+            "last_web_verified_at": result.get("last_web_verified_at") or defaults.get("last_web_verified_at"),
             "last_verified_at": result.get("last_verified_at") or now_iso(),
             "verification_notes": f"LLM API Manager health check passed for connectivity/effort/temperature at {now_iso()}.",
         }
         self._router_config.upsert_model(updated)
 
     def _web_metadata_only(self, model: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "native_web_search_support": str(model.get("native_web_search_support") or "unverified"),
-            "tool_web_search_support": str(model.get("tool_web_search_support") or "not_requested"),
-            "mcp_web_support": str(model.get("mcp_web_support") or model.get("mcp_smoke_status") or "unverified"),
-            "web_smoke_status": str(model.get("web_smoke_status") or "not_requested"),
-            "citation_quality": str(model.get("citation_quality") or "not_requested"),
-            "last_web_verified_at": model.get("last_web_verified_at"),
-        }
+        return resolved_web_capability_fields(
+            model,
+            tool_default="not_requested",
+            smoke_default="not_requested",
+            citation_default="not_requested",
+            mcp_fallback_to_smoke=True,
+        )
 
     def _web_smoke(self, model: dict[str, Any], provider: dict[str, Any]) -> dict[str, Any]:
         urls = [str(item) for item in list(model.get("source_urls") or []) if str(item).startswith(("http://", "https://"))]
@@ -686,12 +686,11 @@ class LlmApiManagerService:
             except Exception as exc:  # noqa: BLE001
                 status = "fail"
                 detail = f"{url} -> {str(exc)[:160]}"
-        native = str(model.get("native_web_search_support") or "unverified")
-        mcp = str(model.get("mcp_web_support") or model.get("mcp_smoke_status") or "unverified")
+        defaults = resolved_web_capability_fields(model, mcp_fallback_to_smoke=True)
         return {
-            "native_web_search_support": native,
+            "native_web_search_support": defaults["native_web_search_support"],
             "tool_web_search_support": "verified" if status == "pass" else status,
-            "mcp_web_support": mcp,
+            "mcp_web_support": defaults["mcp_web_support"],
             "web_smoke_status": status,
             "citation_quality": "source_url_verified" if status == "pass" else "untested",
             "last_web_verified_at": now_iso(),

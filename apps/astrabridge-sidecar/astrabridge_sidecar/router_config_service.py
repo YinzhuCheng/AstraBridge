@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import app_data_dir, now_iso, read_json, write_json
-from .model_catalog import current_generated_catalog
+from .model_catalog import current_generated_catalog, resolved_web_capability_fields
 from .providers import get_provider_profile, resolve_provider_id
 from .providers.tooling import assess_model_authority
 
@@ -495,12 +495,7 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
         "supported_reasoning_levels": list(model.get("supported_reasoning_levels") or []),
         "default_reasoning_level": model.get("default_reasoning_level"),
         "supports_search_tool": bool(model.get("supports_search_tool", False)),
-        "native_web_search_support": str(model.get("native_web_search_support") or "unverified"),
-        "tool_web_search_support": str(model.get("tool_web_search_support") or "unverified"),
-        "mcp_web_support": str(model.get("mcp_web_support") or "unverified"),
-        "web_smoke_status": str(model.get("web_smoke_status") or "untested"),
-        "citation_quality": str(model.get("citation_quality") or "untested"),
-        "last_web_verified_at": model.get("last_web_verified_at"),
+        **resolved_web_capability_fields(model),
         "supports_image_detail_original": bool(model.get("supports_image_detail_original", False)),
         "effective_context_window_percent": int(model.get("effective_context_window_percent") or 80),
         "auto_compact_token_limit": model.get("auto_compact_token_limit"),

@@ -11,6 +11,13 @@ DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT = 80
 ASTRABRIDGE_MODEL_CATALOG_FILENAME = "astrabridge-models.json"
 ASTRABRIDGE_MODELS_CACHE_FILENAME = "astrabridge-models-cache.json"
 PROFILE_MODEL_RESERVED_FIELDS = {"id", "provider", "native_model", "display_name", "displayName"}
+WEB_CAPABILITY_DEFAULTS = {
+    "native_web_search_support": "unverified",
+    "tool_web_search_support": "unverified",
+    "mcp_web_support": "unverified",
+    "web_smoke_status": "untested",
+    "citation_quality": "untested",
+}
 
 
 def known_context_window(provider_id: str, model: str) -> int | None:
@@ -173,6 +180,32 @@ def merge_profile_with_effective_model(
     return merged
 
 
+def resolved_web_capability_fields(
+    model: dict[str, Any],
+    *,
+    tool_default: str | None = None,
+    smoke_default: str | None = None,
+    citation_default: str | None = None,
+    mcp_fallback_to_smoke: bool = False,
+) -> dict[str, Any]:
+    native_default = WEB_CAPABILITY_DEFAULTS["native_web_search_support"]
+    tool_default_value = tool_default or WEB_CAPABILITY_DEFAULTS["tool_web_search_support"]
+    smoke_default_value = smoke_default or WEB_CAPABILITY_DEFAULTS["web_smoke_status"]
+    citation_default_value = citation_default or WEB_CAPABILITY_DEFAULTS["citation_quality"]
+    mcp_default = WEB_CAPABILITY_DEFAULTS["mcp_web_support"]
+    mcp_value = model.get("mcp_web_support")
+    if not mcp_value and mcp_fallback_to_smoke:
+        mcp_value = model.get("mcp_smoke_status")
+    return {
+        "native_web_search_support": str(model.get("native_web_search_support") or native_default),
+        "tool_web_search_support": str(model.get("tool_web_search_support") or tool_default_value),
+        "mcp_web_support": str(mcp_value or mcp_default),
+        "web_smoke_status": str(model.get("web_smoke_status") or smoke_default_value),
+        "citation_quality": str(model.get("citation_quality") or citation_default_value),
+        "last_web_verified_at": model.get("last_web_verified_at"),
+    }
+
+
 def provider_model_records(
     provider_id: str,
     configured_models: list[dict[str, Any]] | None = None,
@@ -277,6 +310,7 @@ def model_catalog_entry(
     for warning in authority.ui_warnings:
         if warning not in ui_warnings:
             ui_warnings.append(warning)
+    web_capabilities = resolved_web_capability_fields(configured_model)
     return {
         "slug": model_id,
         "id": model_id,
@@ -333,12 +367,7 @@ def model_catalog_entry(
         "input_modalities": input_modalities,
         "inputModalities": input_modalities,
         "supports_search_tool": bool(configured_model.get("supports_search_tool", False)),
-        "native_web_search_support": configured_model.get("native_web_search_support") or "unverified",
-        "tool_web_search_support": configured_model.get("tool_web_search_support") or "unverified",
-        "mcp_web_support": configured_model.get("mcp_web_support") or "unverified",
-        "web_smoke_status": configured_model.get("web_smoke_status") or "untested",
-        "citation_quality": configured_model.get("citation_quality") or "untested",
-        "last_web_verified_at": configured_model.get("last_web_verified_at"),
+        **web_capabilities,
         "use_responses_lite": bool(configured_model.get("use_responses_lite", False)),
         "auto_review_model_override": configured_model.get("auto_review_model_override"),
         "tool_mode": configured_model.get("tool_mode"),
