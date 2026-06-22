@@ -18,6 +18,7 @@ import unittest
 import urllib.request
 import zipfile
 import zlib
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -761,7 +762,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "permission_mode": "auto",
                 },
             )
-            tasks.record_provider_handoff(
+            handoff = tasks.record_provider_handoff(
                 from_thread_id="thread-deepseek",
                 to_thread_id="thread-kimi",
                 settings={
@@ -773,6 +774,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 },
                 reused_existing=False,
             )
+            handoff_at = datetime.fromisoformat(str(handoff["created_at"]).replace("Z", "+00:00")).timestamp()
             conversation = TaskConversationService(projects, tasks)
             conversation.record_thread_snapshot(
                 {
@@ -783,7 +785,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "turns": [
                         {
                             "id": "turn-1",
-                            "startedAt": 1,
+                            "startedAt": int(handoff_at) - 1,
                             "items": [
                                 {"type": "userMessage", "id": "user-1", "text": "Build a release readiness scorecard."},
                                 {"type": "agentMessage", "id": "agent-1", "text": "Created scorecard.py"},
@@ -801,7 +803,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "turns": [
                         {
                             "id": "turn-2",
-                            "startedAt": 2,
+                            "startedAt": int(handoff_at) + 1,
                             "items": [
                                 {
                                     "type": "agentMessage",
@@ -869,12 +871,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(thread["id"], f"task:{task['task_id']}")
             self.assertTrue(thread["isCompositeTaskThread"])
             self.assertEqual(thread["active_provider_thread_id"], "thread-kimi")
-            self.assertEqual([turn["id"] for turn in thread["turns"]], ["turn-1", "turn-2"])
+            self.assertEqual([turn["id"] for turn in thread["turns"]], ["turn-1", handoff["event_id"], "turn-2"])
             self.assertEqual(thread["turns"][0]["provider_id"], "deepseek")
             self.assertEqual(thread["turns"][1]["provider_id"], "kimi")
-            self.assertEqual(thread["turns"][1]["items"][0]["provider_id"], "kimi")
+            self.assertEqual(thread["turns"][1]["coding_events"][0]["event_type"], "provider_handoff")
+            self.assertEqual(thread["turns"][2]["provider_id"], "kimi")
+            self.assertEqual(thread["turns"][2]["items"][0]["provider_id"], "kimi")
             self.assertEqual(thread["turns"][0]["coding_events"][0]["event_type"], "agent_message")
-            self.assertEqual(thread["turns"][1]["coding_events"][0]["event_type"], "agent_message")
+            self.assertEqual(thread["turns"][2]["coding_events"][0]["event_type"], "agent_message")
             transcript_text = (workspace / ".astrabridge" / "task_transcripts.json").read_text(encoding="utf-8")
             self.assertIn("task_transcripts", str(result["transcript_path"]))
             self.assertNotIn("should-not-persist", transcript_text)
@@ -884,7 +888,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertNotIn("opaque-secret", transcript_text)
             self.assertNotIn("do-not-store", transcript_text)
             self.assertIn("provider_private_redactions", transcript_text)
-            normalized = thread["turns"][1]["items"][0]["providerData"]["normalized"]
+            normalized = thread["turns"][2]["items"][0]["providerData"]["normalized"]
             self.assertEqual(normalized["provider_data_keys"], ["response"])
             self.assertEqual(normalized["reasoning_state"]["opaque_artifact_count"], 1)
             self.assertNotIn("opaque_artifacts", normalized["reasoning_state"])
@@ -3047,6 +3051,51 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(composite["turns"][0]["items"][0]["provider_id"], "deepseek")
             self.assertEqual(direct["turns"][0]["coding_events"][0]["event_type"], "agent_message")
             self.assertEqual(composite["turns"][0]["coding_events"][0]["event_type"], "agent_message")
+
+    def test_task_conversation_includes_provider_handoff_as_event_only_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            task = tasks.create_task(
+                "Visible task",
+                thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "max",
+                    "permission_mode": "auto",
+                },
+            )
+            conversation = TaskConversationService(projects, tasks)
+            handoff = tasks.record_provider_handoff(
+                from_thread_id="thread-deepseek",
+                to_thread_id="thread-kimi",
+                settings={
+                    "profile_id": "kimi-default",
+                    "provider_id": "kimi",
+                    "model": "kimi-k2.6",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+                reused_existing=False,
+            )
+
+            composite = conversation.conversation(task_id=task["task_id"])["thread"]
+
+            self.assertEqual(len(composite["turns"]), 1)
+            handoff_turn = composite["turns"][0]
+            self.assertEqual(handoff_turn["id"], handoff["event_id"])
+            self.assertTrue(str(handoff_turn["id"]).startswith("handoff-"))
+            self.assertEqual(handoff_turn["provider_id"], "kimi")
+            self.assertEqual(handoff_turn["model"], "kimi-k2.6")
+            self.assertEqual(handoff_turn["items"], [])
+            self.assertEqual(handoff_turn["coding_events"][0]["event_type"], "provider_handoff")
+            self.assertEqual(handoff_turn["coding_events"][0]["payload"]["to_thread_id"], "thread-kimi")
 
     def test_runtime_start_turn_native_kernel_executes_review_flow_and_merges_native_thread(self) -> None:
         class FakeNativeRouter:

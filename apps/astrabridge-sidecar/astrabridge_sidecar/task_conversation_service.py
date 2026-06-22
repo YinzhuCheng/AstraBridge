@@ -61,6 +61,12 @@ class TaskConversationService:
                 if not isinstance(turn, dict):
                     continue
                 turns.append(self._annotate_turn(dict(turn), snapshot=snapshot, route=route))
+        for handoff_event in list(task.get("handoff_events") or []):
+            if not isinstance(handoff_event, dict):
+                continue
+            handoff_turn = self._handoff_turn(task=task, handoff_event=handoff_event)
+            if handoff_turn:
+                turns.append(handoff_turn)
         turns.sort(key=self._turn_sort_key)
         active_snapshot = dict(snapshots.get(active_thread_id) or {})
         active_route = self._route_for_thread(task, active_thread_id)
@@ -166,13 +172,42 @@ class TaskConversationService:
                 items.append(item)
         annotated["items"] = items
         event_source = "native_kernel" if str(snapshot.get("shellSettings", {}).get("execution_backend") or route.get("execution_backend") or "").strip() == "native_kernel" else "codex_app_server"
-        annotated["coding_events"] = project_turn_to_coding_events(
+        projected_events = project_turn_to_coding_events(
             task_id=str(snapshot.get("task_id") or ""),
             visible_thread_id=f"task:{str(snapshot.get('task_id') or '')}" if snapshot.get("task_id") else f"thread:{thread_id or 'unknown'}",
             turn=annotated,
             source=event_source,
         )
+        annotated["coding_events"] = self._merge_coding_events(list(annotated.get("coding_events") or []), projected_events)
         return annotated
+
+    def _handoff_turn(self, *, task: dict[str, Any], handoff_event: dict[str, Any]) -> dict[str, Any] | None:
+        task_id = str(task.get("task_id") or "").strip()
+        if not task_id:
+            return None
+        event_id = str(handoff_event.get("event_id") or "").strip()
+        if not event_id:
+            return None
+        timestamp = handoff_event.get("created_at") or handoff_event.get("updated_at")
+        route = self._route_for_thread(task, str(handoff_event.get("to_thread_id") or ""))
+        coding_events = project_handoff_event_to_coding_events(
+            task_id=task_id,
+            visible_thread_id=f"task:{task_id}",
+            handoff_event=handoff_event,
+        )
+        return {
+            "id": event_id,
+            "task_id": task_id,
+            "source_thread_id": str(handoff_event.get("to_thread_id") or "").strip() or None,
+            "profile_id": handoff_event.get("profile_id") or route.get("profile_id"),
+            "provider_id": handoff_event.get("provider_id") or route.get("provider_id"),
+            "model": handoff_event.get("model") or route.get("model"),
+            "reasoning_effort": handoff_event.get("reasoning_effort") or route.get("reasoning_effort"),
+            "startedAt": timestamp,
+            "completedAt": timestamp,
+            "items": [],
+            "coding_events": coding_events,
+        }
 
     def _digest_turn(self, turn: dict[str, Any]) -> dict[str, Any] | None:
         chunks: list[str] = []
@@ -270,7 +305,28 @@ class TaskConversationService:
                 return (int(value), str(turn.get("source_thread_id") or ""), str(turn.get("id") or ""))
             if isinstance(value, str) and value.isdigit():
                 return (int(value), str(turn.get("source_thread_id") or ""), str(turn.get("id") or ""))
+            if isinstance(value, str):
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    return (int(parsed.timestamp()), str(turn.get("source_thread_id") or ""), str(turn.get("id") or ""))
+                except Exception:
+                    pass
         return (0, str(turn.get("source_thread_id") or ""), str(turn.get("id") or ""))
+
+    def _merge_coding_events(self, existing: list[Any], projected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for candidate in list(existing or []) + list(projected or []):
+            if not isinstance(candidate, dict):
+                continue
+            event_id = str(candidate.get("event_id") or "").strip()
+            event_type = str(candidate.get("event_type") or "").strip()
+            marker = (event_id, event_type)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            merged.append(candidate)
+        return merged
 
     def _digest_sort_key(self, item: dict[str, Any], *, fallback_thread_id: str) -> tuple[int, str, str]:
         for key in ("started_at", "completed_at", "updated_at", "created_at"):

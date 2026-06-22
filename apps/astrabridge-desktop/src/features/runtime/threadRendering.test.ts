@@ -338,6 +338,46 @@ describe("thread rendering helpers", () => {
     expect(blocks[2].detail).toContain("save-123");
   });
 
+  it("renders provider handoff event-only turns as activity blocks with lane metadata", () => {
+    const [block] = summarizeTurnBlocks({
+      turns: [
+        {
+          id: "turn-handoff",
+          startedAt: 10,
+          completedAt: 11,
+          provider_id: "kimi",
+          model: "kimi-k2.6",
+          items: [],
+          coding_events: [
+            {
+              event_id: "evt-handoff",
+              event_type: "provider_handoff",
+              provider_id: "kimi",
+              model_id: "kimi-k2.6",
+              execution_thread_id: "thread-kimi",
+              payload: {
+                to_thread_id: "thread-kimi",
+                model: "kimi-k2.6",
+                reused_existing: true,
+              },
+            },
+          ],
+        },
+      ],
+    } as unknown as Pick<ShellThread, "turns">);
+
+    expect(block.role).toBe("activity");
+    expect(block.providerId).toBe("kimi");
+    expect(block.model).toBe("kimi-k2.6");
+    expect(block.sourceThreadId).toBe("thread-kimi");
+    if (block.role !== "activity") throw new Error("expected activity block");
+    expect(block.activity.kind).toBe("fork");
+    expect(block.activity.preview).toContain("kimi");
+    expect(block.activity.preview).toContain("kimi-k2.6");
+    expect(block.activity.detail).toContain("thread-kimi");
+    expect(block.activity.detail).toContain("reused existing lane");
+  });
+
   it("treats coding-event-only completed turns as persisted renderable content", () => {
     expect(
       hasPersistedRenderableTurnContent({

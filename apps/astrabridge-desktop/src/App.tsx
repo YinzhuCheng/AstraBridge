@@ -4188,8 +4188,6 @@ function AppShell() {
   } : null);
   const messagePlanAnchor = inspectorPlan && !hasRenderedPlanBlock ? inspectorPlan : null;
   const sidebarTasks = !archivedVisible ? (projectTasks.data?.tasks ?? []) : [];
-  const latestTaskHandoff = currentTask?.handoff_events?.[currentTask.handoff_events.length - 1] ?? null;
-
   return (
     <div
       className="shell-grid"
@@ -4423,15 +4421,6 @@ function AppShell() {
               <span>分支来源线程</span>
               <strong>{activeThread.forkedFromId}</strong>
               <span>{activeThread.parentThreadId ? `父线程 ${activeThread.parentThreadId}` : "独立后续分支"}</span>
-            </div>
-          ) : null}
-          {latestTaskHandoff ? (
-            <div className="task-handoff-row">
-              <span>已切换执行通道</span>
-              <strong>{latestTaskHandoff.profile_id ?? "默认通道"}</strong>
-              <span>{latestTaskHandoff.model ?? ""}</span>
-              <span>{latestTaskHandoff.reasoning_effort ?? ""}</span>
-              <time>{summarizeRelativeTime(latestTaskHandoff.created_at)}</time>
             </div>
           ) : null}
           {blocks.map((block) => {
