@@ -10,6 +10,7 @@ CODEX_CLI_BASELINE = "0.137.0"
 DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT = 80
 ASTRABRIDGE_MODEL_CATALOG_FILENAME = "astrabridge-models.json"
 ASTRABRIDGE_MODELS_CACHE_FILENAME = "astrabridge-models-cache.json"
+PROFILE_MODEL_RESERVED_FIELDS = {"id", "provider", "native_model", "display_name", "displayName"}
 
 
 def known_context_window(provider_id: str, model: str) -> int | None:
@@ -148,6 +149,28 @@ def effective_model_record(
         ):
             return item
     return None
+
+
+def merge_profile_with_effective_model(
+    profile: dict[str, Any],
+    configured_models: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    merged = dict(profile)
+    provider_id = str(merged.get("provider_id") or "").strip()
+    native_model = str(merged.get("model") or merged.get("native_model") or "").strip()
+    if not provider_id or not native_model:
+        return merged
+    model = effective_model_record(provider_id, native_model, configured_models)
+    if not model:
+        return merged
+    for key, value in model.items():
+        if key in PROFILE_MODEL_RESERVED_FIELDS:
+            continue
+        existing = merged.get(key)
+        is_empty = existing is None or existing == "" or existing == () or (isinstance(existing, list) and not existing)
+        if is_empty:
+            merged[key] = value
+    return merged
 
 
 def provider_model_records(

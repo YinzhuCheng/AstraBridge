@@ -6092,6 +6092,59 @@ class AstraBridgeServiceTests(unittest.TestCase):
             else:
                 os.environ["TEST_KIMI_PROVIDER_KEY"] = original
 
+    def test_runtime_config_uses_configured_model_capability_resolver(self) -> None:
+        original = os.environ.pop("TEST_DEEPSEEK_PROVIDER_KEY", None)
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                service = RuntimeConfigService(
+                    root / "embedded_codex_home",
+                    configured_models_resolver=lambda: [
+                        {
+                            "id": "deepseek/deepseek-v4-pro",
+                            "provider": "deepseek",
+                            "native_model": "deepseek-v4-pro",
+                            "tool_mode": "native",
+                            "supports_mcp_tools": True,
+                            "mcp_tool_call_policy": "verified",
+                            "apply_patch_tool_type": "freeform",
+                            "web_smoke_status": "pass",
+                            "citation_quality": "source_url_verified",
+                            "supports_parallel_tool_calls": False,
+                        }
+                    ],
+                )
+
+                status = service.load_secret(
+                    {
+                        "profile_id": "deepseek-default",
+                        "label": "DeepSeek",
+                        "provider_id": "deepseek",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-pro",
+                        "reasoning_effort": "max",
+                        "wire_api": "chat",
+                        "env_key": "TEST_DEEPSEEK_PROVIDER_KEY",
+                        "auth_mode": "session_paste",
+                        "proxy_mode": "direct",
+                        "proxy_url": "",
+                    },
+                    session_key="deepseek_unit_secret_123456",
+                )
+
+                self.assertEqual(status["tool_mode"], "native")
+                self.assertTrue(status["supports_mcp_tools"])
+                self.assertEqual(status["mcp_tool_call_policy"], "verified")
+                self.assertEqual(status["apply_patch_tool_type"], "freeform")
+                self.assertEqual(status["web_smoke_status"], "pass")
+                self.assertEqual(status["citation_quality"], "source_url_verified")
+                self.assertFalse(status["supports_parallel_tool_calls"])
+        finally:
+            if original is None:
+                os.environ.pop("TEST_DEEPSEEK_PROVIDER_KEY", None)
+            else:
+                os.environ["TEST_DEEPSEEK_PROVIDER_KEY"] = original
+
     def test_modal_service_translates_approvals_and_user_input(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

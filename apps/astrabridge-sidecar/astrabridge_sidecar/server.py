@@ -22,6 +22,7 @@ from .modal_service import ModalService
 from .metadata_service import MetadataService
 from .mcp_config_service import McpConfigService
 from .llm_api_manager_service import LlmApiManagerService
+from .runtime_config_service import RuntimeConfigService
 from .official_login_guard import disabled_status
 from .official_codex_service import OfficialCodexService
 from .profile_service import ProfileService
@@ -102,6 +103,12 @@ class AppContext:
         self.dogfood = DogfoodRunService(self.projects)
         self.checkpoints = CheckpointService(self.projects)
         self.task_conversation = TaskConversationService(self.projects, self.tasks)
+        self.runtime_config = RuntimeConfigService(
+            codex_home_resolver=self.projects.current_runtime_codex_home,
+            configured_models_resolver=self.router_config.models,
+            secret_service=self.secrets,
+            mcp_config=self.mcp_config,
+        )
         self.project_context = ProjectContextService(
             self.projects,
             self.dogfood,
@@ -114,6 +121,7 @@ class AppContext:
         self.runtime = RuntimeService(
             self.projects,
             self.modals,
+            runtime_config=self.runtime_config,
             secret_service=self.secrets,
             mcp_config=self.mcp_config,
             asset_registry=self.assets,
@@ -191,24 +199,9 @@ class AppContext:
         return self.profile_with_model_capabilities(profile)
 
     def profile_with_model_capabilities(self, profile: dict[str, Any]) -> dict[str, Any]:
-        provider_id = str(profile.get("provider_id") or "").strip()
-        native_model = str(profile.get("model") or "").strip()
-        if not provider_id or not native_model:
-            return profile
-        from .model_catalog import effective_model_record
+        from .model_catalog import merge_profile_with_effective_model
 
-        model = effective_model_record(provider_id, native_model, self.router_config.models())
-        if not model:
-            return profile
-        merged = dict(profile)
-        for key, value in model.items():
-            if key in {"id", "provider", "native_model", "display_name"}:
-                continue
-            existing = merged.get(key)
-            is_empty = existing is None or existing == "" or existing == () or (isinstance(existing, list) and not existing)
-            if is_empty:
-                merged[key] = value
-        return merged
+        return merge_profile_with_effective_model(profile, self.router_config.models())
 
 
 class Handler(BaseHTTPRequestHandler):

@@ -11,12 +11,12 @@ from .mcp_config_service import McpConfigService
 from .model_catalog import (
     ASTRABRIDGE_MODEL_CATALOG_FILENAME,
     ASTRABRIDGE_MODELS_CACHE_FILENAME,
-    effective_model_record,
-    preferred_provider_model_record,
     compact_limit,
     known_context_window,
+    merge_profile_with_effective_model,
     model_catalog_entry,
     normalize_input_modalities,
+    preferred_provider_model_record,
     tool_output_truncation_limit,
 )
 from .providers import get_provider_profile
@@ -44,11 +44,13 @@ class RuntimeConfigService:
         codex_home: Path | None = None,
         *,
         codex_home_resolver: Callable[[], Path] | None = None,
+        configured_models_resolver: Callable[[], list[dict[str, Any]]] | None = None,
         secret_service: SecretService | None = None,
         mcp_config: McpConfigService | None = None,
     ) -> None:
         self._codex_home_override = codex_home.resolve() if codex_home else None
         self._codex_home_resolver = codex_home_resolver
+        self._configured_models_resolver = configured_models_resolver
         self._active_runtime: dict[str, Any] | None = None
         self._secrets = secret_service or SecretService()
         self._mcp_config = mcp_config or McpConfigService()
@@ -247,8 +249,11 @@ class RuntimeConfigService:
         model = str(profile.get("model") or (preferred_model or {}).get("native_model") or "gpt-5").strip()
         if not model:
             raise SecurityError("model is required.")
-        effective_model = effective_model_record(provider_id, model)
-        merged_profile = {**dict(effective_model or {}), **profile}
+        configured_models = self._configured_models_resolver() if self._configured_models_resolver is not None else None
+        merged_profile = merge_profile_with_effective_model(
+            {**profile, "provider_id": provider_id, "model": model},
+            configured_models,
+        )
         metadata = self._secrets.metadata(
             env_key=env_key,
             auth_mode=str(profile.get("auth_mode") or "env_ref"),
