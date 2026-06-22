@@ -20,6 +20,32 @@ PRIVATE_PROVIDER_KEYS = {
 }
 
 
+def sanitize_provider_private_state(value: Any) -> tuple[Any, list[str]]:
+    stripped: set[str] = set()
+
+    def _sanitize(current: Any) -> Any:
+        if isinstance(current, dict):
+            sanitized: dict[str, Any] = {}
+            for key, item in current.items():
+                clean_key = str(key).strip()
+                if clean_key.lower() in PRIVATE_PROVIDER_KEYS:
+                    stripped.add(clean_key)
+                    continue
+                sanitized[key] = _sanitize(item)
+            return sanitized
+        if isinstance(current, list):
+            return [_sanitize(item) for item in current]
+        return current
+
+    return _sanitize(value), sorted(stripped)
+
+
+def provider_private_warning(stripped_keys: list[str]) -> str | None:
+    if not stripped_keys:
+        return None
+    return f"Stripped provider-private fields during history projection: {', '.join(sorted(set(stripped_keys)))}."
+
+
 @dataclass
 class ReasoningArtifact:
     provider_id: str
@@ -77,9 +103,10 @@ class HistoryProjector:
             warnings.append("Unknown target provider; projected text-only history summary and dropped provider-private replay state.")
 
         for message in neutral_messages:
-            sanitized_provider_data, provider_private_warning = self._strip_private_fields(message.provider_data)
-            if provider_private_warning:
-                warnings.append(provider_private_warning)
+            sanitized_provider_data, stripped_provider_keys = sanitize_provider_private_state(message.provider_data)
+            private_warning = provider_private_warning(stripped_provider_keys)
+            if private_warning:
+                warnings.append(private_warning)
 
             if message.role == "tool":
                 tool_content, tool_warning = self._project_tool_result_content(
@@ -145,9 +172,10 @@ class HistoryProjector:
             projected.append({"role": message.role, "content": content})
 
         for artifact in artifacts:
-            sanitized_payload, provider_private_warning = self._strip_private_fields(dict(artifact.payload or {}))
-            if provider_private_warning:
-                warnings.append(provider_private_warning)
+            sanitized_payload, stripped_provider_keys = sanitize_provider_private_state(dict(artifact.payload or {}))
+            private_warning = provider_private_warning(stripped_provider_keys)
+            if private_warning:
+                warnings.append(private_warning)
             summary = self._artifact_summary(artifact.kind, sanitized_payload)
             same_provider = bool(source and artifact.provider_id.strip().lower() == target)
             if same_provider and artifact.replayable and not text_only_mode:
@@ -219,19 +247,6 @@ class HistoryProjector:
             return text
         except Exception:
             return json.dumps({"raw": text}, ensure_ascii=False, separators=(",", ":"))
-
-    def _strip_private_fields(self, payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-        sanitized = {}
-        stripped: list[str] = []
-        for key, value in payload.items():
-            if str(key).strip().lower() in PRIVATE_PROVIDER_KEYS:
-                stripped.append(str(key))
-                continue
-            sanitized[key] = value
-        if not stripped:
-            return sanitized, None
-        stripped.sort()
-        return sanitized, f"Stripped provider-private fields during history projection: {', '.join(stripped)}."
 
     def _project_tool_result_content(
         self,

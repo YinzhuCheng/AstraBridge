@@ -53,7 +53,12 @@ from astrabridge_sidecar.model_catalog import default_seed_models, default_seed_
 from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERROR, disabled_status
 from astrabridge_sidecar.profile_service import ProfileService
 from astrabridge_sidecar.providers import classify_runtime_failure, get_provider_profile
-from astrabridge_sidecar.providers.history_projector import HistoryProjector, NeutralMessage, ReasoningArtifact
+from astrabridge_sidecar.providers.history_projector import (
+    HistoryProjector,
+    NeutralMessage,
+    ReasoningArtifact,
+    sanitize_provider_private_state,
+)
 from astrabridge_sidecar.providers.ir import NormalizedResponse, ToolCall
 from astrabridge_sidecar.providers.tooling import (
     assess_model_authority,
@@ -801,6 +806,12 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                     "type": "agentMessage",
                                     "id": "agent-2",
                                     "text": "Reviewed scorecard.py and added a boundary test. Authorization: Bearer should-not-persist",
+                                    "providerData": {
+                                        "reasoning_state": {
+                                            "thought_signature": "provider-private-signature",
+                                            "nested": [{"response_id": "provider-response-id", "keep": "visible"}],
+                                        }
+                                    },
                                 }
                             ],
                         }
@@ -822,6 +833,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("task_transcripts", str(result["transcript_path"]))
             self.assertNotIn("should-not-persist", transcript_text)
             self.assertNotIn("Authorization", transcript_text)
+            self.assertNotIn("provider-private-signature", transcript_text)
+            self.assertNotIn("provider-response-id", transcript_text)
+            self.assertIn("provider_private_redactions", transcript_text)
 
     def test_project_context_pack_includes_task_conversation_digest(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -10239,6 +10253,34 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertNotIn("thought_signature", projected.replayable_artifacts[0]["payload"])
         self.assertTrue(any("provider-private fields" in warning for warning in projected.warnings))
 
+    def test_history_projector_strips_nested_provider_private_fields(self) -> None:
+        projected = HistoryProjector().project(
+            source_provider="qwen",
+            target_provider="qwen",
+            neutral_messages=[NeutralMessage(role="assistant", text="Continue the same task.")],
+            artifacts=[
+                ReasoningArtifact(
+                    provider_id="qwen",
+                    model_id="qwen3.7-plus",
+                    kind="reasoning_state",
+                    replayable=True,
+                    payload={
+                        "visible_summary": "Preserve the same reasoning lane.",
+                        "state": {
+                            "thought_signature": "private-signature",
+                            "segments": [{"response_id": "resp-1", "keep": "retained"}],
+                        },
+                    },
+                )
+            ],
+        )
+
+        replayed = projected.replayable_artifacts[0]["payload"]
+        self.assertEqual(replayed["state"]["segments"], [{"keep": "retained"}])
+        self.assertNotIn("thought_signature", json.dumps(replayed, ensure_ascii=False))
+        self.assertNotIn("response_id", json.dumps(replayed, ensure_ascii=False))
+        self.assertTrue(any("provider-private fields" in warning for warning in projected.warnings))
+
     def test_history_projector_downgrades_image_tool_result_for_text_only_target(self) -> None:
         projected = HistoryProjector().project(
             source_provider="kimi",
@@ -10259,6 +10301,20 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         self.assertIn("[image result omitted", projected.messages[0]["content"])
         self.assertTrue(any("Downgraded image tool result" in warning for warning in projected.warnings))
+
+    def test_sanitize_provider_private_state_strips_nested_keys(self) -> None:
+        sanitized, stripped = sanitize_provider_private_state(
+            {
+                "visible_summary": "keep",
+                "reasoning_state": {
+                    "thought_signature": "private",
+                    "segments": [{"encrypted_reasoning": "opaque", "text": "safe"}],
+                },
+            }
+        )
+
+        self.assertEqual(sanitized["reasoning_state"]["segments"], [{"text": "safe"}])
+        self.assertEqual(stripped, ["encrypted_reasoning", "thought_signature"])
 
     def test_tool_call_argument_repair_wraps_malformed_json(self) -> None:
         repaired, warnings = repair_tool_arguments("```json\n{\"path\": README.md}\n```")

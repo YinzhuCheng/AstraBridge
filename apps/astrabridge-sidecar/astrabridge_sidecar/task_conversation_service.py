@@ -5,6 +5,7 @@ from typing import Any
 
 from .common import now_iso, read_json, write_json
 from .coding_kernel import project_handoff_event_to_coding_events, project_turn_to_coding_events
+from .providers.history_projector import sanitize_provider_private_state
 from .security import redact_sensitive
 
 
@@ -121,7 +122,9 @@ class TaskConversationService:
         )
 
     def _snapshot_thread(self, thread: dict[str, Any], *, task: dict[str, Any], route: dict[str, Any]) -> dict[str, Any]:
-        sanitized = self._truncate_large_strings(redact_sensitive(thread))
+        sanitized = redact_sensitive(thread)
+        sanitized, stripped_provider_keys = sanitize_provider_private_state(sanitized)
+        sanitized = self._truncate_large_strings(sanitized)
         turns = [dict(item) for item in list(sanitized.get("turns") or []) if isinstance(item, dict)]
         snapshot = {
             "thread_id": str(sanitized.get("id") or sanitized.get("thread_id") or ""),
@@ -138,6 +141,8 @@ class TaskConversationService:
             "turns": turns[-MAX_SNAPSHOT_TURNS:],
             "updated_at": now_iso(),
         }
+        if stripped_provider_keys:
+            snapshot["provider_private_redactions"] = stripped_provider_keys
         return redact_sensitive(snapshot)
 
     def _annotate_turn(self, turn: dict[str, Any], *, snapshot: dict[str, Any], route: dict[str, Any]) -> dict[str, Any]:
