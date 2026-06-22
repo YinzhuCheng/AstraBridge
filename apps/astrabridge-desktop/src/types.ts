@@ -991,6 +991,7 @@ export type ShellThreadSettings = {
   reasoning_effort?: string;
   permission_mode?: PermissionMode;
   collaboration_mode?: CollaborationMode;
+  execution_backend?: string;
 };
 
 export type ShellThread = Thread & {

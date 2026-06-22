@@ -12,6 +12,7 @@ import { formatResponseDiagnostics, summarizeResponseDiagnosticsInline } from ".
 import { composerReasoningOptions, preferredProviderReasoningEffort, preferredReasoningEffort, providerModelDraftDefaults, providerReasoningOptions } from "./features/runtime/reasoningOptions";
 import { runtimeErrorNoticeActions, runtimeErrorNoticeInline, runtimeErrorNoticeText, type RuntimeErrorAction } from "./features/runtime/runtimeErrorNotice";
 import { summarizeTaskCard } from "./features/runtime/taskSummary";
+import { summarizeTaskWorkflowFacts } from "./features/runtime/taskWorkflowFacts";
 import { hasPersistedRenderableTurnContent, itemActivityFromPayload, summarizeTurnBlocks } from "./features/runtime/threadRendering";
 import { useAppStore } from "./store";
 import { chooseProjectSavePath, selectDirectory, selectExistingProject, selectFiles } from "./tauriDialog";
@@ -61,6 +62,7 @@ const DEFAULT_GAMEPLAY_SMOKE_ACTIONS: Array<Record<string, unknown>> = [
 ];
 
 const RELEASE_WORKFLOW_SMOKE_PRESET = "astrabridge_release_workflow_v1";
+const PROVIDER_SWITCH_WORKFLOW_SMOKE_PRESET = "astrabridge_provider_switch_workflow_v1";
 
 function localAssetUrl(path: string) {
   return isTauri() ? convertFileSrc(path) : `file://${path.replace(/\\/g, "/")}`;
@@ -1125,13 +1127,17 @@ function TerminalInspectorPanel({ supervisor, history }: { supervisor?: RuntimeS
 function BrowserInspectorPanel({
   supervisor,
   latestSmoke,
-  isRunning,
-  onRunSmoke,
+  isRunningReleaseSmoke,
+  isRunningProviderSwitchSmoke,
+  onRunReleaseSmoke,
+  onRunProviderSwitchSmoke,
 }: {
   supervisor?: RuntimeSupervisorState;
   latestSmoke?: { label?: string; status?: string; url?: string; console_errors?: string[]; screenshot_path?: string } | null;
-  isRunning?: boolean;
-  onRunSmoke: () => void;
+  isRunningReleaseSmoke?: boolean;
+  isRunningProviderSwitchSmoke?: boolean;
+  onRunReleaseSmoke: () => void;
+  onRunProviderSwitchSmoke: () => void;
 }) {
   const browser = latestSmoke ?? supervisor?.browser;
   return (
@@ -1164,9 +1170,14 @@ function BrowserInspectorPanel({
       ) : (
         <p className="muted compact-copy">还没有 browser smoke 结果。</p>
       )}
-      <button type="button" className="ghost-button inspector-inline-action" disabled={isRunning} onClick={onRunSmoke}>
-        {isRunning ? "运行中..." : "运行工作流 smoke"}
-      </button>
+      <div className="inspector-actions">
+        <button type="button" className="ghost-button inspector-inline-action" disabled={isRunningReleaseSmoke} onClick={onRunReleaseSmoke}>
+          {isRunningReleaseSmoke ? "运行中..." : "运行工作流 smoke"}
+        </button>
+        <button type="button" className="ghost-button inspector-inline-action" disabled={isRunningProviderSwitchSmoke} onClick={onRunProviderSwitchSmoke}>
+          {isRunningProviderSwitchSmoke ? "运行中..." : "运行 provider-switch smoke"}
+        </button>
+      </div>
     </section>
   );
 }
@@ -3176,6 +3187,19 @@ function AppShell() {
       queryClient.invalidateQueries({ queryKey: ["dogfood-run"] });
     },
   });
+  const inspectorProviderSwitchSmoke = useMutation({
+    mutationFn: () =>
+      api.dogfoodBrowserSmoke({
+        url: currentBrowserSmokeUrl(),
+        label: "inspector provider switch workflow smoke",
+        preset: PROVIDER_SWITCH_WORKFLOW_SMOKE_PRESET,
+        include_run: true,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["runtime-supervisor"] });
+      queryClient.invalidateQueries({ queryKey: ["dogfood-run"] });
+    },
+  });
 
   const closeProject = useMutation({
     mutationFn: api.closeProject,
@@ -4129,6 +4153,11 @@ function AppShell() {
 
   const activeThread = taskConversation.data?.thread ?? selectedThread.data?.thread;
   const activeExecutionThread = selectedThread.data?.thread;
+  const workflowFacts = useMemo(
+    () => summarizeTaskWorkflowFacts(currentTask, activeExecutionThread ?? null),
+    [activeExecutionThread, currentTask],
+  );
+  const activeExecutionBackendLabel = workflowFacts.backend === "native_kernel" ? "native kernel" : "app server";
   const activeThreadName = activeThread?.displayName ?? selectedThreadSummary?.displayName ?? "Thread";
   const checkpointDefaultDescription = `${project.name} / ${activeThreadName} · ${new Date().toLocaleString(undefined, {
     year: "numeric",
@@ -4309,9 +4338,17 @@ function AppShell() {
             <p className="eyebrow">{mainView === "setup" ? providerSetupLabel(locale) : t(locale, "title_thread")}</p>
             <h2>{mainView === "setup" ? t(locale, "provider_model_settings") : activeThread?.displayName ?? t(locale, "no_threads")}</h2>
             {mainView === "chat" ? (
-              <p className="route-subtitle">
-                {activeProfile?.label ?? fallbackRouteLabel(locale)} · {activeSettings.model} · {activeSettings.reasoning_effort} · {permissionLabel(locale, activeSettings.permission_mode)}
-              </p>
+              <>
+                <p className="route-subtitle" data-testid="route-summary">
+                  {activeProfile?.label ?? fallbackRouteLabel(locale)} · {activeSettings.model} · {activeSettings.reasoning_effort} · {permissionLabel(locale, activeSettings.permission_mode)} · {activeExecutionBackendLabel}
+                </p>
+                <div className="thread-stat-row" data-testid="task-workflow-facts">
+                  <span className="thread-stat-pill" data-testid="task-fact-lanes">{workflowFacts.laneCount} lanes</span>
+                  <span className="thread-stat-pill" data-testid="task-fact-handoffs">{workflowFacts.handoffCount} handoffs</span>
+                  <span className="thread-stat-pill" data-testid="task-fact-checkpoints">{workflowFacts.checkpointCount} checkpoints</span>
+                  <span className="thread-stat-pill" data-testid="task-fact-backend">{activeExecutionBackendLabel}</span>
+                </div>
+              </>
             ) : (
               <p className="route-subtitle">{t(locale, "provider_settings_subtitle")}</p>
             )}
@@ -4509,6 +4546,7 @@ function AppShell() {
             </div>
             <div className="composer-toolbar-right">
               <select
+                data-testid="composer-profile"
                 data-composer="profile"
                 value={activeSettings.profile_id}
                 onChange={(event) => {
@@ -4540,6 +4578,7 @@ function AppShell() {
                 ))}
               </select>
               <select
+                data-testid="composer-model"
                 data-composer="model"
                 value={activeSettings.model ?? ""}
                 onChange={(event) => {
@@ -4564,6 +4603,7 @@ function AppShell() {
                 ))}
               </select>
               <select
+                data-testid="composer-effort"
                 data-composer="effort"
                 value={activeSettings.reasoning_effort ?? preferredReasoningEffort(activeModelEntry, activeProfile, null)}
                 onChange={(event) => updateComposerSettings({ reasoning_effort: event.target.value })}
@@ -4713,8 +4753,10 @@ function AppShell() {
             <BrowserInspectorPanel
               supervisor={supervisor.data}
               latestSmoke={(inspectorDogfoodRun.data?.run?.browser_smokes ?? []).slice(-1)[0] ?? null}
-              isRunning={inspectorBrowserSmoke.isPending}
-              onRunSmoke={() => inspectorBrowserSmoke.mutate()}
+              isRunningReleaseSmoke={inspectorBrowserSmoke.isPending}
+              isRunningProviderSwitchSmoke={inspectorProviderSwitchSmoke.isPending}
+              onRunReleaseSmoke={() => inspectorBrowserSmoke.mutate()}
+              onRunProviderSwitchSmoke={() => inspectorProviderSwitchSmoke.mutate()}
             />
           ) : null}
           {inspectorTab === "files" ? (

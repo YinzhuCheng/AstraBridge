@@ -8189,6 +8189,68 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(any(item.get("selector") == "[data-testid='checkpoint-modal']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='status-panel-goal']" for item in final_assertions if isinstance(item, dict)))
 
+    def test_dogfood_browser_smoke_provider_switch_preset_exposes_workflow_facts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "index.html").write_text("<html><body>ok</body></html>", encoding="utf-8")
+            screenshot = root / "capture.png"
+            screenshot.write_bytes(b"png")
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            dogfood = DogfoodRunService(projects)
+
+            smoke = dogfood.browser_smoke(
+                {
+                    "url": (workspace / "index.html").resolve().as_uri(),
+                    "preset": "astrabridge_provider_switch_workflow_v1",
+                    "screenshot_path": str(screenshot),
+                }
+            )
+
+            actions = list(smoke["browser_smoke"]["actions"] or [])
+            final_assertions = list(smoke["browser_smoke"]["final_assertions"] or [])
+            self.assertEqual(smoke["browser_smoke"]["preset"], "astrabridge_provider_switch_workflow_v1")
+            self.assertEqual(smoke["browser_smoke"]["label"], "AstraBridge provider switch workflow smoke")
+            self.assertEqual(smoke["browser_smoke"]["verification_level"], "asserted")
+            self.assertTrue(any(item.get("selector") == "[data-testid='composer-profile']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-handoffs']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-backend']" for item in final_assertions if isinstance(item, dict)))
+
+    def test_dogfood_browser_smoke_accepts_fill_and_select_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "index.html").write_text("<html><body>ok</body></html>", encoding="utf-8")
+            screenshot = root / "capture.png"
+            screenshot.write_bytes(b"png")
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            dogfood = DogfoodRunService(projects)
+
+            smoke = dogfood.browser_smoke(
+                {
+                    "url": (workspace / "index.html").resolve().as_uri(),
+                    "screenshot_path": str(screenshot),
+                    "actions": [
+                        {"type": "fill_selector", "selector": "[data-testid='composer-input']", "value": "continue the task"},
+                        {"type": "select_value", "selector": "[data-testid='composer-profile']", "value": "kimi-default"},
+                    ],
+                }
+            )
+
+            actions = list(smoke["browser_smoke"]["actions"] or [])
+            self.assertIn(
+                {"type": "fill_selector", "selector": "[data-testid='composer-input']", "value": "continue the task", "timeout_ms": 3000},
+                actions,
+            )
+            self.assertIn(
+                {"type": "select_value", "selector": "[data-testid='composer-profile']", "value": "kimi-default", "timeout_ms": 3000},
+                actions,
+            )
+
     def test_checkpoint_service_git_save_load_without_git_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
