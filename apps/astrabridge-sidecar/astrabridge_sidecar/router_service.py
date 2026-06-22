@@ -1190,6 +1190,78 @@ class RouterService:
         )
         response.close()
 
+    def complete_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+        chosen = self._resolve_profile(payload)
+        secret = os.environ.get(str(chosen.get("env_key") or ""))
+        if not secret:
+            raise RuntimeError(f"Provider secret is not loaded for env key {chosen.get('env_key')}.")
+        adapter = self._adapter_for(chosen)
+        base_url = str(chosen.get("base_url") or "").rstrip("/")
+        upstream_payload = adapter.upstream_payload(payload)
+        parsed = urllib.parse.urlparse(f"{base_url}{adapter.endpoint_path()}")
+        response = self._request_upstream(
+            parsed=parsed,
+            payload=upstream_payload,
+            bearer=secret,
+            stream=False,
+        )
+        retry_attempt = 0
+        error_text = ""
+        while response.status >= 400:
+            error_text = response.read().decode("utf-8", errors="replace")
+            if not self._should_retry_provider_error(chosen, response.status, error_text, retry_attempt):
+                break
+            retry_attempt += 1
+            self._record(
+                "provider_retry",
+                {
+                    "provider": chosen.get("provider_id"),
+                    "status": response.status,
+                    "attempt": retry_attempt,
+                    "reason": self._provider_error_code(error_text) or "transient_provider_error",
+                },
+            )
+            response.close()
+            time.sleep(min(1.5 * retry_attempt, 4.0))
+            response = self._request_upstream(
+                parsed=parsed,
+                payload=upstream_payload,
+                bearer=secret,
+                stream=False,
+            )
+        if response.status >= 400:
+            normalized = self._normalize_provider_error(chosen, response.status, error_text)
+            self._record("provider_error", {"provider": chosen.get("provider_id"), "status": response.status, "error": normalized})
+            response.close()
+            raise RuntimeError(json.dumps(normalized, ensure_ascii=False))
+        body = response.read()
+        response.close()
+        raw = json.loads(body.decode("utf-8") or "{}")
+        normalized = adapter.normalize_response(raw, payload)
+        self._record(
+            "responses_completed",
+            {
+                "provider": chosen.get("provider_id"),
+                "model": upstream_payload.get("model"),
+                "wire_api": adapter.wire_api(),
+                "adapter": adapter.describe(),
+                "request": redact_sensitive(payload),
+                "upstream_request": redact_sensitive(upstream_payload),
+                "warnings": [warning.code for warning in list(normalized.warnings or [])],
+            },
+        )
+        return {
+            "profile": {
+                "profile_id": chosen.get("profile_id"),
+                "provider_id": chosen.get("provider_id"),
+                "model": chosen.get("model"),
+                "wire_api": chosen.get("wire_api"),
+                "adapter_profile": chosen.get("adapter_profile"),
+            },
+            "adapter": adapter.describe(),
+            "normalized": normalized,
+        }
+
     def _resolve_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
         raw_model = str(payload.get("model") or "").strip()
         if "/" not in raw_model:

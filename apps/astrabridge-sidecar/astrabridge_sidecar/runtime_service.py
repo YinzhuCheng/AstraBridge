@@ -52,6 +52,7 @@ TURN_START_TIMEOUT_SECONDS = 45.0
 TURN_RUNTIME_PIN_SECONDS = 300.0
 VALID_COLLABORATION_MODES = {"default", "plan"}
 VALID_CONTEXT_MODES = {"default", "full", "minimal_text", "minimal_visual", "no_context"}
+VALID_EXECUTION_BACKENDS = {"app_server", "native_kernel"}
 
 
 class RuntimeService:
@@ -68,6 +69,8 @@ class RuntimeService:
         task_conversation: Any | None = None,
         dogfood_run: Any | None = None,
         lcr_web_service: Any | None = None,
+        profile_service: ProfileService | None = None,
+        router_service: Any | None = None,
     ) -> None:
         self._projects = project_service
         self._modals = modal_service
@@ -81,7 +84,10 @@ class RuntimeService:
         self._lcr_web = lcr_web_service or LcrWebService(project_service)
         self._tool_context = ToolContextService(project_service, task_service)
         self._runtime_config = runtime_config or RuntimeConfigService(secret_service=self._secrets, mcp_config=self._mcp_config)
-        self._profiles = ProfileService()
+        self._profiles = profile_service or ProfileService()
+        self._router = router_service
+        self._project_tools = None
+        self._native_turn_loop = None
         self._client: AppServerClient | None = None
         self._runtime_signature: tuple[Any, ...] | None = None
         self._events: list[dict[str, Any]] = []
@@ -98,6 +104,23 @@ class RuntimeService:
         self._runtime_pin_until_monotonic = 0.0
         self._runtime_pin_thread_id: str | None = None
         self._runtime_pin_turn_id: str | None = None
+
+    def attach_router(self, router_service: Any) -> None:
+        self._router = router_service
+        self._initialize_native_turn_loop()
+
+    def attach_project_tools(self, project_tools: Any) -> None:
+        self._project_tools = project_tools
+        self._initialize_native_turn_loop()
+
+    def _initialize_native_turn_loop(self) -> None:
+        if self._router is None or self._project_tools is None:
+            return
+        if self._native_turn_loop is not None:
+            return
+        from .coding_kernel import NativeCodingTurnLoop
+
+        self._native_turn_loop = NativeCodingTurnLoop(self, self._router, self._project_tools)
 
     def environment(self) -> dict[str, Any]:
         execution_host = self._execution_host()
@@ -262,6 +285,8 @@ class RuntimeService:
         return payload
 
     def list_threads(self, profile: dict[str, Any], *, archived: bool = False) -> dict[str, Any]:
+        if archived:
+            return {"threads": [], "next_cursor": None, "backwards_cursor": None}
         runtime_status = self._runtime_status_for_profile(profile, require_secret=False)
         if self._runtime_switch_is_pinned(runtime_status):
             cached = self._cached_threads_response(archived=archived, warning="runtime_switch_deferred_active_turn")
@@ -306,6 +331,12 @@ class RuntimeService:
                 )
                 return cached
         self._projects.cache_threads(threads)
+        native_threads = self._native_cached_threads()
+        seen_ids = {str(thread.get("id") or "") for thread in threads}
+        for native_thread in native_threads:
+            native_id = str(native_thread.get("id") or "")
+            if native_id and native_id not in seen_ids:
+                threads.append(native_thread)
         self._record_event({"type": "threads_listed", "count": len(threads), "archived": archived})
         return {
             "threads": threads,
@@ -316,6 +347,13 @@ class RuntimeService:
     def read_thread(self, profile: dict[str, Any], thread_id: str) -> dict[str, Any]:
         if not thread_id.strip():
             raise ValueError("thread_id is required.")
+        native_thread = self._read_native_thread(thread_id)
+        if native_thread is not None:
+            decorated = self._decorate_thread(native_thread)
+            decorated = self._decorate_dynamic_tool_evidence(decorated)
+            decorated = self._decorate_turn_completion_quality(decorated)
+            self._record_task_thread_snapshot(decorated)
+            return {"thread": decorated}
         runtime_status = self._runtime_status_for_profile(profile, require_secret=False)
         if self._runtime_switch_is_pinned(runtime_status):
             cached = self._cached_thread(thread_id, warning="runtime_switch_deferred_active_turn")
@@ -657,10 +695,23 @@ class RuntimeService:
                 finally:
                     self._runtime_operation_local.in_start_turn = False
                     self._runtime_start_turn_in_progress = False
-        requested_thread_id = thread_id.strip() or self._visible_task_thread_id_hint()
+        requested_thread_id = self._resolve_requested_thread_id(thread_id.strip() or self._visible_task_thread_id_hint())
         if not requested_thread_id:
             raise ValueError("thread_id is required.")
         normalized_context_mode = self._normalize_context_mode(context_mode)
+        execution_backend = self._thread_execution_backend(requested_thread_id, profile)
+        if execution_backend == "native_kernel":
+            return self._start_native_turn(
+                profile,
+                thread_id=requested_thread_id,
+                text=text,
+                attachments=attachments or [],
+                model=model,
+                effort=effort,
+                permission_mode=permission_mode,
+                collaboration_mode=collaboration_mode,
+                context_mode=normalized_context_mode,
+            )
         runtime_status = self._prepare_runtime(profile, require_secret=True)
         client = self._ensure_client(runtime_status)
 
@@ -864,6 +915,69 @@ class RuntimeService:
             }
         )
         return {"turn": turn, "thread_id": effective_thread_id, "handoff": handoff_event}
+
+    def _resolve_requested_thread_id(self, thread_id: str) -> str:
+        clean_thread_id = str(thread_id or "").strip()
+        if not clean_thread_id.startswith("task:") or self._tasks is None:
+            return clean_thread_id
+        hint = self._tasks.visible_provider_thread_id(include_missing_fallback=True)
+        return str(hint or clean_thread_id).strip()
+
+    def _thread_execution_backend(self, thread_id: str, profile: dict[str, Any]) -> str:
+        settings = self._thread_settings_for(thread_id) if thread_id else {}
+        profile_backend = profile.get("execution_backend")
+        return self._normalize_execution_backend(settings.get("execution_backend") or profile_backend)
+
+    def _native_kernel_enabled(self) -> bool:
+        raw = str(os.environ.get("ASTRABRIDGE_ENABLE_NATIVE_KERNEL") or "").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    def _start_native_turn(
+        self,
+        profile: dict[str, Any],
+        *,
+        thread_id: str,
+        text: str,
+        attachments: list[dict[str, Any]],
+        model: str | None,
+        effort: str | None,
+        permission_mode: str,
+        collaboration_mode: str | None,
+        context_mode: str,
+    ) -> dict[str, Any]:
+        if not self._native_kernel_enabled():
+            raise RuntimeError("Native kernel execution is disabled. Set ASTRABRIDGE_ENABLE_NATIVE_KERNEL=1 to enable it.")
+        if self._native_turn_loop is None:
+            raise RuntimeError("Native kernel dependencies are not attached.")
+        result = self._native_turn_loop.run_turn(
+            thread_id=thread_id,
+            profile=profile,
+            text=text,
+            attachments=attachments,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            collaboration_mode=collaboration_mode,
+            context_mode=context_mode,
+        )
+        self._cache_thread_entry(thread_id, result.thread_cache_patch)
+        self._projects.switch_thread(thread_id)
+        if self._tasks is not None:
+            self._tasks.force_visible_provider_thread(thread_id)
+        self._update_project_runtime_defaults(profile, model, effort)
+        self._record_task_thread_snapshot(result.thread)
+        self._record_event(
+            {
+                "type": "native_turn_completed",
+                "thread_id": thread_id,
+                "turn_id": result.turn.get("id"),
+                "profile_id": profile.get("profile_id"),
+                "provider_id": profile.get("provider_id"),
+                "model": model or profile.get("model"),
+                "context_mode": context_mode,
+            }
+        )
+        return {"turn": result.turn, "thread_id": thread_id, "handoff": result.handoff}
 
     def _turn_start_background_pending_response(
         self,
@@ -1307,6 +1421,7 @@ class RuntimeService:
         permission_mode: str,
         *,
         collaboration_mode: str | None = None,
+        execution_backend: str | None = None,
         name: str | None = None,
     ) -> dict[str, Any]:
         settings = {
@@ -1316,6 +1431,7 @@ class RuntimeService:
             "model": model or profile.get("model"),
             "reasoning_effort": effort or profile.get("reasoning_effort"),
             "permission_mode": permission_mode,
+            "execution_backend": self._normalize_execution_backend(execution_backend or profile.get("execution_backend")),
         }
         if collaboration_mode is not None:
             settings["collaboration_mode"] = collaboration_mode or "default"
@@ -3279,6 +3395,12 @@ for host in candidates:
             return None
         cache = self._read_thread_cache()
         entry = dict((cache.get("by_id") or {}).get(thread_id) or {})
+        native_thread = entry.get("thread")
+        if isinstance(native_thread, dict):
+            thread = dict(native_thread)
+            if warning:
+                thread["shellWarning"] = warning
+            return self._decorate_thread(thread)
         if not entry and thread_id not in (self._projects.current_project or {}).get("recent_threads", []):
             return None
         name = entry.get("name") or thread_id
@@ -3293,6 +3415,29 @@ for host in candidates:
             "shellWarning": warning,
         }
         return self._decorate_thread(thread)
+
+    def _native_cached_threads(self) -> list[dict[str, Any]]:
+        cache = self._read_thread_cache()
+        threads: list[dict[str, Any]] = []
+        for entry in list((cache.get("by_id") or {}).values()):
+            if not isinstance(entry, dict):
+                continue
+            native_thread = entry.get("thread")
+            if not isinstance(native_thread, dict):
+                continue
+            threads.append(self._decorate_thread(dict(native_thread)))
+        threads.sort(key=lambda item: str(item.get("status", {}).get("updated_at") or ""), reverse=True)
+        return threads
+
+    def _read_native_thread(self, thread_id: str) -> dict[str, Any] | None:
+        if not thread_id:
+            return None
+        cache = self._read_thread_cache()
+        entry = dict((cache.get("by_id") or {}).get(thread_id) or {})
+        native_thread = entry.get("thread")
+        if not isinstance(native_thread, dict):
+            return None
+        return dict(native_thread)
 
     def _cache_thread_entry(self, thread_id: str, patch: dict[str, Any]) -> None:
         if not thread_id:
@@ -3329,7 +3474,8 @@ for host in candidates:
                     }
                 )
                 return
-        self._record_project_context_hint(thread_id, merged)
+        hint_patch = {key: value for key, value in merged.items() if key != "thread"}
+        self._record_project_context_hint(thread_id, hint_patch)
 
     def _record_project_context_hint(self, thread_id: str, patch: dict[str, Any]) -> None:
         if self._project_context is None:
@@ -3368,6 +3514,9 @@ for host in candidates:
     def _thread_settings_for(self, thread_id: str) -> dict[str, Any]:
         cache = self._read_thread_cache()
         entry = dict((cache.get("by_id") or {}).get(thread_id) or {})
+        task_entry = self._task_thread_entry(thread_id)
+        if task_entry:
+            entry = {**task_entry, **entry}
         current = self._projects.current_project or {}
         normalized = self._normalize_shell_settings(entry, current_project=current, prefer_project_defaults=True)
         cache_patch = {
@@ -3376,10 +3525,24 @@ for host in candidates:
             "reasoning_effort": normalized.get("reasoning_effort"),
             "permission_mode": normalized.get("permission_mode"),
             "collaboration_mode": normalized.get("collaboration_mode"),
+            "execution_backend": normalized.get("execution_backend"),
         }
         if any(entry.get(key) != value for key, value in cache_patch.items() if value is not None):
             self._cache_thread_entry(thread_id, cache_patch)
         return normalized
+
+    def _task_thread_entry(self, thread_id: str) -> dict[str, Any]:
+        if self._tasks is None:
+            return {}
+        try:
+            task = self._tasks.current_task() or {}
+        except Exception:
+            return {}
+        for collection_key in ("provider_threads", "fork_threads"):
+            for item in list(task.get(collection_key) or []):
+                if str((item or {}).get("thread_id") or "") == thread_id:
+                    return dict(item)
+        return {}
 
     def _normalize_shell_settings(
         self,
@@ -3409,13 +3572,21 @@ for host in candidates:
         collaboration_mode = str(settings.get("collaboration_mode") or "").strip().lower() or "default"
         if collaboration_mode not in VALID_COLLABORATION_MODES:
             collaboration_mode = "default"
+        execution_backend = self._normalize_execution_backend(settings.get("execution_backend"))
         return {
             "profile_id": profile_id,
             "model": chosen_model or self._normalize_shell_model(target_profile.get("model"), provider_id) or "gpt-5.5",
             "reasoning_effort": chosen_effort or codex_reasoning_effort(target_profile.get("reasoning_effort")),
             "permission_mode": permission_mode,
             "collaboration_mode": collaboration_mode,
+            "execution_backend": execution_backend,
         }
+
+    def _normalize_execution_backend(self, value: Any) -> str:
+        backend = str(value or "").strip().lower() or "app_server"
+        if backend not in VALID_EXECUTION_BACKENDS:
+            return "app_server"
+        return backend
 
     def _resolve_shell_profile(self, profile_id: str) -> dict[str, Any]:
         fallback = "openai-compatible"

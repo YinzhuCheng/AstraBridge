@@ -54,6 +54,7 @@ from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERR
 from astrabridge_sidecar.profile_service import ProfileService
 from astrabridge_sidecar.providers import classify_runtime_failure, get_provider_profile
 from astrabridge_sidecar.providers.history_projector import HistoryProjector, NeutralMessage, ReasoningArtifact
+from astrabridge_sidecar.providers.ir import NormalizedResponse, ToolCall
 from astrabridge_sidecar.providers.tooling import (
     assess_model_authority,
     repair_tool_arguments,
@@ -2909,6 +2910,264 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(composite["id"], f"task:{task['task_id']}")
             self.assertEqual(composite["turns"][0]["provider_id"], "deepseek")
             self.assertEqual(composite["turns"][0]["items"][0]["provider_id"], "deepseek")
+
+    def test_runtime_start_turn_native_kernel_executes_review_flow_and_merges_native_thread(self) -> None:
+        class FakeNativeRouter:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def complete_response(self, payload: dict[str, object]) -> dict[str, object]:
+                self.calls.append(payload)
+                if len(self.calls) == 1:
+                    return {
+                        "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                        "adapter": "chat_completions",
+                        "normalized": NormalizedResponse(
+                            text="",
+                            reasoning_summary="Need project state before I answer.",
+                            reasoning_state=None,
+                            tool_calls=[
+                                ToolCall(id="call-review", name="review_status", arguments_json="{}"),
+                                ToolCall(id="call-read", name="read_file", arguments_json='{"path":"scorecard.py"}'),
+                            ],
+                            usage=None,
+                            finish_reason="tool_calls",
+                        ),
+                    }
+                return {
+                    "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                    "adapter": "chat_completions",
+                    "normalized": NormalizedResponse(
+                        text="Review summary: scorecard.py is present and the workspace is readable.",
+                        reasoning_summary=None,
+                        reasoning_state=None,
+                        tool_calls=[],
+                        usage=None,
+                        finish_reason="stop",
+                    ),
+                }
+
+        class FakeListClient:
+            def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:
+                if method == "thread/list":
+                    return {"data": []}
+                raise AssertionError(f"unexpected request: {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "scorecard.py").write_text("print('ready')\n", encoding="utf-8")
+
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            task = tasks.create_task(
+                "Native review",
+                thread_id="native-thread-1",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                    "execution_backend": "native_kernel",
+                },
+            )
+            profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            conversation = TaskConversationService(projects, tasks)
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                task_service=tasks,
+                task_conversation=conversation,
+                profile_service=profiles,
+            )
+            tools = ProjectToolsService(projects, runtime, tasks=tasks, profiles=profiles, router_config=router_config)
+            runtime.attach_project_tools(tools)
+            runtime.attach_router(FakeNativeRouter())
+            runtime._runtime_status_for_profile = lambda _profile, require_secret=False: {"configured": True}  # type: ignore[method-assign]
+            runtime._refresh_client_if_runtime_changed = lambda _status: None  # type: ignore[method-assign]
+            runtime._ensure_client = lambda _status: FakeListClient()  # type: ignore[method-assign]
+
+            profile = profiles.resolve_runtime_profile("deepseek-default")
+            with patch.dict(os.environ, {"ASTRABRIDGE_ENABLE_NATIVE_KERNEL": "1"}, clear=False):
+                result = runtime.start_turn(
+                    profile,
+                    thread_id="native-thread-1",
+                    text="Review the workspace and summarize the scorecard file.",
+                    attachments=[],
+                    model="deepseek-v4-pro",
+                    effort="high",
+                    permission_mode="auto",
+                )
+
+            self.assertEqual(result["thread_id"], "native-thread-1")
+            self.assertEqual(result["turn"]["status"], "completed")
+
+            thread = runtime.read_thread(profile, "native-thread-1")["thread"]
+            self.assertEqual(thread["shellSettings"]["execution_backend"], "native_kernel")
+            item_types = [item["type"] for item in thread["turns"][0]["items"]]
+            self.assertIn("userMessage", item_types)
+            self.assertIn("dynamicToolCall", item_types)
+            self.assertIn("agentMessage", item_types)
+
+            listed = runtime.list_threads(profile)
+            self.assertTrue(any(str(item.get("id") or "") == "native-thread-1" for item in listed["threads"]))
+
+            composite = conversation.conversation(task_id=task["task_id"])["thread"]
+            self.assertEqual(composite["id"], f"task:{task['task_id']}")
+            self.assertEqual(composite["turns"][0]["provider_id"], "deepseek")
+            self.assertEqual(composite["turns"][0]["items"][0]["provider_id"], "deepseek")
+
+    def test_runtime_start_turn_native_kernel_can_apply_small_edit(self) -> None:
+        class FakeNativeRouter:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete_response(self, payload: dict[str, object]) -> dict[str, object]:
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                        "adapter": "chat_completions",
+                        "normalized": NormalizedResponse(
+                            text="",
+                            reasoning_summary="Apply the smallest safe file rewrite.",
+                            reasoning_state=None,
+                            tool_calls=[
+                                ToolCall(
+                                    id="call-edit",
+                                    name="edit_apply",
+                                    arguments_json='{"path":"scorecard.py","content":"print(\\"native edit applied\\")\\n"}',
+                                )
+                            ],
+                            usage=None,
+                            finish_reason="tool_calls",
+                        ),
+                    }
+                return {
+                    "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                    "adapter": "chat_completions",
+                    "normalized": NormalizedResponse(
+                        text="Updated scorecard.py and recorded the diff.",
+                        reasoning_summary=None,
+                        reasoning_state=None,
+                        tool_calls=[],
+                        usage=None,
+                        finish_reason="stop",
+                    ),
+                }
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "scorecard.py").write_text("print('before')\n", encoding="utf-8")
+
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Native edit",
+                thread_id="native-thread-edit",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                    "execution_backend": "native_kernel",
+                },
+            )
+            profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            router_config.upsert_model(
+                {
+                    "id": "deepseek/deepseek-v4-pro",
+                    "provider": "deepseek",
+                    "native_model": "deepseek-v4-pro",
+                    "display_name": "DeepSeek V4 Pro",
+                    "supports_tool_calls": True,
+                    "apply_patch_tool_type": "json",
+                    "supports_mcp_tools": True,
+                    "mcp_tool_call_policy": "conservative",
+                    "tool_mode": "full",
+                    "codex_agent_enabled": True,
+                }
+            )
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                task_service=tasks,
+                profile_service=profiles,
+            )
+            tools = ProjectToolsService(projects, runtime, checkpoints=CheckpointService(projects), tasks=tasks, profiles=profiles, router_config=router_config)
+            runtime.attach_project_tools(tools)
+            runtime.attach_router(FakeNativeRouter())
+
+            profile = profiles.resolve_runtime_profile("deepseek-default")
+            with patch.dict(os.environ, {"ASTRABRIDGE_ENABLE_NATIVE_KERNEL": "1"}, clear=False):
+                runtime.start_turn(
+                    profile,
+                    thread_id="native-thread-edit",
+                    text="Update scorecard.py with the new implementation.",
+                    attachments=[],
+                    model="deepseek-v4-pro",
+                    effort="high",
+                    permission_mode="auto",
+                )
+
+            self.assertEqual((workspace / "scorecard.py").read_text(encoding="utf-8"), "print(\"native edit applied\")\n")
+            thread = runtime.read_thread(profile, "native-thread-edit")["thread"]
+            item_types = [item["type"] for item in thread["turns"][0]["items"]]
+            self.assertIn("fileChange", item_types)
+            self.assertIn("dynamicToolCall", item_types)
+
+    def test_runtime_start_turn_native_kernel_requires_feature_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Native disabled",
+                thread_id="native-thread-off",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                    "execution_backend": "native_kernel",
+                },
+            )
+            profiles = ProfileService(store_path=root / "profiles.json")
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                task_service=tasks,
+                profile_service=profiles,
+            )
+            tools = ProjectToolsService(projects, runtime, tasks=tasks, profiles=profiles)
+            runtime.attach_project_tools(tools)
+            runtime.attach_router(object())
+
+            profile = profiles.resolve_runtime_profile("deepseek-default")
+            with patch.dict(os.environ, {}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "Native kernel execution is disabled"):
+                    runtime.start_turn(
+                        profile,
+                        thread_id="native-thread-off",
+                        text="Try native execution.",
+                        attachments=[],
+                        model="deepseek-v4-pro",
+                        effort="high",
+                        permission_mode="auto",
+                    )
 
     def test_runtime_read_thread_decorates_existing_dynamic_tool_evidence(self) -> None:
         class FakeClient:

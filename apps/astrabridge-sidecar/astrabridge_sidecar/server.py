@@ -121,6 +121,8 @@ class AppContext:
             task_service=self.tasks,
             task_conversation=self.task_conversation,
             dogfood_run=self.dogfood,
+            profile_service=self.profiles,
+            router_service=self.router,
         )
         self.project_tools = ProjectToolsService(
             self.projects,
@@ -130,6 +132,7 @@ class AppContext:
             profiles=self.profiles,
             router_config=self.router_config,
         )
+        self.runtime.attach_project_tools(self.project_tools)
         self.supervisor = RuntimeSupervisorService(self.projects, self.runtime, self.modals, self.dogfood)
         self.wsl_dependencies = WslDependencyService()
         self.admin_token = __import__("secrets").token_urlsafe(24)

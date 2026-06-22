@@ -506,6 +506,7 @@ class TaskService:
             "reasoning_effort",
             "permission_mode",
             "collaboration_mode",
+            "execution_backend",
             "name",
         ):
             if route_key not in explicit_settings and prior_entry.get(route_key) is not None:
@@ -520,6 +521,7 @@ class TaskService:
             "reasoning_effort": _display_effort(merged_settings.get("reasoning_effort"), provider_id),
             "permission_mode": merged_settings.get("permission_mode"),
             "collaboration_mode": merged_settings.get("collaboration_mode"),
+            "execution_backend": merged_settings.get("execution_backend"),
             "name": _display_thread_name(merged_settings.get("name"), provider_id),
             "updated_at": now,
         }
@@ -555,8 +557,8 @@ class TaskService:
         route so context packs do not accumulate dozens of effectively equivalent
         provider-thread records.
         """
-        seen_live_routes: set[tuple[str, str, str, str, str, str]] = set()
-        seen_missing_routes: set[tuple[str, str, str, str, str, str]] = set()
+        seen_live_routes: set[tuple[str, str, str, str, str, str, str]] = set()
+        seen_missing_routes: set[tuple[str, str, str, str, str, str, str]] = set()
         pruned: list[dict[str, Any]] = []
         for item in provider_threads:
             entry = dict(item)
@@ -880,13 +882,14 @@ def _provider_thread_entry_is_plausible(item: dict[str, Any]) -> bool:
     return True
 
 
-def _provider_thread_route_key(item: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+def _provider_thread_route_key(item: dict[str, Any]) -> tuple[str, str, str, str, str, str, str]:
     provider = str(item.get("provider_id") or "").strip().lower()
     model = _canonical_model_key(item.get("model"))
     if not provider and "/" in model:
         provider = model.split("/", 1)[0]
     permission_mode = str(item.get("permission_mode") or "").strip().lower()
     collaboration_mode = str(item.get("collaboration_mode") or "").strip().lower()
+    execution_backend = str(item.get("execution_backend") or "").strip().lower() or "app_server"
     role = str(item.get("role") or "provider").strip().lower()
     return (
         provider,
@@ -894,6 +897,7 @@ def _provider_thread_route_key(item: dict[str, Any]) -> tuple[str, str, str, str
         _canonical_effort_key(item.get("reasoning_effort")),
         permission_mode,
         collaboration_mode,
+        execution_backend,
         role,
     )
 

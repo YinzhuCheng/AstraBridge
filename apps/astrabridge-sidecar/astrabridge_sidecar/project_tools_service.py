@@ -196,6 +196,9 @@ class ProjectToolsService:
             "updated_at": now_iso(),
         }
 
+    def resolve_model_record(self, provider_id: str | None, model_id: str | None, *, target_exists: bool = False) -> dict[str, Any]:
+        return self._resolve_model_record(provider_id, model_id, target_exists=target_exists)
+
     def edit_preview(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._edit_operation(payload or {}, apply=False)
 

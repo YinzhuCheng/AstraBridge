@@ -285,7 +285,7 @@ class TaskConversationService:
     def _shell_settings(self, route: dict[str, Any]) -> dict[str, Any]:
         return {
             key: route.get(key)
-            for key in ("profile_id", "model", "reasoning_effort", "permission_mode", "collaboration_mode")
+            for key in ("profile_id", "model", "reasoning_effort", "permission_mode", "collaboration_mode", "execution_backend")
             if route.get(key) is not None
         }
 
