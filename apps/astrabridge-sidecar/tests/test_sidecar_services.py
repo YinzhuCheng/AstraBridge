@@ -563,6 +563,19 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     entry_mode="existing",
                 )
 
+    def test_project_service_creates_shell_tmp_subdir_inside_workspace_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            service = ProjectService(root / "recent.json")
+            service.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+
+            shell_tmp = service.require_shell_subdir("tmp", "browser-smoke")
+
+            self.assertEqual(shell_tmp, (workspace / ".astrabridge" / "tmp" / "browser-smoke").resolve())
+            self.assertTrue(shell_tmp.is_dir())
+
     def test_app_server_client_is_not_running_after_reader_disconnect(self) -> None:
         client = AppServerClient(codex_executable="codex")
         client._process = _LiveProcessStub()  # type: ignore[assignment]
@@ -6163,6 +6176,17 @@ class AstraBridgeServiceTests(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_yunwu_transparent_seed_without_workspace_uses_astrabridge_appdata_runtime(self) -> None:
+        service = YunwuImageService("https://example.test/v1")
+
+        seed = service._ensure_transparent_seed(workspace_root=None, size="1024x1024")  # noqa: SLF001
+
+        expected_root = common_module.app_runtime_dir("yunwu", "seeds")
+        self.assertTrue(seed.exists())
+        self.assertEqual(seed.parent, expected_root)
+        self.assertTrue(str(seed).startswith(str(Path(os.environ["ASTRABRIDGE_APPDATA"]).resolve())))
+        self.assertNotIn("astrabridge-yunwu-seeds", str(seed).lower())
 
     def test_yunwu_image_chat_style_response_and_prompt_guides(self) -> None:
         class ChatStyleHandler(BaseHTTPRequestHandler):
@@ -11910,6 +11934,54 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(captured_urls[0].startswith("file:///"))
             self.assertNotIn("/mnt/", captured_urls[0])
             self.assertEqual(smoke["browser_smoke"]["navigation_url"], captured_urls[0])
+
+    def test_dogfood_browser_smoke_temp_script_stays_inside_project_shell_tmp(self) -> None:
+        class LocalDogfoodRunService(DogfoodRunService):
+            def _node_executable(self) -> str | None:
+                return "node"
+
+            def _desktop_root(self) -> Path | None:
+                return root
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            html = workspace / "index.html"
+            html.write_text("<!doctype html><title>ok</title>", encoding="utf-8")
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            dogfood = LocalDogfoodRunService(projects)
+            recorded: dict[str, Path] = {}
+
+            def fake_run(args: list[str], **kwargs: object) -> SimpleNamespace:
+                del kwargs
+                script_path = Path(str(args[1]))
+                target_path = Path(str(args[3]))
+                recorded["script_path"] = script_path
+                recorded["target_path"] = target_path
+                target_path.write_bytes(b"png")
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "ok": True,
+                            "status": 200,
+                            "console_errors": [],
+                            "screenshot_path": str(target_path),
+                            "screenshot_status": "captured",
+                            "action_results": [],
+                        }
+                    )
+                )
+
+            with patch("astrabridge_sidecar.dogfood_run_service.subprocess.run", side_effect=fake_run):
+                smoke = dogfood.browser_smoke({"url": html.resolve().as_uri(), "label": "local smoke script path"})
+
+            expected_script_root = (workspace / ".astrabridge" / "tmp" / "browser-smoke").resolve()
+            self.assertEqual(smoke["browser_smoke"]["status"], "pass")
+            self.assertTrue(recorded["script_path"].is_relative_to(expected_script_root))
+            self.assertTrue(recorded["target_path"].is_relative_to((workspace / ".astrabridge" / "captures").resolve()))
+            self.assertFalse(recorded["script_path"].exists())
 
     def test_dogfood_browser_smoke_successful_capture_overrides_stale_preflight_failure(self) -> None:
         class CaptureDogfoodRunService(DogfoodRunService):

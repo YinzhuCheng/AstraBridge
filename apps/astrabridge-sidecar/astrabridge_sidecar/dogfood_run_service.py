@@ -2,7 +2,6 @@
 import re
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -751,9 +750,9 @@ async function launchBrowser() {
   console.log(JSON.stringify({ ok: false, error: String(error.message || error) }));
 });
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".cjs", encoding="utf-8", delete=False) as handle:
-            handle.write(script)
-            script_path = Path(handle.name)
+        script_dir = self._scratch_dir("browser-smoke")
+        script_path = script_dir / f"{slugify(label, 'browser-smoke')}-{now_iso().replace(':', '').replace('.', '-')}.cjs"
+        script_path.write_text(script, encoding="utf-8")
         cwd = self._desktop_root()
         try:
             env = __import__("os").environ.copy()
@@ -838,6 +837,14 @@ async function launchBrowser() {
             else:
                 seconds += timeout_sec
         return min(max(seconds, 25.0), 240.0)
+
+    def _scratch_dir(self, *parts: str) -> Path:
+        if hasattr(self._projects, "require_shell_subdir"):
+            return self._projects.require_shell_subdir("tmp", *parts)
+        root = self._projects.require_shell_state_root() / "tmp"
+        path = root.joinpath(*parts) if parts else root
+        path.mkdir(parents=True, exist_ok=True)
+        return path.resolve()
 
     def _desktop_root(self) -> Path | None:
         override = __import__("os").environ.get("ASTRABRIDGE_DESKTOP_ROOT")

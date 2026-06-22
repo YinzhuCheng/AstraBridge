@@ -52,6 +52,13 @@ def default_codex_home() -> Path:
     return app_data_dir() / DEFAULT_CODEX_HOME_NAME
 
 
+def app_runtime_dir(*parts: str) -> Path:
+    root = app_data_dir() / "runtime"
+    path = root.joinpath(*parts) if parts else root
+    path.mkdir(parents=True, exist_ok=True)
+    return path.resolve()
+
+
 def slugify(value: str, default: str = "astrabridge-project") -> str:
     cleaned = re.sub(r"[^0-9A-Za-z._-]+", "-", value.strip()).strip("-._")
     return cleaned[:80] or default

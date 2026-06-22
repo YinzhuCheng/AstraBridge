@@ -221,6 +221,11 @@ class ProjectService:
     def require_shell_state_root(self) -> Path:
         return self.require_workspace_root() / WORKSPACE_STATE_DIRNAME
 
+    def require_shell_subdir(self, *parts: str) -> Path:
+        path = self.require_shell_state_root().joinpath(*parts)
+        path.mkdir(parents=True, exist_ok=True)
+        return path.resolve()
+
     def update_project(self, patch: dict[str, Any]) -> dict[str, Any]:
         if not self.current_project:
             raise ValueError("No project is open.")
@@ -342,6 +347,7 @@ class ProjectService:
         shell_root = workspace_root / WORKSPACE_STATE_DIRNAME
         for path in [
             shell_root / "attachments",
+            shell_root / "tmp",
             shell_root / "runtime_events.jsonl",
             shell_root / "approvals.jsonl",
             shell_root / "thread_cache.json",

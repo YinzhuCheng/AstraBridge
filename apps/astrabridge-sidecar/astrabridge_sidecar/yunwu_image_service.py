@@ -8,7 +8,6 @@ import os
 import re
 import ssl
 import struct
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -18,7 +17,7 @@ import zlib
 from pathlib import Path
 from typing import Any
 
-from .common import WORKSPACE_STATE_DIRNAME, now_iso, path_for_host, read_json, write_json
+from .common import WORKSPACE_STATE_DIRNAME, app_runtime_dir, now_iso, path_for_host, read_json, write_json
 from .image_prompt_strategy import apply_prompt_guide, prompt_guides_payload
 
 
@@ -740,9 +739,8 @@ class YunwuImageService:
             if not path.exists():
                 path.write_bytes(self._blank_transparent_png_bytes(*parsed_size))
             return path
-        temp_root = Path(tempfile.gettempdir()) / "astrabridge-yunwu-seeds"
-        temp_root.mkdir(parents=True, exist_ok=True)
-        path = temp_root / f"transparent_seed_{parsed_size[0]}x{parsed_size[1]}.png"
+        seed_root = app_runtime_dir("yunwu", "seeds")
+        path = seed_root / f"transparent_seed_{parsed_size[0]}x{parsed_size[1]}.png"
         if not path.exists():
             path.write_bytes(self._blank_transparent_png_bytes(*parsed_size))
         return path
