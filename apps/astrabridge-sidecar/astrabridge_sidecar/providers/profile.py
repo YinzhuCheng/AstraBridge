@@ -133,22 +133,11 @@ class ProviderProfile:
             "models_url": self.models_url,
             "protocol": self.protocol,
             "fallback_models": list(self.fallback_models),
-            "supported_reasoning_levels": list(self.reasoning_levels()),
-            "default_reasoning_level": self.default_reasoning_level(),
-            "reasoning_policy_mode": self.reasoning_policy.mode,
-            "edit_policy": self.edit_policy_payload(),
-            "capabilities": self.capability_payload(),
+            **self.provider_metadata_payload(),
         }
 
     def to_router_provider(self) -> dict[str, object]:
-        return {
-            **self.to_catalog_provider(),
-            "supported_reasoning_levels": list(self.reasoning_levels()),
-            "default_reasoning_level": self.default_reasoning_level(),
-            "reasoning_policy_mode": self.reasoning_policy.mode,
-            "edit_policy": self.edit_policy_payload(),
-            "capabilities": self.capability_payload(),
-        }
+        return dict(self.to_catalog_provider())
 
     def to_default_profile(self) -> dict[str, object]:
         env_key = self.primary_env_key()
@@ -184,6 +173,28 @@ class ProviderProfile:
             "max_context_tokens": self.capabilities.max_context_tokens,
             "max_output_tokens": self.capabilities.max_output_tokens,
             "input_modalities": list(self.context_policy.default_input_modalities),
+        }
+
+    def provider_metadata_payload(self) -> dict[str, object]:
+        return {
+            "supported_reasoning_levels": list(self.reasoning_levels()),
+            "default_reasoning_level": self.default_reasoning_level(),
+            "reasoning_policy_mode": self.reasoning_policy.mode,
+            "edit_policy": self.edit_policy_payload(),
+            "capabilities": self.capability_payload(),
+            "fallback_models": list(self.fallback_policy.fallback_models or self.fallback_models),
+            "temperature_default": self.safety_policy.temperature_default,
+            "temperature_ui_min": self.safety_policy.temperature_ui_min,
+            "temperature_ui_max": self.safety_policy.temperature_ui_max,
+            "provider_temperature_min": self.safety_policy.provider_temperature_min,
+            "provider_temperature_max": self.safety_policy.provider_temperature_max,
+            "temperature_adapter_policy": self.safety_policy.temperature_adapter_policy,
+            "effective_context_window_percent": self.context_policy.effective_context_window_percent,
+            "auto_compact_token_limit": self.context_policy.auto_compact_token_limit,
+            "tool_output_token_limit": self.context_policy.tool_output_token_limit,
+            "supports_image_detail_original": self.context_policy.supports_image_detail_original,
+            "downgrade_reasoning_levels": list(self.fallback_policy.downgrade_reasoning_levels),
+            "drop_unsupported_modalities": self.fallback_policy.drop_unsupported_modalities,
         }
 
     def edit_policy_payload(self) -> dict[str, str]:
@@ -249,4 +260,7 @@ class ProviderProfile:
 
     def profile_metadata_payload(self) -> dict[str, object]:
         blocked = {"auto_compact_token_limit", "tool_output_token_limit"}
-        return {key: value for key, value in self.to_model_defaults().items() if key not in blocked}
+        return {
+            **self.provider_metadata_payload(),
+            **{key: value for key, value in self.to_model_defaults().items() if key not in blocked},
+        }

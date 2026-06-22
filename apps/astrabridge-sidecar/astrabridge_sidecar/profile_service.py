@@ -15,6 +15,48 @@ REFERENCE_FIELDS = {"secret_ref", "env_key", "env_key_instructions"}
 ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 ALLOWED_PROXY_MODES = {"direct", "system", "custom"}
 PROXY_URL_RE = re.compile(r"^(https?|socks5)://(127\.0\.0\.1|localhost):([1-9][0-9]{0,4})$")
+PROVIDER_DEFAULT_METADATA_FIELDS = (
+    "supported_reasoning_levels",
+    "default_reasoning_level",
+    "reasoning_policy_mode",
+    "capabilities",
+    "edit_policy",
+    "temperature_default",
+    "temperature_ui_min",
+    "temperature_ui_max",
+    "provider_temperature_min",
+    "provider_temperature_max",
+    "temperature_adapter_policy",
+    "effective_context_window_percent",
+    "supports_image_detail_original",
+    "fallback_models",
+    "downgrade_reasoning_levels",
+    "drop_unsupported_modalities",
+)
+
+
+def _metadata_value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict, tuple, set)):
+        return bool(value)
+    return True
+
+
+def _looks_like_secret_field(key: str) -> bool:
+    lowered = str(key).lower()
+    if lowered in REFERENCE_FIELDS:
+        return False
+    if lowered in SECRET_FIELDS:
+        return True
+    if "authorization" in lowered or "bearer" in lowered:
+        return True
+    for suffix in ("_secret", "_password", "_cookie", "_authorization", "_bearer", "_api_key", "_token"):
+        if lowered.endswith(suffix):
+            return True
+    return False
 
 
 class ProfileService:
@@ -86,10 +128,18 @@ class ProfileService:
             "updated_at": now_iso(),
         }
         merged.setdefault("created_at", now_iso())
-        if provider_defaults.get("supported_reasoning_levels") and not merged.get("supported_reasoning_levels"):
-            merged["supported_reasoning_levels"] = list(provider_defaults["supported_reasoning_levels"])
-        if provider_defaults.get("default_reasoning_level") and not merged.get("default_reasoning_level"):
-            merged["default_reasoning_level"] = provider_defaults["default_reasoning_level"]
+        for field in PROVIDER_DEFAULT_METADATA_FIELDS:
+            if _metadata_value_present(merged.get(field)):
+                continue
+            value = provider_defaults.get(field)
+            if not _metadata_value_present(value):
+                continue
+            if isinstance(value, list):
+                merged[field] = list(value)
+            elif isinstance(value, dict):
+                merged[field] = dict(value)
+            else:
+                merged[field] = value
         merged.setdefault("wire_api", "responses")
         merged.setdefault("secret_ref", None)
         existing[profile_id] = merged
@@ -162,10 +212,7 @@ class ProfileService:
     def _assert_no_secret(self, value: Any) -> None:
         if isinstance(value, dict):
             for key, nested in value.items():
-                lowered = str(key).lower()
-                if lowered in REFERENCE_FIELDS:
-                    continue
-                if lowered in SECRET_FIELDS or any(part in lowered for part in SECRET_FIELDS):
+                if _looks_like_secret_field(str(key)):
                     raise ValueError(f"Profile metadata must not store secret field: {key}")
                 self._assert_no_secret(nested)
         elif isinstance(value, list):
@@ -191,9 +238,9 @@ class ProfileService:
             profile = get_provider_profile(candidate)
         except ValueError:
             return {}
-        return {
-            "supported_reasoning_levels": list(profile.reasoning_levels()),
-            "default_reasoning_level": profile.default_reasoning_level(),
-        }
+        defaults = dict(profile.profile_metadata_payload())
+        defaults.setdefault("supported_reasoning_levels", list(profile.reasoning_levels()))
+        defaults.setdefault("default_reasoning_level", profile.default_reasoning_level())
+        return defaults
 
 

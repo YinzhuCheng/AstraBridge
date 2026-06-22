@@ -11030,6 +11030,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(catalog_provider["default_model"], "qwen3.7-plus")
         self.assertEqual(catalog_provider["env_key"], "DASHSCOPE_API_KEY")
         self.assertEqual(catalog_provider["supported_reasoning_levels"], ["low", "medium", "high", "xhigh"])
+        self.assertEqual(catalog_provider["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
+        self.assertAlmostEqual(float(catalog_provider["provider_temperature_min"]), 0.00001)
+        self.assertEqual(catalog_provider["effective_context_window_percent"], 80)
         self.assertEqual(model_defaults["default_reasoning_level"], "high")
         self.assertEqual(model_defaults["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
         self.assertEqual(model_defaults["provider_profile_id"], "qwen")
@@ -11078,11 +11081,42 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             self.assertEqual(provider["supported_reasoning_levels"], ["high", "xhigh", "max"])
             self.assertEqual(provider["default_reasoning_level"], "xhigh")
+            self.assertEqual(provider["temperature_adapter_policy"], "pass_through_0_2")
+            self.assertEqual(provider["effective_context_window_percent"], 80)
+            self.assertEqual(provider["fallback_models"], ["deepseek-v4-pro", "deepseek-v4-flash"])
             self.assertEqual(model["supported_reasoning_levels"], ["high", "xhigh", "max"])
             self.assertEqual(model["default_reasoning_level"], "xhigh")
             self.assertEqual(model["temperature_adapter_policy"], "pass_through_0_2")
             self.assertEqual(profile["supported_reasoning_levels"], ["high", "xhigh", "max"])
             self.assertEqual(profile["reasoning_effort"], "xhigh")
+
+    def test_profile_service_backfills_provider_policy_metadata_for_custom_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            created = profiles.upsert_profile(
+                {
+                    "profile_id": "qwen-custom",
+                    "label": "Qwen Custom",
+                    "type": "custom_provider",
+                    "provider_id": "qwen",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "model": "qwen3.7-plus",
+                    "wire_api": "responses",
+                    "env_key": "DASHSCOPE_API_KEY",
+                    "auth_mode": "env_ref",
+                    "proxy_mode": "direct",
+                    "proxy_url": "",
+                }
+            )
+
+            self.assertEqual(created["supported_reasoning_levels"], ["low", "medium", "high", "xhigh"])
+            self.assertEqual(created["default_reasoning_level"], "high")
+            self.assertEqual(created["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
+            self.assertAlmostEqual(float(created["provider_temperature_min"]), 0.00001)
+            self.assertEqual(created["effective_context_window_percent"], 80)
+            self.assertEqual(created["fallback_models"], ["qwen3.7-plus", "qwen3.7-max-2026-06-08", "qwen3.6-flash"])
+            self.assertEqual(created["edit_policy"]["medium"], "structured_edit")
+            self.assertTrue(created["capabilities"]["supports_reasoning"])
 
     def test_router_config_seeds_profile_fallback_models_without_static_catalog_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

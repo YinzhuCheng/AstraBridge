@@ -58,6 +58,13 @@ PROVIDER_METADATA_FIELDS = (
     "provider_temperature_min",
     "provider_temperature_max",
     "temperature_adapter_policy",
+    "effective_context_window_percent",
+    "auto_compact_token_limit",
+    "tool_output_token_limit",
+    "supports_image_detail_original",
+    "fallback_models",
+    "downgrade_reasoning_levels",
+    "drop_unsupported_modalities",
 )
 
 
