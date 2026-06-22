@@ -26,7 +26,7 @@ from .mcp_config_service import McpConfigService
 from .modal_service import ModalService
 from .model_catalog import ASTRABRIDGE_MODEL_CATALOG_FILENAME, ASTRABRIDGE_MODELS_CACHE_FILENAME
 from .profile_service import ProfileService
-from .providers import classify_runtime_failure
+from .providers import HistoryProjector, NeutralMessage, ReasoningArtifact, classify_runtime_failure
 from .router_service import ROUTER_ENV_KEY, ROUTER_PORT
 from .runtime_config_service import RuntimeConfigService, codex_model_id, codex_reasoning_effort
 from .security import SecurityError, redact_sensitive, resolve_under, scan_text_for_secrets
@@ -1508,6 +1508,10 @@ class RuntimeService:
                     settings={**desired, "name": reusable.get("name") or desired.get("name")},
                     reused_existing=True,
                     context_budget_report=context_budget_report,
+                    **self._handoff_projection_kwargs(
+                        source_thread_id=source_thread_id,
+                        target_provider_id=str(desired.get("provider_id") or ""),
+                    ),
                 )
                 self._projects.switch_thread(reusable_thread_id)
                 self._record_event(
@@ -1616,6 +1620,10 @@ class RuntimeService:
             settings=desired,
             reused_existing=False,
             context_budget_report=context_budget_report,
+            **self._handoff_projection_kwargs(
+                source_thread_id=source_thread_id,
+                target_provider_id=str(desired.get("provider_id") or ""),
+            ),
         )
         self._record_event(
             {
@@ -1662,6 +1670,10 @@ class RuntimeService:
             settings=desired,
             reused_existing=False,
             context_budget_report=context_budget_report,
+            **self._handoff_projection_kwargs(
+                source_thread_id=source_thread_id,
+                target_provider_id=str(desired.get("provider_id") or ""),
+            ),
         )
         self._projects.switch_thread(target_thread_id)
         self._record_event(
@@ -1721,6 +1733,10 @@ class RuntimeService:
                 settings=desired,
                 reused_existing=False,
                 context_budget_report=context_budget_report,
+                **self._handoff_projection_kwargs(
+                    source_thread_id=missing_thread_id,
+                    target_provider_id=str(desired.get("provider_id") or ""),
+                ),
             )
         self._projects.switch_thread(target_thread_id)
         self._record_event(
@@ -2673,6 +2689,147 @@ class RuntimeService:
         pack = dict(snapshot.get("context_pack") or {})
         report = dict(pack.get("budget_report") or {})
         return report or None
+
+    def _handoff_projection_kwargs(self, *, source_thread_id: str | None, target_provider_id: str) -> dict[str, Any]:
+        summary = self._handoff_projection_summary(source_thread_id=source_thread_id, target_provider_id=target_provider_id)
+        if not summary:
+            return {}
+        return {
+            "dropped_artifacts": int(summary.get("dropped_artifacts") or 0),
+            "repaired_tool_pairs": int(summary.get("repaired_tool_pairs") or 0),
+            "warnings": list(summary.get("warnings") or []),
+        }
+
+    def _handoff_projection_summary(self, *, source_thread_id: str | None, target_provider_id: str) -> dict[str, Any] | None:
+        source_thread = self._thread_for_handoff_projection(source_thread_id)
+        target_provider = str(target_provider_id or "").strip().lower()
+        if not source_thread or not target_provider:
+            return None
+        source_provider = self._thread_provider_id_for_projection(source_thread)
+        neutral_messages, artifacts = self._thread_projection_inputs(source_thread)
+        if not neutral_messages and not artifacts:
+            return None
+        projected = HistoryProjector().project(
+            neutral_messages=neutral_messages,
+            artifacts=artifacts,
+            source_provider=source_provider,
+            target_provider=target_provider,
+        )
+        return {
+            "source_provider": source_provider,
+            "target_provider": target_provider,
+            "dropped_artifacts": projected.dropped_artifacts,
+            "repaired_tool_pairs": projected.repaired_tool_pairs,
+            "warnings": projected.warnings,
+            "projected_message_count": len(projected.messages),
+            "replayable_artifact_count": len(projected.replayable_artifacts),
+        }
+
+    def _thread_for_handoff_projection(self, source_thread_id: str | None) -> dict[str, Any] | None:
+        clean_thread_id = str(source_thread_id or "").strip()
+        if not clean_thread_id:
+            return None
+        native = self._read_native_thread(clean_thread_id)
+        if isinstance(native, dict) and native:
+            return native
+        cached = self._cached_thread(clean_thread_id)
+        if isinstance(cached, dict) and cached:
+            return cached
+        return None
+
+    def _thread_provider_id_for_projection(self, thread: dict[str, Any]) -> str | None:
+        settings = dict(thread.get("shellSettings") or {})
+        provider = str(settings.get("provider_id") or "").strip().lower()
+        if provider:
+            return provider
+        for turn in list(thread.get("turns") or []):
+            if not isinstance(turn, dict):
+                continue
+            provider = str(turn.get("provider_id") or turn.get("providerId") or "").strip().lower()
+            if provider:
+                return provider
+            for item in list(turn.get("items") or []):
+                if not isinstance(item, dict):
+                    continue
+                provider_data = dict(item.get("providerData") or item.get("provider_data") or {})
+                normalized = dict(provider_data.get("normalized") or {})
+                reasoning_state = dict(normalized.get("reasoning_state") or {})
+                provider = str(reasoning_state.get("provider_id") or normalized.get("provider_id") or "").strip().lower()
+                if provider:
+                    return provider
+        return None
+
+    def _thread_projection_inputs(self, thread: dict[str, Any]) -> tuple[list[NeutralMessage], list[ReasoningArtifact]]:
+        neutral_messages: list[NeutralMessage] = []
+        artifacts: list[ReasoningArtifact] = []
+        for turn in list(thread.get("turns") or []):
+            if not isinstance(turn, dict):
+                continue
+            for item in list(turn.get("items") or []):
+                if not isinstance(item, dict):
+                    continue
+                neutral_messages.extend(self._projection_messages_from_item(item))
+                artifacts.extend(self._projection_artifacts_from_item(item))
+        return neutral_messages, artifacts
+
+    def _projection_messages_from_item(self, item: dict[str, Any]) -> list[NeutralMessage]:
+        item_type = str(item.get("type") or "").strip()
+        provider_data = dict(item.get("providerData") or item.get("provider_data") or {})
+        normalized = dict(provider_data.get("normalized") or {})
+        text = self._projection_item_text(item, normalized)
+        messages: list[NeutralMessage] = []
+        if item_type in {"userMessage", "inputMessage", "user_message"} and text:
+            messages.append(NeutralMessage(role="user", text=text))
+            return messages
+        if item_type in {"agentMessage", "assistantMessage", "agent_message", "assistant_message"}:
+            if text:
+                messages.append(NeutralMessage(role="assistant", text=text))
+            for call in list(normalized.get("tool_calls") or []):
+                if not isinstance(call, dict):
+                    continue
+                tool_id = str(call.get("id") or "").strip()
+                tool_name = str(call.get("name") or "").strip()
+                arguments_json = str(call.get("arguments_json") or "").strip() or "{}"
+                if tool_id and tool_name:
+                    messages.append(
+                        NeutralMessage(
+                            role="assistant",
+                            text="",
+                            tool_call_id=tool_id,
+                            tool_name=tool_name,
+                            provider_data={"arguments_json": arguments_json},
+                        )
+                    )
+        return messages
+
+    def _projection_artifacts_from_item(self, item: dict[str, Any]) -> list[ReasoningArtifact]:
+        provider_data = dict(item.get("providerData") or item.get("provider_data") or {})
+        normalized = dict(provider_data.get("normalized") or {})
+        reasoning_state = dict(normalized.get("reasoning_state") or {})
+        if not reasoning_state:
+            return []
+        provider_id = str(reasoning_state.get("provider_id") or "").strip()
+        model_id = str(reasoning_state.get("model_id") or "").strip()
+        if not provider_id or not model_id:
+            return []
+        return [
+            ReasoningArtifact(
+                provider_id=provider_id,
+                model_id=model_id,
+                kind="reasoning_state",
+                replayable=bool(reasoning_state.get("replayable")),
+                payload=reasoning_state,
+            )
+        ]
+
+    def _projection_item_text(self, item: dict[str, Any], normalized: dict[str, Any]) -> str:
+        text = str(normalized.get("text") or "").strip()
+        if text:
+            return text
+        direct = item.get("text") or item.get("message") or item.get("content")
+        if isinstance(direct, str):
+            return direct.strip()
+        return ""
 
     def _asset_context_inputs(self) -> list[dict[str, Any]]:
         if self._asset_registry is None:

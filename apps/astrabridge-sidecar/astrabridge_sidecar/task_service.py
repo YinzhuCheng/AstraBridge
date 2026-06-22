@@ -327,6 +327,9 @@ class TaskService:
         settings: dict[str, Any],
         reused_existing: bool,
         context_budget_report: dict[str, Any] | None = None,
+        dropped_artifacts: int = 0,
+        repaired_tool_pairs: int = 0,
+        warnings: list[str] | None = None,
     ) -> dict[str, Any]:
         task = self.bind_thread(thread_id=to_thread_id, settings=settings, role="provider", make_active=True)
         source_settings = self._provider_thread_settings(task, from_thread_id)
@@ -334,6 +337,9 @@ class TaskService:
             from_provider=str((source_settings or {}).get("provider_id") or "") or None,
             to_provider=str(settings.get("provider_id") or "openai"),
             to_model=str(settings.get("model") or "") or None,
+            dropped_artifacts=dropped_artifacts,
+            repaired_tool_pairs=repaired_tool_pairs,
+            warnings=warnings,
             projection_mode="reused_provider_thread" if reused_existing else "task_context_fresh_thread",
             reasoning_effort=str(settings.get("reasoning_effort") or "") or None,
             context_budget_report=context_budget_report,

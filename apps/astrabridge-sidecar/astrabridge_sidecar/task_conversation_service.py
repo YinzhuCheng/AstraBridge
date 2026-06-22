@@ -259,6 +259,9 @@ class TaskConversationService:
             return None
         transition_summary = dict(handoff_event.get("transition_summary") or {})
         projection_mode = str(transition_summary.get("projection_mode") or "").strip()
+        dropped_artifacts = int(transition_summary.get("dropped_artifacts") or 0)
+        repaired_tool_pairs = int(transition_summary.get("repaired_tool_pairs") or 0)
+        warning_count = len(list(transition_summary.get("warnings") or []))
         target_provider = str(handoff_event.get("provider_id") or "").strip()
         target_model = str(handoff_event.get("model") or "").strip()
         target_thread_id = str(handoff_event.get("to_thread_id") or "").strip()
@@ -268,6 +271,12 @@ class TaskConversationService:
         ]
         if projection_mode:
             summary_parts.append(f"via {projection_mode}")
+        if dropped_artifacts:
+            summary_parts.append(f"dropped_artifacts={dropped_artifacts}")
+        if repaired_tool_pairs:
+            summary_parts.append(f"repaired_tool_pairs={repaired_tool_pairs}")
+        if warning_count:
+            summary_parts.append(f"warnings={warning_count}")
         summary = " ".join(part for part in summary_parts if part).strip()
         return {
             "turn_id": handoff_event.get("event_id"),

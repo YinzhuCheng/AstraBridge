@@ -722,6 +722,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "permission_mode": "auto",
                 },
                 reused_existing=False,
+                dropped_artifacts=2,
+                repaired_tool_pairs=1,
+                warnings=["Stripped provider-private fields during history projection: encrypted_reasoning."],
             )
 
             snapshot = tasks.snapshot()
@@ -733,6 +736,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(event["transition_summary"]["to_provider"], "deepseek")
             self.assertEqual(event["transition_summary"]["to_model"], "deepseek-v4-pro")
             self.assertEqual(event["transition_summary"]["projection_mode"], "task_context_fresh_thread")
+            self.assertEqual(event["transition_summary"]["dropped_artifacts"], 2)
+            self.assertEqual(event["transition_summary"]["repaired_tool_pairs"], 1)
+            self.assertTrue(any("provider-private fields" in warning for warning in event["transition_summary"]["warnings"]))
             self.assertGreaterEqual(int(event["transition_summary"]["context_budget"]), 1000000)
             self.assertEqual(event["transition_summary"]["target_runtime"]["protocol"], "chat")
             self.assertEqual(event["transition_summary"]["target_runtime"]["env_key"], "DEEPSEEK_API_KEY")
@@ -941,6 +947,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "permission_mode": "auto",
                 },
                 reused_existing=False,
+                dropped_artifacts=1,
+                repaired_tool_pairs=2,
+                warnings=["Cross-provider reasoning replay is disabled by target provider policy; preserved only visible summary."],
             )
             context = ProjectContextService(projects, task_service=tasks, task_conversation_service=conversation)
 
@@ -954,6 +963,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(pack["task_conversation_digest"]["items"][0]["event_types"], ["agent_message", "file_change"])
             self.assertEqual(pack["task_conversation_digest"]["items"][1]["event_types"], ["provider_handoff"])
             self.assertIn("Provider handoff", pack["task_conversation_digest"]["items"][1]["summary"])
+            self.assertIn("dropped_artifacts=1", pack["task_conversation_digest"]["items"][1]["summary"])
+            self.assertIn("repaired_tool_pairs=2", pack["task_conversation_digest"]["items"][1]["summary"])
 
     def test_coding_event_projection_maps_core_coding_turn_items(self) -> None:
         events = project_turn_to_coding_events(
@@ -1363,6 +1374,109 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(handoff["reused_existing"])
             self.assertEqual(projects.current_project["current_thread_id"], "thread-deepseek-existing")
             self.assertEqual([method for method, _params in client.requests], ["thread/read"])
+
+    def test_runtime_provider_handoff_uses_history_projection_summary_for_transition_diagnostics(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.requests: list[tuple[str, dict[str, object]]] = []
+
+            def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:
+                self.requests.append((method, params))
+                if method == "thread/read":
+                    return {"thread": {"id": "thread-openai"}}
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-deepseek-fresh", "name": "Fresh DS"}}
+                raise AssertionError(f"Unexpected method {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Same task",
+                thread_id="thread-openai",
+                settings={
+                    "profile_id": "openai-compatible",
+                    "provider_id": "openai",
+                    "model": "gpt-5.5",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            runtime._cache_thread_entry(  # noqa: SLF001
+                "thread-openai",
+                {
+                    "thread": {
+                        "id": "thread-openai",
+                        "shellSettings": {
+                            "profile_id": "openai-compatible",
+                            "provider_id": "openai",
+                            "model": "gpt-5.5",
+                            "reasoning_effort": "high",
+                        },
+                        "turns": [
+                            {
+                                "id": "turn-source",
+                                "items": [
+                                    {
+                                        "type": "agentMessage",
+                                        "id": "agent-source",
+                                        "text": "Reviewed the current task.",
+                                        "providerData": {
+                                            "normalized": {
+                                                "text": "Reviewed the current task.",
+                                                "reasoning_summary": "Need to inspect the repo before editing.",
+                                                "reasoning_state": {
+                                                    "provider_id": "openai",
+                                                    "model_id": "openai/gpt-5.5",
+                                                    "replayable": True,
+                                                    "visible_summary": "Need to inspect the repo before editing.",
+                                                    "opaque_artifacts": [
+                                                        {
+                                                            "encrypted_reasoning": "opaque-secret",
+                                                            "summary": "private chain",
+                                                        }
+                                                    ],
+                                                },
+                                                "tool_calls": [
+                                                    {
+                                                        "id": "call-readme",
+                                                        "name": "read_file",
+                                                        "arguments_json": "{\"path\":\"README.md\"}",
+                                                    }
+                                                ],
+                                                "finish_reason": "completed",
+                                            }
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                },
+            )
+
+            thread_id, handoff = runtime._ensure_provider_thread_for_turn(  # noqa: SLF001
+                FakeClient(),
+                source_thread_id="thread-openai",
+                profile={"profile_id": "deepseek-default", "provider_id": "deepseek", "model": "deepseek-v4-pro", "reasoning_effort": "max"},
+                model="deepseek-v4-pro",
+                effort="max",
+                permission_mode="auto",
+                collaboration_mode=None,
+            )
+
+            self.assertEqual(thread_id, "thread-deepseek-fresh")
+            self.assertEqual(handoff["transition_summary"]["dropped_artifacts"], 1)
+            self.assertEqual(handoff["transition_summary"]["repaired_tool_pairs"], 1)
+            self.assertTrue(any("Opaque provider reasoning artifacts were dropped" in warning for warning in handoff["transition_summary"]["warnings"]))
+            self.assertTrue(any("provider-private fields" in warning for warning in handoff["transition_summary"]["warnings"]))
+            task = tasks.current_task()
+            self.assertEqual(task["handoff_events"][-1]["transition_summary"]["dropped_artifacts"], 1)
 
     def test_runtime_marks_missing_reusable_provider_thread_and_forks_once(self) -> None:
         class FakeClient:
