@@ -1145,13 +1145,11 @@ function TerminalInspectorPanel({
 
 function WorkflowEvidencePanel({
   facts,
-  fallback,
 }: {
   facts: ReturnType<typeof summarizeTaskWorkflowFacts>;
-  fallback?: ReturnType<typeof summarizeCodingEventInspector>;
 }) {
-  const checkpoints = fallback?.checkpointRefs ?? [];
-  const diagnostics = fallback?.diagnosticRefs ?? [];
+  const checkpoints = facts.checkpointRefs;
+  const diagnostics = facts.diagnosticRefs;
   return (
     <section className="pane-section inspector-section" data-testid="workflow-evidence-panel">
       <div className="section-header">
@@ -4853,7 +4851,7 @@ function AppShell() {
                 {supervisor.data?.guard.message ? <p className={`guard-copy guard-copy-${supervisor.data.guard.level}`}>{supervisor.data.guard.message}</p> : null}
               </section>
 
-              <WorkflowEvidencePanel facts={workflowFacts} fallback={eventInspectorFallback} />
+              <WorkflowEvidencePanel facts={workflowFacts} />
             </>
           ) : null}
           {inspectorTab === "review" ? (

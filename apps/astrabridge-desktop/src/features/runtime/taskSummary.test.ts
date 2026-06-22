@@ -31,7 +31,16 @@ describe("task summary", () => {
   it("shows route, fork, checkpoint, and missing status", () => {
     const summary = summarizeTaskCard(
       buildTask({
-        handoff_events: [{ event_id: "handoff-1", type: "provider_handoff", to_thread_id: "thread-1", profile_id: "deepseek-default", model: "deepseek-v4-pro", created_at: "2026-06-21T00:00:00Z" }],
+        handoff_events: [
+          {
+            event_id: "handoff-1",
+            type: "provider_handoff",
+            to_thread_id: "thread-1",
+            profile_id: "deepseek-default",
+            model: "deepseek-v4-pro",
+            created_at: "2026-06-21T00:00:00Z",
+          },
+        ],
         fork_threads: [{ thread_id: "fork-1", role: "fork", model: "deepseek-v4-pro", reasoning_effort: "high" }],
         checkpoint_refs: [{ save_id: "save-1" }],
         provider_threads: [

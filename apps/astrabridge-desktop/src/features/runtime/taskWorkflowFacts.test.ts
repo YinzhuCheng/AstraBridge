@@ -59,6 +59,11 @@ describe("task workflow facts", () => {
       failedCommandCount: 0,
       recoveredCommandCount: 0,
       backend: "native_kernel",
+      checkpointRefs: [
+        { save_id: "save-1", description: "save-1" },
+        { save_id: "save-2", description: "save-2" },
+      ],
+      diagnosticRefs: [],
     });
   });
 
@@ -71,6 +76,8 @@ describe("task workflow facts", () => {
     expect(facts.diagnosticCount).toBe(0);
     expect(facts.failedCommandCount).toBe(0);
     expect(facts.recoveredCommandCount).toBe(0);
+    expect(facts.checkpointRefs).toEqual([]);
+    expect(facts.diagnosticRefs).toEqual([]);
   });
 
   it("uses coding-event fallback for checkpoints, commands, and diagnostics", () => {
@@ -96,6 +103,37 @@ describe("task workflow facts", () => {
       failedCommandCount: 1,
       recoveredCommandCount: 1,
       backend: "app_server",
+      checkpointRefs: [{ save_id: "save-1", description: "Event checkpoint", model_id: undefined, provider_id: undefined }],
+      diagnosticRefs: [
+        { key: "provider_handoff:handoff:", kind: "provider_handoff", summary: "handoff", model_id: undefined, provider_id: undefined, to_thread_id: undefined },
+        { key: "runtime_transition:transition:", kind: "runtime_transition", summary: "transition", model_id: undefined, provider_id: undefined, to_thread_id: undefined },
+      ],
     });
+  });
+
+  it("merges persisted task diagnostic and checkpoint refs with live event summaries", () => {
+    const facts = summarizeTaskWorkflowFacts(
+      buildTask({
+        checkpoint_refs: [{ save_id: "save-1", description: "Persisted checkpoint" }],
+        diagnostic_refs: [
+          { event_id: "handoff-1", kind: "provider_handoff", provider_id: "kimi", model: "kimi-k2.6", to_thread_id: "thread-2" },
+          { event_id: "cmd-1", kind: "command_execution", command: "npm test", status: "failed" },
+        ],
+      }),
+      null,
+      {
+        checkpointRefs: [{ save_id: "save-2", description: "Event checkpoint" }],
+        commandRefs: [{ command: "npm test", status: "failed" }],
+        diagnosticRefs: [{ kind: "runtime_transition", summary: "Runtime transition: review_entered" }],
+      },
+    );
+
+    expect(facts.checkpointCount).toBe(2);
+    expect(facts.diagnosticCount).toBe(3);
+    expect(facts.handoffCount).toBe(1);
+    expect(facts.checkpointRefs.map((item) => item.save_id)).toEqual(["save-1", "save-2"]);
+    expect(facts.diagnosticRefs.map((item) => item.kind)).toEqual(["provider_handoff", "command_execution", "runtime_transition"]);
+    expect(facts.diagnosticRefs[0]?.summary).toBe("Handoff to kimi kimi-k2.6");
+    expect(facts.diagnosticRefs[1]?.summary).toBe("npm test (failed)");
   });
 });

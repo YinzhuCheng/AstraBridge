@@ -99,6 +99,7 @@ export type ProjectTask = {
   goal?: unknown;
   plan?: unknown;
   checkpoint_refs?: Array<Record<string, unknown>>;
+  diagnostic_refs?: Array<Record<string, unknown>>;
   asset_context_refs?: Array<Record<string, unknown>>;
   created_at: string;
   updated_at: string;

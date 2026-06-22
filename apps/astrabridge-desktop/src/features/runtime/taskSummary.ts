@@ -1,4 +1,5 @@
 import type { ProjectTask, ProjectTaskProviderThread } from "../../types";
+import { summarizeTaskWorkflowFacts } from "./taskWorkflowFacts";
 
 export type TaskSummary = {
   subtitle: string;
@@ -14,18 +15,18 @@ function activeThreadForTask(task: ProjectTask): ProjectTaskProviderThread | und
 
 export function summarizeTaskCard(task: ProjectTask): TaskSummary {
   const activeThread = activeThreadForTask(task);
+  const workflowFacts = summarizeTaskWorkflowFacts(task, null, null);
   const latestHandoff = task.handoff_events[task.handoff_events.length - 1];
   const forkCount = task.fork_threads?.length ?? 0;
-  const checkpointCount = task.checkpoint_refs?.length ?? 0;
   const missingCount = task.provider_threads.filter((item) => Boolean((item as { missing_at?: string }).missing_at)).length;
 
   const subtitle = latestHandoff
     ? `已切换到 ${latestHandoff.profile_id ?? latestHandoff.provider_id ?? "默认通道"}${latestHandoff.model ? ` · ${latestHandoff.model}` : ""}`
-    : `${task.provider_threads.length || 0} 条执行线程`;
+    : `${workflowFacts.laneCount || 0} 条执行线程`;
 
   const stats: string[] = [];
   if (forkCount > 0) stats.push(`${forkCount} 个分支`);
-  if (checkpointCount > 0) stats.push(`${checkpointCount} 个检查点`);
+  if (workflowFacts.checkpointCount > 0) stats.push(`${workflowFacts.checkpointCount} 个检查点`);
   if (missingCount > 0) stats.push(`${missingCount} 条异常线程`);
 
   return {
