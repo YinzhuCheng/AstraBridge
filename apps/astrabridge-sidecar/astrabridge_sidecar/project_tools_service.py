@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import mimetypes
 import os
 import subprocess
@@ -8,6 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from .common import WORKSPACE_STATE_DIRNAME, now_iso
+from .coding_kernel import (
+    EditExecutor,
+    available_operations_for_request,
+    edit_operation_to_coding_event,
+    request_from_payload,
+    select_edit_strategy,
+)
+from .providers import get_provider_profile
 
 
 TEXT_EXTENSIONS = {
@@ -51,16 +60,21 @@ MAX_TREE_ITEMS = 500
 
 
 class ProjectToolsService:
-    """Read-only project tools for the right inspector panel.
+    """Bounded project tools for the inspector and coding workflow surfaces.
 
-    This intentionally exposes summaries and bounded previews rather than raw
-    project logs. The UI can inspect useful workspace state without creating a
-    second uncontrolled file/terminal surface.
+    This intentionally exposes summaries, bounded previews, and guarded edit
+    operations rather than raw project logs. The UI can inspect useful
+    workspace state without creating a second uncontrolled file/terminal
+    surface.
     """
 
-    def __init__(self, projects, runtime) -> None:
+    def __init__(self, projects, runtime, *, checkpoints=None, tasks=None, profiles=None, router_config=None) -> None:
         self._projects = projects
         self._runtime = runtime
+        self._checkpoints = checkpoints
+        self._tasks = tasks
+        self._profiles = profiles
+        self._router_config = router_config
 
     def review_status(self) -> dict[str, Any]:
         root = self._workspace_root()
@@ -182,8 +196,184 @@ class ProjectToolsService:
             "updated_at": now_iso(),
         }
 
+    def edit_preview(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._edit_operation(payload or {}, apply=False)
+
+    def edit_apply(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._edit_operation(payload or {}, apply=True)
+
     def _workspace_root(self) -> Path:
         return self._projects.require_workspace_root().resolve()
+
+    def _edit_operation(self, payload: dict[str, Any], *, apply: bool) -> dict[str, Any]:
+        root = self._workspace_root()
+        request = request_from_payload(payload)
+        executor = EditExecutor(root)
+        target_exists = executor.target_exists(request.path)
+        available_operations = available_operations_for_request(request, target_exists=target_exists)
+        context = self._edit_context(payload, target_exists=target_exists)
+        estimated_bytes = self._estimate_edit_bytes(request)
+        decision = select_edit_strategy(
+            model=context["model_record"],
+            requested_operation=payload.get("operation"),
+            available_operations=available_operations,
+            target_exists=target_exists,
+            estimated_bytes=estimated_bytes,
+            edit_count=len(request.edits),
+            profile_id=context["profile_id"],
+            provider_id=context["provider_id"],
+            model_id=context["model_id"],
+        )
+        prepared = executor.prepare(request, operation=decision.selected_operation)
+        checkpoint = None
+        applied = False
+        if apply and prepared.changed and decision.selected_operation != "propose_only":
+            checkpoint = self._create_edit_checkpoint(prepared, context)
+            executor.apply(prepared)
+            applied = True
+        verification = executor.verification_hook(prepared, checkpoint=checkpoint)
+        event_payload = {
+            "event_id": f"edit:{hashlib.sha1(f'{prepared.relative_path}:{prepared.operation}:{prepared.changed}:{prepared.added_lines}:{prepared.removed_lines}'.encode('utf-8')).hexdigest()[:16]}",
+            "timestamp": now_iso(),
+            "path": prepared.relative_path,
+            "requested_operation": decision.requested_operation,
+            "policy_operation": decision.policy_operation,
+            "selected_operation": decision.selected_operation,
+            "size_class": decision.size_class,
+            "authority_tier": decision.authority_tier,
+            "changed": prepared.changed,
+            "applied": applied,
+            "checkpoint_save_id": ((checkpoint or {}).get("save") or {}).get("save_id"),
+            "verification": verification,
+            "added_lines": prepared.added_lines,
+            "removed_lines": prepared.removed_lines,
+            "reason": decision.reason,
+        }
+        event = edit_operation_to_coding_event(
+            task_id=context["task_id"],
+            visible_thread_id=context["visible_thread_id"],
+            execution_thread_id=context["execution_thread_id"],
+            provider_id=context["provider_id"],
+            model_id=context["model_id"],
+            operation=event_payload,
+        )
+        if apply and applied:
+            self._record_edit_event(event)
+        return {
+            "ok": True,
+            "mode": "apply" if apply else "preview",
+            "applied": applied,
+            "no_op": not prepared.changed,
+            "path": prepared.relative_path,
+            "strategy": decision.to_dict(),
+            "preview": prepared.preview_payload(),
+            "checkpoint": (checkpoint or {}).get("save"),
+            "verification": verification,
+            "event": event,
+        }
+
+    def _create_edit_checkpoint(self, prepared, context: dict[str, Any]) -> dict[str, Any] | None:
+        if self._checkpoints is None:
+            return None
+        description = (
+            f"Edit {prepared.relative_path} via {prepared.operation} "
+            f"({context.get('provider_id') or 'provider'} / {context.get('model_id') or 'model'})"
+        )
+        payload = {
+            "thread_id": context.get("execution_thread_id"),
+            "thread_name": f"Edit {prepared.relative_path}",
+            "description": description,
+            "provider": context.get("provider_id") or "",
+            "model": context.get("model_id") or "",
+        }
+        return self._checkpoints.create(payload, system=True)
+
+    def _record_edit_event(self, event: dict[str, Any]) -> None:
+        record = getattr(self._runtime, "record_supervisor_event", None)
+        if not callable(record):
+            return
+        try:
+            record({"event": "edit_operation_applied", "coding_event": event, "path": event.get("payload", {}).get("path")})
+        except Exception:
+            return
+
+    def _edit_context(self, payload: dict[str, Any], *, target_exists: bool) -> dict[str, Any]:
+        profile = self._resolve_profile(payload)
+        provider_id = str(payload.get("provider_id") or profile.get("provider_id") or "").strip() or None
+        model_id = str(payload.get("model") or payload.get("model_id") or profile.get("model") or "").strip() or None
+        model_record = self._resolve_model_record(provider_id, model_id, target_exists=target_exists)
+        task = self._tasks.current_task() if self._tasks is not None else None
+        active_provider_thread = self._tasks.active_provider_thread(include_missing_fallback=True) if self._tasks is not None else None
+        return {
+            "profile_id": str(profile.get("profile_id") or payload.get("profile_id") or "").strip() or None,
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "model_record": model_record,
+            "task_id": str((task or {}).get("task_id") or ""),
+            "visible_thread_id": str(self._tasks.visible_provider_thread_id(include_missing_fallback=True) if self._tasks is not None else ""),
+            "execution_thread_id": str((active_provider_thread or {}).get("thread_id") or "") or None,
+        }
+
+    def _resolve_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        profile_id = str(payload.get("profile_id") or "").strip()
+        if profile_id and self._profiles is not None:
+            try:
+                return dict(self._profiles.resolve_runtime_profile(profile_id))
+            except Exception:
+                return {"profile_id": profile_id}
+        project = self._projects.current_project or {}
+        fallback_profile_id = str(project.get("default_profile_id") or "").strip()
+        if self._tasks is not None:
+            task = self._tasks.current_task() or {}
+            active = self._tasks.active_provider_thread(include_missing_fallback=True) or {}
+            fallback_profile_id = str(
+                payload.get("profile_id")
+                or active.get("profile_id")
+                or (task.get("composer_settings") or {}).get("profile_id")
+                or fallback_profile_id
+            ).strip()
+        if fallback_profile_id and self._profiles is not None:
+            try:
+                return dict(self._profiles.resolve_runtime_profile(fallback_profile_id))
+            except Exception:
+                return {"profile_id": fallback_profile_id}
+        return {}
+
+    def _resolve_model_record(self, provider_id: str | None, model_id: str | None, *, target_exists: bool) -> dict[str, Any]:
+        if self._router_config is not None and provider_id and model_id:
+            full_id = f"{provider_id}/{model_id}"
+            for item in self._router_config.models():
+                if str(item.get("id") or "") in {model_id, full_id}:
+                    return dict(item)
+                if str(item.get("provider") or "") == provider_id and str(item.get("native_model") or "") == model_id:
+                    return dict(item)
+        if provider_id:
+            try:
+                profile = get_provider_profile(provider_id)
+                record = {
+                    "id": f"{provider_id}/{model_id or profile.default_model}",
+                    "provider": provider_id,
+                    "native_model": model_id or profile.default_model,
+                    **profile.default_model_config(),
+                    "edit_policy": profile.edit_policy_payload(),
+                }
+                if target_exists:
+                    record.setdefault("authority_tier", "B")
+                return record
+            except Exception:
+                pass
+        return {
+            "id": model_id or "unknown",
+            "provider": provider_id or "",
+            "native_model": model_id or "",
+            "edit_policy": {"small": "patch", "medium": "patch", "large": "replace"},
+            "authority_tier": "B",
+        }
+
+    def _estimate_edit_bytes(self, request) -> int:
+        if request.content is not None:
+            return len(request.content.encode("utf-8"))
+        return sum(len(item.search.encode("utf-8")) + len(item.replace.encode("utf-8")) for item in request.edits)
 
     def _safe_rel_path(self, root: Path, rel_path: str, *, allow_lcr: bool) -> Path:
         raw = str(rel_path or "").strip().replace("\\", "/").lstrip("/")

@@ -102,6 +102,46 @@ def project_handoff_event_to_coding_events(
     return [event.to_dict()]
 
 
+def edit_operation_to_coding_event(
+    *,
+    task_id: str,
+    visible_thread_id: str,
+    execution_thread_id: str | None,
+    provider_id: str | None,
+    model_id: str | None,
+    operation: dict[str, Any],
+    source: Literal["codex_app_server", "native_kernel", "transport", "ui", "sidecar"] = "sidecar",
+) -> dict[str, Any]:
+    event = CodingEvent(
+        event_id=_string_or_none(operation.get("event_id")) or "edit_operation",
+        task_id=task_id,
+        visible_thread_id=visible_thread_id,
+        execution_thread_id=execution_thread_id,
+        provider_id=provider_id,
+        model_id=model_id,
+        event_type="edit_operation",
+        timestamp=_string_or_none(operation.get("timestamp")),
+        payload={
+            "path": _string_or_none(operation.get("path")),
+            "requested_operation": _string_or_none(operation.get("requested_operation")),
+            "policy_operation": _string_or_none(operation.get("policy_operation")),
+            "selected_operation": _string_or_none(operation.get("selected_operation")),
+            "size_class": _string_or_none(operation.get("size_class")),
+            "authority_tier": _string_or_none(operation.get("authority_tier")),
+            "changed": bool(operation.get("changed")),
+            "applied": bool(operation.get("applied")),
+            "checkpoint_save_id": _string_or_none(operation.get("checkpoint_save_id")),
+            "verification": dict(operation.get("verification") or {}),
+            "added_lines": operation.get("added_lines"),
+            "removed_lines": operation.get("removed_lines"),
+            "reason": _string_or_none(operation.get("reason")),
+        },
+        redaction_status="secret_free",
+        source=source,
+    )
+    return event.to_dict()
+
+
 def _event_payload(item_type: str, item: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
     if item_type in {"userMessage", "agentMessage", "assistantMessage"}:
         return (

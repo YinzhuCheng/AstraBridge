@@ -114,7 +114,14 @@ class AppContext:
             task_conversation=self.task_conversation,
             dogfood_run=self.dogfood,
         )
-        self.project_tools = ProjectToolsService(self.projects, self.runtime)
+        self.project_tools = ProjectToolsService(
+            self.projects,
+            self.runtime,
+            checkpoints=self.checkpoints,
+            tasks=self.tasks,
+            profiles=self.profiles,
+            router_config=self.router_config,
+        )
         self.supervisor = RuntimeSupervisorService(self.projects, self.runtime, self.modals, self.dogfood)
         self.wsl_dependencies = WslDependencyService()
         self.admin_token = __import__("secrets").token_urlsafe(24)
@@ -553,6 +560,22 @@ class Handler(BaseHTTPRequestHandler):
                     preferred_thread_id=str((self.context.projects.current_project or {}).get("current_thread_id") or ""),
                 )
                 self._record_ui_state_event("checkpoint_loaded", {"save_id": str(payload.get("save_id") or "")})
+                self.send_json(response)
+                return
+            if path == "/api/project/edit/preview":
+                self.send_json(self.context.project_tools.edit_preview(payload))
+                return
+            if path == "/api/project/edit/apply":
+                response = self.context.project_tools.edit_apply(payload)
+                event_payload = (response.get("event") or {}).get("payload") or {}
+                self._record_ui_state_event(
+                    "edit_operation_applied",
+                    {
+                        "path": event_payload.get("path"),
+                        "selected_operation": event_payload.get("selected_operation"),
+                        "checkpoint_save_id": event_payload.get("checkpoint_save_id"),
+                    },
+                )
                 self.send_json(response)
                 return
             if path == "/api/project/tasks/create":

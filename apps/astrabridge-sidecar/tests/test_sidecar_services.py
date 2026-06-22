@@ -31,7 +31,14 @@ from astrabridge_sidecar import lcr_web_service as lcr_web_service_module
 from astrabridge_sidecar import lcr_web_mcp_server
 from astrabridge_sidecar.app_server_client import AppServerClient, JsonRpcError
 from astrabridge_sidecar.asset_registry_service import AssetRegistryService
-from astrabridge_sidecar.coding_kernel import project_handoff_event_to_coding_events, project_turn_to_coding_events
+from astrabridge_sidecar.coding_kernel import (
+    available_operations_for_request,
+    edit_operation_to_coding_event,
+    project_handoff_event_to_coding_events,
+    project_turn_to_coding_events,
+    request_from_payload,
+    select_edit_strategy,
+)
 from astrabridge_sidecar.modal_service import ModalService
 from astrabridge_sidecar.checkpoint_service import CheckpointService
 from astrabridge_sidecar.dogfood_run_service import DogfoodRunService
@@ -142,6 +149,9 @@ class _LiveProcessStub:
 
 
 class _RuntimeEventsStub:
+    def __init__(self) -> None:
+        self.supervisor_events: list[dict[str, object]] = []
+
     def list_events(self, after: int = 0, limit: int | None = None) -> dict[str, object]:
         return {
             "cursor": 2,
@@ -150,6 +160,9 @@ class _RuntimeEventsStub:
                 {"timestamp": "2026-06-17T00:01:00+08:00", "type": "runtime_supervisor", "command": "pwd", "status": "completed"},
             ],
         }
+
+    def record_supervisor_event(self, event: dict[str, object]) -> None:
+        self.supervisor_events.append(dict(event))
 
 
 class AstraBridgeServiceTests(unittest.TestCase):
@@ -329,6 +342,148 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(diff.get("synthetic"))
             self.assertIn("diff --astrabridge", diff["diff"])
             self.assertIn("+print('ok')", diff["diff"])
+
+    def test_edit_strategy_prefers_structured_edit_for_medium_qwen_edits(self) -> None:
+        request = request_from_payload(
+            {
+                "path": "scorecard.py",
+                "edits": [
+                    {
+                        "search": "old" * 800,
+                        "replace": "new" * 800,
+                    }
+                ],
+            }
+        )
+        decision = select_edit_strategy(
+            model={
+                "edit_policy": {"small": "patch", "medium": "structured_edit", "large": "replace"},
+                "authority_tier": "A",
+            },
+            requested_operation=None,
+            available_operations=available_operations_for_request(request, target_exists=True),
+            target_exists=True,
+            estimated_bytes=8_000,
+            edit_count=len(request.edits),
+            profile_id="qwen-default",
+            provider_id="qwen",
+            model_id="qwen3.7-plus",
+        )
+
+        self.assertEqual(decision.size_class, "medium")
+        self.assertEqual(decision.policy_operation, "structured_edit")
+        self.assertEqual(decision.selected_operation, "structured_edit")
+        self.assertEqual(decision.authority_tier, "A")
+
+    def test_project_tools_edit_apply_prevalidates_patch_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            target = workspace / "scorecard.py"
+            target.write_text("alpha\nbeta\n", encoding="utf-8")
+            project_file = root / "demo.abproj"
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.bind_thread(
+                thread_id="thread-qwen",
+                settings={"profile_id": "qwen-default", "provider_id": "qwen", "model": "qwen3.7-plus", "reasoning_effort": "high"},
+            )
+            profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            runtime = _RuntimeEventsStub()
+            tools = ProjectToolsService(
+                projects,
+                runtime,
+                checkpoints=CheckpointService(projects),
+                tasks=tasks,
+                profiles=profiles,
+                router_config=router_config,
+            )
+
+            with self.assertRaises(ValueError):
+                tools.edit_apply({"path": "scorecard.py", "search": "missing", "replace": "gamma", "profile_id": "qwen-default"})
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "alpha\nbeta\n")
+            self.assertEqual(runtime.supervisor_events, [])
+
+    def test_project_tools_edit_apply_write_file_creates_checkpoint_and_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            project_file = root / "demo.abproj"
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.bind_thread(
+                thread_id="thread-deepseek",
+                settings={"profile_id": "deepseek-default", "provider_id": "deepseek", "model": "deepseek-v4-pro", "reasoning_effort": "xhigh"},
+            )
+            profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            runtime = _RuntimeEventsStub()
+            tools = ProjectToolsService(
+                projects,
+                runtime,
+                checkpoints=CheckpointService(projects),
+                tasks=tasks,
+                profiles=profiles,
+                router_config=router_config,
+            )
+
+            response = tools.edit_apply({"path": "generated/scorecard.py", "content": "print('ok')\n", "profile_id": "deepseek-default"})
+
+            self.assertTrue(response["ok"])
+            self.assertTrue(response["applied"])
+            self.assertEqual(response["strategy"]["selected_operation"], "write_file")
+            self.assertTrue(((workspace / "generated" / "scorecard.py").is_file()))
+            self.assertEqual(response["checkpoint"]["save_id"], response["event"]["payload"]["checkpoint_save_id"])
+            self.assertEqual(response["event"]["event_type"], "edit_operation")
+            self.assertEqual(response["event"]["payload"]["selected_operation"], "write_file")
+            self.assertTrue(runtime.supervisor_events)
+            self.assertEqual(runtime.supervisor_events[-1]["event"], "edit_operation_applied")
+            review = tools.review_diff("generated/scorecard.py")
+            self.assertTrue(review["ok"])
+            self.assertTrue(review.get("synthetic"))
+            self.assertIn("+print('ok')", review["diff"])
+
+    def test_project_tools_edit_apply_replace_file_produces_checkpoint_and_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            target = workspace / "scorecard.py"
+            target.write_text("print('old')\n", encoding="utf-8")
+            project_file = root / "demo.abproj"
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.bind_thread(
+                thread_id="thread-openai",
+                settings={"profile_id": "openai-compatible", "provider_id": "openai", "model": "gpt-5.5", "reasoning_effort": "high"},
+            )
+            profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            tools = ProjectToolsService(
+                projects,
+                _RuntimeEventsStub(),
+                checkpoints=CheckpointService(projects),
+                tasks=tasks,
+                profiles=profiles,
+                router_config=router_config,
+            )
+
+            response = tools.edit_apply({"path": "scorecard.py", "content": "print('new')\n", "profile_id": "openai-compatible"})
+
+            self.assertTrue(response["applied"])
+            self.assertEqual(response["strategy"]["selected_operation"], "replace_file")
+            self.assertEqual(target.read_text(encoding="utf-8"), "print('new')\n")
+            self.assertIn("-print('old')", response["preview"]["diff"])
+            self.assertIn("+print('new')", response["preview"]["diff"])
+            self.assertTrue(response["checkpoint"]["save_id"])
+            self.assertEqual(response["verification"]["review_diff_path"], "scorecard.py")
 
     def test_app_data_dir_does_not_migrate_legacy_local_store(self) -> None:
         original_appdata = os.environ.get("APPDATA")
