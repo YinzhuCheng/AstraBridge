@@ -808,6 +808,49 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                     "id": "agent-2",
                                     "text": "Reviewed scorecard.py and added a boundary test. Authorization: Bearer should-not-persist",
                                     "providerData": {
+                                        "normalized": {
+                                            "text": "Reviewed scorecard.py and added a boundary test.",
+                                            "reasoning_summary": "Keep the previous provider context and verify edge cases.",
+                                            "reasoning_state": {
+                                                "provider_id": "kimi",
+                                                "model_id": "kimi/kimi-k2.7-code",
+                                                "replayable": True,
+                                                "visible_summary": "Continue the same review lane.",
+                                                "opaque_artifacts": [
+                                                    {
+                                                        "encrypted_reasoning": "opaque-secret",
+                                                        "summary": "provider private chain",
+                                                    }
+                                                ],
+                                            },
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-1",
+                                                    "name": "read_file",
+                                                    "arguments_json": "{\"path\":\"scorecard.py\"}",
+                                                    "provider_data": {"provider_response_id": "resp-raw-hidden"},
+                                                }
+                                            ],
+                                            "usage": {"input_tokens": 120, "output_tokens": 45, "total_tokens": 165},
+                                            "finish_reason": "completed",
+                                            "provider_data": {
+                                                "response": {"raw": "do-not-store"},
+                                                "provider_response_id": "resp-hidden",
+                                            },
+                                            "warnings": [
+                                                {
+                                                    "code": "reasoning_only_notice_emitted",
+                                                    "message": "Provider returned reasoning content but no final assistant message.",
+                                                    "severity": "info",
+                                                }
+                                            ],
+                                            "raw_ref": {
+                                                "kind": "chat_completion_choice",
+                                                "locator": "chat-normalized-kimi",
+                                                "redaction_status": "redacted",
+                                                "summary": "First choice normalized from chat completions.",
+                                            },
+                                        },
                                         "reasoning_state": {
                                             "thought_signature": "provider-private-signature",
                                             "nested": [{"response_id": "provider-response-id", "keep": "visible"}],
@@ -838,7 +881,15 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertNotIn("Authorization", transcript_text)
             self.assertNotIn("provider-private-signature", transcript_text)
             self.assertNotIn("provider-response-id", transcript_text)
+            self.assertNotIn("opaque-secret", transcript_text)
+            self.assertNotIn("do-not-store", transcript_text)
             self.assertIn("provider_private_redactions", transcript_text)
+            normalized = thread["turns"][1]["items"][0]["providerData"]["normalized"]
+            self.assertEqual(normalized["provider_data_keys"], ["response"])
+            self.assertEqual(normalized["reasoning_state"]["opaque_artifact_count"], 1)
+            self.assertNotIn("opaque_artifacts", normalized["reasoning_state"])
+            self.assertEqual(normalized["raw_ref"]["redaction_status"], "redacted")
+            self.assertEqual(normalized["tool_calls"], [{"id": "call-1", "name": "read_file"}])
 
     def test_project_context_pack_includes_task_conversation_digest(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
