@@ -8181,10 +8181,13 @@ class AstraBridgeServiceTests(unittest.TestCase):
             )
 
             actions = list(smoke["browser_smoke"]["actions"] or [])
+            final_assertions = list(smoke["browser_smoke"]["final_assertions"] or [])
             self.assertEqual(smoke["browser_smoke"]["preset"], "astrabridge_release_workflow_v1")
             self.assertEqual(smoke["browser_smoke"]["label"], "AstraBridge release workflow smoke")
+            self.assertEqual(smoke["browser_smoke"]["verification_level"], "asserted")
             self.assertTrue(any(item.get("selector") == "[data-testid='review-panel']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='checkpoint-modal']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='status-panel-goal']" for item in final_assertions if isinstance(item, dict)))
 
     def test_checkpoint_service_git_save_load_without_git_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

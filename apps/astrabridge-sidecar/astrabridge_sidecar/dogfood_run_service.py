@@ -352,6 +352,11 @@ class DogfoodRunService:
                 {"type": "click_selector", "selector": "[data-testid='inspector-tab-status']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='status-panel-goal']", "timeout_ms": 12000},
             ],
+            "final_assertions": [
+                {"type": "expect_selector", "selector": "[data-testid='app-shell']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='composer-send']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='status-panel-goal']", "timeout_ms": 12000},
+            ],
         }
 
     def _browser_actions(self, raw_actions: Any) -> list[dict[str, Any]]:
