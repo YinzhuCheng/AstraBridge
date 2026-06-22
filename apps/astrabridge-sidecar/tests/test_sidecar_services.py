@@ -20,6 +20,7 @@ import zipfile
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -10465,32 +10466,64 @@ class AstraBridgeServiceTests(unittest.TestCase):
             ],
         )
 
+        self.assertEqual(projected.dropped_artifacts, 1)
+        self.assertEqual(projected.replayable_artifacts, [])
+        self.assertTrue(any(item.get("role") == "system" for item in projected.messages))
+        self.assertTrue(any("does not support reasoning replay" in warning for warning in projected.warnings))
+        self.assertTrue(any("provider-private fields" in warning for warning in projected.warnings))
+
+    def test_history_projector_preserves_same_provider_replayable_artifacts_only_when_profile_allows_it(self) -> None:
+        replayable_profile = SimpleNamespace(
+            capabilities=SimpleNamespace(supports_reasoning_replay=True, supports_tool_result_images=False),
+            reasoning_policy=SimpleNamespace(allow_cross_provider_replay=False),
+        )
+        with patch("astrabridge_sidecar.providers.history_projector.get_provider_profile", return_value=replayable_profile):
+            projected = HistoryProjector().project(
+                source_provider="qwen",
+                target_provider="qwen",
+                neutral_messages=[NeutralMessage(role="assistant", text="Continue the same task.")],
+                artifacts=[
+                    ReasoningArtifact(
+                        provider_id="qwen",
+                        model_id="qwen3.7-plus",
+                        kind="reasoning_state",
+                        replayable=True,
+                        payload={"visible_summary": "Preserve the same reasoning lane.", "thought_signature": "private"},
+                    )
+                ],
+            )
+
         self.assertEqual(projected.dropped_artifacts, 0)
         self.assertEqual(len(projected.replayable_artifacts), 1)
         self.assertNotIn("thought_signature", projected.replayable_artifacts[0]["payload"])
         self.assertTrue(any("provider-private fields" in warning for warning in projected.warnings))
 
     def test_history_projector_strips_nested_provider_private_fields(self) -> None:
-        projected = HistoryProjector().project(
-            source_provider="qwen",
-            target_provider="qwen",
-            neutral_messages=[NeutralMessage(role="assistant", text="Continue the same task.")],
-            artifacts=[
-                ReasoningArtifact(
-                    provider_id="qwen",
-                    model_id="qwen3.7-plus",
-                    kind="reasoning_state",
-                    replayable=True,
-                    payload={
-                        "visible_summary": "Preserve the same reasoning lane.",
-                        "state": {
-                            "thought_signature": "private-signature",
-                            "segments": [{"response_id": "resp-1", "keep": "retained"}],
-                        },
-                    },
-                )
-            ],
+        replayable_profile = SimpleNamespace(
+            capabilities=SimpleNamespace(supports_reasoning_replay=True, supports_tool_result_images=False),
+            reasoning_policy=SimpleNamespace(allow_cross_provider_replay=False),
         )
+        with patch("astrabridge_sidecar.providers.history_projector.get_provider_profile", return_value=replayable_profile):
+            projected = HistoryProjector().project(
+                source_provider="qwen",
+                target_provider="qwen",
+                neutral_messages=[NeutralMessage(role="assistant", text="Continue the same task.")],
+                artifacts=[
+                    ReasoningArtifact(
+                        provider_id="qwen",
+                        model_id="qwen3.7-plus",
+                        kind="reasoning_state",
+                        replayable=True,
+                        payload={
+                            "visible_summary": "Preserve the same reasoning lane.",
+                            "state": {
+                                "thought_signature": "private-signature",
+                                "segments": [{"response_id": "resp-1", "keep": "retained"}],
+                            },
+                        },
+                    )
+                ],
+            )
 
         replayed = projected.replayable_artifacts[0]["payload"]
         self.assertEqual(replayed["state"]["segments"], [{"keep": "retained"}])

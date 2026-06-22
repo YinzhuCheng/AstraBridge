@@ -98,6 +98,7 @@ class HistoryProjector:
         expected_tool_ids: list[str] = []
         seen_tool_ids: set[str] = set()
         artifact_summaries: list[str] = []
+        replay_policy_blocked = False
 
         if text_only_mode:
             warnings.append("Unknown target provider; projected text-only history summary and dropped provider-private replay state.")
@@ -177,8 +178,13 @@ class HistoryProjector:
             if private_warning:
                 warnings.append(private_warning)
             summary = self._artifact_summary(artifact.kind, sanitized_payload)
-            same_provider = bool(source and artifact.provider_id.strip().lower() == target)
-            if same_provider and artifact.replayable and not text_only_mode:
+            if self._can_replay_artifact(
+                artifact=artifact,
+                source_provider=source,
+                target_provider=target,
+                target_profile=target_profile,
+                text_only_mode=text_only_mode,
+            ):
                 replayable_artifacts.append(
                     {
                         "provider_id": artifact.provider_id,
@@ -189,6 +195,16 @@ class HistoryProjector:
                 )
                 continue
             dropped += 1
+            if artifact.replayable and not text_only_mode:
+                blocked_warning = self._replay_policy_warning(
+                    artifact=artifact,
+                    source_provider=source,
+                    target_provider=target,
+                    target_profile=target_profile,
+                )
+                if blocked_warning:
+                    warnings.append(blocked_warning)
+                    replay_policy_blocked = True
             if summary:
                 artifact_summaries.append(summary)
 
@@ -197,7 +213,7 @@ class HistoryProjector:
         elif dropped and text_only_mode:
             warnings.append("Provider reasoning artifacts were reduced to text-only summaries for an unknown target provider.")
 
-        if artifact_summaries and (text_only_mode or (source and source != target)):
+        if artifact_summaries and (text_only_mode or (source and source != target) or replay_policy_blocked):
             projected.append(
                 {
                     "role": "system",
@@ -229,6 +245,48 @@ class HistoryProjector:
             warnings=deduped_warnings,
             replayable_artifacts=replayable_artifacts,
         )
+
+    def _can_replay_artifact(
+        self,
+        *,
+        artifact: ReasoningArtifact,
+        source_provider: str | None,
+        target_provider: str,
+        target_profile: Any,
+        text_only_mode: bool,
+    ) -> bool:
+        if text_only_mode or not artifact.replayable or target_profile is None:
+            return False
+        source = str(source_provider or "").strip().lower()
+        artifact_provider = str(artifact.provider_id or "").strip().lower()
+        same_provider = bool(source and artifact_provider == target_provider and artifact_provider == source)
+        if same_provider:
+            return bool(target_profile.capabilities.supports_reasoning_replay)
+        return bool(
+            target_profile.capabilities.supports_reasoning_replay
+            and target_profile.reasoning_policy.allow_cross_provider_replay
+        )
+
+    def _replay_policy_warning(
+        self,
+        *,
+        artifact: ReasoningArtifact,
+        source_provider: str | None,
+        target_provider: str,
+        target_profile: Any,
+    ) -> str | None:
+        if target_profile is None or not artifact.replayable:
+            return None
+        source = str(source_provider or "").strip().lower()
+        artifact_provider = str(artifact.provider_id or "").strip().lower()
+        same_provider = bool(source and artifact_provider == target_provider and artifact_provider == source)
+        if same_provider and not target_profile.capabilities.supports_reasoning_replay:
+            return "Target provider does not support reasoning replay; preserved only visible summary."
+        if not same_provider and not target_profile.reasoning_policy.allow_cross_provider_replay:
+            return "Cross-provider reasoning replay is disabled by target provider policy; preserved only visible summary."
+        if not same_provider and not target_profile.capabilities.supports_reasoning_replay:
+            return "Target provider does not support replaying prior reasoning artifacts; preserved only visible summary."
+        return None
 
     def _target_profile(self, provider_id: str):
         try:
