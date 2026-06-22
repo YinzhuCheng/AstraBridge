@@ -9228,7 +9228,81 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(projected.dropped_artifacts, 1)
         self.assertEqual(projected.repaired_tool_pairs, 1)
         self.assertTrue(any(item.get("role") == "tool" for item in projected.messages))
+        self.assertTrue(any(item.get("role") == "system" for item in projected.messages))
         self.assertTrue(any("Opaque provider reasoning artifacts were dropped" in warning for warning in projected.warnings))
+
+    def test_history_projector_fails_closed_for_unknown_target_provider(self) -> None:
+        projected = HistoryProjector().project(
+            source_provider="openai",
+            target_provider="unknown-provider",
+            neutral_messages=[
+                NeutralMessage(
+                    role="assistant",
+                    text="Planning next step.",
+                    tool_call_id="call_1",
+                    tool_name="read_file",
+                    provider_data={"arguments_json": "{\"path\":\"README.md\"}", "provider_response_id": "resp_123"},
+                ),
+                NeutralMessage(role="tool", text="README contents", tool_call_id="call_1"),
+            ],
+            artifacts=[
+                ReasoningArtifact(
+                    provider_id="openai",
+                    model_id="gpt-5.5",
+                    kind="encrypted_reasoning",
+                    replayable=True,
+                    payload={"summary": "Need to inspect README before editing.", "encrypted_reasoning": "opaque"},
+                )
+            ],
+        )
+
+        self.assertFalse(any("tool_calls" in item for item in projected.messages))
+        self.assertTrue(any(item.get("role") == "system" for item in projected.messages))
+        self.assertEqual(projected.replayable_artifacts, [])
+        self.assertTrue(any("Unknown target provider" in warning for warning in projected.warnings))
+        self.assertTrue(any("provider-private fields" in warning for warning in projected.warnings))
+
+    def test_history_projector_preserves_same_provider_replayable_artifacts(self) -> None:
+        projected = HistoryProjector().project(
+            source_provider="qwen",
+            target_provider="qwen",
+            neutral_messages=[NeutralMessage(role="assistant", text="Continue the same task.")],
+            artifacts=[
+                ReasoningArtifact(
+                    provider_id="qwen",
+                    model_id="qwen3.7-plus",
+                    kind="reasoning_state",
+                    replayable=True,
+                    payload={"visible_summary": "Preserve the same reasoning lane.", "thought_signature": "private"},
+                )
+            ],
+        )
+
+        self.assertEqual(projected.dropped_artifacts, 0)
+        self.assertEqual(len(projected.replayable_artifacts), 1)
+        self.assertNotIn("thought_signature", projected.replayable_artifacts[0]["payload"])
+        self.assertTrue(any("provider-private fields" in warning for warning in projected.warnings))
+
+    def test_history_projector_downgrades_image_tool_result_for_text_only_target(self) -> None:
+        projected = HistoryProjector().project(
+            source_provider="kimi",
+            target_provider="glm",
+            neutral_messages=[
+                NeutralMessage(
+                    role="tool",
+                    text="Rendered preview",
+                    tool_call_id="call_2",
+                    content_parts=[
+                        {"type": "output_text", "text": "Preview ready."},
+                        {"type": "output_image", "mime_type": "image/png"},
+                    ],
+                )
+            ],
+            artifacts=[],
+        )
+
+        self.assertIn("[image result omitted", projected.messages[0]["content"])
+        self.assertTrue(any("Downgraded image tool result" in warning for warning in projected.warnings))
 
     def test_router_config_tracks_models_and_sanitized_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
