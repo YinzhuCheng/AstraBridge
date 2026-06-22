@@ -562,8 +562,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(current["active_provider_thread_id"], "thread-deepseek")
             self.assertEqual(len(current["provider_threads"]), 2)
             self.assertEqual(event["transition_summary"]["to_provider"], "deepseek")
+            self.assertEqual(event["transition_summary"]["to_model"], "deepseek-v4-pro")
             self.assertEqual(event["transition_summary"]["projection_mode"], "task_context_fresh_thread")
             self.assertGreaterEqual(int(event["transition_summary"]["context_budget"]), 1000000)
+            self.assertEqual(event["transition_summary"]["target_runtime"]["protocol"], "chat")
+            self.assertEqual(event["transition_summary"]["target_runtime"]["env_key"], "DEEPSEEK_API_KEY")
+            self.assertEqual(event["transition_summary"]["transition_plan"]["action"], "provider_handoff")
+            self.assertEqual(event["transition_summary"]["transition_plan"]["target"]["base_url"], "https://api.deepseek.com")
+            self.assertEqual(event["transition_summary"]["transition_plan"]["reasoning_effort"], "max")
             state_text = (workspace / ".astrabridge" / "tasks.json").read_text(encoding="utf-8")
             self.assertIn("multi_provider_handoff", state_text)
             self.assertNotIn("Authorization", state_text)
@@ -10854,7 +10860,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
         result = runtime.compact_thread({"provider_id": "deepseek"}, "thread-missing")
 
         self.assertEqual(result["status"], "thread_missing")
-        self.assertEqual(result["recommended_action"], "provider_handoff")
+        self.assertEqual(result["recommended_action"], "restart_runtime_lane")
+        self.assertEqual(result["recoverability"], "recoverable")
+        self.assertEqual(result["recommended_actions"][0]["action"], "restart_runtime_lane")
         self.assertTrue(result["recoverable"])
         self.assertEqual(runtime._tasks.missing, [("thread-missing", "compact_thread_not_found")])
         self.assertTrue(any(event.get("type") == "thread_compact_blocked" for event in runtime._events))
@@ -10966,13 +10974,18 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(context_limit["category"], "context_window_limit")
         self.assertTrue(context_limit["compact_recommended"])
         self.assertTrue(context_limit["fork_recommended"])
+        self.assertEqual(context_limit["recoverability"], "recoverable")
+        self.assertEqual(context_limit["recommended_action"], "compact_thread")
         self.assertEqual(context_limit["recommended_actions"][0]["action"], "compact_thread")
+        self.assertTrue(context_limit["recommended_actions"][0]["transition"]["compact_before_send"])
         self.assertEqual(context_limit["recommended_actions"][2]["action"], "downgrade_reasoning")
         self.assertEqual(context_limit["recommended_actions"][2]["target"], "xhigh")
+        self.assertEqual(context_limit["recommended_actions"][2]["transition"]["target"]["reasoning_policy_mode"], "reasoning_content")
         self.assertEqual(context_limit["fallback_models"], ["deepseek-v4-flash"])
         self.assertEqual(auth_failure["category"], "auth_failure")
         self.assertIn("key", auth_failure["actionable_hint"].lower())
         self.assertTrue(auth_failure["requires_key_check"])
+        self.assertEqual(auth_failure["recoverability"], "requires_user_action")
         self.assertEqual(auth_failure["recommended_actions"][0]["action"], "refresh_provider_key")
 
     def test_runtime_failure_classifier_uses_current_profile_defaults(self) -> None:
@@ -10984,10 +10997,24 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         self.assertEqual(notice["category"], "provider_timeout")
         self.assertTrue(notice["retryable"])
+        self.assertEqual(notice["recoverability"], "retryable")
         self.assertTrue(notice["provider_switch_recommended"])
         self.assertEqual(notice["fallback_models"], ["qwen3.7-max-2026-06-08", "qwen3.6-flash"])
         self.assertEqual(notice["recommended_actions"][1]["action"], "switch_model")
         self.assertEqual(notice["recommended_actions"][1]["target"], "qwen3.7-max-2026-06-08")
+        self.assertEqual(notice["recommended_actions"][1]["transition"]["target"]["protocol"], "responses")
+        self.assertEqual(notice["recommended_actions"][1]["transition"]["target"]["env_key"], "DASHSCOPE_API_KEY")
+
+    def test_runtime_failure_classifier_emits_restart_transition_for_runtime_corruption(self) -> None:
+        notice = classify_runtime_failure(
+            '{"error":{"message":"provider thread missing","provider":"glm","model":"glm-5.2"}}'
+        ).to_payload()
+
+        self.assertEqual(notice["category"], "runtime_state_corruption")
+        self.assertEqual(notice["recommended_action"], "restart_runtime_lane")
+        self.assertEqual(notice["recommended_actions"][0]["action"], "restart_runtime_lane")
+        self.assertTrue(notice["recommended_actions"][0]["transition"]["restart_runtime"])
+        self.assertEqual(notice["recommended_actions"][0]["transition"]["target"]["base_url"], "https://open.bigmodel.cn/api/paas/v4")
 
 
 if __name__ == "__main__":

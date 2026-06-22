@@ -13,7 +13,14 @@ from .profile import (
     ToolPolicy,
 )
 from .registry import all_provider_profiles, default_profiles, get_provider_profile, resolve_provider_id
-from .runtime_transition import TransitionSummary, summarize_transition
+from .runtime_transition import (
+    RuntimeTransitionPlan,
+    RuntimeTransitionTarget,
+    TransitionSummary,
+    build_transition_plan,
+    build_transition_target,
+    summarize_transition,
+)
 
 __all__ = [
     "AuthSpec",
@@ -34,11 +41,15 @@ __all__ = [
     "ReasoningArtifact",
     "ReasoningPolicy",
     "ReasoningState",
+    "RuntimeTransitionPlan",
+    "RuntimeTransitionTarget",
     "ToolCall",
     "ToolPolicy",
     "TransitionSummary",
     "Usage",
     "all_provider_profiles",
+    "build_transition_plan",
+    "build_transition_target",
     "classify_runtime_failure",
     "default_profiles",
     "get_provider_profile",

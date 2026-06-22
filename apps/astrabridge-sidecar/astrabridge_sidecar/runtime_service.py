@@ -25,6 +25,7 @@ from .mcp_config_service import McpConfigService
 from .modal_service import ModalService
 from .model_catalog import ASTRABRIDGE_MODEL_CATALOG_FILENAME, ASTRABRIDGE_MODELS_CACHE_FILENAME
 from .profile_service import ProfileService
+from .providers import classify_runtime_failure
 from .router_service import ROUTER_ENV_KEY, ROUTER_PORT
 from .runtime_config_service import RuntimeConfigService, codex_model_id, codex_reasoning_effort
 from .security import SecurityError, redact_sensitive, resolve_under, scan_text_for_secrets
@@ -927,6 +928,11 @@ class RuntimeService:
         except JsonRpcError as exc:
             message = str(exc)
             if self._is_thread_not_found_error(exc):
+                failure = classify_runtime_failure(
+                    '{"error":{"message":"provider thread missing","type":"runtime_error"}}',
+                    current_provider=str(profile.get("provider_id") or ""),
+                    current_model=str(profile.get("model") or ""),
+                ).to_payload()
                 self._mark_provider_thread_missing(thread_id, reason="compact_thread_not_found")
                 self._record_event(
                     {
@@ -934,6 +940,7 @@ class RuntimeService:
                         "thread_id": thread_id,
                         "status": "thread_missing",
                         "reason": "thread_not_found",
+                        "failure": failure,
                         "runtime": runtime_status,
                     }
                 )
@@ -942,8 +949,17 @@ class RuntimeService:
                     "thread_id": thread_id,
                     "status": "thread_missing",
                     "recoverable": True,
-                    "recommended_action": "provider_handoff",
-                    "message": "The provider thread is no longer available in the current app-server runtime. Continue via provider handoff or start a recovered provider thread.",
+                    "recommended_action": failure.get("recommended_action") or "restart_runtime_lane",
+                    "recommended_actions": list(failure.get("recommended_actions") or []),
+                    "recoverability": failure.get("recoverability") or "recoverable",
+                    "message": " ".join(
+                        part
+                        for part in [
+                            str(failure.get("summary") or "").strip(),
+                            str(failure.get("actionable_hint") or "").strip(),
+                        ]
+                        if part
+                    ).strip(),
                 }
             raise
         self._record_event({"type": "thread_compact_requested", "thread_id": thread_id, "runtime": runtime_status})

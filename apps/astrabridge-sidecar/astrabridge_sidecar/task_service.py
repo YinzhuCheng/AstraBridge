@@ -334,6 +334,7 @@ class TaskService:
             to_provider=str(settings.get("provider_id") or "openai"),
             to_model=str(settings.get("model") or "") or None,
             projection_mode="reused_provider_thread" if reused_existing else "task_context_fresh_thread",
+            reasoning_effort=str(settings.get("reasoning_effort") or "") or None,
         )
         event = {
             "event_id": new_id("handoff"),
