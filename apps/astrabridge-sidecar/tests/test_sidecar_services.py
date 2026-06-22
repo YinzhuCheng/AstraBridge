@@ -64,6 +64,7 @@ from astrabridge_sidecar.model_catalog import (
     known_reasoning_efforts,
     preferred_provider_model_record,
     resolved_web_capability_fields,
+    resolved_workflow_contract_fields,
 )
 from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERROR, disabled_status
 from astrabridge_sidecar.profile_service import ProfileService
@@ -8901,6 +8902,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 health = manager.run_health({"model_ids": ["deepseek/deepseek-v4-pro"], "efforts": ["high"], "temperatures": [0], "web_smoke": True})
                 self.assertEqual(health["model_health"]["deepseek/deepseek-v4-pro"]["tool_web_search_support"], "verified")
                 self.assertEqual(health["model_health"]["deepseek/deepseek-v4-pro"]["web_smoke_status"], "pass")
+                self.assertEqual(health["model_health"]["deepseek/deepseek-v4-pro"]["plan"], "conservative")
+                self.assertEqual(health["model_health"]["deepseek/deepseek-v4-pro"]["goal"], "app_server_native")
+                self.assertEqual(health["model_health"]["deepseek/deepseek-v4-pro"]["manual_compact"], "app_server_native")
                 stream_health = manager.run_health({"model_ids": ["deepseek/deepseek-v4-pro"], "efforts": ["high"], "temperatures": [0], "stream": True})
                 self.assertEqual(stream_health["model_health"]["deepseek/deepseek-v4-pro"]["streaming"], "pass")
                 managed = manager.effective_catalog()
@@ -12523,6 +12527,33 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(metadata_only["web_smoke_status"], "not_requested")
         self.assertEqual(metadata_only["citation_quality"], "not_requested")
         self.assertEqual(metadata_only["mcp_web_support"], "verified_context7")
+
+    def test_catalog_helper_resolves_workflow_contract_defaults(self) -> None:
+        base = resolved_workflow_contract_fields({})
+        overridden = resolved_workflow_contract_fields(
+            {
+                "mcp_smoke_status": "pass_direct_tool_call",
+                "planner_support": {"plan_mode": "verified", "request_user_input": "verified"},
+                "goal_support": {"thread_goal": "native"},
+                "context_compaction_support": {
+                    "manual_compact": "verified",
+                    "auto_compact": "verified",
+                    "structured_summary_quality": "verified",
+                },
+            }
+        )
+
+        self.assertEqual(base["modalities"], "metadata_only")
+        self.assertEqual(base["mcp_tools"], "untested")
+        self.assertEqual(base["plan"], "conservative")
+        self.assertEqual(base["goal"], "app_server_native")
+        self.assertEqual(base["auto_compact"], "configured_unverified")
+        self.assertEqual(overridden["mcp_tools"], "pass_direct_tool_call")
+        self.assertEqual(overridden["plan"], "verified")
+        self.assertEqual(overridden["request_user_input"], "verified")
+        self.assertEqual(overridden["goal"], "native")
+        self.assertEqual(overridden["manual_compact"], "verified")
+        self.assertEqual(overridden["compact_summary_quality"], "verified")
 
     def test_metadata_seed_import_and_effective_catalog_are_conservative(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

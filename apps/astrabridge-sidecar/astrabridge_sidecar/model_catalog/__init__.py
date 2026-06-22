@@ -17,6 +17,7 @@ from .catalog import (
     preferred_provider_model_record,
     provider_model_records,
     resolved_web_capability_fields,
+    resolved_workflow_contract_fields,
     tool_output_truncation_limit,
 )
 from .generated_catalog import (
@@ -63,5 +64,6 @@ __all__ = [
     "preferred_provider_model_record",
     "provider_model_records",
     "resolved_web_capability_fields",
+    "resolved_workflow_contract_fields",
     "tool_output_truncation_limit",
 ]

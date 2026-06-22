@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import app_data_dir, new_id, now_iso, read_json, write_json
-from .model_catalog import current_generated_catalog, effective_model_records, resolved_web_capability_fields
+from .model_catalog import current_generated_catalog, effective_model_records, resolved_web_capability_fields, resolved_workflow_contract_fields
 
 
 VAULT_SCHEMA = "astrabridge-llm-vault-v1"
@@ -329,7 +329,7 @@ class LlmApiManagerService:
             if not provider:
                 result = self._health_skip(run_id, model_id, "provider_not_found", "Provider is not configured.")
                 results.append(result)
-                model_health[model_id] = self._health_record(result)
+                model_health[model_id] = self._health_record(result, model=model)
                 continue
             key = self._find_key(provider_id=provider_id) if self._session.get("mode") == "managed_user" else None
             env_key = str(provider.get("env_key") or "")
@@ -339,7 +339,7 @@ class LlmApiManagerService:
             elif not os.environ.get(env_key):
                 result = self._health_skip(run_id, model_id, "missing_key", f"No managed key or environment value for {env_key}.")
                 results.append(result)
-                model_health[model_id] = self._health_record(result)
+                model_health[model_id] = self._health_record(result, model=model)
                 continue
             try:
                 for effort in efforts:
@@ -365,15 +365,7 @@ class LlmApiManagerService:
                                 "streaming": "pass" if payload.get("stream", False) and raw.get("ok") else "fail" if payload.get("stream", False) else "not_requested",
                                 "reasoning_effort": "pass" if raw.get("ok") else "fail",
                                 "temperature_policy": "pass" if not (raw.get("preview_warnings") or raw.get("warnings")) else "warn",
-                                "modalities": "metadata_only",
-                                "mcp_tools": str(model.get("mcp_smoke_status") or "untested"),
-                                "codex_builtin_tools": "metadata_only",
-                                "plan": str((model.get("planner_support") or {}).get("plan_mode") or "conservative"),
-                                "request_user_input": str((model.get("planner_support") or {}).get("request_user_input") or "conservative"),
-                                "goal": str((model.get("goal_support") or {}).get("thread_goal") or "app_server_native"),
-                                "manual_compact": str((model.get("context_compaction_support") or {}).get("manual_compact") or "app_server_native"),
-                                "auto_compact": str((model.get("context_compaction_support") or {}).get("auto_compact") or "configured_unverified"),
-                                "compact_summary_quality": str((model.get("context_compaction_support") or {}).get("structured_summary_quality") or "untested"),
+                                **resolved_workflow_contract_fields(model),
                                 **web_result,
                                 "preview_warnings": list(raw.get("preview_warnings") or raw.get("warnings") or []),
                                 "response_diagnostics": dict(raw.get("response_diagnostics") or {}),
@@ -401,7 +393,7 @@ class LlmApiManagerService:
                             }
                         result = self._sanitize_result(result)
                         results.append(result)
-                        model_health[model_id] = self._health_record(result)
+                        model_health[model_id] = self._health_record(result, model=model)
                         if result.get("ok"):
                             self._mark_model_health(model, result)
                 if key:
@@ -615,22 +607,23 @@ class LlmApiManagerService:
     def _health_record_passes(self, health: dict[str, Any]) -> bool:
         return bool(health.get("ok")) or str(health.get("connectivity") or "").lower() == "pass"
 
-    def _health_record(self, result: dict[str, Any]) -> dict[str, Any]:
+    def _health_record(self, result: dict[str, Any], *, model: dict[str, Any] | None = None) -> dict[str, Any]:
+        contract_defaults = resolved_workflow_contract_fields(model or {})
         return {
             "ok": bool(result.get("ok")),
             "connectivity": result.get("connectivity") or ("pass" if result.get("ok") else "fail"),
             "streaming": result.get("streaming", "untested"),
             "reasoning_effort": result.get("reasoning_effort", "untested"),
             "temperature_policy": result.get("temperature_policy", "untested"),
-            "modalities": result.get("modalities", "metadata_only"),
-            "mcp_tools": result.get("mcp_tools", "untested"),
-            "codex_builtin_tools": result.get("codex_builtin_tools", "metadata_only"),
-            "plan": result.get("plan", "conservative"),
-            "request_user_input": result.get("request_user_input", "conservative"),
-            "goal": result.get("goal", "app_server_native"),
-            "manual_compact": result.get("manual_compact", "app_server_native"),
-            "auto_compact": result.get("auto_compact", "configured_unverified"),
-            "compact_summary_quality": result.get("compact_summary_quality", "untested"),
+            "modalities": result.get("modalities", contract_defaults["modalities"]),
+            "mcp_tools": result.get("mcp_tools", contract_defaults["mcp_tools"]),
+            "codex_builtin_tools": result.get("codex_builtin_tools", contract_defaults["codex_builtin_tools"]),
+            "plan": result.get("plan", contract_defaults["plan"]),
+            "request_user_input": result.get("request_user_input", contract_defaults["request_user_input"]),
+            "goal": result.get("goal", contract_defaults["goal"]),
+            "manual_compact": result.get("manual_compact", contract_defaults["manual_compact"]),
+            "auto_compact": result.get("auto_compact", contract_defaults["auto_compact"]),
+            "compact_summary_quality": result.get("compact_summary_quality", contract_defaults["compact_summary_quality"]),
             "native_web_search_support": result.get("native_web_search_support", "unverified"),
             "tool_web_search_support": result.get("tool_web_search_support", "unverified"),
             "mcp_web_support": result.get("mcp_web_support", "unverified"),

@@ -18,6 +18,16 @@ WEB_CAPABILITY_DEFAULTS = {
     "web_smoke_status": "untested",
     "citation_quality": "untested",
 }
+WORKFLOW_CONTRACT_DEFAULTS = {
+    "mcp_tools": "untested",
+    "codex_builtin_tools": "metadata_only",
+    "plan": "conservative",
+    "request_user_input": "conservative",
+    "goal": "app_server_native",
+    "manual_compact": "app_server_native",
+    "auto_compact": "configured_unverified",
+    "compact_summary_quality": "untested",
+}
 
 
 def known_context_window(provider_id: str, model: str) -> int | None:
@@ -203,6 +213,29 @@ def resolved_web_capability_fields(
         "web_smoke_status": str(model.get("web_smoke_status") or smoke_default_value),
         "citation_quality": str(model.get("citation_quality") or citation_default_value),
         "last_web_verified_at": model.get("last_web_verified_at"),
+    }
+
+
+def resolved_workflow_contract_fields(
+    model: dict[str, Any],
+    *,
+    modalities_default: str | None = None,
+) -> dict[str, Any]:
+    planner_support = dict(model.get("planner_support") or {})
+    goal_support = dict(model.get("goal_support") or {})
+    context_compaction_support = dict(model.get("context_compaction_support") or {})
+    return {
+        "modalities": modalities_default or "metadata_only",
+        "mcp_tools": str(model.get("mcp_smoke_status") or WORKFLOW_CONTRACT_DEFAULTS["mcp_tools"]),
+        "codex_builtin_tools": WORKFLOW_CONTRACT_DEFAULTS["codex_builtin_tools"],
+        "plan": str(planner_support.get("plan_mode") or WORKFLOW_CONTRACT_DEFAULTS["plan"]),
+        "request_user_input": str(planner_support.get("request_user_input") or WORKFLOW_CONTRACT_DEFAULTS["request_user_input"]),
+        "goal": str(goal_support.get("thread_goal") or WORKFLOW_CONTRACT_DEFAULTS["goal"]),
+        "manual_compact": str(context_compaction_support.get("manual_compact") or WORKFLOW_CONTRACT_DEFAULTS["manual_compact"]),
+        "auto_compact": str(context_compaction_support.get("auto_compact") or WORKFLOW_CONTRACT_DEFAULTS["auto_compact"]),
+        "compact_summary_quality": str(
+            context_compaction_support.get("structured_summary_quality") or WORKFLOW_CONTRACT_DEFAULTS["compact_summary_quality"]
+        ),
     }
 
 
