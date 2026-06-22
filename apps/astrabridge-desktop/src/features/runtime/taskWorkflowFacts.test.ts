@@ -136,4 +136,21 @@ describe("task workflow facts", () => {
     expect(facts.diagnosticRefs[0]?.summary).toBe("Handoff to kimi kimi-k2.6");
     expect(facts.diagnosticRefs[1]?.summary).toBe("npm test (failed)");
   });
+
+  it("counts persisted command diagnostics even when no live command events are present", () => {
+    const facts = summarizeTaskWorkflowFacts(
+      buildTask({
+        diagnostic_refs: [
+          { event_id: "cmd-1", kind: "command_execution", command: "npm test", status: "failed" },
+          { event_id: "cmd-2", kind: "command_execution", command: "npm test", status: "completed" },
+        ],
+      }),
+      null,
+      null,
+    );
+
+    expect(facts.commandCount).toBe(2);
+    expect(facts.failedCommandCount).toBe(1);
+    expect(facts.recoveredCommandCount).toBe(1);
+  });
 });

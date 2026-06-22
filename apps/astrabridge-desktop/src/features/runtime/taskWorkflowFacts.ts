@@ -148,6 +148,44 @@ function mergedDiagnosticRefs(
   return Array.from(merged.values());
 }
 
+function persistedCommandRefs(task: ProjectTask | null | undefined): CodingEventInspectorSummary["commandRefs"] {
+  const commands = new Map<string, CodingEventInspectorSummary["commandRefs"][number]>();
+  for (const item of task?.diagnostic_refs ?? []) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    if (nonEmptyText(record.kind) !== "command_execution") continue;
+    const command = nonEmptyText(record.command);
+    if (!command) continue;
+    const status = nonEmptyText(record.status);
+    const exitCode = typeof record.exit_code === "number" ? record.exit_code : null;
+    const key = `${command}:${status ?? ""}:${exitCode ?? ""}`;
+    if (!commands.has(key)) {
+      commands.set(key, {
+        command,
+        status,
+        exit_code: exitCode,
+        provider_id: nonEmptyText(record.provider_id),
+        model_id: nonEmptyText(record.model ?? record.model_id),
+      });
+    }
+  }
+  return Array.from(commands.values());
+}
+
+function mergedCommandRefs(
+  task: ProjectTask | null | undefined,
+  eventSummary?: Pick<CodingEventInspectorSummary, "commandRefs"> | null,
+): CodingEventInspectorSummary["commandRefs"] {
+  const merged = new Map<string, CodingEventInspectorSummary["commandRefs"][number]>();
+  for (const item of persistedCommandRefs(task)) {
+    merged.set(`${item.command}:${item.status ?? ""}:${item.exit_code ?? ""}`, item);
+  }
+  for (const item of eventSummary?.commandRefs ?? []) {
+    merged.set(`${item.command}:${item.status ?? ""}:${item.exit_code ?? ""}`, item);
+  }
+  return Array.from(merged.values());
+}
+
 export function summarizeTaskWorkflowFacts(
   task: ProjectTask | null | undefined,
   executionThread: Pick<ShellThread, "shellSettings"> | null | undefined,
@@ -155,9 +193,9 @@ export function summarizeTaskWorkflowFacts(
 ): TaskWorkflowFacts {
   const checkpointRefs = mergedCheckpointRefs(task, eventSummary);
   const diagnosticRefs = mergedDiagnosticRefs(task, eventSummary);
+  const commandRefs = mergedCommandRefs(task, eventSummary);
   const handoffCountFromTask = task?.handoff_events?.length ?? 0;
   const handoffCountFromDiagnostics = diagnosticRefs.filter((item) => item.kind === "provider_handoff").length;
-  const commandRefs = eventSummary?.commandRefs ?? [];
   const failedCommands = new Set<string>();
   const recoveredCommands = new Set<string>();
   for (const item of commandRefs) {

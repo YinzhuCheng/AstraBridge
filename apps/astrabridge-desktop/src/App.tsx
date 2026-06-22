@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
 import { summarizeCodingEventInspector } from "./features/runtime/codingEventInspector";
+import { summarizeTaskInspectorEvidence } from "./features/runtime/taskInspectorEvidence";
 import { modelAuthorityState } from "./features/runtime/modelAuthorityNotice";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
 import { resolveRecoveryComposerPatch } from "./features/runtime/runtimeRecoveryPlan";
@@ -4268,6 +4269,7 @@ function AppShell() {
   const activeThread = taskConversation.data?.thread ?? selectedThread.data?.thread;
   const activeExecutionThread = selectedThread.data?.thread;
   const eventInspectorFallback = useMemo(() => summarizeCodingEventInspector(activeThread), [activeThread]);
+  const taskInspectorEvidence = useMemo(() => summarizeTaskInspectorEvidence(currentTask, activeThread), [activeThread, currentTask]);
   const workflowFacts = useMemo(
     () => summarizeTaskWorkflowFacts(currentTask, activeExecutionThread ?? null, eventInspectorFallback),
     [activeExecutionThread, currentTask, eventInspectorFallback],
@@ -4859,12 +4861,12 @@ function AppShell() {
               supervisor={supervisor.data}
               review={inspectorReview.data}
               diff={inspectorReviewDiff.data}
-              fallback={eventInspectorFallback}
+              fallback={taskInspectorEvidence}
               selectedPath={inspectorReviewPath}
               onSelectPath={setInspectorReviewPath}
             />
           ) : null}
-          {inspectorTab === "terminal" ? <TerminalInspectorPanel supervisor={supervisor.data} history={inspectorTerminal.data} fallback={eventInspectorFallback} /> : null}
+          {inspectorTab === "terminal" ? <TerminalInspectorPanel supervisor={supervisor.data} history={inspectorTerminal.data} fallback={taskInspectorEvidence} /> : null}
           {inspectorTab === "browser" ? (
             <BrowserInspectorPanel
               supervisor={supervisor.data}
@@ -4880,7 +4882,7 @@ function AppShell() {
               project={project}
               tree={inspectorFiles.data}
               preview={inspectorFilePreview.data}
-              fallback={eventInspectorFallback}
+              fallback={taskInspectorEvidence}
               query={inspectorFileQuery}
               selectedPath={inspectorFilePath}
               onQueryChange={setInspectorFileQuery}
