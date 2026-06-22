@@ -9,7 +9,7 @@ import { modelAuthorityState } from "./features/runtime/modelAuthorityNotice";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
 import { resolveRecoveryComposerPatch } from "./features/runtime/runtimeRecoveryPlan";
 import { formatResponseDiagnostics, summarizeResponseDiagnosticsInline } from "./features/runtime/responseDiagnostics";
-import { composerReasoningOptions, preferredProviderReasoningEffort, preferredReasoningEffort, providerReasoningOptions, providerTemperatureDefaults } from "./features/runtime/reasoningOptions";
+import { composerReasoningOptions, preferredProviderReasoningEffort, preferredReasoningEffort, providerModelDraftDefaults, providerReasoningOptions } from "./features/runtime/reasoningOptions";
 import { runtimeErrorNoticeActions, runtimeErrorNoticeInline, runtimeErrorNoticeText, type RuntimeErrorAction } from "./features/runtime/runtimeErrorNotice";
 import { summarizeTaskCard } from "./features/runtime/taskSummary";
 import { hasPersistedRenderableTurnContent, itemActivityFromPayload, summarizeTurnBlocks } from "./features/runtime/threadRendering";
@@ -1917,39 +1917,17 @@ function RouterControlCenter({
               type="button"
               className="ghost-button"
               onClick={() => {
-                const reasoningDefaults = providerReasoningOptions(selectedProvider, null);
-                const temperatureDefaults = providerTemperatureDefaults(selectedProvider);
+                const providerDraftDefaults = providerModelDraftDefaults(selectedProvider);
                 setModelDraft({
                   id: "",
                   provider: selectedProvider?.id ?? "",
                   native_model: "",
                   display_name: "",
                   enabled: true,
-                  advertised_context_window: 1000000,
-                  ui_context_hint_only: true,
-                  adapter_profile: "default",
-                  codex_agent_enabled: true,
-                  input_modalities: ["text"],
-                  supported_reasoning_levels: reasoningDefaults.length ? reasoningDefaults : ["high"],
-                  default_reasoning_level: preferredProviderReasoningEffort(selectedProvider, null),
-                  reasoning_display_policy: "collapsed_3_lines",
-                  ...temperatureDefaults,
-                  supports_parallel_tool_calls: false,
-                  supports_search_tool: false,
-                  supports_mcp_tools: false,
-                  mcp_tool_call_policy: "unsupported",
-                  mcp_verified_servers: [],
-                  mcp_smoke_status: "untested",
-                  mcp_tool_argument_validation: "unsupported",
-                  codex_builtin_tools: {},
-                  planner_support: {},
-                  goal_support: { thread_goal: "app_server_native" },
-                  context_compaction_support: { manual_compact: "app_server_native", auto_compact: "configured_unverified", structured_summary_quality: "untested" },
-                  modality_limits: { text: true, image_input: false, file_mentions: true, image_generation: false },
-                  ui_warnings: [],
-                  apply_patch_tool_type: null,
-                  source_status: "manual",
-                  source_urls: [],
+                  ...providerDraftDefaults,
+                  advertised_context_window: providerDraftDefaults.advertised_context_window ?? 1000000,
+                  ui_context_hint_only: providerDraftDefaults.ui_context_hint_only ?? true,
+                  adapter_profile: providerDraftDefaults.adapter_profile ?? "default",
                 });
               }}
             >

@@ -86,3 +86,62 @@ export function providerTemperatureDefaults(provider: RouterProvider | null | un
     temperature_adapter_policy: provider?.temperature_adapter_policy ?? "pass_through_0_2",
   };
 }
+
+function providerCapabilityRecord(provider: RouterProvider | null | undefined): Record<string, unknown> {
+  return provider?.capabilities && typeof provider.capabilities === "object" ? provider.capabilities : {};
+}
+
+function providerInputModalities(provider: RouterProvider | null | undefined): string[] {
+  const topLevel = normalizedList(provider?.input_modalities);
+  if (topLevel.length > 0) return topLevel;
+  const capabilityModalities = normalizedList(providerCapabilityRecord(provider).input_modalities);
+  if (capabilityModalities.length > 0) return capabilityModalities;
+  if (providerCapabilityRecord(provider).supports_vision === true) return ["text", "image"];
+  return ["text"];
+}
+
+export function providerModelDraftDefaults(provider: RouterProvider | null | undefined): Partial<RouterModelEntry> {
+  const capabilityRecord = providerCapabilityRecord(provider);
+  const inputModalities = providerInputModalities(provider);
+  return {
+    advertised_context_window:
+      Number(capabilityRecord.max_context_tokens ?? 0) > 0
+        ? Number(capabilityRecord.max_context_tokens)
+        : 1_000_000,
+    ui_context_hint_only: true,
+    adapter_profile: "default",
+    codex_agent_enabled: true,
+    input_modalities: inputModalities,
+    supported_reasoning_levels: providerReasoningOptions(provider, null),
+    default_reasoning_level: preferredProviderReasoningEffort(provider, null),
+    reasoning_display_policy: "collapsed_3_lines",
+    supports_parallel_tool_calls: capabilityRecord.supports_parallel_tool_calls === true,
+    supports_search_tool: provider?.supports_search_tool ?? false,
+    supports_mcp_tools: provider?.supports_mcp_tools ?? false,
+    mcp_tool_call_policy: provider?.mcp_tool_call_policy ?? "unsupported",
+    mcp_verified_servers: provider?.mcp_verified_servers ?? [],
+    mcp_smoke_status: provider?.mcp_smoke_status ?? "untested",
+    mcp_tool_argument_validation: provider?.mcp_tool_argument_validation ?? "unsupported",
+    codex_builtin_tools: {},
+    planner_support: {},
+    goal_support: { thread_goal: "app_server_native" },
+    context_compaction_support: {
+      manual_compact: "app_server_native",
+      auto_compact: "configured_unverified",
+      structured_summary_quality: "untested",
+    },
+    modality_limits: {
+      text: true,
+      image_input: inputModalities.includes("image"),
+      file_mentions: true,
+      image_generation: false,
+    },
+    ui_warnings: [],
+    apply_patch_tool_type: provider?.apply_patch_tool_type ?? null,
+    web_search_tool_type: provider?.web_search_tool_type ?? "text",
+    supports_image_detail_original: provider?.capabilities && capabilityRecord.supports_image_detail_original === true,
+    source_status: "manual",
+    source_urls: [],
+    ...providerTemperatureDefaults(provider),
+  };
+}

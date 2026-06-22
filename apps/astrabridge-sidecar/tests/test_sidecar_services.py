@@ -11064,10 +11064,13 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         self.assertEqual(deepseek["supported_reasoning_levels"], ["high", "xhigh", "max"])
         self.assertEqual(deepseek["default_reasoning_level"], "xhigh")
+        self.assertEqual(deepseek["supports_mcp_tools"], True)
+        self.assertEqual(deepseek["mcp_verified_servers"], ["lcr_web"])
         self.assertEqual(qwen["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
         self.assertAlmostEqual(float(qwen["provider_temperature_min"]), 0.00001)
         self.assertEqual(kimi["temperature_default"], 1.0)
         self.assertEqual(kimi["provider_temperature_max"], 1.0)
+        self.assertEqual(kimi["input_modalities"], ["text", "image"])
 
     def test_provider_profiles_seed_catalog_provider_and_model_defaults(self) -> None:
         qwen = get_provider_profile("qwen")
@@ -11082,6 +11085,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(catalog_provider["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
         self.assertAlmostEqual(float(catalog_provider["provider_temperature_min"]), 0.00001)
         self.assertEqual(catalog_provider["effective_context_window_percent"], 80)
+        self.assertEqual(catalog_provider["input_modalities"], ["text"])
+        self.assertEqual(catalog_provider["supports_mcp_tools"], False)
+        self.assertEqual(catalog_provider["web_search_tool_type"], "text")
         self.assertEqual(model_defaults["default_reasoning_level"], "high")
         self.assertEqual(model_defaults["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
         self.assertEqual(model_defaults["provider_profile_id"], "qwen")
@@ -11133,6 +11139,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(provider["temperature_adapter_policy"], "pass_through_0_2")
             self.assertEqual(provider["effective_context_window_percent"], 80)
             self.assertEqual(provider["fallback_models"], ["deepseek-v4-pro", "deepseek-v4-flash"])
+            self.assertEqual(provider["supports_mcp_tools"], True)
+            self.assertEqual(provider["mcp_tool_call_policy"], "conservative")
+            self.assertEqual(provider["mcp_verified_servers"], ["lcr_web"])
+            self.assertEqual(provider["tool_web_search_support"], "verified")
             self.assertEqual(model["supported_reasoning_levels"], ["high", "xhigh", "max"])
             self.assertEqual(model["default_reasoning_level"], "xhigh")
             self.assertEqual(model["temperature_adapter_policy"], "pass_through_0_2")
@@ -11166,6 +11176,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(created["fallback_models"], ["qwen3.7-plus", "qwen3.7-max-2026-06-08", "qwen3.6-flash"])
             self.assertEqual(created["edit_policy"]["medium"], "structured_edit")
             self.assertTrue(created["capabilities"]["supports_reasoning"])
+            self.assertEqual(created["input_modalities"], ["text"])
+            self.assertEqual(created["supports_mcp_tools"], False)
+            self.assertEqual(created["web_search_tool_type"], "text")
 
     def test_router_config_seeds_profile_fallback_models_without_static_catalog_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
