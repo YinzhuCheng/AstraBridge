@@ -41,6 +41,21 @@ type DecoratedTurn = {
   reasoningEffort?: string;
   items?: ThreadMessageSource[];
   lcrCompletionQuality?: CompletionQuality;
+  coding_events?: DecoratedCodingEvent[];
+};
+
+type DecoratedCodingEvent = {
+  event_id?: string;
+  event_type?: string;
+  task_id?: string;
+  visible_thread_id?: string;
+  execution_thread_id?: string | null;
+  provider_id?: string | null;
+  model_id?: string | null;
+  timestamp?: string | null;
+  payload?: Record<string, unknown>;
+  redaction_status?: string;
+  source?: string;
 };
 
 type FileChangeSummaryInput = {
@@ -249,6 +264,153 @@ function completionQualityBlock(turn: DecoratedTurn): ThreadRenderBlock | null {
   };
 }
 
+function codingEventPreview(payload: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function codingEventList(payload: Record<string, unknown>, key: string) {
+  const value = payload[key];
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => String(entry ?? "").trim()).filter(Boolean);
+}
+
+function renderBlocksForCodingEvent(event: DecoratedCodingEvent, fallbackKey: string): ThreadRenderBlock[] {
+  const eventType = String(event.event_type ?? "").trim();
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  const key = String(event.event_id ?? "").trim() || fallbackKey;
+  switch (eventType) {
+    case "agent_message": {
+      const text = codingEventPreview(payload, ["text", "message", "summary"]);
+      if (!text) return [];
+      return [{ key, role: payload.role === "user" ? "user" : "assistant", text }];
+    }
+    case "reasoning_summary": {
+      const text = codingEventPreview(payload, ["text", "summary"]);
+      if (!text) return [];
+      return [{ key, role: "reasoning", text: [text], source: event.source || "coding_event" }];
+    }
+    case "plan_update": {
+      const text = codingEventPreview(payload, ["text", "summary"]);
+      if (!text) return [];
+      return [{ key, role: "plan", text }];
+    }
+    case "command_execution": {
+      const command = codingEventPreview(payload, ["command"]);
+      const output = codingEventPreview(payload, ["output_excerpt"]);
+      return [{ key, role: "command", command: command || "Command", output, status: String(payload.status ?? "completed") }];
+    }
+    case "file_change": {
+      const files = codingEventList(payload, "paths");
+      return [{
+        key,
+        role: "file_change",
+        files,
+        status: typeof payload.count === "number" ? `${payload.count} change${payload.count === 1 ? "" : "s"}` : "changed",
+        detail: files.length > 0 ? files.join("\n") : undefined,
+      }];
+    }
+    case "file_read": {
+      const path = codingEventPreview(payload, ["path"]);
+      const kind = codingEventPreview(payload, ["kind"]);
+      const ok = payload.ok !== false;
+      return [{
+        key,
+        role: "tool",
+        title: "Read file",
+        status: ok ? "completed" : "failed",
+        detail: [path ? `path: ${path}` : "", kind ? `kind: ${kind}` : ""].filter(Boolean).join("\n"),
+      }];
+    }
+    case "edit_operation": {
+      const path = codingEventPreview(payload, ["path"]);
+      const reviewDiffPath = codingEventPreview(payload, ["review_diff_path"]);
+      const checkpointSaveId = codingEventPreview(payload, ["checkpoint_save_id"]);
+      const detail = [
+        path ? `path: ${path}` : "",
+        payload.changed !== undefined ? `changed: ${Boolean(payload.changed)}` : "",
+        payload.applied !== undefined ? `applied: ${Boolean(payload.applied)}` : "",
+        reviewDiffPath ? `review diff: ${reviewDiffPath}` : "",
+        checkpointSaveId ? `checkpoint: ${checkpointSaveId}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      return [{ key, role: "tool", title: "Edit operation", status: payload.ok === false ? "failed" : "completed", detail }];
+    }
+    case "checkpoint_created": {
+      const saveId = codingEventPreview(payload, ["save_id"]);
+      const description = codingEventPreview(payload, ["description"]);
+      return [{
+        key,
+        role: "tool",
+        title: "Checkpoint created",
+        status: payload.ok === false ? "failed" : "completed",
+        detail: [saveId ? `save id: ${saveId}` : "", description ? `description: ${description}` : ""].filter(Boolean).join("\n"),
+      }];
+    }
+    case "verification_result": {
+      const tool = codingEventPreview(payload, ["tool"]);
+      const path = codingEventPreview(payload, ["path"]);
+      const files = codingEventList(payload, "files");
+      const paths = codingEventList(payload, "paths");
+      const saveIds = codingEventList(payload, "save_ids");
+      const detail = [
+        path ? `path: ${path}` : "",
+        files.length > 0 ? `files: ${files.join(", ")}` : "",
+        paths.length > 0 ? `paths: ${paths.join(", ")}` : "",
+        saveIds.length > 0 ? `checkpoints: ${saveIds.join(", ")}` : "",
+        payload.command_count !== undefined ? `commands: ${String(payload.command_count)}` : "",
+        payload.item_count !== undefined ? `items: ${String(payload.item_count)}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      return [{
+        key,
+        role: "tool",
+        title: tool ? `Verification: ${tool}` : "Verification result",
+        status: payload.ok === false ? "failed" : "completed",
+        detail,
+      }];
+    }
+    case "provider_handoff": {
+      const toThreadId = codingEventPreview(payload, ["to_thread_id"]);
+      const model = codingEventPreview(payload, ["model"]);
+      const reused = payload.reused_existing === true;
+      return [{
+        key,
+        role: "activity",
+        activity: {
+          kind: "fork",
+          label: "执行通道已切换",
+          status: "completed",
+          preview: [event.provider_id, model].filter(Boolean).join(" / ") || "Provider handoff",
+          detail: [toThreadId ? `to thread: ${toThreadId}` : "", reused ? "reused existing lane" : ""].filter(Boolean).join("\n"),
+        },
+      }];
+    }
+    case "runtime_transition": {
+      const transition = codingEventPreview(payload, ["transition"]);
+      const review = codingEventPreview(payload, ["review"]);
+      return [{
+        key,
+        role: "activity",
+        activity: {
+          kind: "review",
+          label: "运行时状态更新",
+          status: "completed",
+          preview: transition || "runtime transition",
+          detail: review,
+        },
+      }];
+    }
+    default:
+      return [];
+  }
+}
+
 export function itemActivityFromPayload(item: Record<string, unknown>, status = "active"): RuntimeActivityState | null {
   const itemType = String(item.type ?? "");
   const itemId = String(item.id ?? "");
@@ -455,10 +617,11 @@ export function hasPersistedRenderableTurnContent(
   turn?: {
     completedAt?: number | null;
     items?: ThreadMessageSource[];
+    coding_events?: DecoratedCodingEvent[];
   } | null,
 ) {
   if (!turn?.completedAt) return false;
-  return (turn.items ?? []).some((item) =>
+  const itemContent = (turn.items ?? []).some((item) =>
     [
       "agentMessage",
       "plan",
@@ -474,6 +637,22 @@ export function hasPersistedRenderableTurnContent(
       "exitedReviewMode",
       "contextCompaction",
     ].includes(item.type),
+  );
+  if (itemContent) return true;
+  return (turn.coding_events ?? []).some((event) =>
+    [
+      "agent_message",
+      "plan_update",
+      "reasoning_summary",
+      "command_execution",
+      "file_change",
+      "file_read",
+      "edit_operation",
+      "checkpoint_created",
+      "verification_result",
+      "provider_handoff",
+      "runtime_transition",
+    ].includes(String(event.event_type ?? "")),
   );
 }
 
@@ -508,8 +687,24 @@ export function summarizeTurnBlocks(
       model: turn.model,
       reasoningEffort: turn.reasoning_effort ?? turn.reasoningEffort,
     };
+    let renderedTurnContent = false;
     for (const item of turn.items ?? []) {
-      blocks.push(...renderBlocksForItem(item).map((block) => ({ ...turnMeta, ...block })));
+      const rendered = renderBlocksForItem(item).map((block) => ({ ...turnMeta, ...block }));
+      if (rendered.length > 0) renderedTurnContent = true;
+      blocks.push(...rendered);
+    }
+    if (!renderedTurnContent) {
+      for (const [index, event] of (turn.coding_events ?? []).entries()) {
+        const rendered = renderBlocksForCodingEvent(event, `${turn.id ?? "turn"}:event:${index}`).map((block) => ({
+          ...turnMeta,
+          providerId: block.providerId ?? turnMeta.providerId ?? event.provider_id ?? undefined,
+          model: block.model ?? turnMeta.model ?? event.model_id ?? undefined,
+          sourceThreadId: block.sourceThreadId ?? turnMeta.sourceThreadId ?? event.execution_thread_id ?? undefined,
+          ...block,
+        }));
+        if (rendered.length > 0) renderedTurnContent = true;
+        blocks.push(...rendered);
+      }
     }
     const qualityBlock = completionQualityBlock(turn);
     if (qualityBlock) {

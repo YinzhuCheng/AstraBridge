@@ -278,4 +278,79 @@ describe("thread rendering helpers", () => {
       }),
     ).toBe(true);
   });
+
+  it("falls back to coding events when a completed turn has no renderable items", () => {
+    const blocks = summarizeTurnBlocks({
+      turns: [
+        {
+          id: "turn-event-only",
+          startedAt: 1,
+          completedAt: 2,
+          provider_id: "glm",
+          model: "glm-5.2",
+          items: [],
+          coding_events: [
+            {
+              event_id: "evt-1",
+              event_type: "agent_message",
+              provider_id: "glm",
+              model_id: "glm-5.2",
+              execution_thread_id: "thread-glm",
+              payload: { role: "assistant", text: "Implemented the fix." },
+            },
+            {
+              event_id: "evt-2",
+              event_type: "verification_result",
+              provider_id: "glm",
+              model_id: "glm-5.2",
+              execution_thread_id: "thread-glm",
+              payload: { tool: "review_diff", ok: true, path: "src/App.tsx", files: ["src/App.tsx"] },
+            },
+            {
+              event_id: "evt-3",
+              event_type: "checkpoint_created",
+              provider_id: "glm",
+              model_id: "glm-5.2",
+              execution_thread_id: "thread-glm",
+              payload: { save_id: "save-123", description: "Before cleanup", ok: true },
+            },
+          ],
+        },
+      ],
+    } as unknown as Pick<ShellThread, "turns">);
+
+    expect(blocks).toHaveLength(3);
+    expect(blocks[0].role).toBe("assistant");
+    expect(blocks[0].providerId).toBe("glm");
+    expect(blocks[0].model).toBe("glm-5.2");
+    expect(blocks[0].sourceThreadId).toBe("thread-glm");
+    if (blocks[0].role !== "assistant") throw new Error("expected assistant block");
+    expect(blocks[0].text).toContain("Implemented the fix.");
+
+    expect(blocks[1].role).toBe("tool");
+    if (blocks[1].role !== "tool") throw new Error("expected tool block");
+    expect(blocks[1].title).toBe("Verification: review_diff");
+    expect(blocks[1].detail).toContain("src/App.tsx");
+
+    expect(blocks[2].role).toBe("tool");
+    if (blocks[2].role !== "tool") throw new Error("expected tool block");
+    expect(blocks[2].title).toBe("Checkpoint created");
+    expect(blocks[2].detail).toContain("save-123");
+  });
+
+  it("treats coding-event-only completed turns as persisted renderable content", () => {
+    expect(
+      hasPersistedRenderableTurnContent({
+        completedAt: 10,
+        items: [],
+        coding_events: [
+          {
+            event_id: "evt-runtime",
+            event_type: "runtime_transition",
+            payload: { transition: "context_compaction" },
+          },
+        ],
+      } as never),
+    ).toBe(true);
+  });
 });
