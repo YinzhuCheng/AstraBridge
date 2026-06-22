@@ -195,16 +195,9 @@ class AppContext:
         native_model = str(profile.get("model") or "").strip()
         if not provider_id or not native_model:
             return profile
-        full_model_id = f"{provider_id}/{native_model}"
-        model = next(
-            (
-                item
-                for item in self.router_config.models()
-                if str(item.get("id") or "") in {native_model, full_model_id}
-                or (str(item.get("provider") or "") == provider_id and str(item.get("native_model") or "") == native_model)
-            ),
-            None,
-        )
+        from .model_catalog import effective_model_record
+
+        model = effective_model_record(provider_id, native_model, self.router_config.models())
         if not model:
             return profile
         merged = dict(profile)

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import app_data_dir, now_iso, write_json
-from .model_catalog import known_context_window, model_catalog_entry
+from .model_catalog import catalog_entry_from_record, effective_model_records, known_context_window, model_catalog_entry
 
 
 MANAGED_BLOCK_START = "# BEGIN LOCAL CODEX ROUTER MANAGED BLOCK"
@@ -81,22 +81,8 @@ class OfficialCodexService:
         models = []
         configured_models = self._router_config.models() if self._router_config is not None else []
         if configured_models:
-            for model in configured_models:
-                if not model.get("enabled", True):
-                    continue
-                provider_id = str(model.get("provider") or "")
-                native_model = str(model.get("native_model") or "")
-                context_window = int(model.get("advertised_context_window") or known_context_window(provider_id, native_model) or 128_000)
-                models.append(
-                    model_catalog_entry(
-                        model_id=str(model.get("id") or f"{provider_id}/{native_model}"),
-                        provider_id=provider_id,
-                        native_model=native_model,
-                        display_name=str(model.get("display_name") or native_model),
-                        context_window=context_window,
-                        configured_model=model,
-                    )
-                )
+            for model in effective_model_records(configured_models, include_disabled=False):
+                models.append(catalog_entry_from_record(model))
         else:
             for profile in profiles:
                 model = str(profile.get("model") or "").strip()

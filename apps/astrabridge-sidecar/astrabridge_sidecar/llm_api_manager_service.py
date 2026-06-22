@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import app_data_dir, new_id, now_iso, read_json, write_json
-from .model_catalog import current_generated_catalog
+from .model_catalog import current_generated_catalog, effective_model_records
 
 
 VAULT_SCHEMA = "astrabridge-llm-vault-v1"
@@ -231,9 +231,7 @@ class LlmApiManagerService:
     def effective_catalog(self) -> dict[str, Any]:
         mode = str(self._session.get("mode") or "anonymous")
         providers = self._effective_providers()
-        configured_models = {str(item.get("id") or ""): dict(item) for item in self._router_config.models()}
-        generated = current_generated_catalog()
-        models = [{**item, **configured_models.get(str(item.get("id") or ""), {})} for item in generated.models]
+        models = effective_model_records(self._router_config.models(), include_disabled=False)
         health = self.health_results()
         model_health = dict(health.get("model_health") or {})
         key_provider_ids = self._enabled_key_provider_ids()

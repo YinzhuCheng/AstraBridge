@@ -52,7 +52,15 @@ from astrabridge_sidecar.lcr_web_service import LcrWebService
 from astrabridge_sidecar.lcr_web_mcp_server import _tools as lcr_web_mcp_tools
 from astrabridge_sidecar.metadata_service import MetadataService
 from astrabridge_sidecar.mcp_config_service import McpConfigService
-from astrabridge_sidecar.model_catalog import default_seed_models, default_seed_providers, known_context_window, known_input_modalities, known_reasoning_efforts
+from astrabridge_sidecar.model_catalog import (
+    default_seed_models,
+    default_seed_providers,
+    effective_model_record,
+    effective_model_records,
+    known_context_window,
+    known_input_modalities,
+    known_reasoning_efforts,
+)
 from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERROR, disabled_status
 from astrabridge_sidecar.profile_service import ProfileService
 from astrabridge_sidecar.providers import classify_runtime_failure, get_provider_profile, summarize_response_diagnostics
@@ -8246,6 +8254,40 @@ class AstraBridgeServiceTests(unittest.TestCase):
             else:
                 os.environ["TEST_MCP_PROVIDER_KEY"] = original
 
+    def test_runtime_config_uses_effective_model_metadata_for_sparse_profile(self) -> None:
+        original = os.environ.pop("TEST_QWEN_EFFECTIVE_KEY", None)
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                service = RuntimeConfigService(root / "embedded_codex_home")
+                status = service.load_secret(
+                    {
+                        "profile_id": "qwen-sparse",
+                        "label": "Qwen Sparse",
+                        "provider_id": "qwen",
+                        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        "model": "qwen3.7-plus",
+                        "reasoning_effort": "high",
+                        "wire_api": "responses",
+                        "env_key": "TEST_QWEN_EFFECTIVE_KEY",
+                        "auth_mode": "session_paste",
+                        "proxy_mode": "direct",
+                        "proxy_url": "",
+                    },
+                    session_key="unit_secret_qwen_effective_123456",
+                )
+
+                self.assertEqual(status["input_modalities"], ["text"])
+                self.assertEqual(status["web_search_tool_type"], "text")
+                self.assertEqual(status["supports_mcp_tools"], False)
+                self.assertEqual(status["citation_quality"], "untested")
+                self.assertEqual(status["web_smoke_status"], "untested")
+        finally:
+            if original is None:
+                os.environ.pop("TEST_QWEN_EFFECTIVE_KEY", None)
+            else:
+                os.environ["TEST_QWEN_EFFECTIVE_KEY"] = original
+
     def test_runtime_service_rewrites_windows_mcp_paths_for_wsl(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -11495,6 +11537,36 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(known_reasoning_efforts("deepseek", "deepseek-v4-pro"), ["high", "xhigh", "max"])
         self.assertEqual(known_input_modalities("glm", "glm-5.2"), ["text", "image"])
         self.assertEqual(known_context_window("qwen", "qwen3.7-plus"), 1_000_000)
+
+    def test_effective_model_records_merge_generated_and_configured_overrides_and_extras(self) -> None:
+        configured = [
+            {
+                "id": "qwen/qwen3.7-plus",
+                "provider": "qwen",
+                "native_model": "qwen3.7-plus",
+                "display_name": "Qwen3.7 Plus Custom",
+                "enabled": True,
+                "temperature_default": 0.4,
+            },
+            {
+                "id": "deepseek-alt/deepseek-v4-pro",
+                "provider": "deepseek-alt",
+                "native_model": "deepseek-v4-pro",
+                "display_name": "DeepSeek Alt V4 Pro",
+                "enabled": True,
+                "supported_reasoning_levels": ["high"],
+            },
+        ]
+
+        merged = effective_model_records(configured, include_disabled=False)
+        qwen = next(item for item in merged if item["id"] == "qwen/qwen3.7-plus")
+        deepseek_alt = effective_model_record("deepseek-alt", "deepseek-v4-pro", configured)
+
+        self.assertEqual(qwen["display_name"], "Qwen3.7 Plus Custom")
+        self.assertEqual(qwen["temperature_default"], 0.4)
+        self.assertIsNotNone(deepseek_alt)
+        self.assertEqual(deepseek_alt["display_name"], "DeepSeek Alt V4 Pro")
+        self.assertEqual(deepseek_alt["supported_reasoning_levels"], ["high"])
 
     def test_metadata_seed_import_and_effective_catalog_are_conservative(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -82,6 +82,74 @@ def normalize_input_modalities(value: Any, provider_id: str = "", native_model: 
     return known or ["text"]
 
 
+def effective_model_records(
+    configured_models: list[dict[str, Any]] | None = None,
+    *,
+    include_disabled: bool = True,
+) -> list[dict[str, Any]]:
+    from .generated_catalog import current_generated_catalog
+
+    configured_list = [dict(item) for item in list(configured_models or []) if isinstance(item, dict)]
+    generated = current_generated_catalog()
+    configured_by_id = {
+        str(item.get("id") or ""): dict(item)
+        for item in configured_list
+        if str(item.get("id") or "").strip()
+    }
+    configured_by_key = {
+        (
+            str(item.get("provider") or "").strip(),
+            str(item.get("native_model") or "").strip(),
+        ): dict(item)
+        for item in configured_list
+        if str(item.get("provider") or "").strip() and str(item.get("native_model") or "").strip()
+    }
+    merged: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_keys: set[tuple[str, str]] = set()
+    for item in generated.models:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id") or "").strip()
+        if not model_id:
+            continue
+        model_key = (str(item.get("provider") or "").strip(), str(item.get("native_model") or "").strip())
+        effective = {**item, **configured_by_key.get(model_key, {}), **configured_by_id.get(model_id, {})}
+        if not include_disabled and not bool(effective.get("enabled", True)):
+            continue
+        merged.append(effective)
+        seen_ids.add(model_id)
+        seen_keys.add(model_key)
+    for model_id, item in configured_by_id.items():
+        item_key = (str(item.get("provider") or "").strip(), str(item.get("native_model") or "").strip())
+        if model_id in seen_ids or item_key in seen_keys:
+            continue
+        if not include_disabled and not bool(item.get("enabled", True)):
+            continue
+        merged.append(dict(item))
+    return merged
+
+
+def effective_model_record(
+    provider_id: str,
+    native_model: str,
+    configured_models: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    provider_text = str(provider_id or "").strip()
+    native_text = str(native_model or "").strip()
+    full_model_id = f"{provider_text}/{native_text}" if provider_text and native_text else ""
+    for item in effective_model_records(configured_models, include_disabled=True):
+        item_id = str(item.get("id") or "").strip()
+        if full_model_id and item_id == full_model_id:
+            return item
+        if (
+            str(item.get("provider") or "").strip() == provider_text
+            and str(item.get("native_model") or "").strip() == native_text
+        ):
+            return item
+    return None
+
+
 def model_catalog_entry(
     *,
     model_id: str,
@@ -211,6 +279,27 @@ def model_catalog_entry(
     }
 
 
+def catalog_entry_from_record(
+    record: dict[str, Any],
+    *,
+    reasoning_effort: Any = None,
+) -> dict[str, Any]:
+    provider_id = str(record.get("provider") or "")
+    native_model = str(record.get("native_model") or "")
+    display_name = str(record.get("display_name") or native_model or record.get("id") or "")
+    context_window = int(record.get("advertised_context_window") or known_context_window(provider_id, native_model) or 128_000)
+    return model_catalog_entry(
+        model_id=str(record.get("id") or f"{provider_id}/{native_model}"),
+        provider_id=provider_id,
+        native_model=native_model,
+        display_name=display_name,
+        context_window=context_window,
+        reasoning_effort=reasoning_effort,
+        configured_model=record,
+        auto_compact_token_limit=_optional_positive_int(record.get("auto_compact_token_limit")),
+    )
+
+
 def _codex_reasoning_effort(effort: Any) -> str:
     normalized = str(effort or "high").strip().lower()
     if normalized == "max":
@@ -226,6 +315,14 @@ def _optional_float(value: Any, fallback: float) -> float:
     except (TypeError, ValueError):
         return fallback
     return parsed
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _profile_for(provider_id: str, model: str) -> Any | None:

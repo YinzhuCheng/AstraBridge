@@ -16,12 +16,12 @@ from .common import app_data_dir, now_iso, read_json, write_json
 from .model_catalog import (
     GeneratedCatalog,
     build_generated_catalog,
+    catalog_entry_from_record,
     current_generated_catalog,
     default_catalog_sources,
     default_seed_models,
     default_seed_providers,
-    known_context_window,
-    model_catalog_entry,
+    effective_model_records,
 )
 
 
@@ -165,28 +165,13 @@ class MetadataService:
 
     def effective_catalog(self, model_id: str | None = None) -> dict[str, Any]:
         generated = current_generated_catalog()
-        configured_by_id = {str(item.get("id") or ""): item for item in self._router_config.models()}
         models = []
-        for model in generated.models:
-            effective = {**model, **configured_by_id.get(str(model.get("id") or ""), {})}
+        for effective in effective_model_records(self._router_config.models(), include_disabled=False):
             if model_id and str(effective.get("id")) != model_id:
                 continue
             if not bool(effective.get("codex_agent_enabled", True)):
                 continue
-            provider = str(effective.get("provider") or "")
-            native = str(effective.get("native_model") or "")
-            context_window = int(effective.get("advertised_context_window") or known_context_window(provider, native) or 128_000)
-            models.append(
-                model_catalog_entry(
-                    model_id=str(effective.get("id") or f"{provider}/{native}"),
-                    provider_id=provider,
-                    native_model=native,
-                    display_name=str(effective.get("display_name") or native),
-                    context_window=context_window,
-                    configured_model=effective,
-                    auto_compact_token_limit=_optional_positive_int(effective.get("auto_compact_token_limit")),
-                )
-            )
+            models.append(catalog_entry_from_record(effective))
         return {
             "models": models,
             "model_count": len(models),
