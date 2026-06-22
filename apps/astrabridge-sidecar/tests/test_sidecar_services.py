@@ -49,7 +49,7 @@ from astrabridge_sidecar.lcr_web_service import LcrWebService
 from astrabridge_sidecar.lcr_web_mcp_server import _tools as lcr_web_mcp_tools
 from astrabridge_sidecar.metadata_service import MetadataService
 from astrabridge_sidecar.mcp_config_service import McpConfigService
-from astrabridge_sidecar.model_catalog import default_seed_providers, known_context_window, known_input_modalities, known_reasoning_efforts
+from astrabridge_sidecar.model_catalog import default_seed_models, default_seed_providers, known_context_window, known_input_modalities, known_reasoning_efforts
 from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERROR, disabled_status
 from astrabridge_sidecar.profile_service import ProfileService
 from astrabridge_sidecar.providers import classify_runtime_failure, get_provider_profile
@@ -10339,6 +10339,16 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(seeded["deepseek"]["default_model"], deepseek["default_model"])
         self.assertEqual(seeded["glm"]["env_key"], glm["env_key"])
         self.assertEqual(seeded["glm"]["supported_reasoning_levels"], glm["supported_reasoning_levels"])
+
+    def test_generated_catalog_seed_models_merge_profile_defaults(self) -> None:
+        seeded = {str(item["id"]): item for item in default_seed_models()}
+        qwen_defaults = get_provider_profile("qwen").to_model_defaults()
+        glm_defaults = get_provider_profile("glm").to_model_defaults()
+
+        self.assertEqual(seeded["qwen/qwen3.7-plus"]["temperature_adapter_policy"], qwen_defaults["temperature_adapter_policy"])
+        self.assertEqual(seeded["qwen/qwen3.7-plus"]["supported_reasoning_levels"], qwen_defaults["supported_reasoning_levels"])
+        self.assertEqual(seeded["glm/glm-5.2"]["input_modalities"], glm_defaults["input_modalities"])
+        self.assertEqual(seeded["glm/glm-5.2"]["provider_profile_id"], "glm")
 
     def test_router_config_uses_provider_profile_defaults_for_new_provider_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
