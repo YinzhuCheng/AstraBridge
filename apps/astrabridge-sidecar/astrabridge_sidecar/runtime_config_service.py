@@ -16,6 +16,7 @@ from .model_catalog import (
     normalize_input_modalities,
     tool_output_truncation_limit,
 )
+from .providers import get_provider_profile
 from .security import SECRET_RE, SecurityError
 from .secret_service import SecretService
 
@@ -208,7 +209,8 @@ class RuntimeConfigService:
         wire_api = str(profile.get("wire_api") or "responses").strip().lower()
         if wire_api not in ALLOWED_WIRE_APIS:
             raise SecurityError(f"Unsupported provider wire_api: {wire_api}")
-        reasoning_effort = str(profile.get("reasoning_effort") or "high").strip().lower()
+        default_reasoning_effort = self._default_reasoning_effort(provider_id)
+        reasoning_effort = str(profile.get("reasoning_effort") or profile.get("default_reasoning_level") or default_reasoning_effort).strip().lower()
         if reasoning_effort not in ALLOWED_REASONING_EFFORTS:
             raise SecurityError(f"Unsupported reasoning effort: {reasoning_effort}")
         env_key = str(profile.get("env_key") or "OPENAI_API_KEY").strip()
@@ -267,6 +269,13 @@ class RuntimeConfigService:
             "secret_source": metadata.source,
             "secret_fingerprint": metadata.fingerprint,
         }
+
+    @staticmethod
+    def _default_reasoning_effort(provider_id: str) -> str:
+        try:
+            return get_provider_profile(provider_id).default_profile_reasoning_effort()
+        except ValueError:
+            return "high"
 
     def _normalize_proxy(self, profile: dict[str, Any]) -> tuple[str, str]:
         mode = str(profile.get("proxy_mode") or "direct").strip().lower()

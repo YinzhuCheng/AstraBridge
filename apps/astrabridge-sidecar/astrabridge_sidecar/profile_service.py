@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import app_data_dir, now_iso, read_json, write_json
-from .providers import default_profiles, resolve_provider_id
+from .providers import default_profiles, get_provider_profile, resolve_provider_id
 
 
 PROFILE_TYPES = {"openai_api_key", "custom_provider"}
@@ -64,6 +64,15 @@ class ProfileService:
         payload = self.list_profiles()
         existing = {item["profile_id"]: item for item in payload["profiles"]}
         current = existing.get(profile_id, {})
+        provider_defaults = self._provider_defaults(str(profile.get("provider_id") or current.get("provider_id") or ""))
+        resolved_reasoning_effort = (
+            str(profile.get("reasoning_effort") or "").strip()
+            or str(current.get("reasoning_effort") or "").strip()
+            or str(profile.get("default_reasoning_level") or "").strip()
+            or str(current.get("default_reasoning_level") or "").strip()
+            or str(provider_defaults.get("default_reasoning_level") or "").strip()
+            or "high"
+        )
         merged = {
             **current,
             **profile,
@@ -73,10 +82,14 @@ class ProfileService:
             "env_key": env_key,
             "proxy_mode": proxy_mode,
             "proxy_url": proxy_url,
+            "reasoning_effort": resolved_reasoning_effort,
             "updated_at": now_iso(),
         }
         merged.setdefault("created_at", now_iso())
-        merged.setdefault("reasoning_effort", "high")
+        if provider_defaults.get("supported_reasoning_levels") and not merged.get("supported_reasoning_levels"):
+            merged["supported_reasoning_levels"] = list(provider_defaults["supported_reasoning_levels"])
+        if provider_defaults.get("default_reasoning_level") and not merged.get("default_reasoning_level"):
+            merged["default_reasoning_level"] = provider_defaults["default_reasoning_level"]
         merged.setdefault("wire_api", "responses")
         merged.setdefault("secret_ref", None)
         existing[profile_id] = merged
@@ -168,5 +181,19 @@ class ProfileService:
             item.setdefault("updated_at", created_at)
             profiles.append(item)
         return profiles
+
+    @staticmethod
+    def _provider_defaults(provider_id: str) -> dict[str, Any]:
+        candidate = str(provider_id or "").strip()
+        if not candidate:
+            return {}
+        try:
+            profile = get_provider_profile(candidate)
+        except ValueError:
+            return {}
+        return {
+            "supported_reasoning_levels": list(profile.reasoning_levels()),
+            "default_reasoning_level": profile.default_reasoning_level(),
+        }
 
 

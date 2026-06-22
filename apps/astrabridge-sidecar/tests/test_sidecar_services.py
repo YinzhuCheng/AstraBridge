@@ -10467,6 +10467,29 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     }
                 )
 
+    def test_profile_service_defaults_reasoning_effort_from_provider_profile_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            service = ProfileService(Path(temp) / "profiles.json")
+            profile = service.upsert_profile(
+                {
+                    "profile_id": "deepseek-manual",
+                    "label": "DeepSeek Manual",
+                    "type": "custom_provider",
+                    "provider_id": "deepseek",
+                    "base_url": "https://api.deepseek.com",
+                    "model": "deepseek-v4-pro",
+                    "wire_api": "chat",
+                    "env_key": "DEEPSEEK_API_KEY",
+                    "auth_mode": "env_ref",
+                    "proxy_mode": "direct",
+                    "proxy_url": "",
+                }
+            )
+
+            self.assertEqual(profile["reasoning_effort"], "xhigh")
+            self.assertEqual(profile["default_reasoning_level"], "xhigh")
+            self.assertEqual(profile["supported_reasoning_levels"], ["high", "xhigh", "max"])
+
     def test_profile_service_resolves_provider_id_for_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             service = ProfileService(Path(temp) / "profiles.json")
@@ -10535,6 +10558,26 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(service.resolve_runtime_profile("dashscope")["provider_id"], "qwen")
             self.assertEqual(service.resolve_runtime_profile("moonshot")["provider_id"], "kimi")
             self.assertEqual(service.resolve_runtime_profile("zai")["provider_id"], "glm")
+
+    def test_runtime_config_service_defaults_reasoning_effort_from_provider_profile_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            service = RuntimeConfigService(Path(temp) / "codex_home")
+            normalized = service._normalize_profile(  # noqa: SLF001
+                {
+                    "profile_id": "deepseek-manual",
+                    "label": "DeepSeek Manual",
+                    "provider_id": "deepseek",
+                    "base_url": "https://api.deepseek.com",
+                    "model": "deepseek-v4-pro",
+                    "wire_api": "chat",
+                    "env_key": "DEEPSEEK_API_KEY",
+                    "auth_mode": "env_ref",
+                    "proxy_mode": "direct",
+                    "proxy_url": "",
+                }
+            )
+
+            self.assertEqual(normalized["reasoning_effort"], "xhigh")
 
     def test_history_projector_repairs_missing_tool_results_and_drops_cross_provider_reasoning(self) -> None:
         projected = HistoryProjector().project(

@@ -8,7 +8,7 @@ import { summarizeCodingEventInspector } from "./features/runtime/codingEventIns
 import { modelAuthorityState } from "./features/runtime/modelAuthorityNotice";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
 import { formatResponseDiagnostics, summarizeResponseDiagnosticsInline } from "./features/runtime/responseDiagnostics";
-import { composerReasoningOptions, preferredReasoningEffort } from "./features/runtime/reasoningOptions";
+import { composerReasoningOptions, preferredProviderReasoningEffort, preferredReasoningEffort, providerReasoningOptions, providerTemperatureDefaults } from "./features/runtime/reasoningOptions";
 import { runtimeErrorNoticeActions, runtimeErrorNoticeText, type RuntimeErrorAction } from "./features/runtime/runtimeErrorNotice";
 import { summarizeTaskCard } from "./features/runtime/taskSummary";
 import { hasPersistedRenderableTurnContent, itemActivityFromPayload, summarizeTurnBlocks } from "./features/runtime/threadRendering";
@@ -1910,7 +1910,9 @@ function RouterControlCenter({
             <button
               type="button"
               className="ghost-button"
-              onClick={() =>
+              onClick={() => {
+                const reasoningDefaults = providerReasoningOptions(selectedProvider, null);
+                const temperatureDefaults = providerTemperatureDefaults(selectedProvider);
                 setModelDraft({
                   id: "",
                   provider: selectedProvider?.id ?? "",
@@ -1922,15 +1924,10 @@ function RouterControlCenter({
                   adapter_profile: "default",
                   codex_agent_enabled: true,
                   input_modalities: ["text"],
-                  supported_reasoning_levels: ["low", "medium", "high"],
-                  default_reasoning_level: "high",
+                  supported_reasoning_levels: reasoningDefaults.length ? reasoningDefaults : ["high"],
+                  default_reasoning_level: preferredProviderReasoningEffort(selectedProvider, null),
                   reasoning_display_policy: "collapsed_3_lines",
-                  temperature_default: 0,
-                  temperature_ui_min: 0,
-                  temperature_ui_max: 2,
-                  provider_temperature_min: 0,
-                  provider_temperature_max: 2,
-                  temperature_adapter_policy: "pass_through_0_2",
+                  ...temperatureDefaults,
                   supports_parallel_tool_calls: false,
                   supports_search_tool: false,
                   supports_mcp_tools: false,
@@ -1947,8 +1944,8 @@ function RouterControlCenter({
                   apply_patch_tool_type: null,
                   source_status: "manual",
                   source_urls: [],
-                })
-              }
+                });
+              }}
             >
               New model
             </button>
@@ -2586,10 +2583,43 @@ function RouterControlCenter({
             <section className="manager-section">
               <h4>Run check</h4>
               <label className="field"><span>Model</span><select value={modelDraft?.id ?? ""} onChange={(event) => setModelDraft((routerConfig.data?.models ?? []).find((model) => model.id === event.target.value) ?? null)}>{(routerConfig.data?.models ?? []).map((model) => <option key={model.id} value={model.id}>{model.id}</option>)}</select></label>
-              <label className="field"><span>Efforts</span><input value={joinList(modelDraft?.supported_reasoning_levels?.length ? modelDraft.supported_reasoning_levels : ["high"])} readOnly /></label>
+              <label className="field"><span>Efforts</span><input value={joinList(modelDraft?.supported_reasoning_levels?.length ? modelDraft.supported_reasoning_levels : providerReasoningOptions(selectedProvider, null))} readOnly /></label>
               <div className="field-row">
-                <button type="button" className="primary-button" disabled={!modelDraft?.id || runHealth.isPending} onClick={() => runHealth.mutate({ model_ids: modelDraft?.id ? [modelDraft.id] : [], efforts: modelDraft?.supported_reasoning_levels?.slice(0, 2) ?? ["high"], temperatures: [0], web_smoke: true })}>Run selected model + web</button>
-                <button type="button" className="ghost-button" disabled={runHealth.isPending} onClick={() => runHealth.mutate({ model_ids: (routerConfig.data?.models ?? []).slice(0, 4).map((model) => model.id), efforts: ["high"], temperatures: [0], web_smoke: true })}>Run small set + web</button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={!modelDraft?.id || runHealth.isPending}
+                  onClick={() => {
+                    const modelEfforts = modelDraft?.supported_reasoning_levels?.length ? modelDraft.supported_reasoning_levels : providerReasoningOptions(selectedProvider, null);
+                    const preferredEffort = String(modelDraft?.default_reasoning_level ?? preferredProviderReasoningEffort(selectedProvider, null)).trim();
+                    const prioritizedEfforts = [...new Set([preferredEffort, ...modelEfforts].filter(Boolean))];
+                    runHealth.mutate({ model_ids: modelDraft?.id ? [modelDraft.id] : [], efforts: prioritizedEfforts.slice(0, 2), temperatures: [0], web_smoke: true });
+                  }}
+                >
+                  Run selected model + web
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={runHealth.isPending}
+                  onClick={() => {
+                    const providerMap = new Map((routerConfig.data?.providers ?? []).map((provider) => [provider.id, provider]));
+                    const efforts = Array.from(
+                      new Set(
+                        (routerConfig.data?.models ?? [])
+                          .slice(0, 4)
+                          .map((model) => {
+                            const provider = providerMap.get(model.provider);
+                            return String(model.default_reasoning_level ?? preferredProviderReasoningEffort(provider, null)).trim();
+                          })
+                          .filter(Boolean),
+                      ),
+                    );
+                    runHealth.mutate({ model_ids: (routerConfig.data?.models ?? []).slice(0, 4).map((model) => model.id), efforts: efforts.length ? efforts : ["high"], temperatures: [0], web_smoke: true });
+                  }}
+                >
+                  Run small set + web
+                </button>
               </div>
               {runHealth.error ? <p className="error-text">{String(runHealth.error as Error)}</p> : null}
               {metadataOutput ? <pre className="modal-json">{metadataOutput}</pre> : null}
@@ -4551,7 +4581,7 @@ function AppShell() {
               </select>
               <select
                 data-composer="effort"
-                value={activeSettings.reasoning_effort ?? "high"}
+                value={activeSettings.reasoning_effort ?? preferredReasoningEffort(activeModelEntry, activeProfile, null)}
                 onChange={(event) => updateComposerSettings({ reasoning_effort: event.target.value })}
                 aria-label={t(locale, "title_effort")}
               >
