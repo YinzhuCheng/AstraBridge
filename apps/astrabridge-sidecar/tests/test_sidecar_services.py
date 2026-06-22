@@ -8225,6 +8225,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(any(item.get("selector") == "[data-testid='terminal-panel']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-handoffs']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-backend']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-evidence-panel']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-recovery']" for item in final_assertions if isinstance(item, dict)))
 
     def test_dogfood_browser_smoke_accepts_fill_and_select_actions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -8315,7 +8317,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 },
             )
             route_started_at = int(
-                datetime.fromisoformat(str(task["provider_threads"][0]["created_at"]).replace("Z", "+00:00")).timestamp()
+                datetime.fromisoformat(str(task["provider_threads"][0]["created_at"]).replace("Z", "+00:00")).timestamp() * 1000
             )
 
             class FakeClient:
@@ -8353,6 +8355,12 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                 }
                             }
                         if thread_id == "thread-kimi-fresh":
+                            handoff_at = int(
+                                datetime.fromisoformat(
+                                    str(tasks.current_task()["handoff_events"][-1]["created_at"]).replace("Z", "+00:00")
+                                ).timestamp()
+                                * 1000
+                            )
                             return {
                                 "thread": {
                                     "id": "thread-kimi-fresh",
@@ -8367,8 +8375,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                     "turns": [
                                         {
                                             "id": "turn-kimi",
-                                            "startedAt": route_started_at + 4,
-                                            "completedAt": route_started_at + 5,
+                                            "startedAt": handoff_at + 1,
+                                            "completedAt": handoff_at + 2,
                                             "items": [
                                                 {"type": "userMessage", "id": "user-2", "content": [{"type": "input_text", "text": "Continue the same task, fix the scorecard, and rerun tests."}]},
                                                 {"type": "agentMessage", "id": "agent-2", "text": "I switched lanes, created a recovery plan, and I am ready to fix the scorecard."},
@@ -14031,6 +14039,44 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(projects.current_project["current_thread_id"], "thread-fallback")
             missing = [item for item in current["provider_threads"] if item["thread_id"] == "thread-active"][0]
             self.assertEqual(missing["missing_reason"], "compact_thread_not_found")
+
+    def test_runtime_service_get_goal_returns_recoverable_thread_missing(self) -> None:
+        class FakeClient:
+            def request(self, method, params):  # noqa: ANN001
+                raise JsonRpcError("thread not found: thread-missing")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Same task",
+                thread_id="thread-missing",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            tasks.record_goal("thread-missing", {"objective": "Ship the scorecard", "tokenBudget": 4000})
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id", "deepseek")}  # type: ignore[method-assign]
+            runtime._ensure_client = lambda runtime_status: FakeClient()  # type: ignore[method-assign]
+
+            result = runtime.get_goal({"provider_id": "deepseek", "profile_id": "deepseek-default"}, "thread-missing")
+
+            self.assertEqual(result["status"], "thread_missing")
+            self.assertEqual(result["thread_id"], "thread-missing")
+            self.assertEqual((result.get("goal") or {}).get("objective"), "Ship the scorecard")
+            current = tasks.current_task()
+            missing = [item for item in current["provider_threads"] if item["thread_id"] == "thread-missing"][0]
+            self.assertEqual(missing["missing_reason"], "goal_thread_missing")
+            self.assertTrue(any(event.get("type") == "goal_thread_missing" for event in runtime._events))
 
     def test_context_guard_does_not_block_missing_provider_thread(self) -> None:
         class FakeProjects:

@@ -657,7 +657,26 @@ class RuntimeService:
     def get_goal(self, profile: dict[str, Any], thread_id: str) -> dict[str, Any]:
         runtime_status = self._prepare_runtime(profile, require_secret=False)
         client = self._ensure_client(runtime_status)
-        result = client.request("thread/goal/get", {"threadId": thread_id})
+        try:
+            result = client.request("thread/goal/get", {"threadId": thread_id})
+        except Exception as exc:
+            if self._is_thread_not_found_error(exc):
+                self._mark_provider_thread_missing(thread_id, reason="goal_thread_missing")
+                self._record_event(
+                    {
+                        "type": "goal_thread_missing",
+                        "thread_id": thread_id,
+                        "profile_id": profile.get("profile_id"),
+                    }
+                )
+                fallback_goal = None
+                if self._tasks is not None:
+                    try:
+                        fallback_goal = (self._tasks.current_task() or {}).get("goal")
+                    except Exception:
+                        fallback_goal = None
+                return {"goal": fallback_goal, "status": "thread_missing", "thread_id": thread_id}
+            raise
         return {"goal": result.get("goal")}
 
     def set_goal(

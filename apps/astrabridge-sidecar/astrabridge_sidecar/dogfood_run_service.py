@@ -359,6 +359,8 @@ class DogfoodRunService:
                     {"type": "expect_selector", "selector": "[data-testid='task-fact-lanes']", "timeout_ms": 12000},
                     {"type": "expect_selector", "selector": "[data-testid='task-fact-handoffs']", "timeout_ms": 12000},
                     {"type": "expect_selector", "selector": "[data-testid='task-fact-backend']", "timeout_ms": 12000},
+                    {"type": "expect_selector", "selector": "[data-testid='workflow-evidence-panel']", "timeout_ms": 12000},
+                    {"type": "expect_selector", "selector": "[data-testid='workflow-fact-recovery']", "timeout_ms": 12000},
                 ],
             }
         if preset != BROWSER_SMOKE_PRESET_RELEASE_WORKFLOW:

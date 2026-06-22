@@ -471,7 +471,14 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/runtime/goal":
                 thread_id = str(query.get("thread_id", [""])[0])
                 profile = self._resolve_runtime_profile(query.get("profile_id", [None])[0])
-                self.send_json(self.context.runtime.get_goal(profile, thread_id))
+                try:
+                    self.send_json(self.context.runtime.get_goal(profile, thread_id))
+                except Exception as exc:
+                    if self.context.runtime._is_thread_not_found_error(exc):  # type: ignore[attr-defined]
+                        self.context.runtime._mark_provider_thread_missing(thread_id, reason="goal_thread_missing")  # type: ignore[attr-defined]
+                        self.send_json({"goal": None, "status": "thread_missing", "thread_id": thread_id})
+                        return
+                    raise
                 return
             if path == "/api/runtime/mcp/status":
                 profile = self._resolve_runtime_profile(query.get("profile_id", [None])[0])

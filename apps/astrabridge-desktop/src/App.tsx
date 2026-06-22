@@ -1158,25 +1158,35 @@ function WorkflowEvidencePanel({
         <h2>工作流事实</h2>
       </div>
       <div className="tool-list">
-        <div className="tool-row">
+        <div className="tool-row" data-testid="workflow-fact-lanes">
           <span>执行通道</span>
           <strong>{facts.laneCount}</strong>
         </div>
-        <div className="tool-row">
+        <div className="tool-row" data-testid="workflow-fact-handoffs">
           <span>Provider 切换</span>
           <strong>{facts.handoffCount}</strong>
         </div>
-        <div className="tool-row">
+        <div className="tool-row" data-testid="workflow-fact-checkpoints">
           <span>检查点</span>
           <strong>{facts.checkpointCount}</strong>
         </div>
-        <div className="tool-row">
+        <div className="tool-row" data-testid="workflow-fact-commands">
           <span>命令事件</span>
           <strong>{facts.commandCount}</strong>
         </div>
-        <div className="tool-row">
+        <div className="tool-row" data-testid="workflow-fact-diagnostics">
           <span>诊断事件</span>
           <strong>{facts.diagnosticCount}</strong>
+        </div>
+        <div className="tool-row" data-testid="workflow-fact-recovery">
+          <span>恢复路径</span>
+          <strong>
+            {facts.recoveredCommandCount > 0
+              ? `${facts.recoveredCommandCount} recovered`
+              : facts.failedCommandCount > 0
+                ? `${facts.failedCommandCount} pending`
+                : "clear"}
+          </strong>
         </div>
       </div>
       {checkpoints.length ? (
