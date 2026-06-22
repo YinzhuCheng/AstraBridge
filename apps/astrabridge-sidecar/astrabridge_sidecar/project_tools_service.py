@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import mimetypes
 import os
 import subprocess
@@ -58,6 +59,8 @@ SECRET_NAME_PARTS = ("secret", "token", "apikey", "api_key", "authorization", "c
 MAX_TEXT_BYTES = 1_000_000
 MAX_IMAGE_BYTES = 2_500_000
 MAX_TREE_ITEMS = 500
+RELEASE_DEMO_COMMAND = "python scorecard.py --checks checks.json"
+RELEASE_DEMO_REVIEW_ARTIFACT = f"{WORKSPACE_STATE_DIRNAME}/reviews/release-workflow-demo.diff"
 
 
 class ProjectToolsService:
@@ -253,6 +256,116 @@ class ProjectToolsService:
             except Exception:
                 pass
         return response
+
+    def prepare_release_workflow_demo(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        root = self._workspace_root()
+        self._require_isolated_demo_workspace(root)
+        payload = dict(payload or {})
+        context = self._edit_context(payload, target_exists=False)
+
+        baseline_files = self._release_demo_baseline_files()
+        for rel_path, content in baseline_files.items():
+            target = root / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        scorecard_path = root / "scorecard.py"
+        if not scorecard_path.exists():
+            scorecard_path.write_text(self._release_demo_scorecard_source(), encoding="utf-8")
+        tests_path = root / "test_scorecard.py"
+        if not tests_path.exists():
+            tests_path.write_text(self._release_demo_test_source(), encoding="utf-8")
+
+        baseline_commit = self._ensure_release_demo_git_baseline(root)
+
+        failing_checks = [
+            {"id": "build", "label": "Desktop build", "status": "pass", "notes": "Vite build completed"},
+            {"id": "sidecar", "label": "Sidecar tests", "status": "pass", "notes": "unittest suite completed"},
+            {"id": "browser", "label": "Browser smoke", "status": "fail", "notes": "needs provider switch acceptance"},
+        ]
+        passing_checks = [
+            {"id": "build", "label": "Desktop build", "status": "pass", "notes": "Vite build completed"},
+            {"id": "sidecar", "label": "Sidecar tests", "status": "pass", "notes": "unittest suite completed"},
+            {"id": "browser", "label": "Browser smoke", "status": "pass", "notes": "provider switch acceptance captured"},
+            {"id": "recovery", "label": "Recovery path", "status": "pass", "notes": "failure reproduced and recovered in the same task"},
+        ]
+        checks_path = root / "checks.json"
+        checks_path.write_text(json.dumps(failing_checks, indent=2) + "\n", encoding="utf-8")
+        failed_run = self.run_command({"command": RELEASE_DEMO_COMMAND, "permission_mode": "full"})
+        checks_path.write_text(json.dumps(passing_checks, indent=2) + "\n", encoding="utf-8")
+
+        readme_path = root / "README.md"
+        readme_path.write_text(self._release_demo_readme_after_recovery(), encoding="utf-8")
+        workflow_note_path = root / "workflow_note.txt"
+        workflow_note_path.write_text("Recovery verified and ready for browser smoke.\n", encoding="utf-8")
+
+        recovered_run = self.run_command({"command": RELEASE_DEMO_COMMAND, "permission_mode": "full"})
+        checkpoint_response = self.create_checkpoint(
+            {
+                "description": "Release workflow demo checkpoint after recovery verification",
+                "system": True,
+            }
+        )
+        review_status = self.review_status()
+        full_diff = self._full_git_diff(root)
+        review_artifact = self._write_release_demo_review_artifact(root, full_diff)
+        files_tree = self.files_tree(limit=40)
+        checkpoints = self.list_checkpoints(limit=10)
+
+        changed_paths = [str(item.get("path") or "").strip() for item in list(review_status.get("files") or []) if str(item.get("path") or "").strip()]
+        if self._tasks is not None:
+            self._tasks.record_coding_events(
+                [
+                    self._release_demo_command_event(context, failed_run, event_id="release-demo-command-failed"),
+                    self._release_demo_command_event(context, recovered_run, event_id="release-demo-command-recovered"),
+                    self._release_demo_verification_event(
+                        context,
+                        event_id="release-demo-review-status",
+                        tool="review_status",
+                        files=changed_paths[:6],
+                    ),
+                    self._release_demo_verification_event(
+                        context,
+                        event_id="release-demo-review-diff",
+                        tool="review_diff",
+                        path=changed_paths[0] if changed_paths else "checks.json",
+                        review_diff_path=review_artifact,
+                        files=changed_paths[:6],
+                    ),
+                    self._release_demo_verification_event(
+                        context,
+                        event_id="release-demo-files-tree",
+                        tool="files_tree",
+                        paths=[str(item.get("path") or "").strip() for item in list(files_tree.get("items") or [])[:6] if str(item.get("path") or "").strip()],
+                    ),
+                    self._release_demo_verification_event(
+                        context,
+                        event_id="release-demo-list-checkpoints",
+                        tool="list_checkpoints",
+                        save_ids=[str(item.get("save_id") or "").strip() for item in list(checkpoints.get("saves") or [])[:6] if str(item.get("save_id") or "").strip()],
+                    ),
+                    self._release_demo_runtime_transition_event(
+                        context,
+                        event_id="release-demo-recovery-verified",
+                        transition="recovery_verified",
+                    ),
+                ]
+            )
+            self._projects.reconcile_task_projection(self._tasks.current_task())
+
+        return {
+            "ok": True,
+            "workspace_root": str(root),
+            "task": self._tasks.current_task() if self._tasks is not None else None,
+            "review_status": review_status,
+            "terminal_history": self.terminal_history(limit=12),
+            "checkpoints": checkpoints,
+            "baseline_commit": baseline_commit,
+            "review_artifact": review_artifact,
+            "failed_run": failed_run,
+            "recovered_run": recovered_run,
+            "provider_switch_present": bool((self._tasks.current_task() or {}).get("handoff_events")) if self._tasks is not None else False,
+            "updated_at": now_iso(),
+        }
 
     def run_command(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._command_operation(payload or {}, test_mode=False)
@@ -589,6 +702,192 @@ class ProjectToolsService:
         if request.content is not None:
             return len(request.content.encode("utf-8"))
         return sum(len(item.search.encode("utf-8")) + len(item.replace.encode("utf-8")) for item in request.edits)
+
+    def _release_demo_baseline_files(self) -> dict[str, str]:
+        return {
+            ".gitignore": ".astrabridge/\n__pycache__/\n*.pyc\n",
+            "README.md": (
+                "# Provider Switch Scorecard Demo\n\n"
+                "This workspace is used for the AstraBridge release workflow demo.\n\n"
+                "## Workflow\n"
+                "- run `python scorecard.py --checks checks.json`\n"
+                "- inspect the diff in AstraBridge review mode\n"
+                "- save a checkpoint after recovery is verified\n"
+            ),
+            "workflow_note.txt": "Baseline release workflow demo workspace.\n",
+        }
+
+    def _release_demo_readme_after_recovery(self) -> str:
+        return (
+            "# Provider Switch Scorecard Demo\n\n"
+            "This workspace is used for the AstraBridge release workflow demo.\n\n"
+            "## Workflow\n"
+            "- run `python scorecard.py --checks checks.json`\n"
+            "- inspect the diff in AstraBridge review mode\n"
+            "- save a checkpoint after recovery is verified\n\n"
+            "## Recovery Result\n"
+            "- browser acceptance is now marked pass in `checks.json`\n"
+            "- the recovery path was reproduced and cleared in the same task\n"
+        )
+
+    def _release_demo_scorecard_source(self) -> str:
+        return (
+            "#!/usr/bin/env python3\n"
+            "\"\"\"Release workflow demo scorecard CLI.\"\"\"\n"
+            "import argparse\n"
+            "import json\n"
+            "import sys\n"
+            "from pathlib import Path\n\n"
+            "def main(argv=None):\n"
+            "    parser = argparse.ArgumentParser()\n"
+            "    parser.add_argument('--checks', type=Path, default=Path('checks.json'))\n"
+            "    args = parser.parse_args(argv)\n"
+            "    checks = json.loads(args.checks.read_text(encoding='utf-8'))\n"
+            "    failed = [item for item in checks if item.get('status') != 'pass']\n"
+            "    print(json.dumps({'failed': len(failed), 'total': len(checks)}))\n"
+            "    return 0 if not failed else 1\n\n"
+            "if __name__ == '__main__':\n"
+            "    raise SystemExit(main())\n"
+        )
+
+    def _release_demo_test_source(self) -> str:
+        return (
+            "import unittest\n"
+            "import scorecard\n\n"
+            "class DemoScorecardTests(unittest.TestCase):\n"
+            "    def test_import(self):\n"
+            "        self.assertTrue(callable(scorecard.main))\n\n"
+            "if __name__ == '__main__':\n"
+            "    unittest.main()\n"
+        )
+
+    def _require_isolated_demo_workspace(self, root: Path) -> None:
+        normalized = root.resolve().as_posix().lower()
+        if "/private/demo-runs/" not in normalized:
+            raise ValueError("Release workflow demo preparation is only allowed inside PRIVATE/demo-runs isolated workspaces.")
+
+    def _ensure_release_demo_git_baseline(self, root: Path) -> str:
+        init = self._run(["git", "-C", str(root), "init"], timeout=10)
+        if not init["ok"]:
+            raise RuntimeError(f"git init failed: {init.get('stderr') or init.get('error') or 'unknown git error'}")
+        add = self._run(["git", "-C", str(root), "add", "--all", "--", "."], timeout=10)
+        if not add["ok"]:
+            raise RuntimeError(f"git add failed: {add.get('stderr') or add.get('error') or 'unknown git error'}")
+        has_head = self._run(["git", "-C", str(root), "rev-parse", "--verify", "HEAD"], timeout=5)["ok"]
+        status = self._run(["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all", "--", "."], timeout=8)
+        if has_head and not str(status.get("stdout") or "").strip():
+            return str(self._run(["git", "-C", str(root), "rev-parse", "HEAD"], timeout=5).get("stdout") or "").strip()
+        commit = self._run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "-c",
+                "user.email=demo@example.invalid",
+                "-c",
+                "user.name=AstraBridge Demo",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Release workflow demo baseline",
+            ],
+            timeout=15,
+        )
+        if not commit["ok"]:
+            raise RuntimeError(f"git commit failed: {commit.get('stderr') or commit.get('error') or 'unknown git error'}")
+        return str(self._run(["git", "-C", str(root), "rev-parse", "HEAD"], timeout=5).get("stdout") or "").strip()
+
+    def _full_git_diff(self, root: Path) -> str:
+        result = self._run(["git", "-C", str(root), "diff", "--", "."], timeout=10)
+        if result["ok"]:
+            return str(result.get("stdout") or "")
+        return ""
+
+    def _write_release_demo_review_artifact(self, root: Path, diff_text: str) -> str:
+        artifact = root / RELEASE_DEMO_REVIEW_ARTIFACT
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(diff_text or "No diff available.\n", encoding="utf-8")
+        return artifact.relative_to(root).as_posix()
+
+    def _release_demo_command_event(
+        self,
+        context: dict[str, Any],
+        result: dict[str, Any],
+        *,
+        event_id: str,
+    ) -> dict[str, Any]:
+        return {
+            "event_id": event_id,
+            "task_id": context.get("task_id"),
+            "visible_thread_id": context.get("visible_thread_id"),
+            "execution_thread_id": context.get("execution_thread_id"),
+            "provider_id": context.get("provider_id"),
+            "model_id": context.get("model_id"),
+            "event_type": "command_execution",
+            "timestamp": now_iso(),
+            "payload": {
+                "command": result.get("command"),
+                "status": result.get("status"),
+                "exit_code": result.get("exit_code"),
+            },
+            "redaction_status": "secret_free",
+            "source": "sidecar",
+        }
+
+    def _release_demo_verification_event(
+        self,
+        context: dict[str, Any],
+        *,
+        event_id: str,
+        tool: str,
+        path: str | None = None,
+        review_diff_path: str | None = None,
+        files: list[str] | None = None,
+        paths: list[str] | None = None,
+        save_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "event_id": event_id,
+            "task_id": context.get("task_id"),
+            "visible_thread_id": context.get("visible_thread_id"),
+            "execution_thread_id": context.get("execution_thread_id"),
+            "provider_id": context.get("provider_id"),
+            "model_id": context.get("model_id"),
+            "event_type": "verification_result",
+            "timestamp": now_iso(),
+            "payload": {
+                "tool": tool,
+                "path": path,
+                "review_diff_path": review_diff_path,
+                "files": list(files or []),
+                "paths": list(paths or []),
+                "save_ids": list(save_ids or []),
+                "ok": True,
+            },
+            "redaction_status": "secret_free",
+            "source": "sidecar",
+        }
+
+    def _release_demo_runtime_transition_event(
+        self,
+        context: dict[str, Any],
+        *,
+        event_id: str,
+        transition: str,
+    ) -> dict[str, Any]:
+        return {
+            "event_id": event_id,
+            "task_id": context.get("task_id"),
+            "visible_thread_id": context.get("visible_thread_id"),
+            "execution_thread_id": context.get("execution_thread_id"),
+            "provider_id": context.get("provider_id"),
+            "model_id": context.get("model_id"),
+            "event_type": "runtime_transition",
+            "timestamp": now_iso(),
+            "payload": {"transition": transition},
+            "redaction_status": "secret_free",
+            "source": "sidecar",
+        }
 
     def _safe_rel_path(self, root: Path, rel_path: str, *, allow_lcr: bool) -> Path:
         raw = str(rel_path or "").strip().replace("\\", "/").lstrip("/")

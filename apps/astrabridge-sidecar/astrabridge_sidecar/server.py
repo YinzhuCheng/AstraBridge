@@ -857,6 +857,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._record_ui_state_event("project_context_rebuilt", {"thread_id": self._optional_string(payload, "thread_id")})
                 self.send_json(response)
                 return
+            if path == "/api/project/demo/release-workflow/prepare":
+                response = self.context.project_tools.prepare_release_workflow_demo(payload)
+                self._record_ui_state_event(
+                    "release_workflow_demo_prepared",
+                    {
+                        "task_id": str(((response or {}).get("task") or {}).get("task_id") or "")[:120],
+                        "workspace_root": str((response or {}).get("workspace_root") or "")[:240],
+                    },
+                )
+                self.send_json(response)
+                return
             if path == "/api/router/payload-preview":
                 self.send_json(self.context.router.preview_payload(payload))
                 return

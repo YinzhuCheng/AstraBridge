@@ -8347,8 +8347,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 )
             )
             self.assertTrue(any(item.get("selector") == "[data-testid='terminal-panel']" for item in actions if isinstance(item, dict)))
-            self.assertTrue(any(item.get("selector") == "[data-testid='checkpoint-modal']" for item in actions if isinstance(item, dict)))
-            self.assertTrue(any(item.get("selector") == "[data-testid='checkpoint-save']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='status-panel-goal']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-recovery']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='status-panel-goal']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(
                 any(
@@ -8359,6 +8359,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     if isinstance(item, dict)
                 )
             )
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-recovery']" for item in final_assertions if isinstance(item, dict)))
 
     def test_dogfood_browser_smoke_provider_switch_preset_exposes_workflow_facts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -8729,6 +8730,106 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(list(refreshed_task.get("checkpoint_refs") or []))
             self.assertTrue(list(refreshed_task.get("handoff_events") or []))
             self.assertTrue(list(refreshed_task.get("verification_refs") or []))
+
+    def test_project_tools_prepare_release_workflow_demo_builds_repeatable_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "PRIVATE" / "demo-runs" / "release-workflow" / "workspace"
+            workspace.mkdir(parents=True)
+            (workspace / "scorecard.py").write_text(
+                (
+                    "#!/usr/bin/env python3\n"
+                    "import argparse\n"
+                    "import json\n"
+                    "import sys\n"
+                    "from pathlib import Path\n\n"
+                    "def main(argv=None):\n"
+                    "    parser = argparse.ArgumentParser()\n"
+                    "    parser.add_argument('--checks', type=Path, default=Path('checks.json'))\n"
+                    "    args = parser.parse_args(argv)\n"
+                    "    path = args.checks\n"
+                    "    checks = json.loads(path.read_text(encoding='utf-8'))\n"
+                    "    failed = [item for item in checks if item.get('status') != 'pass']\n"
+                    "    print(json.dumps({'failed': len(failed), 'total': len(checks)}))\n"
+                    "    return 0 if not failed else 1\n\n"
+                    "if __name__ == '__main__':\n"
+                    "    raise SystemExit(main())\n"
+                ),
+                encoding="utf-8",
+            )
+            (workspace / "checks.json").write_text(
+                json.dumps(
+                    [
+                        {"id": "build", "label": "Desktop build", "status": "pass", "notes": "ok"},
+                        {"id": "browser", "label": "Browser smoke", "status": "fail", "notes": "pending"},
+                    ],
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            project_file = root / "demo.abproj"
+            projects = ProjectService(root / "projects.json")
+            projects.create_project("Release Demo", project_file, workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.ensure_default_task(
+                thread_id="thread-kimi",
+                settings={"profile_id": "kimi-default", "provider_id": "kimi", "model": "kimi-k2.6", "reasoning_effort": "high", "permission_mode": "full"},
+                title="Release workflow demo",
+            )
+            profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            tools = ProjectToolsService(projects, runtime, checkpoints=CheckpointService(projects), tasks=tasks, profiles=profiles, router_config=router_config)
+
+            response = tools.prepare_release_workflow_demo({})
+
+            self.assertTrue(response["ok"])
+            self.assertTrue(response["baseline_commit"])
+            self.assertTrue((workspace / ".git").is_dir())
+            self.assertTrue((workspace / ".astrabridge" / "reviews" / "release-workflow-demo.diff").is_file())
+
+            review_status = tools.review_status()
+            changed_paths = {item["path"] for item in review_status["files"]}
+            self.assertIn("checks.json", changed_paths)
+            self.assertIn("README.md", changed_paths)
+
+            history = tools.terminal_history(limit=10)
+            commands = list(history["commands"])
+            matching = [item for item in commands if str(item.get("command") or "") == "python scorecard.py --checks checks.json"]
+            self.assertGreaterEqual(len(matching), 2)
+            self.assertEqual(matching[0]["status"], "failed")
+            self.assertEqual(matching[-1]["status"], "completed")
+
+            task = tasks.current_task()
+            self.assertTrue(list(task.get("checkpoint_refs") or []))
+            self.assertTrue(any(str(item.get("kind") or "") == "command_execution" and str(item.get("status") or "") == "failed" for item in list(task.get("diagnostic_refs") or [])))
+            self.assertTrue(any(str(item.get("kind") or "") == "command_execution" and str(item.get("status") or "") == "completed" for item in list(task.get("diagnostic_refs") or [])))
+            self.assertTrue(any(str(item.get("kind") or "") == "runtime_transition" and str(item.get("transition") or "") == "recovery_verified" for item in list(task.get("diagnostic_refs") or [])))
+            self.assertTrue(any(str(item.get("tool") or "") == "review_diff" for item in list(task.get("verification_refs") or [])))
+
+    def test_project_tools_prepare_release_workflow_demo_rejects_non_demo_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "scorecard.py").write_text("print('ok')\n", encoding="utf-8")
+            (workspace / "checks.json").write_text("[]\n", encoding="utf-8")
+            projects = ProjectService(root / "projects.json")
+            projects.create_project("Regular Workspace", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.ensure_default_task(
+                thread_id="thread-deepseek",
+                settings={"profile_id": "deepseek-default", "provider_id": "deepseek", "model": "deepseek-v4-pro", "reasoning_effort": "high", "permission_mode": "full"},
+                title="Regular task",
+            )
+            profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            tools = ProjectToolsService(projects, runtime, checkpoints=CheckpointService(projects), tasks=tasks, profiles=profiles, router_config=router_config)
+
+            with self.assertRaisesRegex(ValueError, "PRIVATE/demo-runs"):
+                tools.prepare_release_workflow_demo({})
 
     def test_checkpoint_service_git_save_load_without_git_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

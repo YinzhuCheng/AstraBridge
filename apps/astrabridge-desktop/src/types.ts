@@ -948,6 +948,21 @@ export type ProjectReviewDiff = {
   error?: string;
 };
 
+export type ReleaseWorkflowDemoResponse = {
+  ok: boolean;
+  workspace_root: string;
+  task?: ProjectTask | null;
+  review_status?: ProjectReviewStatus;
+  terminal_history?: ProjectTerminalHistory;
+  checkpoints?: ProjectSavesResponse;
+  baseline_commit?: string;
+  review_artifact?: string;
+  failed_run?: Record<string, unknown>;
+  recovered_run?: Record<string, unknown>;
+  provider_switch_present?: boolean;
+  updated_at?: string;
+};
+
 export type ProjectFileTreeItem = {
   path: string;
   name: string;

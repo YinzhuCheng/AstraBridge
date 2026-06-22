@@ -388,14 +388,14 @@ class DogfoodRunService:
                 {"type": "click_selector", "selector": "[data-testid='inspector-tab-files']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='files-panel']", "timeout_ms": 12000},
                 {"type": "expect_selector_count_at_least", "selector": "[data-testid='project-file-row']", "count": 1, "timeout_ms": 12000},
-                {"type": "click_selector", "selector": "[data-testid='checkpoint-open']", "timeout_ms": 12000},
-                {"type": "expect_selector", "selector": "[data-testid='checkpoint-modal']", "timeout_ms": 12000},
-                {"type": "expect_selector", "selector": "[data-testid='checkpoint-save']", "timeout_ms": 12000},
-                {"type": "click_selector", "selector": "[data-testid='checkpoint-cancel']", "timeout_ms": 12000},
+                {"type": "click_selector", "selector": "[data-testid='inspector-tab-status']", "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='status-panel-goal']", "timeout_ms": 12000},
+                {"type": "expect_selector_count_at_least", "selector": "[data-testid='workflow-checkpoint-row']", "count": 1, "timeout_ms": 12000},
+                {"type": "expect_selector_count_at_least", "selector": "[data-testid='workflow-diagnostic-row']", "count": 1, "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='workflow-fact-recovery']", "timeout_ms": 12000},
                 {"type": "click_selector", "selector": "[data-testid='inspector-tab-browser']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='browser-panel']", "timeout_ms": 12000},
                 {"type": "click_selector", "selector": "[data-testid='inspector-tab-status']", "timeout_ms": 12000},
-                {"type": "expect_selector", "selector": "[data-testid='status-panel-goal']", "timeout_ms": 12000},
             ],
             "final_assertions": [
                 {"type": "expect_selector", "selector": "[data-testid='app-shell']", "timeout_ms": 12000},
@@ -403,6 +403,7 @@ class DogfoodRunService:
                 {"type": "expect_selector", "selector": "[data-testid='status-panel-goal']", "timeout_ms": 12000},
                 {"type": "expect_selector_count_at_least", "selector": "[data-testid='workflow-checkpoint-row']", "count": 1, "timeout_ms": 12000},
                 {"type": "expect_selector_count_at_least", "selector": "[data-testid='workflow-diagnostic-row']", "count": 1, "timeout_ms": 12000},
+                {"type": "expect_selector", "selector": "[data-testid='workflow-fact-recovery']", "timeout_ms": 12000},
             ],
         }
 

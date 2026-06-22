@@ -29,6 +29,7 @@ import type {
   ProjectFilesTree,
   ProjectReviewDiff,
   ProjectReviewStatus,
+  ReleaseWorkflowDemoResponse,
   ProjectContextPackResponse,
   ProjectSaveCreateResponse,
   ProjectSaveLoadResponse,
@@ -284,6 +285,7 @@ export const api = {
     jsonRequest<Partial<DogfoodRunResponse> & { milestone: Record<string, unknown>; run_summary?: Record<string, unknown> }>("/api/dogfood/milestone", payload),
   dogfoodAssets: () => request<AssetRegistryResponse>("/api/dogfood/assets"),
   rebuildDogfoodAssets: () => jsonRequest<AssetRegistryResponse>("/api/dogfood/assets/rebuild", {}),
+  prepareReleaseWorkflowDemo: () => jsonRequest<ReleaseWorkflowDemoResponse>("/api/project/demo/release-workflow/prepare", {}),
   markDogfoodAsset: (payload: { asset_id: string; status?: string; quality_status?: string; integration_status?: string; role?: string; purpose?: string; notes?: string }) =>
     jsonRequest<AssetRegistryResponse>("/api/dogfood/assets/mark", payload),
   promoteDogfoodAsset: (payload: { asset_id: string; target_name?: string; manifest_section?: "sprites" | "tiles" | "hud"; entity?: string; state?: string; tile_key?: string; role?: string }) =>

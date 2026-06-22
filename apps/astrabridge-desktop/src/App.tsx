@@ -1227,8 +1227,10 @@ function WorkflowEvidencePanel({
 function BrowserInspectorPanel({
   supervisor,
   latestSmoke,
+  isPreparingWorkflowDemo,
   isRunningReleaseSmoke,
   isRunningProviderSwitchSmoke,
+  onPrepareWorkflowDemo,
   onRunReleaseSmoke,
   onRunProviderSwitchSmoke,
 }: {
@@ -1241,8 +1243,10 @@ function BrowserInspectorPanel({
     request_failures?: Array<{ url?: string; method?: string; resource_type?: string; error_text?: string }>;
     screenshot_path?: string;
   } | null;
+  isPreparingWorkflowDemo?: boolean;
   isRunningReleaseSmoke?: boolean;
   isRunningProviderSwitchSmoke?: boolean;
+  onPrepareWorkflowDemo: () => void;
   onRunReleaseSmoke: () => void;
   onRunProviderSwitchSmoke: () => void;
 }) {
@@ -1290,6 +1294,9 @@ function BrowserInspectorPanel({
         </pre>
       ) : null}
       <div className="inspector-actions">
+        <button type="button" data-testid="prepare-release-workflow-demo" className="ghost-button inspector-inline-action" disabled={isPreparingWorkflowDemo} onClick={onPrepareWorkflowDemo}>
+          {isPreparingWorkflowDemo ? "准备中..." : "准备演示工作流"}
+        </button>
         <button type="button" className="ghost-button inspector-inline-action" disabled={isRunningReleaseSmoke} onClick={onRunReleaseSmoke}>
           {isRunningReleaseSmoke ? "运行中..." : "运行工作流 smoke"}
         </button>
@@ -3312,6 +3319,22 @@ function AppShell() {
       queryClient.invalidateQueries({ queryKey: ["dogfood-run"] });
     },
   });
+  const prepareReleaseWorkflowDemo = useMutation({
+    mutationFn: api.prepareReleaseWorkflowDemo,
+    onSuccess: (response) => {
+      if (response.task?.task_id) {
+        queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+        queryClient.invalidateQueries({ queryKey: ["task-conversation", response.task.task_id] });
+      }
+      queryClient.invalidateQueries({ queryKey: ["task-conversation"] });
+      queryClient.invalidateQueries({ queryKey: ["project-review-status"] });
+      queryClient.invalidateQueries({ queryKey: ["project-files-tree"] });
+      queryClient.invalidateQueries({ queryKey: ["project-terminal-history"] });
+      queryClient.invalidateQueries({ queryKey: ["project-saves"] });
+      queryClient.invalidateQueries({ queryKey: ["runtime-supervisor"] });
+      queryClient.invalidateQueries({ queryKey: ["dogfood-run"] });
+    },
+  });
   const inspectorProviderSwitchSmoke = useMutation({
     mutationFn: () =>
       api.dogfoodBrowserSmoke({
@@ -4884,14 +4907,16 @@ function AppShell() {
           ) : null}
           {inspectorTab === "terminal" ? <TerminalInspectorPanel supervisor={supervisor.data} history={inspectorTerminal.data} fallback={taskInspectorEvidence} /> : null}
           {inspectorTab === "browser" ? (
-            <BrowserInspectorPanel
-              supervisor={supervisor.data}
-              latestSmoke={(inspectorDogfoodRun.data?.run?.browser_smokes ?? []).slice(-1)[0] ?? null}
-              isRunningReleaseSmoke={inspectorBrowserSmoke.isPending}
-              isRunningProviderSwitchSmoke={inspectorProviderSwitchSmoke.isPending}
-              onRunReleaseSmoke={() => inspectorBrowserSmoke.mutate()}
-              onRunProviderSwitchSmoke={() => inspectorProviderSwitchSmoke.mutate()}
-            />
+              <BrowserInspectorPanel
+                supervisor={supervisor.data}
+                latestSmoke={(inspectorDogfoodRun.data?.run?.browser_smokes ?? []).slice(-1)[0] ?? null}
+                isPreparingWorkflowDemo={prepareReleaseWorkflowDemo.isPending}
+                isRunningReleaseSmoke={inspectorBrowserSmoke.isPending}
+                isRunningProviderSwitchSmoke={inspectorProviderSwitchSmoke.isPending}
+                onPrepareWorkflowDemo={() => prepareReleaseWorkflowDemo.mutate()}
+                onRunReleaseSmoke={() => inspectorBrowserSmoke.mutate()}
+                onRunProviderSwitchSmoke={() => inspectorProviderSwitchSmoke.mutate()}
+              />
           ) : null}
           {inspectorTab === "files" ? (
             <FilesInspectorPanel
