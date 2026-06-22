@@ -4,6 +4,7 @@ import { Files, GitCompare, GitFork, Globe2, ListChecks, Save, Terminal } from "
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
+import { summarizeCodingEventInspector } from "./features/runtime/codingEventInspector";
 import { modelAuthorityState } from "./features/runtime/modelAuthorityNotice";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
 import { composerReasoningOptions, preferredReasoningEffort } from "./features/runtime/reasoningOptions";
@@ -1028,17 +1029,20 @@ function ReviewInspectorPanel({
   supervisor,
   review,
   diff,
+  fallback,
   selectedPath,
   onSelectPath,
 }: {
   supervisor?: RuntimeSupervisorState;
   review?: ProjectReviewStatus;
   diff?: ProjectReviewDiff;
+  fallback?: ReturnType<typeof summarizeCodingEventInspector>;
   selectedPath?: string;
   onSelectPath: (path: string) => void;
 }) {
   const git = review?.git ?? supervisor?.environment.git;
-  const files = review?.files ?? [];
+  const files = (review?.files?.length ? review.files : fallback?.reviewFiles) ?? [];
+  const fallbackDetail = selectedPath ? fallback?.detailByPath[selectedPath] : "";
   return (
     <section className="inspector-tool-panel">
       <div className="section-header">
@@ -1072,6 +1076,8 @@ function ReviewInspectorPanel({
       </div>
       {diff ? (
         <pre className="tool-preview diff-preview">{diff.ok ? diff.diff || "这个文件当前没有 diff。" : diff.error || "暂时无法读取 diff。"}</pre>
+      ) : fallbackDetail ? (
+        <pre className="tool-preview diff-preview">{fallbackDetail}</pre>
       ) : (
         <p className="muted compact-copy">选择文件后查看只读 diff 预览。</p>
       )}
@@ -1157,6 +1163,7 @@ function FilesInspectorPanel({
   project,
   tree,
   preview,
+  fallback,
   query,
   selectedPath,
   onQueryChange,
@@ -1165,26 +1172,29 @@ function FilesInspectorPanel({
   project: ProjectFile;
   tree?: ProjectFilesTree;
   preview?: ProjectFilePreview;
+  fallback?: ReturnType<typeof summarizeCodingEventInspector>;
   query: string;
   selectedPath?: string;
   onQueryChange: (value: string) => void;
   onSelectPath: (path: string) => void;
 }) {
+  const items = (tree?.items?.length ? tree.items : fallback?.recentFiles) ?? [];
+  const fallbackDetail = selectedPath ? fallback?.detailByPath[selectedPath] : "";
   return (
     <section className="inspector-tool-panel">
       <div className="section-header">
         <h2>项目文件</h2>
-        <span className="status-tag">{tree?.items.length ?? 0}</span>
+        <span className="status-tag">{items.length}</span>
       </div>
       <input className="inspector-search" value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="筛选文件..." aria-label="筛选文件" />
       <div className="inspector-list inspector-file-list" role="list" aria-label="项目文件">
-        {(tree?.items ?? []).slice(0, 18).map((item) => (
+        {items.slice(0, 18).map((item) => (
           <button type="button" className={`inspector-list-row ${selectedPath === item.path ? "active" : ""}`} onClick={() => onSelectPath(item.path)} key={item.path}>
             <span>{item.path}</span>
             <small>{item.kind}</small>
           </button>
         ))}
-        {!tree?.items?.length ? <p className="muted compact-copy">没有匹配文件。</p> : null}
+        {!items.length ? <p className="muted compact-copy">没有匹配文件。</p> : null}
       </div>
       {preview ? (
         <div className="file-preview">
@@ -1195,6 +1205,14 @@ function FilesInspectorPanel({
           {preview.kind === "image" && preview.data_url ? <img src={preview.data_url} alt={preview.name} /> : null}
           {preview.kind === "text" ? <pre className="tool-preview">{preview.content}</pre> : null}
           {preview.kind !== "text" && preview.kind !== "image" ? <p className="muted compact-copy">{preview.message ?? "该文件暂不支持预览。"}</p> : null}
+        </div>
+      ) : fallbackDetail ? (
+        <div className="file-preview">
+          <div className="tool-row">
+            <span>{selectedPath}</span>
+            <strong>event summary</strong>
+          </div>
+          <pre className="tool-preview">{fallbackDetail}</pre>
         </div>
       ) : (
         <pre className="tool-preview">{project.workspace_root}</pre>
@@ -4118,6 +4136,7 @@ function AppShell() {
   }, [activeThread, clearLiveTurn, liveTurnId, selectedThreadId]);
 
   const blocks = summarizeTurnBlocks(activeThread, liveText, liveReasoning, liveActivity, liveDiff, liveTurnId);
+  const eventInspectorFallback = useMemo(() => summarizeCodingEventInspector(activeThread), [activeThread]);
   const hasRenderedPlanBlock = blocks.some((block) => block.role === "plan" || (("text" in block) && typeof block.text === "string" && extractProposedPlanText(block.text)));
   const inspectorPlan = supervisor.data?.plan ?? (activePlan ? {
     thread_id: selectedThreadId ?? "",
@@ -4664,6 +4683,7 @@ function AppShell() {
               supervisor={supervisor.data}
               review={inspectorReview.data}
               diff={inspectorReviewDiff.data}
+              fallback={eventInspectorFallback}
               selectedPath={inspectorReviewPath}
               onSelectPath={setInspectorReviewPath}
             />
@@ -4682,6 +4702,7 @@ function AppShell() {
               project={project}
               tree={inspectorFiles.data}
               preview={inspectorFilePreview.data}
+              fallback={eventInspectorFallback}
               query={inspectorFileQuery}
               selectedPath={inspectorFilePath}
               onQueryChange={setInspectorFileQuery}
