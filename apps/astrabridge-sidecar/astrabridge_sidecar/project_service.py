@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -258,6 +259,28 @@ class ProjectService:
             raise ValueError(f"Unsupported managed AstraBridge state directory: {name}")
         return self.require_shell_subdir(normalized, *parts)
 
+    def current_runtime_roots(self) -> dict[str, Path]:
+        project = self.current_project or {}
+        project_file = str(project.get("project_file") or "").strip()
+        workspace_root = str(project.get("workspace_root") or "").strip()
+        if not project_file or not workspace_root:
+            fallback = default_codex_home().resolve()
+            runtime_root = fallback.parent.resolve()
+            return {
+                "project_runtime_root": runtime_root,
+                "codex_home_root": fallback,
+                "downloads_root": (runtime_root / "downloads").resolve(),
+                "caches_root": (runtime_root / "caches").resolve(),
+                "tmp_root": (runtime_root / "tmp").resolve(),
+            }
+        return self._runtime_roots_for_project(
+            Path(project_file).expanduser().resolve(),
+            Path(workspace_root).expanduser().resolve(),
+        )
+
+    def current_runtime_codex_home(self) -> Path:
+        return self.current_runtime_roots()["codex_home_root"]
+
     def update_project(self, patch: dict[str, Any]) -> dict[str, Any]:
         if not self.current_project:
             raise ValueError("No project is open.")
@@ -380,6 +403,9 @@ class ProjectService:
         for dirname in MANAGED_STATE_DIRS:
             path = shell_root / dirname
             path.mkdir(parents=True, exist_ok=True)
+        if project_path is not None:
+            for runtime_root in self._runtime_roots_for_project(project_path.resolve(), workspace_root.resolve()).values():
+                runtime_root.mkdir(parents=True, exist_ok=True)
         for filename in MANAGED_STATE_FILES:
             path = shell_root / filename
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -404,6 +430,10 @@ class ProjectService:
     ) -> None:
         shell_root = workspace_root / WORKSPACE_STATE_DIRNAME
         policy_path = shell_root / "storage_policy.json"
+        runtime_roots = self._runtime_roots_for_project(
+            (project_path or Path(str((self.current_project or {}).get("project_file") or "")).expanduser()).resolve(),
+            workspace_root.resolve(),
+        )
         payload = {
             "schema_version": STORAGE_POLICY_SCHEMA_VERSION,
             "workspace_root": str(workspace_root.resolve()),
@@ -420,7 +450,11 @@ class ProjectService:
             },
             "runtime": {
                 "app_data_root": str(app_data_dir()),
-                "codex_home_root": str(default_codex_home()),
+                "project_runtime_root": str(runtime_roots["project_runtime_root"]),
+                "codex_home_root": str(runtime_roots["codex_home_root"]),
+                "downloads_root": str(runtime_roots["downloads_root"]),
+                "caches_root": str(runtime_roots["caches_root"]),
+                "tmp_root": str(runtime_roots["tmp_root"]),
             },
             "updated_at": now_iso(),
         }
@@ -471,6 +505,20 @@ class ProjectService:
                 continue
             return bundle_root, project_path
         raise ValueError(f"Could not allocate an isolated AstraBridge project root under {projects_root}")
+
+    def _runtime_roots_for_project(self, project_path: Path, workspace_root: Path) -> dict[str, Path]:
+        project_path = project_path.expanduser().resolve()
+        workspace_root = workspace_root.expanduser().resolve()
+        slug = slugify(project_path.stem or workspace_root.name or "astrabridge-project")
+        digest = hashlib.sha256(str(project_path).encode("utf-8")).hexdigest()[:12]
+        runtime_root = app_runtime_dir("project_runtime", f"{slug}-{digest}")
+        return {
+            "project_runtime_root": runtime_root.resolve(),
+            "codex_home_root": (runtime_root / "codex_home").resolve(),
+            "downloads_root": (runtime_root / "downloads").resolve(),
+            "caches_root": (runtime_root / "caches").resolve(),
+            "tmp_root": (runtime_root / "tmp").resolve(),
+        }
 
     def _ensure_git_exclude(self, workspace_root: Path) -> None:
         git_root = workspace_root / ".git"

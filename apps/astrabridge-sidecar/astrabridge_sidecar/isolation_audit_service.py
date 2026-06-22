@@ -41,6 +41,7 @@ class IsolationAuditService:
         checks.append(_check("project_file_suffix", project_file is None or project_file.suffix == PROJECT_FILE_SUFFIX, str(project_file) if project_file else None))
         if workspace:
             storage_policy = workspace / WORKSPACE_STATE_DIRNAME / "storage_policy.json"
+            storage_policy_payload = _read_storage_policy(storage_policy)
             checks.append(_check("workspace_astrabridge_state_exists", (workspace / WORKSPACE_STATE_DIRNAME).exists(), str(workspace / WORKSPACE_STATE_DIRNAME)))
             checks.append(_check("workspace_storage_policy_exists", storage_policy.exists(), str(storage_policy)))
             checks.append(
@@ -65,6 +66,24 @@ class IsolationAuditService:
                 _check(
                     "workspace_storage_policy_managed_dirs_match",
                     _storage_policy_managed_dirs_match(storage_policy, workspace),
+                    str(storage_policy),
+                )
+            )
+            checks.append(
+                _check(
+                    "workspace_storage_policy_runtime_codex_home_matches",
+                    _expected_runtime_codex_home_matches(
+                        storage_policy_payload,
+                        actual_path=codex_home,
+                        expected_override=expected_codex_home,
+                    ),
+                    str(storage_policy),
+                )
+            )
+            checks.append(
+                _check(
+                    "workspace_storage_policy_runtime_root_outside_workspace",
+                    _storage_policy_runtime_root_outside_workspace(storage_policy_payload, workspace),
                     str(storage_policy),
                 )
             )
@@ -108,6 +127,7 @@ class IsolationAuditService:
                     for dirname in MANAGED_STATE_DIRS
                 } if workspace else {},
                 "isolated_codex_home": str(codex_home) if codex_home else None,
+                "project_runtime_root": _storage_policy_runtime_path(_read_storage_policy(workspace / WORKSPACE_STATE_DIRNAME / "storage_policy.json"), "project_runtime_root") if workspace else None,
                 "official_codex_config": str(official_config) if official_config else None,
                 "expected_appdata": str(expected_appdata) if expected_appdata else None,
                 "expected_codex_home": str(expected_codex_home) if expected_codex_home else None,
@@ -216,4 +236,52 @@ def _read_storage_policy(path: Path) -> dict[str, Any] | None:
     except Exception:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _storage_policy_runtime_path(payload: dict[str, Any] | None, key: str) -> str | None:
+    if not payload:
+        return None
+    runtime = dict(payload.get("runtime") or {})
+    value = runtime.get(key)
+    return str(value) if value else None
+
+
+def _storage_policy_runtime_path_matches(payload: dict[str, Any] | None, key: str, actual_path: Path | None) -> bool:
+    expected = _storage_policy_runtime_path(payload, key)
+    if not expected:
+        return False
+    if actual_path is None:
+        return False
+    try:
+        return Path(expected).expanduser().resolve() == actual_path.expanduser().resolve()
+    except OSError:
+        return False
+
+
+def _storage_policy_runtime_root_outside_workspace(payload: dict[str, Any] | None, workspace: Path) -> bool:
+    expected = _storage_policy_runtime_path(payload, "project_runtime_root")
+    if not expected:
+        return False
+    try:
+        runtime_root = Path(expected).expanduser().resolve()
+        workspace_root = workspace.expanduser().resolve()
+    except OSError:
+        return False
+    return runtime_root != workspace_root and workspace_root not in runtime_root.parents
+
+
+def _expected_runtime_codex_home_matches(
+    payload: dict[str, Any] | None,
+    *,
+    actual_path: Path | None,
+    expected_override: Path | None,
+) -> bool:
+    if actual_path is None:
+        return False
+    if expected_override is not None:
+        try:
+            return actual_path.expanduser().resolve() == expected_override.expanduser().resolve()
+        except OSError:
+            return False
+    return _storage_policy_runtime_path_matches(payload, "codex_home_root", actual_path)
 

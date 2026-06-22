@@ -87,7 +87,12 @@ class RuntimeService:
         self._dogfood_run = dogfood_run
         self._lcr_web = lcr_web_service or LcrWebService(project_service)
         self._tool_context = ToolContextService(project_service, task_service)
-        self._runtime_config = runtime_config or RuntimeConfigService(secret_service=self._secrets, mcp_config=self._mcp_config)
+        codex_home_resolver = getattr(self._projects, "current_runtime_codex_home", None)
+        self._runtime_config = runtime_config or RuntimeConfigService(
+            codex_home_resolver=codex_home_resolver if callable(codex_home_resolver) else None,
+            secret_service=self._secrets,
+            mcp_config=self._mcp_config,
+        )
         self._profiles = profile_service or ProfileService()
         self._router = router_service
         self._project_tools = None

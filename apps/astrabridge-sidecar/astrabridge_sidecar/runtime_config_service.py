@@ -4,6 +4,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable
 
 from .common import default_codex_home, now_iso, write_json
 from .mcp_config_service import McpConfigService
@@ -38,11 +39,34 @@ LOCAL_NO_PROXY = "127.0.0.1,localhost,::1"
 
 
 class RuntimeConfigService:
-    def __init__(self, codex_home: Path | None = None, secret_service: SecretService | None = None, mcp_config: McpConfigService | None = None) -> None:
-        self.codex_home = (codex_home or default_codex_home()).resolve()
+    def __init__(
+        self,
+        codex_home: Path | None = None,
+        *,
+        codex_home_resolver: Callable[[], Path] | None = None,
+        secret_service: SecretService | None = None,
+        mcp_config: McpConfigService | None = None,
+    ) -> None:
+        self._codex_home_override = codex_home.resolve() if codex_home else None
+        self._codex_home_resolver = codex_home_resolver
         self._active_runtime: dict[str, Any] | None = None
         self._secrets = secret_service or SecretService()
         self._mcp_config = mcp_config or McpConfigService()
+
+    @property
+    def codex_home(self) -> Path:
+        if self._codex_home_override is not None:
+            return self._codex_home_override
+        if os.environ.get("ASTRABRIDGE_CODEX_HOME"):
+            return default_codex_home().resolve()
+        if self._codex_home_resolver is not None:
+            try:
+                resolved = self._codex_home_resolver()
+            except Exception:
+                resolved = None
+            if resolved:
+                return Path(resolved).expanduser().resolve()
+        return default_codex_home().resolve()
 
     def prepare_profile(
         self,

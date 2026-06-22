@@ -85,6 +85,7 @@ from astrabridge_sidecar.providers.tooling import (
 from astrabridge_sidecar.project_context_service import ProjectContextService
 from astrabridge_sidecar.project_service import DEFAULT_RUNTIME_HOST_ENV, DEFAULT_RUNTIME_WSL_DISTRO_ENV, ProjectService
 from astrabridge_sidecar.project_tools_service import ProjectToolsService
+from astrabridge_sidecar.common import default_codex_home
 from astrabridge_sidecar.router_config_service import RouterConfigService
 from astrabridge_sidecar.router_service import ROUTER_ENV_KEY, RouterService
 from astrabridge_sidecar.runtime_config_service import RuntimeConfigService
@@ -573,6 +574,15 @@ class AstraBridgeServiceTests(unittest.TestCase):
             storage_policy = json.loads((workspace / ".astrabridge" / "storage_policy.json").read_text(encoding="utf-8"))
             self.assertEqual(storage_policy["schema_version"], "astrabridge-storage-policy-v1")
             self.assertEqual(storage_policy["managed_dirs"]["captures"], str((workspace / ".astrabridge" / "captures").resolve()))
+            runtime_policy = dict(storage_policy.get("runtime") or {})
+            runtime_root = Path(runtime_policy["project_runtime_root"]).resolve()
+            self.assertTrue(runtime_root.is_dir())
+            self.assertTrue((runtime_root / "codex_home").is_dir())
+            self.assertTrue((runtime_root / "downloads").is_dir())
+            self.assertTrue((runtime_root / "caches").is_dir())
+            self.assertTrue((runtime_root / "tmp").is_dir())
+            self.assertNotEqual(runtime_root, workspace.resolve())
+            self.assertNotIn(str(workspace.resolve()), str(runtime_root))
 
             with self.assertRaises(ValueError):
                 service.create_project(
@@ -606,7 +616,13 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 self.assertTrue(str(project_file).startswith(str(isolated_root)))
                 self.assertTrue(str(workspace).startswith(str(isolated_root)))
                 self.assertEqual(workspace.name, "workspace")
-                self.assertTrue((workspace / ".astrabridge" / "storage_policy.json").is_file())
+                storage_policy_path = workspace / ".astrabridge" / "storage_policy.json"
+                self.assertTrue(storage_policy_path.is_file())
+                storage_policy = json.loads(storage_policy_path.read_text(encoding="utf-8"))
+                runtime_root = Path(storage_policy["runtime"]["project_runtime_root"]).resolve()
+                self.assertTrue(runtime_root.is_dir())
+                self.assertTrue((runtime_root / "codex_home").is_dir())
+                self.assertTrue(str(runtime_root).startswith(str(root / "AppData" / "runtime")))
         finally:
             if original_appdata is None:
                 os.environ.pop("ASTRABRIDGE_APPDATA", None)
@@ -625,6 +641,37 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             self.assertEqual(shell_tmp, (workspace / ".astrabridge" / "tmp" / "browser-smoke").resolve())
             self.assertTrue(shell_tmp.is_dir())
+
+    def test_runtime_environment_defaults_to_project_scoped_codex_home(self) -> None:
+        original_appdata = os.environ.get("ASTRABRIDGE_APPDATA")
+        original_codex_home = os.environ.get("ASTRABRIDGE_CODEX_HOME")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                os.environ["ASTRABRIDGE_APPDATA"] = str(root / "AppData")
+                os.environ.pop("ASTRABRIDGE_CODEX_HOME", None)
+                workspace = root / "repo-workspace"
+                workspace.mkdir()
+                projects = ProjectService(root / "recent.json")
+                project = projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+                runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+
+                environment = runtime.environment()
+
+                codex_home = Path(environment["runtime_config"]["codex_home"]).resolve()
+                storage_policy = json.loads((workspace / ".astrabridge" / "storage_policy.json").read_text(encoding="utf-8"))
+                self.assertEqual(codex_home, Path(storage_policy["runtime"]["codex_home_root"]).resolve())
+                self.assertNotEqual(codex_home, default_codex_home().resolve())
+                self.assertTrue(codex_home.is_dir())
+        finally:
+            if original_appdata is None:
+                os.environ.pop("ASTRABRIDGE_APPDATA", None)
+            else:
+                os.environ["ASTRABRIDGE_APPDATA"] = original_appdata
+            if original_codex_home is None:
+                os.environ.pop("ASTRABRIDGE_CODEX_HOME", None)
+            else:
+                os.environ["ASTRABRIDGE_CODEX_HOME"] = original_codex_home
 
     def test_app_server_client_is_not_running_after_reader_disconnect(self) -> None:
         client = AppServerClient(codex_executable="codex")
@@ -9891,8 +9938,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 workspace.mkdir()
                 project_service = ProjectService(root / "projects.json")
                 project = project_service.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
-                codex_home = root / "isolated-codex-home"
-                codex_home.mkdir()
+                storage_policy = json.loads((workspace / ".astrabridge" / "storage_policy.json").read_text(encoding="utf-8"))
+                codex_home = Path(storage_policy["runtime"]["codex_home_root"]).resolve()
                 (codex_home / "config.toml").write_text('model = "deepseek/deepseek-v4-pro"\n', encoding="utf-8")
                 official_home = root / ".codex"
                 official_home.mkdir()
@@ -9923,6 +9970,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 self.assertTrue(checks["workspace_storage_policy_exists"]["ok"])
                 self.assertTrue(checks["workspace_storage_policy_schema"]["ok"])
                 self.assertTrue(checks["workspace_storage_policy_managed_dirs_match"]["ok"])
+                self.assertTrue(checks["workspace_storage_policy_runtime_codex_home_matches"]["ok"])
+                self.assertTrue(checks["workspace_storage_policy_runtime_root_outside_workspace"]["ok"])
                 self.assertTrue(checks["managed_state_dir_captures_exists"]["ok"])
                 self.assertTrue(checks["managed_state_dir_downloads_exists"]["ok"])
                 self.assertIsNotNone(audit["official_codex"]["config_sha256"])
