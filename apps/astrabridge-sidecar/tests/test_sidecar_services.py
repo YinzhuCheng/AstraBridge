@@ -8777,10 +8777,19 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 settings={"profile_id": "kimi-default", "provider_id": "kimi", "model": "kimi-k2.6", "reasoning_effort": "high", "permission_mode": "full"},
                 title="Release workflow demo",
             )
+            conversation = TaskConversationService(projects, tasks)
             profiles = ProfileService(store_path=root / "profiles.json")
             router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
             runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
-            tools = ProjectToolsService(projects, runtime, checkpoints=CheckpointService(projects), tasks=tasks, profiles=profiles, router_config=router_config)
+            tools = ProjectToolsService(
+                projects,
+                runtime,
+                checkpoints=CheckpointService(projects),
+                tasks=tasks,
+                profiles=profiles,
+                router_config=router_config,
+                task_conversation=conversation,
+            )
 
             response = tools.prepare_release_workflow_demo({})
 
@@ -8788,6 +8797,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(response["baseline_commit"])
             self.assertTrue((workspace / ".git").is_dir())
             self.assertTrue((workspace / ".astrabridge" / "reviews" / "release-workflow-demo.diff").is_file())
+            self.assertTrue(response["provider_switch_present"])
+            self.assertEqual((response["provider_switch"] or {}).get("lane_count"), 2)
+            self.assertEqual((response["provider_switch"] or {}).get("handoff_count"), 1)
 
             review_status = tools.review_status()
             changed_paths = {item["path"] for item in review_status["files"]}
@@ -8803,10 +8815,23 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             task = tasks.current_task()
             self.assertTrue(list(task.get("checkpoint_refs") or []))
+            self.assertEqual(len(list(task.get("provider_threads") or [])), 2)
+            self.assertEqual(len(list(task.get("handoff_events") or [])), 1)
+            self.assertEqual(str(task.get("active_provider_thread_id") or ""), "thread-demo-kimi-review")
             self.assertTrue(any(str(item.get("kind") or "") == "command_execution" and str(item.get("status") or "") == "failed" for item in list(task.get("diagnostic_refs") or [])))
             self.assertTrue(any(str(item.get("kind") or "") == "command_execution" and str(item.get("status") or "") == "completed" for item in list(task.get("diagnostic_refs") or [])))
             self.assertTrue(any(str(item.get("kind") or "") == "runtime_transition" and str(item.get("transition") or "") == "recovery_verified" for item in list(task.get("diagnostic_refs") or [])))
             self.assertTrue(any(str(item.get("tool") or "") == "review_diff" for item in list(task.get("verification_refs") or [])))
+            composite = conversation.conversation(task_id=str(task.get("task_id") or ""))["thread"]
+            self.assertEqual(composite["active_provider_thread_id"], "thread-demo-kimi-review")
+            self.assertEqual(len(list(composite.get("provider_threads") or [])), 2)
+            self.assertTrue(any(turn.get("id") == task["handoff_events"][0]["event_id"] for turn in list(composite.get("turns") or [])))
+            self.assertTrue(any(str(turn.get("provider_id") or "") == "deepseek" for turn in list(composite.get("turns") or [])))
+            self.assertTrue(any(str(turn.get("provider_id") or "") == "kimi" for turn in list(composite.get("turns") or [])))
+            transcript_text = (workspace / ".astrabridge" / "task_transcripts.json").read_text(encoding="utf-8")
+            self.assertIn(str((response["provider_switch"] or {}).get("source_thread_id") or ""), transcript_text)
+            self.assertIn("thread-demo-kimi-review", transcript_text)
+            self.assertNotIn("Authorization", transcript_text)
 
     def test_project_tools_prepare_release_workflow_demo_rejects_non_demo_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

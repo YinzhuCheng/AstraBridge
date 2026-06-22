@@ -139,6 +139,7 @@ class AppContext:
             tasks=self.tasks,
             profiles=self.profiles,
             router_config=self.router_config,
+            task_conversation=self.task_conversation,
         )
         self.runtime.attach_project_tools(self.project_tools)
         self.supervisor = RuntimeSupervisorService(self.projects, self.runtime, self.modals, self.dogfood)

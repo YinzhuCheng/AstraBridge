@@ -72,13 +72,14 @@ class ProjectToolsService:
     surface.
     """
 
-    def __init__(self, projects, runtime, *, checkpoints=None, tasks=None, profiles=None, router_config=None) -> None:
+    def __init__(self, projects, runtime, *, checkpoints=None, tasks=None, profiles=None, router_config=None, task_conversation=None) -> None:
         self._projects = projects
         self._runtime = runtime
         self._checkpoints = checkpoints
         self._tasks = tasks
         self._profiles = profiles
         self._router_config = router_config
+        self._task_conversation = task_conversation
 
     def review_status(self) -> dict[str, Any]:
         root = self._workspace_root()
@@ -312,6 +313,7 @@ class ProjectToolsService:
         checkpoints = self.list_checkpoints(limit=10)
 
         changed_paths = [str(item.get("path") or "").strip() for item in list(review_status.get("files") or []) if str(item.get("path") or "").strip()]
+        provider_switch_summary = None
         if self._tasks is not None:
             self._tasks.record_coding_events(
                 [
@@ -350,6 +352,10 @@ class ProjectToolsService:
                     ),
                 ]
             )
+            provider_switch_summary = self._prepare_release_demo_provider_switch(
+                failed_run=failed_run,
+                recovered_run=recovered_run,
+            )
             self._projects.reconcile_task_projection(self._tasks.current_task())
 
         return {
@@ -363,6 +369,7 @@ class ProjectToolsService:
             "review_artifact": review_artifact,
             "failed_run": failed_run,
             "recovered_run": recovered_run,
+            "provider_switch": provider_switch_summary,
             "provider_switch_present": bool((self._tasks.current_task() or {}).get("handoff_events")) if self._tasks is not None else False,
             "updated_at": now_iso(),
         }
@@ -808,6 +815,174 @@ class ProjectToolsService:
         artifact.parent.mkdir(parents=True, exist_ok=True)
         artifact.write_text(diff_text or "No diff available.\n", encoding="utf-8")
         return artifact.relative_to(root).as_posix()
+
+    def _prepare_release_demo_provider_switch(self, *, failed_run: dict[str, Any], recovered_run: dict[str, Any]) -> dict[str, Any] | None:
+        if self._tasks is None or self._task_conversation is None:
+            return None
+        task = self._tasks.ensure_default_task(title="Release workflow demo")
+        existing_source = self._tasks.active_provider_thread(include_missing_fallback=True) or {}
+        source_thread_id = str(existing_source.get("thread_id") or "").strip() or "thread-demo-deepseek-release"
+        target_thread_id = "thread-demo-kimi-review"
+        source_settings = {
+            "profile_id": "deepseek-default",
+            "provider_id": "deepseek",
+            "model": "deepseek-v4-pro",
+            "reasoning_effort": "high",
+            "permission_mode": "auto",
+            "name": "DeepSeek implementation lane",
+        }
+        target_settings = {
+            "profile_id": "kimi-default",
+            "provider_id": "kimi",
+            "model": "kimi-k2.7-code",
+            "reasoning_effort": "high",
+            "permission_mode": "auto",
+            "name": "Kimi review lane",
+        }
+        self._tasks.bind_thread(thread_id=source_thread_id, settings=source_settings, role="provider", make_active=True)
+        self._task_conversation.record_thread_snapshot(
+            self._release_demo_source_thread_snapshot(
+                thread_id=source_thread_id,
+                failed_run=failed_run,
+                recovered_run=recovered_run,
+            )
+        )
+        handoff = self._tasks.record_provider_handoff(
+            from_thread_id=source_thread_id,
+            to_thread_id=target_thread_id,
+            settings=target_settings,
+            reused_existing=False,
+            dropped_artifacts=1,
+            repaired_tool_pairs=2,
+            replayable_artifact_count=1,
+            projection_preview="User: Implement a release readiness scorecard. Assistant: Created scorecard.py and recovered the failing browser check.",
+            warnings=["Cross-provider handoff uses AstraBridge task context instead of raw provider-state replay."],
+        )
+        self._task_conversation.record_thread_snapshot(
+            self._release_demo_target_thread_snapshot(
+                thread_id=target_thread_id,
+                handoff_created_at=str(handoff.get("created_at") or now_iso()),
+                recovered_run=recovered_run,
+            )
+        )
+        self._projects.switch_thread(target_thread_id)
+        task = self._tasks.current_task() or task
+        return {
+            "source_thread_id": source_thread_id,
+            "target_thread_id": target_thread_id,
+            "handoff_event_id": handoff.get("event_id"),
+            "lane_count": len(list(task.get("provider_threads") or [])),
+            "handoff_count": len(list(task.get("handoff_events") or [])),
+            "active_provider_thread_id": task.get("active_provider_thread_id"),
+        }
+
+    def _release_demo_source_thread_snapshot(self, *, thread_id: str, failed_run: dict[str, Any], recovered_run: dict[str, Any]) -> dict[str, Any]:
+        started_at = now_iso()
+        completed_at = now_iso()
+        return {
+            "id": thread_id,
+            "name": "DeepSeek implementation lane",
+            "displayName": "DeepSeek implementation lane",
+            "status": {"type": "idle"},
+            "shellSettings": {
+                "profile_id": "deepseek-default",
+                "provider_id": "deepseek",
+                "model": "deepseek-v4-pro",
+                "reasoning_effort": "high",
+                "execution_backend": "codex_app_server",
+            },
+            "turns": [
+                {
+                    "id": "turn-demo-release-source",
+                    "startedAt": started_at,
+                    "completedAt": completed_at,
+                    "items": [
+                        {
+                            "type": "userMessage",
+                            "id": "user-demo-release",
+                            "content": [{"type": "text", "text": "Implement a small release readiness scorecard, then recover one failing check inside the same task."}],
+                        },
+                        {
+                            "type": "agentMessage",
+                            "id": "agent-demo-release",
+                            "text": "Created scorecard.py, added a baseline test, and reproduced the failing browser check before recovery.",
+                        },
+                        {
+                            "type": "commandExecution",
+                            "id": "cmd-demo-failed",
+                            "command": RELEASE_DEMO_COMMAND,
+                            "status": str(failed_run.get("status") or "failed"),
+                            "exitCode": failed_run.get("exit_code"),
+                            "aggregatedOutput": str(failed_run.get("output") or ""),
+                        },
+                        {
+                            "type": "commandExecution",
+                            "id": "cmd-demo-recovered",
+                            "command": RELEASE_DEMO_COMMAND,
+                            "status": str(recovered_run.get("status") or "completed"),
+                            "exitCode": recovered_run.get("exit_code"),
+                            "aggregatedOutput": str(recovered_run.get("output") or ""),
+                        },
+                        {
+                            "type": "fileChange",
+                            "id": "file-demo-source",
+                            "status": "completed",
+                            "changes": [
+                                {"path": "scorecard.py", "kind": {"type": "add"}},
+                                {"path": "test_scorecard.py", "kind": {"type": "add"}},
+                                {"path": "checks.json", "kind": {"type": "add"}},
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+
+    def _release_demo_target_thread_snapshot(self, *, thread_id: str, handoff_created_at: str, recovered_run: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": thread_id,
+            "name": "Kimi review lane",
+            "displayName": "Kimi review lane",
+            "status": {"type": "idle"},
+            "shellSettings": {
+                "profile_id": "kimi-default",
+                "provider_id": "kimi",
+                "model": "kimi-k2.7-code",
+                "reasoning_effort": "high",
+                "execution_backend": "codex_app_server",
+            },
+            "turns": [
+                {
+                    "id": "turn-demo-release-target",
+                    "startedAt": handoff_created_at,
+                    "completedAt": handoff_created_at,
+                    "items": [
+                        {
+                            "type": "agentMessage",
+                            "id": "agent-demo-review",
+                            "text": "Continued the same visible task on Kimi, reviewed the scorecard output, and tightened the README and workflow note for recovery acceptance.",
+                        },
+                        {
+                            "type": "fileChange",
+                            "id": "file-demo-target",
+                            "status": "completed",
+                            "changes": [
+                                {"path": "README.md", "kind": {"type": "update"}},
+                                {"path": "workflow_note.txt", "kind": {"type": "update"}},
+                            ],
+                        },
+                        {
+                            "type": "commandExecution",
+                            "id": "cmd-demo-target",
+                            "command": RELEASE_DEMO_COMMAND,
+                            "status": str(recovered_run.get("status") or "completed"),
+                            "exitCode": recovered_run.get("exit_code"),
+                            "aggregatedOutput": str(recovered_run.get("output") or ""),
+                        },
+                    ],
+                }
+            ],
+        }
 
     def _release_demo_command_event(
         self,

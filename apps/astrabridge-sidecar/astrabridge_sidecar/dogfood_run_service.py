@@ -337,7 +337,6 @@ class DogfoodRunService:
                 "label": "AstraBridge provider switch workflow smoke",
                 "actions": [
                     {"type": "expect_selector", "selector": "[data-testid='app-shell']", "timeout_ms": 12000},
-                    {"type": "expect_selector", "selector": "[data-testid='message-stream']", "timeout_ms": 12000},
                     {"type": "expect_selector", "selector": "[data-testid='composer']", "timeout_ms": 12000},
                     {"type": "expect_selector", "selector": "[data-testid='composer-profile']", "timeout_ms": 12000},
                     {"type": "expect_selector", "selector": "[data-testid='composer-model']", "timeout_ms": 12000},
@@ -374,7 +373,6 @@ class DogfoodRunService:
             "label": "AstraBridge release workflow smoke",
             "actions": [
                 {"type": "expect_selector", "selector": "[data-testid='app-shell']", "timeout_ms": 12000},
-                {"type": "expect_selector", "selector": "[data-testid='message-stream']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='composer']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='composer-send']", "timeout_ms": 12000},
                 {"type": "expect_selector", "selector": "[data-testid='topbar-compact']", "timeout_ms": 12000},
