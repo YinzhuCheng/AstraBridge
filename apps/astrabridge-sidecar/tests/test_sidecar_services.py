@@ -9698,6 +9698,152 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(normalized.tool_calls[0].arguments_json, "{\"path\":\"README.md\"}")
             self.assertTrue(any(item.code == "tool_call_repair" for item in normalized.warnings))
 
+    def test_qwen_transport_normalizes_reasoning_state_without_raw_payload_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            adapter = router._adapter_for_provider("qwen")  # noqa: SLF001
+
+            upstream = {
+                "id": "resp-normalized-qwen",
+                "object": "response",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "reasoning_1",
+                        "type": "reasoning",
+                        "summary": ["qwen planning step"],
+                        "content": ["qwen planning step"],
+                    },
+                    {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Qwen final answer."}],
+                    },
+                ],
+            }
+
+            normalized = adapter.normalize_response(upstream, {"model": "qwen/qwen3.7-plus"})
+
+            self.assertEqual(normalized.text, "Qwen final answer.")
+            self.assertEqual(normalized.reasoning_summary, "qwen planning step")
+            self.assertIsNotNone(normalized.reasoning_state)
+            self.assertEqual(normalized.reasoning_state.provider_id, "qwen")
+            self.assertEqual(normalized.reasoning_state.model_id, "qwen/qwen3.7-plus")
+            self.assertIsNotNone(normalized.raw_ref)
+            self.assertEqual(normalized.raw_ref.kind, "responses_output")
+            self.assertEqual(normalized.raw_ref.locator, "resp-normalized-qwen")
+            self.assertNotIn("output", normalized.provider_data)
+            self.assertEqual(normalized.provider_data["output_types"], ["reasoning", "message"])
+            self.assertEqual(normalized.warnings, [])
+
+    def test_kimi_chat_transport_normalizes_reasoning_and_tool_calls_without_raw_payload_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            adapter = router._adapter_for_provider("kimi")  # noqa: SLF001
+
+            upstream = {
+                "id": "chat-normalized-kimi",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "Review the file before editing.",
+                            "tool_calls": [
+                                {
+                                    "id": "call-readme",
+                                    "function": {"name": "read_file", "arguments": "{\"path\":\"README.md\"}"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+
+            normalized = adapter.normalize_response(upstream, {"model": "kimi/kimi-k2.6"})
+
+            self.assertEqual(normalized.text, "")
+            self.assertEqual(normalized.reasoning_summary, "Review the file before editing.")
+            self.assertIsNotNone(normalized.reasoning_state)
+            self.assertEqual(normalized.reasoning_state.provider_id, "kimi")
+            self.assertEqual(normalized.reasoning_state.model_id, "kimi/kimi-k2.6")
+            self.assertEqual([(item.id, item.name, item.arguments_json) for item in normalized.tool_calls], [("call-readme", "read_file", "{\"path\":\"README.md\"}")])
+            self.assertIsNotNone(normalized.raw_ref)
+            self.assertEqual(normalized.raw_ref.kind, "chat_completion_choice")
+            self.assertEqual(normalized.raw_ref.locator, "chat-normalized-kimi")
+            self.assertNotIn("choices", normalized.provider_data)
+            self.assertEqual(normalized.provider_data["tool_call_count"], 1)
+            self.assertEqual(normalized.warnings, [])
+
+    def test_glm_chat_transport_normalizes_reasoning_notice_without_raw_payload_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            adapter = router._adapter_for_provider("glm")  # noqa: SLF001
+
+            upstream = {
+                "id": "chat-normalized-glm",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "Inspect the repository before answering.",
+                            "tool_calls": [],
+                        },
+                    }
+                ],
+            }
+
+            normalized = adapter.normalize_response(upstream, {"model": "glm/glm-5.2"})
+
+            self.assertIn("Provider returned reasoning content", normalized.text)
+            self.assertEqual(normalized.reasoning_summary, "Inspect the repository before answering.")
+            self.assertIsNotNone(normalized.reasoning_state)
+            self.assertEqual(normalized.reasoning_state.provider_id, "glm")
+            self.assertEqual(normalized.reasoning_state.model_id, "glm/glm-5.2")
+            self.assertIsNotNone(normalized.raw_ref)
+            self.assertEqual(normalized.raw_ref.kind, "chat_completion_choice")
+            self.assertEqual(normalized.raw_ref.locator, "chat-normalized-glm")
+            self.assertNotIn("choices", normalized.provider_data)
+            self.assertTrue(any(item.code == "reasoning_only_notice_emitted" for item in normalized.warnings))
+
+    def test_yunwu_transport_normalizes_response_without_raw_payload_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            adapter = router._adapter_for_provider("yunwu")  # noqa: SLF001
+
+            upstream = {
+                "id": "resp-normalized-yunwu",
+                "object": "response",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Yunwu final answer."}],
+                    }
+                ],
+            }
+
+            normalized = adapter.normalize_response(upstream, {"model": "yunwu/gpt-5.5"})
+
+            self.assertEqual(normalized.text, "Yunwu final answer.")
+            self.assertIsNone(normalized.reasoning_state)
+            self.assertIsNotNone(normalized.raw_ref)
+            self.assertEqual(normalized.raw_ref.kind, "responses_output")
+            self.assertEqual(normalized.raw_ref.locator, "resp-normalized-yunwu")
+            self.assertNotIn("output", normalized.provider_data)
+            self.assertEqual(normalized.provider_data["output_types"], ["message"])
+            self.assertEqual(normalized.warnings, [])
+
     def test_deepseek_adapter_uses_adapter_profile_not_exact_provider_id(self) -> None:
         class UpstreamHandler(BaseHTTPRequestHandler):
             last_payload = None
