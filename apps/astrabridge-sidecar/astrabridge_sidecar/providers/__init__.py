@@ -23,6 +23,10 @@ from .profile import (
     ProviderSafetyPolicy,
     ReasoningPolicy,
     ToolPolicy,
+    default_builtin_tool_support,
+    default_context_compaction_support,
+    default_goal_support,
+    default_planner_support,
 )
 from .registry import all_provider_profiles, default_profiles, get_provider_profile, resolve_provider_id
 from .runtime_transition import (
@@ -63,7 +67,11 @@ __all__ = [
     "build_transition_plan",
     "build_transition_target",
     "classify_runtime_failure",
+    "default_builtin_tool_support",
+    "default_context_compaction_support",
     "default_profiles",
+    "default_goal_support",
+    "default_planner_support",
     "get_provider_profile",
     "parse_runtime_error",
     "resolve_provider_id",

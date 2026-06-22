@@ -5,7 +5,14 @@ from typing import Any
 
 from .common import app_data_dir, now_iso, read_json, write_json
 from .model_catalog import current_generated_catalog, resolved_web_capability_fields
-from .providers import get_provider_profile, resolve_provider_id
+from .providers import (
+    default_builtin_tool_support,
+    default_context_compaction_support,
+    default_goal_support,
+    default_planner_support,
+    get_provider_profile,
+    resolve_provider_id,
+)
 from .providers.tooling import assess_model_authority
 
 
@@ -67,6 +74,10 @@ PROVIDER_METADATA_FIELDS = (
     "mcp_web_support",
     "web_smoke_status",
     "citation_quality",
+    "codex_builtin_tools",
+    "planner_support",
+    "goal_support",
+    "context_compaction_support",
     "temperature_default",
     "temperature_ui_min",
     "temperature_ui_max",
@@ -521,10 +532,10 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
         "mcp_verified_servers": list(model.get("mcp_verified_servers") or []),
         "mcp_smoke_status": str(model.get("mcp_smoke_status") or "untested"),
         "mcp_tool_argument_validation": str(model.get("mcp_tool_argument_validation") or "unsupported"),
-        "codex_builtin_tools": dict(model.get("codex_builtin_tools") or _default_builtin_tool_support()),
-        "planner_support": dict(model.get("planner_support") or _default_planner_support()),
-        "goal_support": dict(model.get("goal_support") or {"thread_goal": "app_server_native"}),
-        "context_compaction_support": dict(model.get("context_compaction_support") or _default_context_compaction_support()),
+        "codex_builtin_tools": dict(model.get("codex_builtin_tools") or default_builtin_tool_support()),
+        "planner_support": dict(model.get("planner_support") or default_planner_support()),
+        "goal_support": dict(model.get("goal_support") or default_goal_support()),
+        "context_compaction_support": dict(model.get("context_compaction_support") or default_context_compaction_support()),
         "modality_limits": dict(model.get("modality_limits") or _default_modality_limits(modalities)),
         "ui_warnings": ui_warnings,
         "authority_tier": authority.tier,
@@ -593,34 +604,6 @@ def _provider_family(
     if "openai" in signals:
         return "openai"
     return None
-
-
-def _default_builtin_tool_support() -> dict[str, dict[str, str]]:
-    return {
-        "shell_command": {"support": "verified", "notes": "Codex app-server native tool; still permission-gated by sandbox mode."},
-        "apply_patch": {"support": "conservative", "notes": "Expose only through Codex native patch flow unless model smoke verifies structured patch calls."},
-        "view_image": {"support": "conservative", "notes": "Requires image input modality verification."},
-        "update_plan": {"support": "conservative", "notes": "Provider must emit exact tool calls; verify with plan smoke."},
-        "request_user_input": {"support": "conservative", "notes": "Provider must emit exact structured tool calls; verify with modal smoke."},
-        "thread_goal": {"support": "verified", "notes": "Goal is app-server state, not model-native behavior."},
-        "thread_compact": {"support": "conservative", "notes": "Manual compact is app-server native; summary quality must be smoke-tested per model."},
-    }
-
-
-def _default_planner_support() -> dict[str, str]:
-    return {
-        "update_plan": "conservative",
-        "plan_mode": "conservative",
-        "request_user_input": "conservative",
-    }
-
-
-def _default_context_compaction_support() -> dict[str, str]:
-    return {
-        "manual_compact": "app_server_native",
-        "auto_compact": "configured_unverified",
-        "structured_summary_quality": "untested",
-    }
 
 
 def _default_modality_limits(modalities: Any) -> dict[str, Any]:

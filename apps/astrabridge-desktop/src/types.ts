@@ -153,6 +153,10 @@ export type Profile = {
   mcp_web_support?: string;
   web_smoke_status?: string;
   citation_quality?: string;
+  codex_builtin_tools?: Record<string, { support?: string; notes?: string; last_verified_at?: string | null }>;
+  planner_support?: Record<string, string>;
+  goal_support?: Record<string, string>;
+  context_compaction_support?: Record<string, string>;
   temperature_default?: number;
   temperature_ui_min?: number;
   temperature_ui_max?: number;
@@ -282,6 +286,10 @@ export type RouterProvider = {
   mcp_web_support?: string;
   web_smoke_status?: string;
   citation_quality?: string;
+  codex_builtin_tools?: Record<string, { support?: string; notes?: string; last_verified_at?: string | null }>;
+  planner_support?: Record<string, string>;
+  goal_support?: Record<string, string>;
+  context_compaction_support?: Record<string, string>;
   temperature_default?: number;
   temperature_ui_min?: number;
   temperature_ui_max?: number;

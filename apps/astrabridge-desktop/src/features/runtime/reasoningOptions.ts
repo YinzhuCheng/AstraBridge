@@ -100,6 +100,26 @@ function providerInputModalities(provider: RouterProvider | null | undefined): s
   return ["text"];
 }
 
+function builtinToolDefaults(provider: RouterProvider | null | undefined) {
+  return provider?.codex_builtin_tools ?? {};
+}
+
+function plannerSupportDefaults(provider: RouterProvider | null | undefined) {
+  return provider?.planner_support ?? {};
+}
+
+function goalSupportDefaults(provider: RouterProvider | null | undefined) {
+  return provider?.goal_support ?? { thread_goal: "app_server_native" };
+}
+
+function contextCompactionDefaults(provider: RouterProvider | null | undefined) {
+  return provider?.context_compaction_support ?? {
+    manual_compact: "app_server_native",
+    auto_compact: "configured_unverified",
+    structured_summary_quality: "untested",
+  };
+}
+
 export function providerModelDraftDefaults(provider: RouterProvider | null | undefined): Partial<RouterModelEntry> {
   const capabilityRecord = providerCapabilityRecord(provider);
   const inputModalities = providerInputModalities(provider);
@@ -122,14 +142,10 @@ export function providerModelDraftDefaults(provider: RouterProvider | null | und
     mcp_verified_servers: provider?.mcp_verified_servers ?? [],
     mcp_smoke_status: provider?.mcp_smoke_status ?? "untested",
     mcp_tool_argument_validation: provider?.mcp_tool_argument_validation ?? "unsupported",
-    codex_builtin_tools: {},
-    planner_support: {},
-    goal_support: { thread_goal: "app_server_native" },
-    context_compaction_support: {
-      manual_compact: "app_server_native",
-      auto_compact: "configured_unverified",
-      structured_summary_quality: "untested",
-    },
+    codex_builtin_tools: builtinToolDefaults(provider),
+    planner_support: plannerSupportDefaults(provider),
+    goal_support: goalSupportDefaults(provider),
+    context_compaction_support: contextCompactionDefaults(provider),
     modality_limits: {
       text: true,
       image_input: inputModalities.includes("image"),

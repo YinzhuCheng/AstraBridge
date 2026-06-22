@@ -138,6 +138,21 @@ describe("reasoning options", () => {
       mcp_verified_servers: ["lcr_web"],
       mcp_smoke_status: "pass_direct_tool_call",
       mcp_tool_argument_validation: "router_repair",
+      codex_builtin_tools: {
+        shell_command: { support: "verified", notes: "native" },
+      },
+      planner_support: {
+        update_plan: "verified",
+        plan_mode: "verified",
+      },
+      goal_support: {
+        thread_goal: "app_server_native",
+      },
+      context_compaction_support: {
+        manual_compact: "app_server_native",
+        auto_compact: "verified",
+        structured_summary_quality: "verified",
+      },
       tool_web_search_support: "verified",
       mcp_web_support: "verified_lcr_web",
       web_smoke_status: "pass_direct_tool_call",
@@ -154,6 +169,21 @@ describe("reasoning options", () => {
       mcp_verified_servers: ["lcr_web"],
       mcp_smoke_status: "pass_direct_tool_call",
       mcp_tool_argument_validation: "router_repair",
+      codex_builtin_tools: {
+        shell_command: { support: "verified", notes: "native" },
+      },
+      planner_support: {
+        update_plan: "verified",
+        plan_mode: "verified",
+      },
+      goal_support: {
+        thread_goal: "app_server_native",
+      },
+      context_compaction_support: {
+        manual_compact: "app_server_native",
+        auto_compact: "verified",
+        structured_summary_quality: "verified",
+      },
       web_search_tool_type: "text",
       modality_limits: {
         text: true,

@@ -4,6 +4,38 @@ from dataclasses import dataclass
 from typing import Literal
 
 
+def default_builtin_tool_support() -> dict[str, dict[str, str]]:
+    return {
+        "shell_command": {"support": "verified", "notes": "Codex app-server native tool; still permission-gated by sandbox mode."},
+        "apply_patch": {"support": "conservative", "notes": "Expose only through Codex native patch flow unless model smoke verifies structured patch calls."},
+        "view_image": {"support": "conservative", "notes": "Requires image input modality verification."},
+        "update_plan": {"support": "conservative", "notes": "Provider must emit exact tool calls; verify with plan smoke."},
+        "request_user_input": {"support": "conservative", "notes": "Provider must emit exact structured tool calls; verify with modal smoke."},
+        "thread_goal": {"support": "verified", "notes": "Goal is app-server state, not model-native behavior."},
+        "thread_compact": {"support": "conservative", "notes": "Manual compact is app-server native; summary quality must be smoke-tested per model."},
+    }
+
+
+def default_planner_support() -> dict[str, str]:
+    return {
+        "update_plan": "conservative",
+        "plan_mode": "conservative",
+        "request_user_input": "conservative",
+    }
+
+
+def default_goal_support() -> dict[str, str]:
+    return {"thread_goal": "app_server_native"}
+
+
+def default_context_compaction_support() -> dict[str, str]:
+    return {
+        "manual_compact": "app_server_native",
+        "auto_compact": "configured_unverified",
+        "structured_summary_quality": "untested",
+    }
+
+
 @dataclass(frozen=True)
 class AuthSpec:
     type: Literal["api_key", "none"]
@@ -204,6 +236,10 @@ class ProviderProfile:
             "mcp_web_support": self.tool_policy.mcp_web_support,
             "web_smoke_status": self.tool_policy.web_smoke_status,
             "citation_quality": self.tool_policy.citation_quality,
+            "codex_builtin_tools": default_builtin_tool_support(),
+            "planner_support": default_planner_support(),
+            "goal_support": default_goal_support(),
+            "context_compaction_support": default_context_compaction_support(),
             "fallback_models": list(self.fallback_policy.fallback_models or self.fallback_models),
             "temperature_default": self.safety_policy.temperature_default,
             "temperature_ui_min": self.safety_policy.temperature_ui_min,
@@ -263,6 +299,10 @@ class ProviderProfile:
             "mcp_verified_servers": list(self.tool_policy.mcp_verified_servers),
             "mcp_smoke_status": self.tool_policy.mcp_smoke_status,
             "mcp_tool_argument_validation": self.tool_policy.mcp_tool_argument_validation,
+            "codex_builtin_tools": default_builtin_tool_support(),
+            "planner_support": default_planner_support(),
+            "goal_support": default_goal_support(),
+            "context_compaction_support": default_context_compaction_support(),
             "supports_image_detail_original": self.context_policy.supports_image_detail_original,
             "effective_context_window_percent": self.context_policy.effective_context_window_percent,
             "auto_compact_token_limit": self.context_policy.auto_compact_token_limit,
