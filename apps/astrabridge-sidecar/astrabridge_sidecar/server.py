@@ -869,6 +869,17 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self.send_json(response)
                 return
+            if path == "/api/project/demo/native-kernel/prepare":
+                response = self.context.project_tools.prepare_native_kernel_workflow_demo(payload)
+                self._record_ui_state_event(
+                    "native_kernel_demo_prepared",
+                    {
+                        "task_id": str(((response or {}).get("task") or {}).get("task_id") or "")[:120],
+                        "workspace_root": str((response or {}).get("workspace_root") or "")[:240],
+                    },
+                )
+                self.send_json(response)
+                return
             if path == "/api/router/payload-preview":
                 self.send_json(self.context.router.preview_payload(payload))
                 return

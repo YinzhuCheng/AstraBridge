@@ -20,6 +20,7 @@ DOGFOOD_SECRET_FIELD_PARTS = ("api_key", "apikey", "authorization", "cookie", "p
 MAX_BROWSER_SMOKE_ACTIONS = 80
 BROWSER_SMOKE_PRESET_RELEASE_WORKFLOW = "astrabridge_release_workflow_v1"
 BROWSER_SMOKE_PRESET_PROVIDER_SWITCH_WORKFLOW = "astrabridge_provider_switch_workflow_v1"
+BROWSER_SMOKE_PRESET_NATIVE_KERNEL_WORKFLOW = "astrabridge_native_kernel_workflow_v1"
 
 
 DEFAULT_DOGFOOD_RUN: dict[str, Any] = {
@@ -332,6 +333,48 @@ class DogfoodRunService:
     def _browser_smoke_preset(self, preset: str) -> dict[str, Any]:
         if not preset:
             return {}
+        if preset == BROWSER_SMOKE_PRESET_NATIVE_KERNEL_WORKFLOW:
+            return {
+                "label": "AstraBridge native kernel workflow smoke",
+                "actions": [
+                    {"type": "expect_selector", "selector": "[data-testid='app-shell']", "timeout_ms": 12000},
+                    {"type": "expect_selector", "selector": "[data-testid='composer']", "timeout_ms": 12000},
+                    {"type": "expect_selector", "selector": "[data-testid='task-fact-backend']", "timeout_ms": 12000},
+                    {
+                        "type": "expect_selector_text_contains",
+                        "selector": "[data-testid='task-fact-backend']",
+                        "text": "native kernel",
+                        "timeout_ms": 12000,
+                    },
+                    {"type": "click_selector", "selector": "[data-testid='inspector-tab-review']", "timeout_ms": 12000},
+                    {"type": "expect_selector", "selector": "[data-testid='review-panel']", "timeout_ms": 12000},
+                    {"type": "expect_selector_count_at_least", "selector": "[data-testid='review-file-row']", "count": 1, "timeout_ms": 12000},
+                    {"type": "click_selector", "selector": "[data-testid='inspector-tab-terminal']", "timeout_ms": 12000},
+                    {"type": "expect_selector", "selector": "[data-testid='terminal-panel']", "timeout_ms": 12000},
+                    {"type": "expect_selector_count_at_least", "selector": "[data-testid='terminal-command-row']", "count": 1, "timeout_ms": 12000},
+                    {"type": "click_selector", "selector": "[data-testid='inspector-tab-files']", "timeout_ms": 12000},
+                    {"type": "expect_selector", "selector": "[data-testid='files-panel']", "timeout_ms": 12000},
+                    {"type": "expect_selector_count_at_least", "selector": "[data-testid='project-file-row']", "count": 1, "timeout_ms": 12000},
+                    {"type": "click_selector", "selector": "[data-testid='checkpoint-open']", "timeout_ms": 12000},
+                    {"type": "expect_selector", "selector": "[data-testid='checkpoint-modal']", "timeout_ms": 12000},
+                    {"type": "expect_selector", "selector": "[data-testid='checkpoint-save']", "timeout_ms": 12000},
+                    {"type": "click_selector", "selector": "[data-testid='checkpoint-cancel']", "timeout_ms": 12000},
+                    {"type": "click_selector", "selector": "[data-testid='inspector-tab-status']", "timeout_ms": 12000},
+                    {"type": "expect_selector", "selector": "[data-testid='status-panel-goal']", "timeout_ms": 12000},
+                ],
+                "final_assertions": [
+                    {"type": "expect_selector", "selector": "[data-testid='task-fact-backend']", "timeout_ms": 12000},
+                    {
+                        "type": "expect_selector_text_contains",
+                        "selector": "[data-testid='task-fact-backend']",
+                        "text": "native kernel",
+                        "timeout_ms": 12000,
+                    },
+                    {"type": "expect_selector_count_at_least", "selector": "[data-testid='workflow-checkpoint-row']", "count": 1, "timeout_ms": 12000},
+                    {"type": "expect_selector_count_at_least", "selector": "[data-testid='workflow-diagnostic-row']", "count": 1, "timeout_ms": 12000},
+                    {"type": "expect_selector", "selector": "[data-testid='workflow-fact-recovery']", "timeout_ms": 12000},
+                ],
+            }
         if preset == BROWSER_SMOKE_PRESET_PROVIDER_SWITCH_WORKFLOW:
             return {
                 "label": "AstraBridge provider switch workflow smoke",
@@ -433,6 +476,13 @@ class DogfoodRunService:
                 selector = str(raw.get("selector") or "").strip()[:160]
                 if selector:
                     actions.append({"type": kind, "selector": selector, "timeout_ms": int(raw.get("timeout_ms") or 3000)})
+            elif kind == "expect_selector_text_contains":
+                selector = str(raw.get("selector") or "").strip()[:160]
+                text = str(raw.get("text") or "")[:240]
+                if selector and text:
+                    actions.append(
+                        {"type": kind, "selector": selector, "text": text, "timeout_ms": int(raw.get("timeout_ms") or 3000)}
+                    )
             elif kind == "expect_selector_count_at_least":
                 selector = str(raw.get("selector") or "").strip()[:160]
                 count = max(1, min(50, int(raw.get("count") or 1)))
@@ -827,6 +877,16 @@ async function launchBrowser() {
     } else if (action.type === 'expect_selector') {
       await page.locator(action.selector).first().waitFor({ state: 'visible', timeout: action.timeout_ms || 3000 });
       result.selector = action.selector;
+    } else if (action.type === 'expect_selector_text_contains') {
+      const locator = page.locator(action.selector).first();
+      await locator.waitFor({ state: 'visible', timeout: action.timeout_ms || 3000 });
+      const text = await locator.innerText({ timeout: action.timeout_ms || 3000 });
+      result.selector = action.selector;
+      result.text = text;
+      result.expected_text = action.text || '';
+      if (!String(text || '').includes(action.text || '')) {
+        throw new Error(`Selector text did not contain expected text "${action.text || ''}": ${action.selector}`);
+      }
     } else if (action.type === 'expect_selector_count_at_least') {
       const locator = page.locator(action.selector);
       await locator.first().waitFor({ state: 'visible', timeout: action.timeout_ms || 3000 });

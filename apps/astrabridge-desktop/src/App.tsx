@@ -64,6 +64,7 @@ const DEFAULT_GAMEPLAY_SMOKE_ACTIONS: Array<Record<string, unknown>> = [
 
 const RELEASE_WORKFLOW_SMOKE_PRESET = "astrabridge_release_workflow_v1";
 const PROVIDER_SWITCH_WORKFLOW_SMOKE_PRESET = "astrabridge_provider_switch_workflow_v1";
+const NATIVE_KERNEL_WORKFLOW_SMOKE_PRESET = "astrabridge_native_kernel_workflow_v1";
 
 function localAssetUrl(path: string) {
   return isTauri() ? convertFileSrc(path) : `file://${path.replace(/\\/g, "/")}`;
@@ -1228,11 +1229,15 @@ function BrowserInspectorPanel({
   supervisor,
   latestSmoke,
   isPreparingWorkflowDemo,
+  isPreparingNativeKernelDemo,
   isRunningReleaseSmoke,
   isRunningProviderSwitchSmoke,
+  isRunningNativeKernelSmoke,
   onPrepareWorkflowDemo,
+  onPrepareNativeKernelDemo,
   onRunReleaseSmoke,
   onRunProviderSwitchSmoke,
+  onRunNativeKernelSmoke,
 }: {
   supervisor?: RuntimeSupervisorState;
   latestSmoke?: {
@@ -1244,11 +1249,15 @@ function BrowserInspectorPanel({
     screenshot_path?: string;
   } | null;
   isPreparingWorkflowDemo?: boolean;
+  isPreparingNativeKernelDemo?: boolean;
   isRunningReleaseSmoke?: boolean;
   isRunningProviderSwitchSmoke?: boolean;
+  isRunningNativeKernelSmoke?: boolean;
   onPrepareWorkflowDemo: () => void;
+  onPrepareNativeKernelDemo: () => void;
   onRunReleaseSmoke: () => void;
   onRunProviderSwitchSmoke: () => void;
+  onRunNativeKernelSmoke: () => void;
 }) {
   const browser = latestSmoke ?? supervisor?.browser;
   return (
@@ -1297,11 +1306,17 @@ function BrowserInspectorPanel({
         <button type="button" data-testid="prepare-release-workflow-demo" className="ghost-button inspector-inline-action" disabled={isPreparingWorkflowDemo} onClick={onPrepareWorkflowDemo}>
           {isPreparingWorkflowDemo ? "准备中..." : "准备演示工作流"}
         </button>
+        <button type="button" data-testid="prepare-native-kernel-demo" className="ghost-button inspector-inline-action" disabled={isPreparingNativeKernelDemo} onClick={onPrepareNativeKernelDemo}>
+          {isPreparingNativeKernelDemo ? "准备中..." : "准备 native kernel 演示"}
+        </button>
         <button type="button" className="ghost-button inspector-inline-action" disabled={isRunningReleaseSmoke} onClick={onRunReleaseSmoke}>
           {isRunningReleaseSmoke ? "运行中..." : "运行工作流 smoke"}
         </button>
         <button type="button" className="ghost-button inspector-inline-action" disabled={isRunningProviderSwitchSmoke} onClick={onRunProviderSwitchSmoke}>
           {isRunningProviderSwitchSmoke ? "运行中..." : "运行 provider-switch smoke"}
+        </button>
+        <button type="button" className="ghost-button inspector-inline-action" disabled={isRunningNativeKernelSmoke} onClick={onRunNativeKernelSmoke}>
+          {isRunningNativeKernelSmoke ? "运行中..." : "运行 native-kernel smoke"}
         </button>
       </div>
     </section>
@@ -3335,12 +3350,43 @@ function AppShell() {
       queryClient.invalidateQueries({ queryKey: ["dogfood-run"] });
     },
   });
+  const prepareNativeKernelWorkflowDemo = useMutation({
+    mutationFn: api.prepareNativeKernelWorkflowDemo,
+    onSuccess: (response) => {
+      if (response.task?.task_id) {
+        queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+        queryClient.invalidateQueries({ queryKey: ["task-conversation", response.task.task_id] });
+      }
+      queryClient.invalidateQueries({ queryKey: ["task-conversation"] });
+      queryClient.invalidateQueries({ queryKey: ["project-review-status"] });
+      queryClient.invalidateQueries({ queryKey: ["project-files-tree"] });
+      queryClient.invalidateQueries({ queryKey: ["project-terminal-history"] });
+      queryClient.invalidateQueries({ queryKey: ["project-saves"] });
+      queryClient.invalidateQueries({ queryKey: ["runtime-supervisor"] });
+      queryClient.invalidateQueries({ queryKey: ["dogfood-run"] });
+      queryClient.invalidateQueries({ queryKey: ["thread"] });
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
+    },
+  });
   const inspectorProviderSwitchSmoke = useMutation({
     mutationFn: () =>
       api.dogfoodBrowserSmoke({
         url: currentBrowserSmokeUrl(),
         label: "inspector provider switch workflow smoke",
         preset: PROVIDER_SWITCH_WORKFLOW_SMOKE_PRESET,
+        include_run: true,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["runtime-supervisor"] });
+      queryClient.invalidateQueries({ queryKey: ["dogfood-run"] });
+    },
+  });
+  const inspectorNativeKernelSmoke = useMutation({
+    mutationFn: () =>
+      api.dogfoodBrowserSmoke({
+        url: currentBrowserSmokeUrl(),
+        label: "inspector native kernel workflow smoke",
+        preset: NATIVE_KERNEL_WORKFLOW_SMOKE_PRESET,
         include_run: true,
       }),
     onSuccess: () => {
@@ -4911,11 +4957,15 @@ function AppShell() {
                 supervisor={supervisor.data}
                 latestSmoke={(inspectorDogfoodRun.data?.run?.browser_smokes ?? []).slice(-1)[0] ?? null}
                 isPreparingWorkflowDemo={prepareReleaseWorkflowDemo.isPending}
+                isPreparingNativeKernelDemo={prepareNativeKernelWorkflowDemo.isPending}
                 isRunningReleaseSmoke={inspectorBrowserSmoke.isPending}
                 isRunningProviderSwitchSmoke={inspectorProviderSwitchSmoke.isPending}
+                isRunningNativeKernelSmoke={inspectorNativeKernelSmoke.isPending}
                 onPrepareWorkflowDemo={() => prepareReleaseWorkflowDemo.mutate()}
+                onPrepareNativeKernelDemo={() => prepareNativeKernelWorkflowDemo.mutate()}
                 onRunReleaseSmoke={() => inspectorBrowserSmoke.mutate()}
                 onRunProviderSwitchSmoke={() => inspectorProviderSwitchSmoke.mutate()}
+                onRunNativeKernelSmoke={() => inspectorNativeKernelSmoke.mutate()}
               />
           ) : null}
           {inspectorTab === "files" ? (

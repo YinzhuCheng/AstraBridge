@@ -19,6 +19,7 @@ import type {
   MetadataRefreshJobStatusResponse,
   MetadataReportResponse,
   MetadataSourcesResponse,
+  NativeKernelDemoResponse,
   McpConfigResponse,
   McpServerConfig,
   McpStatusResponse,
@@ -286,6 +287,7 @@ export const api = {
   dogfoodAssets: () => request<AssetRegistryResponse>("/api/dogfood/assets"),
   rebuildDogfoodAssets: () => jsonRequest<AssetRegistryResponse>("/api/dogfood/assets/rebuild", {}),
   prepareReleaseWorkflowDemo: () => jsonRequest<ReleaseWorkflowDemoResponse>("/api/project/demo/release-workflow/prepare", {}),
+  prepareNativeKernelWorkflowDemo: () => jsonRequest<NativeKernelDemoResponse>("/api/project/demo/native-kernel/prepare", {}),
   markDogfoodAsset: (payload: { asset_id: string; status?: string; quality_status?: string; integration_status?: string; role?: string; purpose?: string; notes?: string }) =>
     jsonRequest<AssetRegistryResponse>("/api/dogfood/assets/mark", payload),
   promoteDogfoodAsset: (payload: { asset_id: string; target_name?: string; manifest_section?: "sprites" | "tiles" | "hud"; entity?: string; state?: string; tile_key?: string; role?: string }) =>

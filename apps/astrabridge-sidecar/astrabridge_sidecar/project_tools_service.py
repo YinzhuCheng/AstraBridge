@@ -18,6 +18,7 @@ from .coding_kernel import (
     select_edit_strategy,
 )
 from .providers import get_provider_profile
+from .providers.ir import NormalizedResponse, ToolCall
 from .security import classify_command, redact_sensitive, resolve_under
 
 
@@ -61,6 +62,7 @@ MAX_IMAGE_BYTES = 2_500_000
 MAX_TREE_ITEMS = 500
 RELEASE_DEMO_COMMAND = "python scorecard.py --checks checks.json"
 RELEASE_DEMO_REVIEW_ARTIFACT = f"{WORKSPACE_STATE_DIRNAME}/reviews/release-workflow-demo.diff"
+NATIVE_KERNEL_DEMO_TEST_COMMAND = "python -m unittest -q test_native_kernel_demo"
 
 
 class ProjectToolsService:
@@ -371,6 +373,166 @@ class ProjectToolsService:
             "recovered_run": recovered_run,
             "provider_switch": provider_switch_summary,
             "provider_switch_present": bool((self._tasks.current_task() or {}).get("handoff_events")) if self._tasks is not None else False,
+            "updated_at": now_iso(),
+        }
+
+    def prepare_native_kernel_workflow_demo(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        root = self._workspace_root()
+        self._require_isolated_demo_workspace(root)
+        if self._tasks is None or self._profiles is None:
+            raise RuntimeError("Native kernel demo requires task and profile services.")
+        payload = dict(payload or {})
+
+        readme = (
+            "# AstraBridge Native Kernel Demo\n\n"
+            "This workspace is used for the AstraBridge native-kernel constrained coding demo.\n\n"
+            "It proves one local read/edit/test/checkpoint workflow without using the Codex app-server thread path.\n"
+        )
+        (root / "README.md").write_text(readme, encoding="utf-8")
+        (root / "native_kernel_scorecard.py").write_text(
+            "def status():\n"
+            "    return 'draft'\n",
+            encoding="utf-8",
+        )
+        (root / "test_native_kernel_demo.py").write_text(
+            "import unittest\n"
+            "from native_kernel_scorecard import status\n\n"
+            "class NativeKernelScorecardTest(unittest.TestCase):\n"
+            "    def test_status_ready(self):\n"
+            "        self.assertEqual(status(), 'ready')\n\n"
+            "if __name__ == '__main__':\n"
+            "    unittest.main()\n",
+            encoding="utf-8",
+        )
+        baseline_commit = self._ensure_release_demo_git_baseline(root)
+        native_thread_id = "native-kernel-demo-thread"
+        native_settings = {
+            "profile_id": "deepseek-default",
+            "provider_id": "deepseek",
+            "model": "deepseek-v4-pro",
+            "reasoning_effort": "high",
+            "permission_mode": "auto",
+            "execution_backend": "native_kernel",
+            "name": "Native kernel demo lane",
+        }
+        task = self._tasks.ensure_default_task(thread_id=native_thread_id, settings=native_settings, title="Native kernel demo")
+        if self._router_config is not None:
+            self._router_config.upsert_model(
+                {
+                    "id": "deepseek/deepseek-v4-pro",
+                    "provider": "deepseek",
+                    "native_model": "deepseek-v4-pro",
+                    "display_name": "DeepSeek V4 Pro",
+                    "supports_tool_calls": True,
+                    "apply_patch_tool_type": "json",
+                    "supports_mcp_tools": True,
+                    "mcp_tool_call_policy": "conservative",
+                    "tool_mode": "full",
+                    "codex_agent_enabled": True,
+                }
+            )
+
+        class _NativeKernelDemoRouter:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete_response(self, payload: dict[str, object]) -> dict[str, object]:
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                        "adapter": "chat_completions",
+                        "normalized": NormalizedResponse(
+                            text="",
+                            reasoning_summary="Inspect the demo file, apply the smallest safe edit, verify the test, and checkpoint the result.",
+                            reasoning_state=None,
+                            tool_calls=[
+                                ToolCall(id="call-review", name="review_status", arguments_json="{}"),
+                                ToolCall(id="call-read", name="read_file", arguments_json='{"path":"native_kernel_scorecard.py"}'),
+                                ToolCall(
+                                    id="call-edit",
+                                    name="edit_apply",
+                                    arguments_json='{"path":"native_kernel_scorecard.py","content":"def status():\\n    return \\"ready\\"\\n"}',
+                                ),
+                                ToolCall(
+                                    id="call-tests",
+                                    name="run_tests",
+                                    arguments_json=json.dumps({"command": NATIVE_KERNEL_DEMO_TEST_COMMAND}),
+                                ),
+                                ToolCall(
+                                    id="call-checkpoint",
+                                    name="create_checkpoint",
+                                    arguments_json='{"description":"Native kernel demo checkpoint"}',
+                                ),
+                                ToolCall(
+                                    id="call-list-checkpoints",
+                                    name="list_checkpoints",
+                                    arguments_json='{"limit":5}',
+                                ),
+                            ],
+                            usage=None,
+                            finish_reason="tool_calls",
+                        ),
+                    }
+                return {
+                    "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                    "adapter": "chat_completions",
+                    "normalized": NormalizedResponse(
+                        text="Native kernel demo completed: reviewed the file, applied a small edit, ran the unit test, and created a checkpoint.",
+                        reasoning_summary=None,
+                        reasoning_state=None,
+                        tool_calls=[],
+                        usage=None,
+                        finish_reason="stop",
+                    ),
+                }
+
+        original_router = getattr(self._runtime, "_router", None)
+        original_loop = getattr(self._runtime, "_native_turn_loop", None)
+        flag_before = os.environ.get("ASTRABRIDGE_ENABLE_NATIVE_KERNEL")
+        profile = self._profiles.resolve_runtime_profile("deepseek-default")
+        try:
+            os.environ["ASTRABRIDGE_ENABLE_NATIVE_KERNEL"] = "1"
+            self._runtime._native_turn_loop = None  # type: ignore[attr-defined]
+            self._runtime.attach_router(_NativeKernelDemoRouter())
+            turn_result = self._runtime.start_turn(
+                profile,
+                thread_id=native_thread_id,
+                text="Review native_kernel_scorecard.py, apply the smallest safe fix, run the unit test, create a checkpoint, then summarize the result.",
+                attachments=[],
+                model="deepseek-v4-pro",
+                effort="high",
+                permission_mode="auto",
+            )
+        finally:
+            if flag_before is None:
+                os.environ.pop("ASTRABRIDGE_ENABLE_NATIVE_KERNEL", None)
+            else:
+                os.environ["ASTRABRIDGE_ENABLE_NATIVE_KERNEL"] = flag_before
+            self._runtime._native_turn_loop = None  # type: ignore[attr-defined]
+            if original_router is not None:
+                self._runtime.attach_router(original_router)
+            else:
+                self._runtime._router = None  # type: ignore[attr-defined]
+                self._runtime._native_turn_loop = original_loop  # type: ignore[attr-defined]
+
+        thread = self._runtime.read_thread(profile, native_thread_id).get("thread") or {}
+        review_status = self.review_status()
+        terminal_history = self.terminal_history(limit=12)
+        checkpoints = self.list_checkpoints(limit=10)
+        self._projects.reconcile_task_projection(self._tasks.current_task())
+        return {
+            "ok": True,
+            "workspace_root": str(root),
+            "baseline_commit": baseline_commit,
+            "thread_id": native_thread_id,
+            "turn": turn_result.get("turn"),
+            "thread": thread,
+            "task": self._tasks.current_task() or task,
+            "execution_backend": "native_kernel",
+            "review_status": review_status,
+            "terminal_history": terminal_history,
+            "checkpoints": checkpoints,
             "updated_at": now_iso(),
         }
 

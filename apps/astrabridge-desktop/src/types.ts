@@ -963,6 +963,19 @@ export type ReleaseWorkflowDemoResponse = {
   updated_at?: string;
 };
 
+export type NativeKernelDemoResponse = {
+  ok: boolean;
+  workspace_root: string;
+  task?: ProjectTask | null;
+  thread_id?: string;
+  execution_backend?: string;
+  review_status?: ProjectReviewStatus;
+  terminal_history?: ProjectTerminalHistory;
+  checkpoints?: ProjectSavesResponse;
+  baseline_commit?: string;
+  updated_at?: string;
+};
+
 export type ProjectFileTreeItem = {
   path: string;
   name: string;

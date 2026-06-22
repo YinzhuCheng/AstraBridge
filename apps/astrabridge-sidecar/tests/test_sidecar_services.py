@@ -8411,6 +8411,60 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 )
             )
 
+    def test_dogfood_browser_smoke_native_kernel_preset_asserts_backend_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "index.html").write_text("<html><body>ok</body></html>", encoding="utf-8")
+            screenshot = root / "capture.png"
+            screenshot.write_bytes(b"png")
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            dogfood = DogfoodRunService(projects)
+
+            smoke = dogfood.browser_smoke(
+                {
+                    "url": (workspace / "index.html").resolve().as_uri(),
+                    "preset": "astrabridge_native_kernel_workflow_v1",
+                    "screenshot_path": str(screenshot),
+                }
+            )
+
+            actions = list(smoke["browser_smoke"]["actions"] or [])
+            final_assertions = list(smoke["browser_smoke"]["final_assertions"] or [])
+            self.assertEqual(smoke["browser_smoke"]["preset"], "astrabridge_native_kernel_workflow_v1")
+            self.assertEqual(smoke["browser_smoke"]["label"], "AstraBridge native kernel workflow smoke")
+            self.assertEqual(smoke["browser_smoke"]["verification_level"], "asserted")
+            self.assertTrue(
+                any(
+                    item.get("type") == "expect_selector_text_contains"
+                    and item.get("selector") == "[data-testid='task-fact-backend']"
+                    and item.get("text") == "native kernel"
+                    for item in actions
+                    if isinstance(item, dict)
+                )
+            )
+            self.assertTrue(any(item.get("selector") == "[data-testid='checkpoint-modal']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(
+                any(
+                    item.get("type") == "expect_selector_count_at_least"
+                    and item.get("selector") == "[data-testid='workflow-checkpoint-row']"
+                    and item.get("count") == 1
+                    for item in final_assertions
+                    if isinstance(item, dict)
+                )
+            )
+            self.assertTrue(
+                any(
+                    item.get("type") == "expect_selector_text_contains"
+                    and item.get("selector") == "[data-testid='task-fact-backend']"
+                    and item.get("text") == "native kernel"
+                    for item in final_assertions
+                    if isinstance(item, dict)
+                )
+            )
+
     def test_dogfood_browser_smoke_accepts_fill_and_select_actions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -8496,6 +8550,44 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "timeout_ms": 3000,
                 },
                 final_assertions,
+            )
+
+    def test_dogfood_browser_smoke_accepts_selector_text_contains_assertions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "index.html").write_text("<html><body>ok</body></html>", encoding="utf-8")
+            screenshot = root / "capture.png"
+            screenshot.write_bytes(b"png")
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            dogfood = DogfoodRunService(projects)
+
+            smoke = dogfood.browser_smoke(
+                {
+                    "url": (workspace / "index.html").resolve().as_uri(),
+                    "screenshot_path": str(screenshot),
+                    "actions": [
+                        {
+                            "type": "expect_selector_text_contains",
+                            "selector": "[data-testid='task-fact-backend']",
+                            "text": "native kernel",
+                            "timeout_ms": 4500,
+                        }
+                    ],
+                }
+            )
+
+            actions = list(smoke["browser_smoke"]["actions"] or [])
+            self.assertIn(
+                {
+                    "type": "expect_selector_text_contains",
+                    "selector": "[data-testid='task-fact-backend']",
+                    "text": "native kernel",
+                    "timeout_ms": 4500,
+                },
+                actions,
             )
 
     def test_release_grade_provider_switch_workflow_integrates_checkpoint_review_tests_and_recovery(self) -> None:
@@ -8855,6 +8947,91 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "PRIVATE/demo-runs"):
                 tools.prepare_release_workflow_demo({})
+
+    def test_project_tools_prepare_native_kernel_workflow_demo_executes_local_demo_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "PRIVATE" / "demo-runs" / "native-kernel" / "workspace"
+            workspace.mkdir(parents=True)
+            project_file = root / "demo.abproj"
+            projects = ProjectService(root / "projects.json")
+            projects.create_project("Native Kernel Demo", project_file, workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            conversation = TaskConversationService(projects, tasks)
+            profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                task_service=tasks,
+                task_conversation=conversation,
+                profile_service=profiles,
+            )
+            tools = ProjectToolsService(
+                projects,
+                runtime,
+                checkpoints=CheckpointService(projects),
+                tasks=tasks,
+                profiles=profiles,
+                router_config=router_config,
+                task_conversation=conversation,
+            )
+            runtime.attach_project_tools(tools)
+
+            response = tools.prepare_native_kernel_workflow_demo({})
+
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["execution_backend"], "native_kernel")
+            self.assertEqual(response["thread_id"], "native-kernel-demo-thread")
+            self.assertTrue(response["baseline_commit"])
+            self.assertEqual((workspace / "native_kernel_scorecard.py").read_text(encoding="utf-8"), 'def status():\n    return "ready"\n')
+            self.assertTrue((workspace / ".git").is_dir())
+            self.assertEqual((response["thread"] or {}).get("shellSettings", {}).get("execution_backend"), "native_kernel")
+
+            history = response["terminal_history"]
+            commands = list(history["commands"])
+            self.assertTrue(any("python -m unittest -q test_native_kernel_demo" in str(item.get("command") or "") for item in commands))
+            self.assertTrue(any(str(item.get("status") or "") == "completed" for item in commands))
+
+            checkpoints = list((response["checkpoints"] or {}).get("saves") or [])
+            self.assertGreaterEqual(len(checkpoints), 1)
+            self.assertTrue(any("Native kernel demo checkpoint" in str(item.get("description") or "") for item in checkpoints))
+
+            review_status = response["review_status"]
+            changed_paths = {item["path"] for item in review_status["files"]}
+            self.assertIn("native_kernel_scorecard.py", changed_paths)
+            self.assertTrue((workspace / "README.md").is_file())
+
+            task = tasks.current_task()
+            self.assertEqual(str(task.get("active_provider_thread_id") or ""), "native-kernel-demo-thread")
+            self.assertEqual(str(task.get("title") or ""), "Native kernel demo")
+            self.assertTrue(any(str(item.get("thread_id") or "") == "native-kernel-demo-thread" for item in list(task.get("provider_threads") or [])))
+            self.assertTrue(any(str(item.get("kind") or "") == "command_execution" for item in list(task.get("diagnostic_refs") or [])))
+            self.assertTrue(list(task.get("checkpoint_refs") or []))
+
+            composite = conversation.conversation(task_id=str(task.get("task_id") or ""))["thread"]
+            self.assertEqual(composite["active_provider_thread_id"], "native-kernel-demo-thread")
+            self.assertTrue(any(str(turn.get("provider_id") or "") == "deepseek" for turn in list(composite.get("turns") or [])))
+            transcript_text = (workspace / ".astrabridge" / "task_transcripts.json").read_text(encoding="utf-8")
+            self.assertIn("native-kernel-demo-thread", transcript_text)
+            self.assertNotIn("Authorization", transcript_text)
+            self.assertNotIn("Bearer ", transcript_text)
+
+    def test_project_tools_prepare_native_kernel_workflow_demo_rejects_non_demo_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "projects.json")
+            projects.create_project("Regular Workspace", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            tools = ProjectToolsService(projects, runtime, checkpoints=CheckpointService(projects), tasks=tasks, profiles=profiles, router_config=router_config)
+
+            with self.assertRaisesRegex(ValueError, "PRIVATE/demo-runs"):
+                tools.prepare_native_kernel_workflow_demo({})
 
     def test_checkpoint_service_git_save_load_without_git_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
