@@ -7,6 +7,7 @@ import { t, permissionLabel } from "./features/i18n/catalog";
 import { summarizeCodingEventInspector } from "./features/runtime/codingEventInspector";
 import { modelAuthorityState } from "./features/runtime/modelAuthorityNotice";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
+import { formatResponseDiagnostics, summarizeResponseDiagnosticsInline } from "./features/runtime/responseDiagnostics";
 import { composerReasoningOptions, preferredReasoningEffort } from "./features/runtime/reasoningOptions";
 import { runtimeErrorNoticeActions, runtimeErrorNoticeText, type RuntimeErrorAction } from "./features/runtime/runtimeErrorNotice";
 import { summarizeTaskCard } from "./features/runtime/taskSummary";
@@ -1542,7 +1543,7 @@ function RouterControlCenter({
   const testManagedKey = useMutation({
     mutationFn: api.llmManagerTestKey,
     onSuccess: (data) => {
-      setTestOutput(data.result.response_excerpt ?? JSON.stringify(data.result, null, 2));
+      setTestOutput(formatResponseDiagnostics(data.result.response_diagnostics) ?? data.result.response_excerpt ?? JSON.stringify(data.result, null, 2));
       queryClient.invalidateQueries({ queryKey: ["llm-manager-keys"] });
       queryClient.invalidateQueries({ queryKey: ["llm-manager-catalog"] });
       queryClient.invalidateQueries({ queryKey: ["runtime-environment"] });
@@ -1692,7 +1693,7 @@ function RouterControlCenter({
     const sourceProvider = providerDraft ?? selectedProvider;
     if (!sourceProvider) return;
     const result = await api.testProvider({ provider_id: sourceProvider.id, model_id: modelDraft?.id, stream });
-    setTestOutput(result.response_excerpt);
+    setTestOutput(formatResponseDiagnostics(result.response_diagnostics) ?? result.response_excerpt);
     queryClient.invalidateQueries({ queryKey: ["router-config"] });
     queryClient.invalidateQueries({ queryKey: ["runtime-environment"] });
   }
@@ -2596,17 +2597,21 @@ function RouterControlCenter({
             <section className="manager-section">
               <h4>Latest results</h4>
               <div className="manager-list manager-list-tall">
-                {(llmHealth.data?.results ?? []).slice(-12).reverse().map((result, index) => (
-                  <div className="manager-row" key={`${String(result.run_id ?? "run")}-${index}`}>
-                    <span>
-                      <strong>{String(result.model ?? "-")}</strong>
-                      <small>{String(result.provider ?? "")} / {String(result.effort ?? "")} / web {String(result.web_smoke_status ?? "n/a")} / {String(result.connectivity ?? result.reason ?? "")}</small>
-                    </span>
-                    <span className="manager-row-side">
-                      <small>{result.ok ? "pass" : result.skipped ? "blocked" : "fail"}</small>
-                    </span>
-                  </div>
-                ))}
+                {(llmHealth.data?.results ?? []).slice(-12).reverse().map((result, index) => {
+                  const diagnosticsSummary = summarizeResponseDiagnosticsInline(result.response_diagnostics);
+                  return (
+                    <div className="manager-row" key={`${String(result.run_id ?? "run")}-${index}`}>
+                      <span>
+                        <strong>{String(result.model ?? "-")}</strong>
+                        <small>{String(result.provider ?? "")} / {String(result.effort ?? "")} / web {String(result.web_smoke_status ?? "n/a")} / {String(result.connectivity ?? result.reason ?? "")}</small>
+                        {diagnosticsSummary ? <small>{diagnosticsSummary}</small> : null}
+                      </span>
+                      <span className="manager-row-side">
+                        <small>{result.ok ? "pass" : result.skipped ? "blocked" : "fail"}</small>
+                      </span>
+                    </div>
+                  );
+                })}
                 {(llmHealth.data?.results ?? []).length === 0 ? <p className="muted">No health checks have been run yet.</p> : null}
               </div>
             </section>

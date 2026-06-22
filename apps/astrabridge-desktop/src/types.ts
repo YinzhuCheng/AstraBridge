@@ -512,6 +512,39 @@ export type ReasoningConfig = {
   updated_at?: string;
 };
 
+export type ResponseDiagnosticsWarning = {
+  code?: string;
+  severity?: string;
+  message?: string;
+};
+
+export type ResponseDiagnosticsReasoningState = {
+  provider_id?: string;
+  model_id?: string;
+  replayable?: boolean;
+  visible_summary?: string | null;
+  opaque_artifact_count?: number;
+};
+
+export type ResponseDiagnosticsRawRef = {
+  kind?: string;
+  locator?: string;
+  redaction_status?: string;
+  summary?: string | null;
+};
+
+export type ResponseDiagnostics = {
+  text_excerpt?: string | null;
+  reasoning_summary?: string | null;
+  finish_reason?: string | null;
+  warnings?: ResponseDiagnosticsWarning[];
+  provider_data_keys?: string[];
+  tool_calls?: Array<{ id?: string; name?: string }>;
+  usage?: Record<string, unknown>;
+  reasoning_state?: ResponseDiagnosticsReasoningState;
+  raw_ref?: ResponseDiagnosticsRawRef;
+};
+
 export type RouterTestResult = {
   ok: boolean;
   provider: string;
@@ -521,6 +554,8 @@ export type RouterTestResult = {
   content_type?: string;
   preview: Record<string, unknown>;
   response_excerpt: string;
+  preview_warnings?: string[];
+  response_diagnostics?: ResponseDiagnostics | null;
   timestamp?: string;
 };
 
