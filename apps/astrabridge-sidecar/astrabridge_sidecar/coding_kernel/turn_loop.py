@@ -27,12 +27,26 @@ class NativeTurnResult:
 
 
 class RuntimeToolFacade:
-    def __init__(self, project_tools: Any, *, profile_id: str, provider_id: str, model_id: str, authority: AuthorityAssessment) -> None:
+    def __init__(
+        self,
+        project_tools: Any,
+        *,
+        profile_id: str,
+        provider_id: str,
+        model_id: str,
+        authority: AuthorityAssessment,
+        permission_mode: str,
+        thread_id: str,
+        turn_id: str,
+    ) -> None:
         self._project_tools = project_tools
         self._profile_id = profile_id
         self._provider_id = provider_id
         self._model_id = model_id
         self._authority = authority
+        self._permission_mode = permission_mode
+        self._thread_id = thread_id
+        self._turn_id = turn_id
 
     def tool_definitions(self) -> list[dict[str, Any]]:
         definitions: list[dict[str, Any]] = [
@@ -92,6 +106,30 @@ class RuntimeToolFacade:
             ),
         ]
         if self._authority.tier in {"A", "B"}:
+            definitions.extend(
+                [
+                    self._tool_definition(
+                        "run_command",
+                        "Run a bounded workspace command. Destructive or global commands require explicit approval.",
+                        {
+                            "command": {"type": "string", "description": "Command line to run inside the workspace."},
+                            "cwd": {"type": "string", "description": "Optional workspace-relative working directory."},
+                            "timeout_seconds": {"type": "integer", "description": "Optional timeout in seconds."},
+                        },
+                        required=("command",),
+                    ),
+                    self._tool_definition(
+                        "run_tests",
+                        "Run a workspace test command and capture its output as a command execution event.",
+                        {
+                            "command": {"type": "string", "description": "Test command to run inside the workspace."},
+                            "cwd": {"type": "string", "description": "Optional workspace-relative working directory."},
+                            "timeout_seconds": {"type": "integer", "description": "Optional timeout in seconds."},
+                        },
+                        required=("command",),
+                    ),
+                ]
+            )
             definitions.append(
                 self._tool_definition(
                     "edit_apply",
@@ -119,6 +157,10 @@ class RuntimeToolFacade:
             result = self._project_tools.create_checkpoint(arguments)
         elif name == "read_file":
             result = self._project_tools.read_file(str(arguments.get("path") or ""))
+        elif name == "run_command":
+            result = self._project_tools.run_command(self._command_payload(arguments))
+        elif name == "run_tests":
+            result = self._project_tools.run_tests(self._command_payload(arguments))
         elif name == "edit_preview":
             result = self._project_tools.edit_preview(self._edit_payload(arguments))
         elif name == "edit_apply":
@@ -157,6 +199,17 @@ class RuntimeToolFacade:
             payload = {
                 "save": result.get("save") or result.get("manifest"),
                 "path": result.get("path"),
+            }
+            return json.dumps(redact_sensitive(payload), ensure_ascii=False)
+        if name in {"run_command", "run_tests"}:
+            payload = {
+                "ok": result.get("ok"),
+                "status": result.get("status"),
+                "command": result.get("command"),
+                "cwd": result.get("cwd"),
+                "exit_code": result.get("exit_code"),
+                "approved": result.get("approved"),
+                "output": str(result.get("output") or "")[:20000],
             }
             return json.dumps(redact_sensitive(payload), ensure_ascii=False)
         if name == "review_diff":
@@ -234,6 +287,20 @@ class RuntimeToolFacade:
                 payload[key] = arguments.get(key)
         return payload
 
+    def _command_payload(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            "profile_id": self._profile_id,
+            "provider_id": self._provider_id,
+            "model": self._model_id,
+            "permission_mode": self._permission_mode,
+            "thread_id": self._thread_id,
+            "turn_id": self._turn_id,
+        }
+        for key in ("command", "cwd", "timeout_seconds"):
+            if key in arguments and arguments.get(key) not in {None, ""}:
+                payload[key] = arguments.get(key)
+        return payload
+
     def _tool_item(self, call: ToolCall, arguments: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         summary = {
             "tool": call.name,
@@ -262,6 +329,12 @@ class RuntimeToolFacade:
             save = dict(result.get("save") or result.get("manifest") or {})
             summary["checkpoint_save_id"] = save.get("save_id")
             summary["checkpoint_description"] = save.get("description")
+        elif call.name in {"run_command", "run_tests"}:
+            summary["command"] = result.get("command")
+            summary["cwd"] = result.get("cwd")
+            summary["exit_code"] = result.get("exit_code")
+            summary["approved"] = result.get("approved")
+            summary["output_excerpt"] = str(result.get("output") or "")[:800]
         elif call.name == "read_file":
             summary["kind"] = result.get("kind")
             if result.get("kind") == "text":
@@ -290,6 +363,17 @@ class RuntimeToolFacade:
 
     def _extra_items_for_result(self, call: ToolCall, result: dict[str, Any]) -> list[dict[str, Any]]:
         if call.name not in {"edit_preview", "edit_apply"}:
+            if call.name in {"run_command", "run_tests"}:
+                return [
+                    {
+                        "type": "commandExecution",
+                        "id": f"cmd-{call.id}",
+                        "command": str(result.get("command") or ""),
+                        "status": str(result.get("status") or ("completed" if result.get("ok") else "failed")),
+                        "exitCode": result.get("exit_code"),
+                        "aggregatedOutput": str(result.get("output") or ""),
+                    }
+                ]
             return []
         preview = dict(result.get("preview") or {})
         path = str(preview.get("path") or result.get("path") or "").strip()
@@ -346,14 +430,17 @@ class NativeCodingTurnLoop:
         authority = assess_model_authority(model_record)
         if authority.tier == "D":
             raise ValueError("The selected model is not eligible for native kernel execution.")
+        turn_id = new_id("turn")
         facade = RuntimeToolFacade(
             self._project_tools,
             profile_id=profile_id,
             provider_id=provider_id,
             model_id=model_id,
             authority=authority,
+            permission_mode=permission_mode,
+            thread_id=thread_id,
+            turn_id=turn_id,
         )
-        turn_id = new_id("turn")
         started_at = int(__import__("time").time() * 1000)
         existing_thread = dict(self._runtime._read_native_thread(thread_id) or {})  # noqa: SLF001
         history = list(existing_thread.get("native_history") or [])

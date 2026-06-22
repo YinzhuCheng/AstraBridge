@@ -1890,6 +1890,30 @@ class RuntimeService:
     def record_supervisor_event(self, event: dict[str, Any]) -> None:
         self._record_event({"type": "runtime_supervisor", **event})
 
+    def request_native_command_approval(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        command: str,
+        cwd: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        return dict(
+            self._modals.request(
+                "item/commandExecution/requestApproval",
+                {
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "itemId": new_id("cmd"),
+                    "command": command,
+                    "cwd": cwd,
+                    "reason": reason,
+                },
+            )
+            or {}
+        )
+
     def _raise_if_context_guard_blocks_turn(self, client: AppServerClient, thread_id: str) -> None:
         state = self._context_guard_state(thread_id)
         if state.get("level") == "compacting":

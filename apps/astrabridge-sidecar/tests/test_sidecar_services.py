@@ -3287,6 +3287,212 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(str(checkpoint_refs[0].get("description") or ""), "Native checkpoint")
             self.assertEqual(str((refreshed_task or {}).get("task_id") or ""), task["task_id"])
 
+    def test_runtime_start_turn_native_kernel_can_run_tests_without_modal_in_auto_mode(self) -> None:
+        class FakeNativeRouter:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete_response(self, payload: dict[str, object]) -> dict[str, object]:
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                        "adapter": "chat_completions",
+                        "normalized": NormalizedResponse(
+                            text="",
+                            reasoning_summary="Run the test command first.",
+                            reasoning_state=None,
+                            tool_calls=[
+                                ToolCall(
+                                    id="call-run-tests",
+                                    name="run_tests",
+                                    arguments_json='{"command":"python -m unittest -q test_sample"}',
+                                )
+                            ],
+                            usage=None,
+                            finish_reason="tool_calls",
+                        ),
+                    }
+                return {
+                    "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                    "adapter": "chat_completions",
+                    "normalized": NormalizedResponse(
+                        text="The test command passed.",
+                        reasoning_summary=None,
+                        reasoning_state=None,
+                        tool_calls=[],
+                        usage=None,
+                        finish_reason="stop",
+                    ),
+                }
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "test_sample.py").write_text(
+                "import unittest\n\nclass SampleTest(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Native tests",
+                thread_id="native-thread-tests",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                    "execution_backend": "native_kernel",
+                },
+            )
+            profiles = ProfileService(store_path=root / "profiles.json")
+            modals = ModalService(projects.require_shell_state_root)
+            runtime = RuntimeService(
+                projects,
+                modals,
+                task_service=tasks,
+                profile_service=profiles,
+            )
+            tools = ProjectToolsService(projects, runtime, checkpoints=CheckpointService(projects), tasks=tasks, profiles=profiles)
+            runtime.attach_project_tools(tools)
+            runtime.attach_router(FakeNativeRouter())
+
+            profile = profiles.resolve_runtime_profile("deepseek-default")
+            with patch.dict(os.environ, {"ASTRABRIDGE_ENABLE_NATIVE_KERNEL": "1"}, clear=False):
+                runtime.start_turn(
+                    profile,
+                    thread_id="native-thread-tests",
+                    text="Run the test suite.",
+                    attachments=[],
+                    model="deepseek-v4-pro",
+                    effort="high",
+                    permission_mode="auto",
+                )
+
+            self.assertEqual(modals.list_pending()["modals"], [])
+            thread = runtime.read_thread(profile, "native-thread-tests")["thread"]
+            item_types = [item["type"] for item in thread["turns"][0]["items"]]
+            self.assertIn("commandExecution", item_types)
+            command_item = next(item for item in thread["turns"][0]["items"] if item["type"] == "commandExecution")
+            self.assertEqual(command_item["status"], "completed")
+            self.assertEqual(command_item["exitCode"], 0)
+            history = tools.terminal_history(limit=5)
+            self.assertTrue(any("python -m unittest -q test_sample" in str(item.get("command") or "") for item in history["commands"]))
+
+    def test_runtime_start_turn_native_kernel_requests_command_approval_and_runs_after_accept(self) -> None:
+        class FakeNativeRouter:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete_response(self, payload: dict[str, object]) -> dict[str, object]:
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                        "adapter": "chat_completions",
+                        "normalized": NormalizedResponse(
+                            text="",
+                            reasoning_summary="Ask for approval and then inspect the workspace.",
+                            reasoning_state=None,
+                            tool_calls=[
+                                ToolCall(
+                                    id="call-run-command",
+                                    name="run_command",
+                                    arguments_json='{"command":"Get-ChildItem -Name ."}',
+                                )
+                            ],
+                            usage=None,
+                            finish_reason="tool_calls",
+                        ),
+                    }
+                return {
+                    "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                    "adapter": "chat_completions",
+                    "normalized": NormalizedResponse(
+                        text="Listed the workspace after approval.",
+                        reasoning_summary=None,
+                        reasoning_state=None,
+                        tool_calls=[],
+                        usage=None,
+                        finish_reason="stop",
+                    ),
+                }
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "alpha.txt").write_text("hello\n", encoding="utf-8")
+
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Native approved command",
+                thread_id="native-thread-command",
+                settings={
+                    "profile_id": "deepseek-default",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "permission_mode": "ask",
+                    "execution_backend": "native_kernel",
+                },
+            )
+            profiles = ProfileService(store_path=root / "profiles.json")
+            modals = ModalService(projects.require_shell_state_root)
+            runtime = RuntimeService(
+                projects,
+                modals,
+                task_service=tasks,
+                profile_service=profiles,
+            )
+            tools = ProjectToolsService(projects, runtime, checkpoints=CheckpointService(projects), tasks=tasks, profiles=profiles)
+            runtime.attach_project_tools(tools)
+            runtime.attach_router(FakeNativeRouter())
+
+            profile = profiles.resolve_runtime_profile("deepseek-default")
+            result_holder: dict[str, object] = {}
+
+            def worker() -> None:
+                with patch.dict(os.environ, {"ASTRABRIDGE_ENABLE_NATIVE_KERNEL": "1"}, clear=False):
+                    result_holder["result"] = runtime.start_turn(
+                        profile,
+                        thread_id="native-thread-command",
+                        text="List the workspace.",
+                        attachments=[],
+                        model="deepseek-v4-pro",
+                        effort="high",
+                        permission_mode="ask",
+                    )
+
+            thread_worker = threading.Thread(target=worker)
+            thread_worker.start()
+            pending: list[dict[str, object]] = []
+            for _ in range(60):
+                pending = modals.list_pending()["modals"]
+                if pending:
+                    break
+                time.sleep(0.05)
+            self.assertTrue(pending)
+            self.assertEqual(pending[0]["method"], "item/commandExecution/requestApproval")
+            modals.resolve(str(pending[0]["modal_id"]), {"decision": "accept"})
+            thread_worker.join(timeout=10)
+            self.assertFalse(thread_worker.is_alive())
+            self.assertIn("result", result_holder)
+            self.assertEqual(modals.list_pending()["modals"], [])
+
+            thread = runtime.read_thread(profile, "native-thread-command")["thread"]
+            command_item = next(item for item in thread["turns"][0]["items"] if item["type"] == "commandExecution")
+            self.assertEqual(command_item["status"], "completed")
+            self.assertEqual(command_item["exitCode"], 0)
+            self.assertIn("alpha.txt", str(command_item.get("aggregatedOutput") or ""))
+
     def test_runtime_read_thread_decorates_existing_dynamic_tool_evidence(self) -> None:
         class FakeClient:
             def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:

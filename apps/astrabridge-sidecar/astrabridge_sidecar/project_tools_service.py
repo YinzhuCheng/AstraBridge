@@ -17,6 +17,7 @@ from .coding_kernel import (
     select_edit_strategy,
 )
 from .providers import get_provider_profile
+from .security import classify_command, redact_sensitive, resolve_under
 
 
 TEXT_EXTENSIONS = {
@@ -233,6 +234,12 @@ class ProjectToolsService:
                 pass
         return response
 
+    def run_command(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._command_operation(payload or {}, test_mode=False)
+
+    def run_tests(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._command_operation(payload or {}, test_mode=True)
+
     def resolve_model_record(self, provider_id: str | None, model_id: str | None, *, target_exists: bool = False) -> dict[str, Any]:
         return self._resolve_model_record(provider_id, model_id, target_exists=target_exists)
 
@@ -337,6 +344,148 @@ class ProjectToolsService:
         except Exception:
             return
 
+    def _command_operation(self, payload: dict[str, Any], *, test_mode: bool) -> dict[str, Any]:
+        context = self._command_context(payload)
+        command = str(payload.get("command") or "").strip()
+        if not command:
+            raise ValueError("command is required.")
+        timeout_seconds = int(payload.get("timeout_seconds") or (120 if test_mode else 60))
+        timeout_seconds = max(1, min(timeout_seconds, 300))
+        cwd = self._command_cwd(str(payload.get("cwd") or "").strip())
+        classification = classify_command(command, str(cwd))
+        approval = self._command_approval(command=command, cwd=cwd, classification=classification, context=context, test_mode=test_mode)
+        if approval.get("decision") not in {"accept", "acceptForSession"}:
+            result = {
+                "ok": False,
+                "status": "cancelled",
+                "approved": False,
+                "command": command,
+                "cwd": str(cwd),
+                "exit_code": None,
+                "output": "Command execution was declined.",
+                "classification": classification,
+                "approval": approval,
+                "test_mode": test_mode,
+                "tool_event_verified": True,
+            }
+            self._record_command_event(result, context=context)
+            return result
+        completed = self._run_shell_command(command, cwd=cwd, timeout_seconds=timeout_seconds)
+        output = "\n".join(part for part in [completed.get("stdout") or "", completed.get("stderr") or ""] if part).strip()
+        status = "completed" if completed.get("returncode") == 0 else "failed"
+        result = {
+            "ok": completed.get("returncode") == 0,
+            "status": status,
+            "approved": True,
+            "command": command,
+            "cwd": str(cwd),
+            "exit_code": completed.get("returncode"),
+            "output": redact_sensitive(output)[:20000],
+            "timed_out": bool(completed.get("timed_out")),
+            "classification": classification,
+            "approval": approval,
+            "test_mode": test_mode,
+            "tool_event_verified": True,
+        }
+        self._record_command_event(result, context=context)
+        return result
+
+    def _command_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+        edit_context = self._edit_context(payload, target_exists=False)
+        task = self._tasks.current_task() if self._tasks is not None else None
+        active_provider_thread = self._tasks.active_provider_thread(include_missing_fallback=True) if self._tasks is not None else None
+        permission_mode = str(
+            payload.get("permission_mode")
+            or (active_provider_thread or {}).get("permission_mode")
+            or (task.get("composer_settings") or {}).get("permission_mode") if isinstance(task, dict) else ""
+        ).strip().lower() or "auto"
+        return {
+            **edit_context,
+            "permission_mode": permission_mode,
+        }
+
+    def _command_cwd(self, raw_cwd: str) -> Path:
+        root = self._workspace_root()
+        if not raw_cwd:
+            return root
+        return resolve_under(root, raw_cwd)
+
+    def _command_approval(
+        self,
+        *,
+        command: str,
+        cwd: Path,
+        classification: dict[str, Any],
+        context: dict[str, Any],
+        test_mode: bool,
+    ) -> dict[str, Any]:
+        permission_mode = str(context.get("permission_mode") or "auto").strip().lower()
+        auto_allowed = bool(test_mode) or str(classification.get("decision") or "") == "allowed_in_sandbox"
+        if permission_mode == "full":
+            return {"decision": "accept", "reason": "permission_mode_full"}
+        if permission_mode == "auto" and auto_allowed:
+            return {"decision": "accept", "reason": "auto_allowed"}
+        request_approval = getattr(self._runtime, "request_native_command_approval", None)
+        if not callable(request_approval):
+            raise RuntimeError("Runtime approval bridge is not available for native command execution.")
+        decision = request_approval(
+            thread_id=str(context.get("execution_thread_id") or context.get("visible_thread_id") or ""),
+            turn_id=str(context.get("turn_id") or ""),
+            command=command,
+            cwd=str(cwd),
+            reason=str(classification.get("reason") or ("Native test command" if test_mode else "Native command execution")),
+        )
+        return dict(decision or {})
+
+    def _run_shell_command(self, command: str, *, cwd: Path, timeout_seconds: int) -> dict[str, Any]:
+        launcher = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command]
+        try:
+            completed = subprocess.run(
+                launcher,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                check=False,
+            )
+            return {
+                "returncode": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+                "timed_out": False,
+            }
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "returncode": None,
+                "stdout": exc.stdout or "",
+                "stderr": exc.stderr or "",
+                "timed_out": True,
+            }
+
+    def _record_command_event(self, result: dict[str, Any], *, context: dict[str, Any]) -> None:
+        record = getattr(self._runtime, "record_supervisor_event", None)
+        if not callable(record):
+            return
+        try:
+            record(
+                {
+                    "event": "native_command_execution",
+                    "thread_id": context.get("execution_thread_id") or context.get("visible_thread_id"),
+                    "provider_id": context.get("provider_id"),
+                    "model_id": context.get("model_id"),
+                    "command": result.get("command"),
+                    "status": result.get("status"),
+                    "exitCode": result.get("exit_code"),
+                    "aggregatedOutput": str(result.get("output") or "")[:4000],
+                    "test_mode": bool(result.get("test_mode")),
+                    "approved": bool(result.get("approved")),
+                }
+            )
+        except Exception:
+            return
+
     def _edit_context(self, payload: dict[str, Any], *, target_exists: bool) -> dict[str, Any]:
         profile = self._resolve_profile(payload)
         provider_id = str(payload.get("provider_id") or profile.get("provider_id") or "").strip() or None
@@ -352,6 +501,7 @@ class ProjectToolsService:
             "task_id": str((task or {}).get("task_id") or ""),
             "visible_thread_id": str(self._tasks.visible_provider_thread_id(include_missing_fallback=True) if self._tasks is not None else ""),
             "execution_thread_id": str((active_provider_thread or {}).get("thread_id") or "") or None,
+            "turn_id": str(payload.get("turn_id") or ""),
         }
 
     def _resolve_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
