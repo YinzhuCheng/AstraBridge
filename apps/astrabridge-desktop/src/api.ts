@@ -288,7 +288,15 @@ export const api = {
   dogfoodAssets: () => request<AssetRegistryResponse>("/api/dogfood/assets"),
   rebuildDogfoodAssets: () => jsonRequest<AssetRegistryResponse>("/api/dogfood/assets/rebuild", {}),
   prepareReleaseWorkflowDemo: () => jsonRequest<ReleaseWorkflowDemoResponse>("/api/project/demo/release-workflow/prepare", {}),
-  prepareNativeKernelWorkflowDemo: () => jsonRequest<NativeKernelDemoResponse>("/api/project/demo/native-kernel/prepare", {}),
+  prepareNativeKernelWorkflowDemo: (payload?: {
+    profile_id?: string;
+    provider_id?: string;
+    model?: string;
+    effort?: string;
+    reasoning_effort?: string;
+    permission_mode?: PermissionMode;
+    collaboration_mode?: CollaborationMode;
+  }) => jsonRequest<NativeKernelDemoResponse>("/api/project/demo/native-kernel/prepare", payload ?? {}),
   isolationAudit: () => request<IsolationAuditResponse>("/api/audit/isolation"),
   markDogfoodAsset: (payload: { asset_id: string; status?: string; quality_status?: string; integration_status?: string; role?: string; purpose?: string; notes?: string }) =>
     jsonRequest<AssetRegistryResponse>("/api/dogfood/assets/mark", payload),

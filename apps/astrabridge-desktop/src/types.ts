@@ -1017,6 +1017,9 @@ export type NativeKernelDemoResponse = {
   workspace_root: string;
   task?: ProjectTask | null;
   thread_id?: string;
+  profile_id?: string;
+  provider_id?: string;
+  model_id?: string;
   execution_backend?: string;
   review_status?: ProjectReviewStatus;
   terminal_history?: ProjectTerminalHistory;

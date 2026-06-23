@@ -382,6 +382,13 @@ class ProjectToolsService:
         if self._tasks is None or self._profiles is None:
             raise RuntimeError("Native kernel demo requires task and profile services.")
         payload = dict(payload or {})
+        profile = self._resolve_profile(payload)
+        profile_id = str(payload.get("profile_id") or profile.get("profile_id") or "").strip() or "deepseek-default"
+        provider_id = str(payload.get("provider_id") or profile.get("provider_id") or "").strip() or "deepseek"
+        model_id = str(payload.get("model") or payload.get("model_id") or profile.get("model") or "").strip() or "deepseek-v4-pro"
+        reasoning_effort = str(payload.get("effort") or payload.get("reasoning_effort") or profile.get("reasoning_effort") or "high").strip() or "high"
+        permission_mode = str(payload.get("permission_mode") or profile.get("permission_mode") or "auto").strip() or "auto"
+        collaboration_mode = str(payload.get("collaboration_mode") or profile.get("collaboration_mode") or "default").strip() or "default"
 
         readme = (
             "# AstraBridge Native Kernel Demo\n\n"
@@ -407,40 +414,46 @@ class ProjectToolsService:
         baseline_commit = self._ensure_release_demo_git_baseline(root)
         native_thread_id = "native-kernel-demo-thread"
         native_settings = {
-            "profile_id": "deepseek-default",
-            "provider_id": "deepseek",
-            "model": "deepseek-v4-pro",
-            "reasoning_effort": "high",
-            "permission_mode": "auto",
+            "profile_id": profile_id,
+            "provider_id": provider_id,
+            "model": model_id,
+            "reasoning_effort": reasoning_effort,
+            "permission_mode": permission_mode,
+            "collaboration_mode": collaboration_mode,
             "execution_backend": "native_kernel",
             "name": "Native kernel demo lane",
         }
         task = self._tasks.ensure_default_task(thread_id=native_thread_id, settings=native_settings, title="Native kernel demo")
         if self._router_config is not None:
+            model_record = self._resolve_model_record(provider_id, model_id, target_exists=True)
             self._router_config.upsert_model(
                 {
-                    "id": "deepseek/deepseek-v4-pro",
-                    "provider": "deepseek",
-                    "native_model": "deepseek-v4-pro",
-                    "display_name": "DeepSeek V4 Pro",
+                    **model_record,
+                    "id": f"{provider_id}/{model_id}",
+                    "provider": provider_id,
+                    "native_model": model_id,
+                    "display_name": str(model_record.get("display_name") or model_record.get("native_model") or model_id),
                     "supports_tool_calls": True,
                     "apply_patch_tool_type": "json",
-                    "supports_mcp_tools": True,
+                    "supports_mcp_tools": bool(model_record.get("supports_mcp_tools", True)),
                     "mcp_tool_call_policy": "conservative",
                     "tool_mode": "full",
                     "codex_agent_enabled": True,
+                    "authority_tier": str(model_record.get("authority_tier") or "B"),
                 }
             )
 
         class _NativeKernelDemoRouter:
-            def __init__(self) -> None:
+            def __init__(self, demo_provider_id: str, demo_model_id: str) -> None:
                 self.calls = 0
+                self.provider_id = demo_provider_id
+                self.model_id = demo_model_id
 
             def complete_response(self, payload: dict[str, object]) -> dict[str, object]:
                 self.calls += 1
                 if self.calls == 1:
                     return {
-                        "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                        "profile": {"provider_id": self.provider_id, "model": self.model_id},
                         "adapter": "chat_completions",
                         "normalized": NormalizedResponse(
                             text="",
@@ -475,7 +488,7 @@ class ProjectToolsService:
                         ),
                     }
                 return {
-                    "profile": {"provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                    "profile": {"provider_id": self.provider_id, "model": self.model_id},
                     "adapter": "chat_completions",
                     "normalized": NormalizedResponse(
                         text="Native kernel demo completed: reviewed the file, applied a small edit, ran the unit test, and created a checkpoint.",
@@ -490,19 +503,20 @@ class ProjectToolsService:
         original_router = getattr(self._runtime, "_router", None)
         original_loop = getattr(self._runtime, "_native_turn_loop", None)
         flag_before = os.environ.get("ASTRABRIDGE_ENABLE_NATIVE_KERNEL")
-        profile = self._profiles.resolve_runtime_profile("deepseek-default")
+        profile = self._profiles.resolve_runtime_profile(profile_id)
         try:
             os.environ["ASTRABRIDGE_ENABLE_NATIVE_KERNEL"] = "1"
             self._runtime._native_turn_loop = None  # type: ignore[attr-defined]
-            self._runtime.attach_router(_NativeKernelDemoRouter())
+            self._runtime.attach_router(_NativeKernelDemoRouter(provider_id, model_id))
             turn_result = self._runtime.start_turn(
                 profile,
                 thread_id=native_thread_id,
                 text="Review native_kernel_scorecard.py, apply the smallest safe fix, run the unit test, create a checkpoint, then summarize the result.",
                 attachments=[],
-                model="deepseek-v4-pro",
-                effort="high",
-                permission_mode="auto",
+                model=model_id,
+                effort=reasoning_effort,
+                permission_mode=permission_mode,
+                collaboration_mode=collaboration_mode,
             )
         finally:
             if flag_before is None:
@@ -526,6 +540,9 @@ class ProjectToolsService:
             "workspace_root": str(root),
             "baseline_commit": baseline_commit,
             "thread_id": native_thread_id,
+            "profile_id": profile_id,
+            "provider_id": provider_id,
+            "model_id": model_id,
             "turn": turn_result.get("turn"),
             "thread": thread,
             "task": self._tasks.current_task() or task,

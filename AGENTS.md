@@ -22,10 +22,11 @@ Baseline priorities already completed on this branch:
 2. ProviderProfile plus generated catalog as the single truth source
 3. CodingEvent contract unification across chat/files/review/checkpoint/diagnostics
 4. One release-grade end-to-end coding workflow with isolated demo workspace, browser smoke pass, and visible in-app validation
+5. One minimal provider-neutral native-kernel workflow on the same event/evidence contract
 
 Current active priority order:
 
-1. A minimal native-kernel cut on top of the same workflow and evidence contract
+- No active near-term priority remains in `PLAN/30`; set a fresh major slice before starting a new execution cycle.
 
 Until those priorities are substantially complete, do not let primary effort drift into overly trivial or low-leverage work such as:
 
@@ -49,13 +50,12 @@ Only after that should agents spend significant time on smaller polish items.
 
 For each round of execution:
 
-For each user-facing conversation turn, execute and close exactly one major active step from the remaining plan (`Priority 5`) until it is finished.
+When a plan defines a finite set of major active steps, each user-facing conversation turn should execute and close exactly one remaining major step before stopping.
 
-1. Do not stop until that step is completed in code, tests, or docs that support the step.
-2. Each step completed in a turn advances the cycle position.
-3. The remaining cycle is complete when `Priority 5` has been completed and retired from the active plan.
-4. When a step is complete, remove or retire that step in the plan (or its active slice) so the next turn does not repeat it.
-5. Record completion in the **Round Completion Log** below.
+1. Do not stop until that active step is completed in code, tests, or docs that support the step.
+2. When the active step is complete, remove or retire it in the plan (or its active slice) so the next turn does not repeat it.
+3. If no active near-term step remains, do not invent filler work; either wait for a new explicit priority or create a fresh plan first.
+4. Record completion in the **Round Completion Log** below.
 
 ## Round Completion Log
 
@@ -67,3 +67,4 @@ For each user-facing conversation turn, execute and close exactly one major acti
 - 2026-06-23: Completed Priority 2 step in this turn: completed MCP web preset/route rename chain by adding `astrabridge_web` preset application path in sidecar (`/api/router/mcp/preset/astrabridge-web`), adding `astrabridge_web` compatibility support in runtime MCP server discovery, and adding sidecar tests for new preset and `astrabridge_web` server activation.
 - 2026-06-23: Completed Priority 3 step in this turn: unified visible task evidence consumption by wiring workflow facts to the same task-inspector evidence path used by review/files/terminal panels, and refreshed `task-conversation` on runtime thread/turn/supervisor updates so provider handoff continuity stays visible.
 - 2026-06-23: Completed Priority 4 step in this turn: passed the isolated release workflow demo end to end, added smoke-mode browser low-noise behavior, filtered known nonblocking local runtime polling noise in browser smoke verdicts, and verified review/files/status/checkpoint flows in the visible in-app browser.
+- 2026-06-23: Completed Priority 5 step in this turn: removed DeepSeek hardcoding from native-kernel demo preparation, propagated current provider/profile/model settings through desktop and sidecar demo paths, and passed provider-neutral native-kernel acceptance on `qwen-default` with browser smoke evidence.

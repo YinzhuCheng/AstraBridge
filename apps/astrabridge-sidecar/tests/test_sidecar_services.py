@@ -9247,15 +9247,29 @@ class AstraBridgeServiceTests(unittest.TestCase):
             )
             runtime.attach_project_tools(tools)
 
-            response = tools.prepare_native_kernel_workflow_demo({})
+            response = tools.prepare_native_kernel_workflow_demo(
+                {
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3.7-plus",
+                    "effort": "medium",
+                    "permission_mode": "auto",
+                    "collaboration_mode": "default",
+                }
+            )
 
             self.assertTrue(response["ok"])
             self.assertEqual(response["execution_backend"], "native_kernel")
             self.assertEqual(response["thread_id"], "native-kernel-demo-thread")
+            self.assertEqual(response["profile_id"], "qwen-default")
+            self.assertEqual(response["provider_id"], "qwen")
+            self.assertEqual(response["model_id"], "qwen3.7-plus")
             self.assertTrue(response["baseline_commit"])
             self.assertEqual((workspace / "native_kernel_scorecard.py").read_text(encoding="utf-8"), 'def status():\n    return "ready"\n')
             self.assertTrue((workspace / ".git").is_dir())
             self.assertEqual((response["thread"] or {}).get("shellSettings", {}).get("execution_backend"), "native_kernel")
+            self.assertEqual((response["thread"] or {}).get("shellSettings", {}).get("profile_id"), "qwen-default")
+            self.assertEqual((response["thread"] or {}).get("shellSettings", {}).get("model"), "qwen3.7-plus")
 
             history = response["terminal_history"]
             commands = list(history["commands"])
@@ -9275,12 +9289,13 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(str(task.get("active_provider_thread_id") or ""), "native-kernel-demo-thread")
             self.assertEqual(str(task.get("title") or ""), "Native kernel demo")
             self.assertTrue(any(str(item.get("thread_id") or "") == "native-kernel-demo-thread" for item in list(task.get("provider_threads") or [])))
+            self.assertTrue(any(str(item.get("provider_id") or "") == "qwen" for item in list(task.get("provider_threads") or [])))
             self.assertTrue(any(str(item.get("kind") or "") == "command_execution" for item in list(task.get("diagnostic_refs") or [])))
             self.assertTrue(list(task.get("checkpoint_refs") or []))
 
             composite = conversation.conversation(task_id=str(task.get("task_id") or ""))["thread"]
             self.assertEqual(composite["active_provider_thread_id"], "native-kernel-demo-thread")
-            self.assertTrue(any(str(turn.get("provider_id") or "") == "deepseek" for turn in list(composite.get("turns") or [])))
+            self.assertTrue(any(str(turn.get("provider_id") or "") == "qwen" for turn in list(composite.get("turns") or [])))
             transcript_text = (workspace / ".astrabridge" / "task_transcripts.json").read_text(encoding="utf-8")
             self.assertIn("native-kernel-demo-thread", transcript_text)
             self.assertNotIn("Authorization", transcript_text)

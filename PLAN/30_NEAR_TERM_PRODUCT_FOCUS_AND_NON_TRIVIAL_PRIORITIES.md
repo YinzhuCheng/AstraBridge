@@ -70,13 +70,18 @@ Priority 2 hardening gap completed (2026-06-23): single-truth catalog/metadata/h
   - `astrabridge_sidecar/dogfood_run_service.py` now treats browser-smoke success as workflow-assertion success, while filtering known nonblocking local runtime polling noise instead of failing the whole demo on background fetch churn.
   - `apps/astrabridge-desktop/src/App.tsx` now opens browser smoke URLs in explicit `smoke=1` low-noise mode and disables background event/polling churn during smoke acceptance.
   - Acceptance passed on `http://127.0.0.1:4181/?sidecar=http://127.0.0.1:8820&smoke=1` with review/files/terminal/status/checkpoint nodes verified and screenshot evidence captured under `.astrabridge/captures/`.
+- **Priority 5 status:** completed in this branch as the minimal provider-neutral native-kernel gate.
+  - `astrabridge_sidecar/project_tools_service.py` no longer hardcodes native-kernel demo execution to DeepSeek; the demo now follows the selected `profile_id` / `provider_id` / `model` / reasoning and permission settings.
+  - `apps/astrabridge-desktop/src/App.tsx`, `src/api.ts`, and `src/types.ts` now pass current composer/provider settings into `/api/project/demo/native-kernel/prepare`, so the visible app path and sidecar demo path use the same provider-neutral contract.
+  - `apps/astrabridge-sidecar/tests/test_sidecar_services.py` now locks the native-kernel demo to a non-DeepSeek provider fixture (`qwen-default`) and asserts provider/model propagation through task lane state and composite task conversation.
+  - Acceptance passed on `http://127.0.0.1:4181/?sidecar=http://127.0.0.1:8826&smoke=1` with `astrabridge_native_kernel_workflow_v1` browser smoke status `pass`, screenshot evidence captured under `.astrabridge/captures/`, and task/thread/transcript state confirming `qwen-default` / `qwen` / `qwen3.7-plus`.
 
 ## 1.2 Execution Focus Guidance
 
 - Current branch scope should stay constrained:
-  1. keep the now-passing release workflow as baseline and avoid reopening it for cosmetic churn;
-  2. move directly to the narrow native-kernel cut on top of the same workflow/evidence contract;
-  3. keep additional provider additions or cosmetic work deferred until that native path is stable.
+  1. keep the now-passing release workflow and native-kernel workflow as baseline and avoid reopening them for cosmetic churn;
+  2. treat further work as a new planning cycle rather than extending the retired near-term slices ad hoc;
+  3. keep additional provider additions or cosmetic work deferred until the next explicit product priority is set.
 
 ## 2. Ranked Priorities
 
@@ -155,7 +160,9 @@ What "done enough" looks like:
 2. browser acceptance and sidecar validation both confirm it
 3. failures are explainable and recoverable
 
-## Priority 5: Minimal Native Kernel Cut, Not Full Native Expansion
+## ~~Priority 5: Minimal Native Kernel Cut, Not Full Native Expansion~~
+
+Completed on this branch. This is now repository baseline, not an active near-term slice.
 
 This matters, but it should stay scoped.
 
@@ -210,14 +217,9 @@ then it should normally be deferred.
 
 ## 5. Immediate Recommendation
 
-If only one major slice is chosen next, choose:
+The original near-term priority stack is now complete.
 
-**Minimal Native Kernel Cut scoped to the same event contract**
-
-If two slices are chosen next, choose:
-
-1. Minimal Native Kernel Cut scoped to the same event contract
-That most directly moves AstraBridge from "dependable app-server demo" to "provider-neutral product foundation."
+The next major slice should be chosen by a fresh product plan rather than by extending this retired focus file.
 
 ## 6. Near-term Execution Slices
 
@@ -236,4 +238,4 @@ That most directly moves AstraBridge from "dependable app-server demo" to "provi
   - Slice C status: completed (release workflow prepare + browser acceptance + visible in-app validation passed).
 
 - Slice D:
-  - keep Priority 5 native-kernel cut narrow now that Priority 4 acceptance is repeatable.
+  - Slice D status: completed (native-kernel demo now follows selected provider/profile/model settings and passed provider-neutral workflow acceptance).

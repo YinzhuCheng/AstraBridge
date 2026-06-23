@@ -3482,7 +3482,17 @@ function AppShell() {
     },
   });
   const prepareNativeKernelWorkflowDemo = useMutation({
-    mutationFn: api.prepareNativeKernelWorkflowDemo,
+    mutationFn: () => {
+      const settings = currentComposerSettings();
+      return api.prepareNativeKernelWorkflowDemo({
+        profile_id: settings.profile_id ?? undefined,
+        provider_id: activeProfile?.provider_id ?? undefined,
+        model: settings.model ?? undefined,
+        effort: settings.reasoning_effort ?? undefined,
+        permission_mode: settings.permission_mode,
+        collaboration_mode: settings.collaboration_mode,
+      });
+    },
     onSuccess: (response) => {
       if (response.task?.task_id) {
         queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
