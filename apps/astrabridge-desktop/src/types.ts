@@ -438,6 +438,13 @@ export type CodexModelCatalogEntry = Record<string, unknown> & {
   name?: string;
   model: string;
   context_window?: number;
+  source_status?: string;
+  catalog_version?: string | null;
+  source_provenance?: Record<string, unknown>;
+  recommended?: boolean;
+  default_for_provider?: boolean;
+  deprecated?: boolean;
+  verification_notes?: string;
 };
 
 export type EffectiveCatalogResponse = {

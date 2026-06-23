@@ -152,7 +152,7 @@ def default_seed_models() -> list[dict[str, Any]]:
             default_for_provider=True,
             source_status="official_docs",
             confidence="high",
-            verification_notes="AstraBridge direct MCP smoke passed for lcr_web on 2026-06-15; keep arbitrary external MCP tools conservative until model-initiated smoke passes.",
+            verification_notes="AstraBridge direct MCP smoke passed for astrabridge_web on 2026-06-15; keep external MCP tools conservative until model-initiated smoke passes.",
         ),
         {
             "id": "deepseek/deepseek-v4-flash",

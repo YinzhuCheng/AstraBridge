@@ -9533,6 +9533,34 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 docs.shutdown()
                 docs.server_close()
 
+    def test_llm_api_manager_effective_catalog_exposes_generated_catalog_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService(root / "profiles.json")
+            config = RouterConfigService(profiles, root / "router.json")
+            config.upsert_provider(
+                {
+                    "id": "kimi",
+                    "display_name": "Kimi",
+                    "adapter_type": "chat",
+                    "base_url": "https://api.moonshot.cn/v1",
+                    "default_model": "kimi-k2.7-code",
+                    "env_key": "KIMI_API_KEY",
+                }
+            )
+            manager = LlmApiManagerService(config, DummyRouter(), root / "manager")
+            catalog = manager.effective_catalog()
+            self.assertEqual(catalog["mode"], "anonymous")
+            self.assertTrue(catalog["model_count"] >= 1)
+            model_ids = {str(item.get("id")) for item in catalog["models"]}
+            self.assertIn("kimi/kimi-k2.7-code", model_ids)
+            matching = next(item for item in catalog["models"] if str(item.get("id")) == "kimi/kimi-k2.7-code")
+            self.assertEqual(matching["provider"], "kimi")
+            self.assertEqual(matching["source_status"], "official_docs")
+            self.assertEqual(matching["source_provenance"]["provider_id"], "kimi")
+            self.assertTrue(matching.get("catalog_version"))
+            self.assertIsInstance(matching.get("source_urls"), list)
+
     def test_llm_manager_health_preserves_secret_safe_response_diagnostics(self) -> None:
         class DiagnosticsRouter(DummyRouter):
             def test_model_case(self, *, provider_id: str, model_id: str, effort: str | None = None, temperature: float | None = None, stream: bool = False) -> dict[str, object]:
@@ -9660,6 +9688,102 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 "rate_limit",
             )
             self.assertNotIn("unit_secret", json.dumps(result, ensure_ascii=False))
+
+    def test_llm_manager_health_falls_back_to_generated_catalog_when_configured_models_missing(self) -> None:
+        class DocsHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                body = b"health-ok"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args) -> None:  # noqa: A003
+                return
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService(root / "profiles.json")
+            config = RouterConfigService(profiles, root / "router.json")
+            config.upsert_provider(
+                {
+                    "id": "deepseek",
+                    "display_name": "DeepSeek",
+                    "adapter_type": "chat",
+                    "base_url": "https://api.deepseek.com",
+                    "default_model": "deepseek-v4-pro",
+                    "env_key": "DEEPSEEK_API_KEY",
+                }
+            )
+
+            docs = ThreadingHTTPServer(("127.0.0.1", 0), DocsHandler)
+            docs_thread = threading.Thread(target=docs.serve_forever, daemon=True)
+            docs_thread.start()
+            generated_catalog = SimpleNamespace(
+                providers=[
+                    {
+                        "provider_id": "deepseek",
+                        "display_name": "DeepSeek",
+                        "source_status": "official_docs",
+                        "urls": [f"http://127.0.0.1:{docs.server_address[1]}/docs"],
+                    }
+                ],
+                models=[
+                    {
+                        "id": "deepseek/deepseek-v4-pro",
+                        "provider": "deepseek",
+                        "native_model": "deepseek-v4-pro",
+                        "display_name": "DeepSeek V4 Pro",
+                        "enabled": True,
+                        "advertised_context_window": 1_000_000,
+                        "source_urls": [f"http://127.0.0.1:{docs.server_address[1]}/docs"],
+                        "source_status": "official_docs",
+                        "catalog_version": "astrabridge-generated-catalog-v1",
+                    }
+                ],
+                sources=[],
+                generated_at="2026-06-23T00:00:00+00:00",
+                catalog_version="astrabridge-generated-catalog-v1",
+                review_path=str(root / "model_catalog" / "review.md"),
+                models_lock_path=str(root / "model_catalog" / "models.lock.json"),
+                sources_lock_path=str(root / "model_catalog" / "sources.lock.json"),
+            )
+
+            try:
+                manager = LlmApiManagerService(config, DummyRouter(), root / "manager")
+                with patch("astrabridge_sidecar.llm_api_manager_service.current_generated_catalog", return_value=generated_catalog):
+                    manager.create_user({"username": "user", "password": "vault-password-123"})
+                    manager.login({"username": "user", "password": "vault-password-123"})
+                    manager.save_key(
+                        {
+                            "provider_id": "deepseek",
+                            "label": "DeepSeek",
+                            "secret": "unit_secret_deepseek_value",
+                            "env_key": "DEEPSEEK_API_KEY",
+                        }
+                    )
+
+                    health = manager.run_health({"model_ids": ["deepseek/deepseek-v4-pro"], "efforts": ["high"], "temperatures": [0], "web_smoke": True})
+
+                    result = None
+                    for item in health["results"]:
+                        if item.get("model") == "deepseek/deepseek-v4-pro":
+                            result = item
+                            break
+                    self.assertIsNotNone(result)
+                    self.assertTrue(health["model_health"].get("deepseek/deepseek-v4-pro", {}).get("ok"))
+                    self.assertEqual(result["model"], "deepseek/deepseek-v4-pro")
+                    self.assertEqual(result["provider"], "deepseek")
+                    self.assertEqual(result["web_smoke_status"], "pass")
+                    self.assertEqual(result["reasoning_effort"], "pass")
+                    models = [item for item in config.models() if str(item.get("id")) == "deepseek/deepseek-v4-pro"]
+                    self.assertEqual(len(models), 1)
+                    self.assertEqual(models[0]["id"], "deepseek/deepseek-v4-pro")
+                    self.assertEqual(models[0]["source_status"], "official_docs")
+            finally:
+                docs.shutdown()
+                docs.server_close()
 
     def test_llm_manager_effective_catalog_merges_generated_provider_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

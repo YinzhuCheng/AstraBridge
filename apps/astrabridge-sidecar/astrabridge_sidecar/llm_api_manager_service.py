@@ -302,6 +302,7 @@ class LlmApiManagerService:
         }
 
     def run_health(self, payload: dict[str, Any]) -> dict[str, Any]:
+        effective_models = {str(item.get("id") or item.get("native_model") or ""): item for item in effective_model_records(self._router_config.models(), include_disabled=False)}
         model_ids = [str(item) for item in list(payload.get("model_ids") or []) if str(item).strip()]
         if not model_ids and payload.get("model_id"):
             model_ids = [str(payload.get("model_id"))]
@@ -310,16 +311,15 @@ class LlmApiManagerService:
         temperatures = [item for item in temperatures if item is not None]
         include_web_smoke = bool(payload.get("web_smoke", False))
         if not model_ids:
-            model_ids = [str(item.get("id")) for item in self._router_config.models() if item.get("enabled", True)][:4]
+            model_ids = [str(item.get("id")) for item in effective_models.values()][:4]
 
-        providers = {str(item.get("id")): item for item in self._router_config.providers()}
-        models = {str(item.get("id")): item for item in self._router_config.models()}
+        providers = {str(item.get("id")): item for item in self._effective_providers()}
         stored = self.health_results()
         results = list(stored.get("results") or [])
         model_health = dict(stored.get("model_health") or {})
         run_id = new_id("HEALTH")
         for model_id in model_ids:
-            model = models.get(model_id)
+            model = effective_models.get(model_id)
             if not model:
                 result = self._health_skip(run_id, model_id, "model_not_found", "Model is not in metadata.")
                 results.append(result)

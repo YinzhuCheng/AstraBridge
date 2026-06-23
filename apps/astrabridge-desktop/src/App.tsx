@@ -1881,7 +1881,14 @@ function RouterControlCenter({
         .includes(needle),
     );
   }, [modelSearch, routerConfig.data?.models]);
-  const selectedCatalogEntry = effectiveCatalog.data?.models?.[0] ?? null;
+  const selectedCatalogEntry = useMemo(() => {
+    const entries = effectiveCatalog.data?.models ?? [];
+    const selectedId = modelDraft?.id ?? "";
+    if (!selectedId) {
+      return entries[0] ?? null;
+    }
+    return entries.find((item) => item.id === selectedId) ?? null;
+  }, [effectiveCatalog.data?.models, modelDraft?.id]);
 
   async function handlePayloadPreview() {
     const sourceProvider = providerDraft ?? selectedProvider;
@@ -2254,6 +2261,19 @@ function RouterControlCenter({
                 </div>
                 <label className="field"><span>Source URLs</span><textarea rows={3} value={(modelDraft.source_urls ?? []).join("\n")} onChange={(event) => setModelDraft({ ...modelDraft, source_urls: splitList(event.target.value) })} /></label>
                 <label className="field"><span>Verification notes</span><textarea rows={3} value={modelDraft.verification_notes ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, verification_notes: event.target.value })} /></label>
+              </div>
+              <div className="metadata-section">
+                <h4>Generated catalog provenance</h4>
+                <div className="form-grid">
+                  <label className="field"><span>Catalog version</span><input value={effectiveCatalog.data?.catalog_version ?? ""} readOnly /></label>
+                  <label className="field"><span>Models lock</span><input value={effectiveCatalog.data?.models_lock_path ?? ""} readOnly /></label>
+                  <label className="field"><span>Sources lock</span><input value={effectiveCatalog.data?.sources_lock_path ?? ""} readOnly /></label>
+                  <label className="field"><span>Review</span><input value={effectiveCatalog.data?.review_path ?? ""} readOnly /></label>
+                  <label className="field"><span>Source status</span><input value={selectedCatalogEntry?.source_status ?? ""} readOnly /></label>
+                  <label className="field"><span>Source provenance</span><input value={JSON.stringify(selectedCatalogEntry?.source_provenance ?? {})} readOnly /></label>
+                  <label className="field"><span>Catalog version (model)</span><input value={selectedCatalogEntry?.catalog_version ?? ""} readOnly /></label>
+                </div>
+                <label className="field"><span>Recommended / defaults / deprecated</span><input value={`recommended=${selectedCatalogEntry?.recommended ? "yes" : "no"} default=${selectedCatalogEntry?.default_for_provider ? "yes" : "no"} deprecated=${selectedCatalogEntry?.deprecated ? "yes" : "no"}`} readOnly /></label>
               </div>
               <div className="metadata-section">
                 <h4>Effective Codex catalog preview</h4>

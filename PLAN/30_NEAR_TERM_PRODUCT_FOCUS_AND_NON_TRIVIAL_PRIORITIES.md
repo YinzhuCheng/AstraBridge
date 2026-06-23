@@ -60,9 +60,9 @@ Near-term execution should not optimize for:
 
 What remains before calling Priority 2 complete:
 
-1. remove any remaining public paths that still document or expose legacy `lcr_*` model sources (if any) outside compatibility-only tooling names;
+1. ~~remove any remaining public paths that still document or expose legacy `lcr_*` model sources (if any) outside compatibility-only tooling names;~~ (checked: generation notes and metadata model provenance now avoid `lcr_*` in exposed status payloads)
 2. complete one more router/metadata smoke pass using generated catalog source/status as the single truth;
-3. add a short, user-visible acceptance check that provider-truth fields appear in metadata model panel.
+3. add a short, user-visible acceptance check that provider-truth fields appear in metadata model panel. (in progress: runtime metadata panel now shows catalog version, lock paths, source provenance, source status; remaining is explicit regression lock-in)
 
 ## 1.2 Execution Focus Guidance
 
