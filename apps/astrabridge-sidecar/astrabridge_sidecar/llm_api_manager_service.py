@@ -664,8 +664,8 @@ class LlmApiManagerService:
     def _web_smoke(self, model: dict[str, Any], provider: dict[str, Any]) -> dict[str, Any]:
         urls = [str(item) for item in list(model.get("source_urls") or []) if str(item).startswith(("http://", "https://"))]
         if not urls:
-            provider_id = str(provider.get("id") or provider.get("provider_id") or "")
-            urls = self._source_urls_for_provider(provider_id)
+            provider_urls = [str(item) for item in list(provider.get("source_urls") or []) if str(item).startswith(("http://", "https://"))]
+            urls = provider_urls
         status = "blocked_no_source"
         detail = ""
         for url in urls[:3]:
@@ -689,24 +689,6 @@ class LlmApiManagerService:
             "last_web_verified_at": now_iso(),
             "web_smoke_detail": detail,
         }
-
-    def _source_urls_for_provider(self, provider_id: str) -> list[str]:
-        lowered = provider_id.lower()
-        if "deepseek" in lowered:
-            return ["https://api-docs.deepseek.com/zh-cn/"]
-        if "kimi" in lowered or "moonshot" in lowered:
-            return [
-                "https://platform.moonshot.ai/docs/overview",
-                "https://platform.moonshot.ai/docs/guide/start-using-kimi-api",
-                "https://platform.kimi.com/docs/pricing/chat",
-            ]
-        if "qwen" in lowered or "dashscope" in lowered:
-            return ["https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions", "https://qwen.ai/apiplatform"]
-        if "glm" in lowered or "zai" in lowered or "zhipu" in lowered:
-            return ["https://open.bigmodel.cn/dev/api", "https://open.bigmodel.cn/pricing"]
-        if "yunwu" in lowered:
-            return ["https://yunwu.ai/pricing?group=Codex%E4%B8%93%E5%B1%9E"]
-        return []
 
     def _health_skip(self, run_id: str, model_id: str, code: str, reason: str) -> dict[str, Any]:
         provider = model_id.split("/", 1)[0] if "/" in model_id else ""

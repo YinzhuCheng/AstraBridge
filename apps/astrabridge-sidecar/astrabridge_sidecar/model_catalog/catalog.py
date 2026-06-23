@@ -465,17 +465,5 @@ def _profile_for(provider_id: str, model: str) -> Any | None:
         try:
             return get_provider_profile(resolve_provider_id(text))
         except ValueError:
-            lowered = text.lower()
-            if "deepseek" in lowered:
-                return get_provider_profile("deepseek")
-            if "kimi" in lowered or "moonshot" in lowered:
-                return get_provider_profile("kimi")
-            if "qwen" in lowered or "dashscope" in lowered:
-                return get_provider_profile("qwen")
-            if any(token in lowered for token in ("glm", "zai", "zhipu", "bigmodel")):
-                return get_provider_profile("glm")
-            if "yunwu" in lowered:
-                return get_provider_profile("yunwu")
-            if "openai" in lowered or "gpt-" in lowered:
-                return get_provider_profile("openai")
+            continue
     return None

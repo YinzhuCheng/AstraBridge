@@ -9968,7 +9968,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 config_text = (root / "embedded_codex_home" / "config.toml").read_text(encoding="utf-8")
                 self.assertIn('model = "deepseek-verify/deepseek-v4-pro"', config_text)
                 self.assertIn("model_catalog_json =", config_text)
-                self.assertIn("model_context_window = 1000000", config_text)
+                self.assertIn("model_context_window = 128000", config_text)
                 self.assertIn("model_auto_compact_token_limit = 4096", config_text)
                 model_catalog = json.loads((root / "embedded_codex_home" / "models" / "astrabridge-models.json").read_text(encoding="utf-8"))
                 model_info = model_catalog["models"][0]
@@ -13073,6 +13073,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             provider = config.upsert_provider(
                 {
                     "id": "deepseek-alt",
+                    "provider_family": "deepseek",
                     "display_name": "DeepSeek Alt",
                     "enabled": True,
                     "adapter_type": "chat",
@@ -13119,6 +13120,32 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(profile["goal_support"]["thread_goal"], "app_server_native")
             self.assertEqual(profile["context_compaction_support"]["manual_compact"], "app_server_native")
             self.assertEqual(profile["codex_builtin_tools"]["shell_command"]["support"], "verified")
+
+    def test_router_config_requires_explicit_provider_family_for_custom_provider_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            config = RouterConfigService(profiles, Path(temp) / "router.json")
+            config.upsert_provider(
+                {
+                    "id": "deepseek-alt",
+                    "display_name": "DeepSeek Alt",
+                    "adapter_type": "chat",
+                    "base_url": "https://api.deepseek.com",
+                    "default_model": "deepseek-v4-pro",
+                    "env_key": "DEEPSEEK_API_KEY",
+                    "auth_mode": "env_ref",
+                    "proxy_mode": "direct",
+                    "proxy_url": "",
+                }
+            )
+            provider = next(item for item in config.providers() if item["id"] == "deepseek-alt")
+            model = next(item for item in config.models() if item["id"] == "deepseek-alt/deepseek-v4-pro")
+
+            self.assertIsNone(provider.get("provider_family"))
+            self.assertIsNone(provider.get("provider_profile_id"))
+            self.assertIsNone(provider.get("supported_reasoning_levels"))
+            self.assertIsNone(model.get("provider_profile_id"))
+            self.assertEqual(model["supported_reasoning_levels"], [])
 
     def test_profile_service_backfills_provider_policy_metadata_for_custom_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

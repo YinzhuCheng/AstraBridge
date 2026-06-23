@@ -130,6 +130,7 @@ class RouterConfigService:
             raise ValueError("Provider id is required.")
         provider_family = _provider_family(
             provider_id,
+            provider_family=provider.get("provider_family"),
             adapter_profile=provider.get("adapter_profile"),
             wire_api=provider.get("adapter_type") or provider.get("wire_api"),
             base_url=provider.get("base_url"),
@@ -310,6 +311,7 @@ class RouterConfigService:
             "provider_id": provider_id,
             "provider_family": _provider_family(
                 provider_id,
+                provider_family=provider_id,
                 wire_api=profile.get("wire_api"),
                 base_url=profile.get("base_url"),
                 model=profile.get("model"),
@@ -339,6 +341,7 @@ class RouterConfigService:
         profile_id = "openai-compatible" if provider["id"] == "openai" else f"{provider['id']}-default"
         provider_family = _provider_family(
             provider.get("provider_family") or provider.get("adapter_profile") or provider.get("provider_id") or provider.get("id"),
+            provider_family=provider.get("provider_family"),
             wire_api=provider.get("adapter_type"),
             base_url=provider.get("base_url"),
             model=default_model,
@@ -384,6 +387,7 @@ class RouterConfigService:
     def _default_model(self, provider: dict[str, Any], native_model: str) -> dict[str, Any]:
         provider_family = _provider_family(
             provider.get("provider_family") or provider.get("adapter_profile") or provider.get("id") or provider.get("provider_id"),
+            provider_family=provider.get("provider_family"),
             wire_api=provider.get("adapter_type"),
             base_url=provider.get("base_url"),
             model=native_model,
@@ -418,6 +422,7 @@ class RouterConfigService:
                 continue
             provider_family = _provider_family(
                 provider.get("provider_family") or provider_id,
+                provider_family=provider.get("provider_family"),
                 adapter_profile=provider.get("adapter_profile"),
                 wire_api=provider.get("adapter_type"),
                 base_url=provider.get("base_url"),
@@ -577,33 +582,17 @@ def _optional_float(value: Any, fallback: float) -> float:
 def _provider_family(
     provider_id: Any,
     *,
+    provider_family: Any = None,
     adapter_profile: Any = None,
     wire_api: Any = None,
     base_url: Any = None,
     model: Any = None,
 ) -> str | None:
-    for candidate in (adapter_profile, provider_id):
+    for candidate in (provider_family, adapter_profile, provider_id, wire_api, base_url, model):
         try:
             return resolve_provider_id(str(candidate or "").strip())
         except ValueError:
             continue
-    signals = " ".join(
-        str(value or "").strip().lower()
-        for value in (provider_id, wire_api, base_url, model)
-        if str(value or "").strip()
-    )
-    if any(token in signals for token in ("deepseek",)):
-        return "deepseek"
-    if any(token in signals for token in ("moonshot", "kimi")):
-        return "kimi"
-    if any(token in signals for token in ("dashscope", "qwen")):
-        return "qwen"
-    if any(token in signals for token in ("bigmodel", "glm", "zai", "zhipu")):
-        return "glm"
-    if "yunwu" in signals:
-        return "yunwu"
-    if "openai" in signals:
-        return "openai"
     return None
 
 

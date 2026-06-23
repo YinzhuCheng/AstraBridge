@@ -1336,7 +1336,16 @@ class RouterService:
         return list(deduped.values())
 
     def _adapter_for(self, profile: dict[str, Any]) -> RegistryProviderTransport:
-        provider_family = _provider_family(profile.get("provider_family") or profile.get("adapter_profile") or profile.get("provider_id")) or "openai"
+        provider_family = (
+            _provider_family(
+                profile.get("adapter_profile"),
+                provider_family=profile.get("provider_family"),
+                source_provider_id=profile.get("provider_id"),
+                base_url=profile.get("base_url"),
+                model=profile.get("model"),
+            )
+            or "openai"
+        )
         if provider_family == "qwen":
             return RegistryQwenResponsesTransport(self, profile)
         if provider_family == "deepseek":
@@ -1607,11 +1616,18 @@ class RouterService:
                 policy = str(item.get("temperature_adapter_policy") or "").strip()
                 if policy:
                     return policy
-        signals = " ".join(str(profile.get(key) or "") for key in ("provider_id", "base_url", "model", "adapter_profile")).lower()
-        if "qwen" in signals or "dashscope" in signals:
-            return "qwen_omit_zero_clamp_1"
-        if "kimi" in signals or "moonshot" in signals:
-            return "kimi_only_temperature_1"
+        provider_family = _provider_family(
+            profile.get("adapter_profile"),
+            provider_family=profile.get("provider_family"),
+            source_provider_id=profile.get("provider_id"),
+            base_url=profile.get("base_url"),
+            model=str(profile.get("model") or ""),
+        )
+        if provider_family:
+            try:
+                return get_provider_profile(provider_family).safety_policy.temperature_adapter_policy
+            except ValueError:
+                pass
         return "pass_through_0_2"
 
     def _request_upstream(self, *, parsed: urllib.parse.ParseResult, payload: dict[str, Any], bearer: str, stream: bool) -> http.client.HTTPResponse:
@@ -1940,10 +1956,15 @@ class RouterService:
 
 
 def _fallback_context_window(profile: dict[str, Any]) -> int | None:
-    signals = " ".join(str(profile.get(key) or "") for key in ("provider_id", "base_url", "model")).lower()
-    provider = str(profile.get("provider_family") or profile.get("provider_id") or "")
+    provider = _provider_family(
+        profile.get("adapter_profile"),
+        provider_family=profile.get("provider_family"),
+        source_provider_id=profile.get("provider_id"),
+        base_url=profile.get("base_url"),
+        model=profile.get("model"),
+    )
     model = str(profile.get("model") or "")
-    return known_context_window(provider, model) or known_context_window(signals, signals)
+    return known_context_window(provider, model) if provider else None
 
 
 def _optional_positive_int(value: Any) -> int | None:
@@ -1962,27 +1983,21 @@ def _optional_float(value: Any) -> float | None:
     return parsed
 
 
-def _provider_family(provider_id: Any, *, base_url: Any = None, model: Any = None) -> str | None:
-    try:
-        return resolve_provider_id(str(provider_id or "").strip())
-    except ValueError:
-        signals = " ".join(
-            str(value or "").strip().lower()
-            for value in (provider_id, base_url, model)
-            if str(value or "").strip()
-        )
-        if "deepseek" in signals:
-            return "deepseek"
-        if "moonshot" in signals or "kimi" in signals:
-            return "kimi"
-        if "dashscope" in signals or "qwen" in signals:
-            return "qwen"
-        if any(token in signals for token in ("bigmodel", "glm", "zai", "zhipu")):
-            return "glm"
-        if "yunwu" in signals:
-            return "yunwu"
-        if "openai" in signals:
-            return "openai"
+def _provider_family(
+    seed: Any,
+    *,
+    adapter_profile: Any = None,
+    provider_family: Any = None,
+    source_provider_id: Any = None,
+    base_url: Any = None,
+    model: Any = None,
+) -> str | None:
+    candidates = (seed, provider_family, adapter_profile, source_provider_id, base_url, model)
+    for candidate in candidates:
+        try:
+            return resolve_provider_id(str(candidate or "").strip())
+        except ValueError:
+            continue
     return None
 
 

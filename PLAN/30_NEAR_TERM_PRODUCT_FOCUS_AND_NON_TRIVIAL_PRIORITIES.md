@@ -34,17 +34,35 @@ Near-term execution should not optimize for:
 - Completed by sidecar test harness team:
   - Extended browser smoke presets to assert checkpoint/review/diagnostic workflow facts and artifacts (`task-fact-*`, `workflow-fact-*`) rather than only presence of basic app chrome.
   - Added corresponding unit test assertions in `apps/astrabridge-sidecar/tests/test_sidecar_services.py` to lock in the new acceptance expectations.
-  - Verified `python -B -m unittest discover -s apps/astrabridge-sidecar/tests -p test_sidecar_services.py` passes (331 tests).
-  - Verified `cmd /c npm run test` in `apps/astrabridge-desktop` passes (61 tests).
+- Verified `python -B -m unittest discover -s apps/astrabridge-sidecar/tests -p test_sidecar_services.py` passes (332 tests).
+- Verified `cmd /c npm run test` in `apps/astrabridge-desktop` passes (61 tests).
+- Verified `cmd /c npm run build` in `apps/astrabridge-desktop` passes.
 - Follow-up hardening completed on this branch:
   - Removed heuristic fallback logic in `astrabridge_sidecar/model_catalog/catalog.py` from `known_context_window()` and `known_input_modalities()`, so catalog/profile-derived facts now take precedence.
   - Removed provider-name prefix hardcoding from `apps/astrabridge-desktop/src/App.tsx` for active model provider inference; Composer now prefers explicit model metadata.
+  - Hardened `RouterConfigService` to require explicit `provider_family` to consume provider profile semantics; custom provider ids no longer inherit unknown-family profile defaults.
+  - Tightened LLM API smoke logic to use only configured `source_urls` on model/provider records, removing legacy hardcoded provider URL fallbacks.
   - Added regression test to ensure each new `.abproj` gets an isolated runtime bundle root, with independent `project_runtime_root` and `codex_home_root` values under appdata runtime.
   - Reworked storage policy documentation in `docs/SECURITY_AND_ISOLATION.md` to make the default isolation model explicit (workspace state roots vs runtime roots vs injected launch env vars).
   - Reasserted router normalization test resilience (provider-error actionable hint can route to auth/connectivity/context hints instead of a single phrase).
 - Interpretation against current priorities:
   - **Priority 1 (Isolation Hardening):** strengthened by asserting workflow evidence surfaces and checkpoint/review artifacts that are part of the isolation/audit picture.
   - **Priority 3 (CodingEvent Contract Unification):** improved by forcing the product’s high-value workflow surfaces to remain in one observable acceptance trace.
+
+### Execution status snapshot
+
+- **Status:** `Priority 1` is considered complete for this branch, and now enters the repository baseline.
+- **Priority 2 status:** started and on-track. Core provider/profile truth paths are consolidated in:
+  - `astrabridge_sidecar/model_catalog/catalog.py` (`known_*` no legacy model-name heuristics)
+  - `astrabridge_sidecar/router_service.py` / `astrabridge_sidecar/router_config_service.py` (`provider_family` required for implicit profile inheritance)
+  - `astrabridge_sidecar/llm_api_manager_service.py` (`web_smoke` source URL now catalog-driven)
+  - `astrabridge_sidecar/tests/test_sidecar_services.py` (provider_family regression guard)
+
+What remains before calling Priority 2 complete:
+
+1. remove any remaining public paths that still document or expose legacy `lcr_*` model sources (if any) outside compatibility-only tooling names;
+2. complete one more router/metadata smoke pass using generated catalog source/status as the single truth;
+3. add a short, user-visible acceptance check that provider-truth fields appear in metadata model panel.
 
 ## 1.2 Execution Focus Guidance
 
@@ -214,3 +232,17 @@ If two slices are chosen next, choose:
 2. ProviderProfile Plus Generated Catalog Single-Truth Consolidation
 
 That pair most directly moves AstraBridge from "promising demo" to "dependable internal app."
+
+## 6. Near-term Execution Slices
+
+- Slice A (immediate):
+  - finish Priority 2 hardening gap pass:
+    - keep `lcr_*` usage only in explicit compatibility aliases,
+    - complete one metadata/health smoke validation against generated catalog records,
+    - keep desktop status and model panels aligned to provider-family derived fields.
+
+- Slice B:
+  - complete Priority 3 visible event-contract pass around task/thread evidence and handoff rows.
+
+- Slice C:
+  - keep Priority 4 release-style end-to-end workflow as the readiness gate before broader expansion.
