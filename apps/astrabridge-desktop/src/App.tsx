@@ -3244,6 +3244,7 @@ function AppShell() {
 
   const currentTask = projectTasks.data?.current_task ?? null;
   const selectedThreadId = project.current_thread_id ?? currentTask?.active_provider_thread_id ?? threads.data?.threads[0]?.id ?? null;
+  const sendTargetThreadId = currentTask?.active_provider_thread_id ?? selectedThreadId;
   const selectedThreadSummary = threads.data?.threads.find((thread) => thread.id === selectedThreadId);
   const selectedTaskProviderThread = currentTask?.provider_threads.find((thread) => thread.thread_id === selectedThreadId) ?? null;
   const selectedThreadProfileId =
@@ -4405,7 +4406,7 @@ function AppShell() {
 
   async function handleSend() {
     setSendFailure(null);
-    if (!selectedThreadId) {
+    if (!sendTargetThreadId) {
       const threadStage = t(locale, "send_stage_thread");
       const turnStage = t(locale, "send_stage_turn");
       let currentStage = threadStage;
@@ -4438,16 +4439,16 @@ function AppShell() {
         return;
       }
     }
-    const turnStage = t(locale, "send_stage_turn");
-    const settings = currentComposerSettings();
-    try {
-      setSendStage(turnStage);
-      await startTurn.mutateAsync({
-        thread_id: selectedThreadId,
-        profile_id: settings.profile_id,
-        text: composerText,
-        attachments,
-        model: settings.model,
+      const turnStage = t(locale, "send_stage_turn");
+      const settings = currentComposerSettings();
+      try {
+        setSendStage(turnStage);
+        await startTurn.mutateAsync({
+          thread_id: sendTargetThreadId,
+          profile_id: settings.profile_id,
+          text: composerText,
+          attachments,
+          model: settings.model,
         effort: settings.reasoning_effort,
         permission_mode: settings.permission_mode,
         collaboration_mode: settings.collaboration_mode,
