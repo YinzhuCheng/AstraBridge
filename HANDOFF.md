@@ -48,15 +48,14 @@ Passed:
 
 Not yet green:
 
-- Full inherited sidecar unittest suite still needs migration cleanup. Current failures are mostly stale state-directory assertions, old asset-context wording, rejected legacy project behavior, and test environment assumptions around `ASTRABRIDGE_CODEX_HOME`.
-- Windows `node` is not on the current shell PATH, so desktop TypeScript/Vite build was not run in this session.
+- Earlier legacy migration failures are resolved. Current periodic checks should continue to run both full sidecar and desktop suites before major branch merges.
 
 Recommended next test work:
 
 1. Add a test fixture that sets both `ASTRABRIDGE_APPDATA` and `ASTRABRIDGE_CODEX_HOME` to temp paths for every sidecar test.
-2. Rename stale state-directory expectations to `.astrabridge`.
+2. Keep stale state-directory expectations aligned to `.astrabridge` in any new or touched migration tests.
 3. Rewrite legacy project tests around explicit rejection of old project formats; AstraBridge no longer imports `.lcrproj`, `.lcr`, `.codexproj`, or `.codex-shell` state.
-4. Install desktop dependencies in the new repo and run `npm run build`.
+4. Keep provider/profile truth drift checks active around catalog/prefs and runtime/router usage.
 ## Private credentials handoff
 
 AstraBridge can point developers to local private-property credential locations, but actual secrets must remain outside public git history.
