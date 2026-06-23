@@ -8349,6 +8349,21 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(any(item.get("selector") == "[data-testid='terminal-panel']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='status-panel-goal']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-recovery']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='sidebar-nav-setup']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='setup-tab-saves']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='saves-panel']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(
+                any(
+                    item.get("type") == "expect_selector_count_at_least"
+                    and item.get("selector") == "[data-testid='checkpoint-row']"
+                    and item.get("count") == 1
+                    for item in actions
+                    if isinstance(item, dict)
+                )
+            )
+            self.assertTrue(any(item.get("selector") == "[data-testid='checkpoint-preview-button']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='checkpoint-preview-panel']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='setup-back-to-chat']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='status-panel-goal']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(
                 any(
@@ -14703,6 +14718,45 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual((result.get("goal") or {}).get("objective"), "Ship the scorecard")
             current = tasks.current_task()
             missing = [item for item in current["provider_threads"] if item["thread_id"] == "thread-missing"][0]
+            self.assertEqual(missing["missing_reason"], "goal_thread_missing")
+            self.assertTrue(any(event.get("type") == "goal_thread_missing" for event in runtime._events))
+
+    def test_runtime_service_get_goal_treats_invalid_thread_id_as_recoverable_missing(self) -> None:
+        class FakeClient:
+            def request(self, method, params):  # noqa: ANN001
+                raise JsonRpcError(
+                    "invalid thread id: invalid character: expected an optional prefix of `urn:uuid:` "
+                    "followed by [0-9a-fA-F-], found `t` at 1"
+                )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Same task",
+                thread_id="thread-demo-kimi-review",
+                settings={
+                    "profile_id": "kimi-default",
+                    "provider_id": "kimi",
+                    "model": "kimi-k2.7-code",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id", "kimi")}  # type: ignore[method-assign]
+            runtime._ensure_client = lambda runtime_status: FakeClient()  # type: ignore[method-assign]
+
+            result = runtime.get_goal({"provider_id": "kimi", "profile_id": "kimi-default"}, "thread-demo-kimi-review")
+
+            self.assertEqual(result["status"], "thread_missing")
+            self.assertEqual(result["thread_id"], "thread-demo-kimi-review")
+            current = tasks.current_task()
+            missing = [item for item in current["provider_threads"] if item["thread_id"] == "thread-demo-kimi-review"][0]
             self.assertEqual(missing["missing_reason"], "goal_thread_missing")
             self.assertTrue(any(event.get("type") == "goal_thread_missing" for event in runtime._events))
 

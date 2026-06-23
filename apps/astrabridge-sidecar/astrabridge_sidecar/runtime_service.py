@@ -1862,7 +1862,11 @@ class RuntimeService:
     @staticmethod
     def _is_thread_not_found_error(error: Exception) -> bool:
         message = str(error).lower()
-        return "thread not found" in message or "thread not loaded" in message
+        return (
+            "thread not found" in message
+            or "thread not loaded" in message
+            or "invalid thread id" in message
+        )
 
     def _thread_exists(self, client: AppServerClient, thread_id: str) -> bool:
         if not str(thread_id or "").strip():

@@ -30,6 +30,7 @@ import type {
   McpServerConfig,
   PermissionMode,
   Profile,
+  ProjectCheckpoint,
   ProjectFile,
   ProjectFilePreview,
   ProjectFilesTree,
@@ -1483,9 +1484,11 @@ function useResizablePane(kind: "left" | "right") {
 function RouterControlCenter({
   locale,
   queryClient,
+  fallbackCheckpoints,
 }: {
   locale: "en" | "zh-CN";
   queryClient: ReturnType<typeof useQueryClient>;
+  fallbackCheckpoints: ProjectCheckpoint[];
 }) {
   const project = useAppStore((store) => store.project);
   const routerConfig = useQuery({ queryKey: ["router-config"], queryFn: api.routerConfig, refetchInterval: 5000 });
@@ -1497,7 +1500,7 @@ function RouterControlCenter({
   const mcpConfig = useQuery({ queryKey: ["mcp-config"], queryFn: api.mcpConfig, refetchInterval: 5000 });
   const dogfoodRun = useQuery({ queryKey: ["dogfood-run"], queryFn: api.dogfoodRun, refetchInterval: 5000 });
   const dogfoodAssets = useQuery({ queryKey: ["dogfood-assets"], queryFn: api.dogfoodAssets, refetchInterval: 7000, retry: false });
-  const projectSaves = useQuery({ queryKey: ["project-saves"], queryFn: api.projectSaves, refetchInterval: 7000 });
+  const projectSaves = useQuery({ queryKey: ["project-saves", project?.project_id], queryFn: api.projectSaves, refetchInterval: 7000 });
   const setupTabs = ["login", "users", "keys", "providers", "models", "health", "mcp", "runtime", "saves", "dogfood", "reports"] as const;
   const [tab, setTab] = useState<(typeof setupTabs)[number]>("login");
   const [providerDraft, setProviderDraft] = useState<RouterProvider | null>(null);
@@ -1515,7 +1518,7 @@ function RouterControlCenter({
   const [managedKeyDraft, setManagedKeyDraft] = useState({ label: "", secret: "", env_key: "" });
   const [selectedKeyId, setSelectedKeyId] = useState("");
   const [selectedProviderId, setSelectedProviderId] = useState("");
-  const mcpStatus = useQuery({ queryKey: ["mcp-status", selectedProviderId], queryFn: () => api.mcpStatus({ profile_id: selectedProviderId ? `${selectedProviderId}-default` : undefined, detail: "toolsAndAuthOnly" }), enabled: Boolean(selectedProviderId), refetchInterval: 7000, retry: false });
+  const mcpStatus = useQuery({ queryKey: ["mcp-status", selectedProviderId], queryFn: () => api.mcpStatus({ profile_id: selectedProviderId ? `${selectedProviderId}-default` : undefined, detail: "toolsAndAuthOnly" }), enabled: tab === "mcp" && Boolean(selectedProviderId), refetchInterval: 7000, retry: false });
   const [wslSetupDistro, setWslSetupDistro] = useState("Ubuntu-24.04");
   const wslDependencies = useQuery({ queryKey: ["wsl-dependencies", wslSetupDistro], queryFn: () => api.wslDependencies(wslSetupDistro), refetchInterval: 15000, retry: false });
   const [modelSearch, setModelSearch] = useState("");
@@ -1550,6 +1553,10 @@ function RouterControlCenter({
     [project, dogfoodSmokeLabel],
   );
   const isolationSummary = useMemo(() => isolationAuditSummary(isolationAudit.data), [isolationAudit.data]);
+  const visibleCheckpoints = useMemo(() => {
+    const saves = projectSaves.data?.saves ?? [];
+    return saves.length > 0 ? saves : fallbackCheckpoints;
+  }, [fallbackCheckpoints, projectSaves.data?.saves]);
 
   useEffect(() => {
     const current = dogfoodScreenshotPath.trim();
@@ -1942,7 +1949,13 @@ function RouterControlCenter({
         </div>
         <div className="settings-nav-list">
           {setupTabs.map((item) => (
-            <button key={item} type="button" className={tab === item ? "settings-nav-item active" : "settings-nav-item"} onClick={() => setTab(item as typeof tab)}>
+            <button
+              key={item}
+              type="button"
+              data-testid={`setup-tab-${item}`}
+              className={tab === item ? "settings-nav-item active" : "settings-nav-item"}
+              onClick={() => setTab(item as typeof tab)}
+            >
               <span>{t(locale, `setup_tab_${item}`)}</span>
             </button>
           ))}
@@ -2484,28 +2497,36 @@ function RouterControlCenter({
       ) : null}
 
       {tab === "saves" ? (
-        <div className="manager-panel">
+        <div className="manager-panel" data-testid="saves-panel">
           <div className="manager-hero">
             <div>
               <span className="eyebrow">检查点</span>
               <h3>保存 / 载入</h3>
               <p className="muted">本地检查点保存在工作区 `.astrabridge/saves` 下。这里对 Git 只读，不会创建 commit、tag、remote，也不会改 Git 配置。</p>
             </div>
-            <span className="session-badge">{projectSaves.data?.saves.length ?? 0} 个检查点</span>
+            <span className="session-badge">{visibleCheckpoints.length} 个检查点</span>
           </div>
           <div className="manager-grid">
             <section className="manager-section manager-section-wide">
               <h4>已保存的检查点</h4>
               <div className="checkpoint-list">
-                {(projectSaves.data?.saves ?? []).map((save) => (
-                  <div className="checkpoint-row" key={save.save_id}>
+                {visibleCheckpoints.map((save) => (
+                  <div className="checkpoint-row" data-testid="checkpoint-row" key={save.save_id}>
                     <div className="checkpoint-copy">
                       <strong>{save.description || save.default_description}</strong>
                       <small>{save.project_name} / {save.thread_name || "线程"} / {formatMessageTime(save.created_at)}</small>
                       <span>{save.workspace.is_git_repo ? `Git ${save.workspace.base_commit?.slice(0, 8) ?? "unknown"}${save.workspace.dirty ? " / dirty" : ""}` : "工作区快照"} / {save.workspace.file_count ?? 0} 个文件</span>
                     </div>
                     <div className="checkpoint-actions">
-                      <button type="button" className="ghost-button" onClick={() => previewCheckpoint.mutate(save.save_id)} disabled={previewCheckpoint.isPending}>预览</button>
+                      <button
+                        type="button"
+                        data-testid="checkpoint-preview-button"
+                        className="ghost-button"
+                        onClick={() => previewCheckpoint.mutate(save.save_id)}
+                        disabled={previewCheckpoint.isPending}
+                      >
+                        预览
+                      </button>
                       <button
                         type="button"
                         className="primary-button"
@@ -2524,13 +2545,13 @@ function RouterControlCenter({
                     </div>
                   </div>
                 ))}
-                {(projectSaves.data?.saves ?? []).length === 0 ? <p className="muted">还没有检查点。可以在助手消息右下角点击“保存”。</p> : null}
+                {visibleCheckpoints.length === 0 ? <p className="muted">还没有检查点。可以在助手消息右下角点击“保存”。</p> : null}
               </div>
             </section>
             <section className="manager-section">
               <h4>预览</h4>
               {previewCheckpoint.data ? (
-                <div className="checkpoint-preview">
+                <div className="checkpoint-preview" data-testid="checkpoint-preview-panel">
                   <strong>{previewCheckpoint.data.save.description || previewCheckpoint.data.save.default_description}</strong>
                   <span>{previewCheckpoint.data.dirty ? "当前工作区有未保存变化" : "当前工作区状态适合直接载入"}</span>
                   <small>{(previewCheckpoint.data.changed_files ?? []).slice(0, 8).join("\n") || "没有报告变化文件。"}</small>
@@ -3224,14 +3245,17 @@ function AppShell() {
   const currentTask = projectTasks.data?.current_task ?? null;
   const selectedThreadId = project.current_thread_id ?? currentTask?.active_provider_thread_id ?? threads.data?.threads[0]?.id ?? null;
   const selectedThreadSummary = threads.data?.threads.find((thread) => thread.id === selectedThreadId);
+  const selectedTaskProviderThread = currentTask?.provider_threads.find((thread) => thread.thread_id === selectedThreadId) ?? null;
   const selectedThreadProfileId =
+    selectedTaskProviderThread?.profile_id ??
     threadSettingsDraft[selectedThreadId ?? ""]?.profile_id ??
     selectedThreadSummary?.shellSettings?.profile_id ??
-    listProfileId;
+    (!selectedThreadId ? listProfileId : null);
+  const selectedThreadProfileReady = !selectedThreadId || Boolean(selectedThreadProfileId);
   const selectedThread = useQuery({
     queryKey: ["thread", selectedThreadId, selectedThreadProfileId],
-    queryFn: () => api.readThread(selectedThreadId!, selectedThreadProfileId),
-    enabled: Boolean(selectedThreadId),
+    queryFn: () => api.readThread(selectedThreadId!, selectedThreadProfileId ?? undefined),
+    enabled: Boolean(selectedThreadId && selectedThreadProfileReady),
     refetchInterval: 4000,
   });
   const taskConversation = useQuery({
@@ -3242,9 +3266,9 @@ function AppShell() {
   });
   const goal = useQuery({
     queryKey: ["goal", selectedThreadId, selectedThreadProfileId],
-    queryFn: () => api.getGoal(selectedThreadId!, selectedThreadProfileId),
-    enabled: Boolean(selectedThreadId),
-    refetchInterval: 4000,
+    queryFn: () => api.getGoal(selectedThreadId!, selectedThreadProfileId ?? undefined),
+    enabled: Boolean(selectedThreadId && selectedThreadProfileReady),
+    refetchInterval: mainView === "chat" ? 4000 : false,
   });
   const pendingModals = useQuery({
     queryKey: ["pending-modals"],
@@ -3293,7 +3317,7 @@ function AppShell() {
   });
 
   const renameThread = useMutation({
-    mutationFn: ({ threadId, name }: { threadId: string; name: string }) => api.renameThread(threadId, name, selectedThreadProfileId),
+    mutationFn: ({ threadId, name }: { threadId: string; name: string }) => api.renameThread(threadId, name, selectedThreadProfileId ?? undefined),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["thread"] });
@@ -3301,7 +3325,7 @@ function AppShell() {
   });
 
   const archiveThread = useMutation({
-    mutationFn: (threadId: string) => api.archiveThread(threadId, selectedThreadProfileId),
+    mutationFn: (threadId: string) => api.archiveThread(threadId, selectedThreadProfileId ?? undefined),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["thread"] });
@@ -3506,21 +3530,29 @@ function AppShell() {
   }, [selectedThreadId, selectedThread.data?.thread, setThreadSettingsDraft, threadSettingsDraft]);
 
   const activeSettings = useMemo(() => {
+    const laneSettings = {
+      profile_id: selectedTaskProviderThread?.profile_id,
+      model: selectedTaskProviderThread?.model,
+      reasoning_effort: selectedTaskProviderThread?.reasoning_effort,
+      permission_mode: selectedTaskProviderThread?.permission_mode,
+      collaboration_mode: selectedTaskProviderThread?.collaboration_mode,
+    };
     const saved = selectedThread.data?.thread.shellSettings ?? {};
     const draft = threadSettingsDraft[selectedThreadId ?? "__new__"] ?? {};
     return {
-      profile_id: draft.profile_id ?? saved.profile_id ?? project.default_profile_id,
-      model: draft.model ?? saved.model ?? project.default_model,
-      reasoning_effort: draft.reasoning_effort ?? saved.reasoning_effort ?? project.default_effort,
-      permission_mode: (draft.permission_mode ?? saved.permission_mode ?? "auto") as PermissionMode,
-      collaboration_mode: (draft.collaboration_mode ?? saved.collaboration_mode ?? "default") as CollaborationMode,
+      profile_id: draft.profile_id ?? laneSettings.profile_id ?? saved.profile_id ?? project.default_profile_id,
+      model: draft.model ?? laneSettings.model ?? saved.model ?? project.default_model,
+      reasoning_effort: draft.reasoning_effort ?? laneSettings.reasoning_effort ?? saved.reasoning_effort ?? project.default_effort,
+      permission_mode: (draft.permission_mode ?? laneSettings.permission_mode ?? saved.permission_mode ?? "auto") as PermissionMode,
+      collaboration_mode: (draft.collaboration_mode ?? laneSettings.collaboration_mode ?? saved.collaboration_mode ?? "default") as CollaborationMode,
     };
-  }, [project.default_effort, project.default_model, project.default_profile_id, selectedThread.data?.thread.shellSettings, selectedThreadId, threadSettingsDraft]);
+  }, [project.default_effort, project.default_model, project.default_profile_id, selectedTaskProviderThread, selectedThread.data?.thread.shellSettings, selectedThreadId, threadSettingsDraft]);
+  const selectedThreadStatusType = selectedThread.data?.thread.status?.type ?? "idle";
   const supervisor = useQuery({
     queryKey: ["runtime-supervisor", selectedThreadId, activeSettings.profile_id],
     queryFn: () => api.runtimeSupervisor({ thread_id: selectedThreadId ?? undefined, profile_id: activeSettings.profile_id }),
     enabled: Boolean(selectedThreadId),
-    refetchInterval: 2500,
+    refetchInterval: mainView === "chat" && selectedThreadStatusType === "active" ? 2500 : false,
   });
   const inheritedTaskGoal = inheritedGoalFrom(currentTask?.goal, "task");
   const inheritedDogfoodGoal = inheritedGoalFrom(supervisor.data?.dogfood?.latest_milestone?.goal, "dogfood");
@@ -3685,7 +3717,7 @@ function AppShell() {
   const runtimeModelList = useQuery({
     queryKey: ["runtime-models", activeSettings.profile_id],
     queryFn: () => api.models(activeSettings.profile_id),
-    enabled: Boolean(activeSettings.profile_id) && mainView === "chat",
+    enabled: Boolean(activeSettings.profile_id) && mainView === "chat" && selectedThreadProfileReady,
     retry: false,
     staleTime: 60_000,
   });
@@ -4460,6 +4492,38 @@ function AppShell() {
   const waitingOnApproval = activeFlags.includes("waitingOnApproval") || Boolean(modal?.kind === "approval" && modal.thread_id === selectedThreadId);
   const canInterrupt = Boolean(liveTurnId && activeStatusType === "active");
   const runtimeGuardVisible = Boolean(liveTurnId && activeStatusType === "active") || waitingOnApproval || startTurn.isPending;
+  const fallbackSetupCheckpoints = useMemo<ProjectCheckpoint[]>(
+    () => {
+      const checkpoints: ProjectCheckpoint[] = [];
+      for (const item of currentTask?.checkpoint_refs ?? []) {
+          const saveId = String(item?.save_id ?? "").trim();
+          if (!saveId) continue;
+          const providerThread = currentTask?.provider_threads.find((thread) => thread.thread_id === String(item?.thread_id ?? currentTask?.active_provider_thread_id ?? ""));
+          const providerId = String(item?.provider_id ?? providerThread?.provider_id ?? "");
+          const model = String(item?.model ?? providerThread?.model ?? "");
+          checkpoints.push({
+            save_id: saveId,
+            save_dir: "",
+            created_at: String(item?.created_at ?? currentTask?.updated_at ?? project.updated_at ?? ""),
+            project_name: project.name,
+            thread_id: String(item?.thread_id ?? providerThread?.thread_id ?? currentTask?.active_provider_thread_id ?? "") || null,
+            thread_name: String(item?.thread_name ?? providerThread?.name ?? "当前线程"),
+            description: String(item?.description ?? ""),
+            default_description: String(item?.description ?? saveId),
+            provider: providerId || null,
+            model: model || null,
+            workspace: {
+              is_git_repo: false,
+              base_commit: null,
+              dirty: false,
+            },
+            project_file: project.project_file,
+          });
+        }
+      return checkpoints;
+    },
+    [currentTask, project.name, project.project_file, project.updated_at],
+  );
   const supervisorGuardKey = `${selectedThreadId ?? "none"}:${liveTurnId ?? "none"}:${supervisor.data?.guard.level ?? "ok"}`;
   const supervisorGuardVisible = Boolean(supervisor.data?.guard.level === "pause" && supervisor.data.guard.should_pause && guardDismissedFor !== supervisorGuardKey);
 
@@ -4502,7 +4566,7 @@ function AppShell() {
             <span>{t(locale, "search")}</span>
             <kbd>{t(locale, "command_k_hint")}</kbd>
           </button>
-          <button type="button" className={`nav-row ${mainView === "setup" ? "nav-row-active" : ""}`} onClick={() => setMainView("setup")}>
+          <button type="button" data-testid="sidebar-nav-setup" className={`nav-row ${mainView === "setup" ? "nav-row-active" : ""}`} onClick={() => setMainView("setup")}>
             <span className="nav-icon" aria-hidden="true">◎</span>
             <span>{providerSetupLabel(locale)}</span>
           </button>
@@ -4650,7 +4714,7 @@ function AppShell() {
                 </button>
               </>
             ) : (
-              <button type="button" className="ghost-button" onClick={() => setMainView("chat")}>
+              <button type="button" data-testid="setup-back-to-chat" className="ghost-button" onClick={() => setMainView("chat")}>
                 {t(locale, "back_to_chat")}
               </button>
             )}
@@ -4662,6 +4726,7 @@ function AppShell() {
             <RouterControlCenter
               locale={locale}
               queryClient={queryClient}
+              fallbackCheckpoints={fallbackSetupCheckpoints}
             />
             <section className="settings-strip">
               <div className="settings-strip-section">
@@ -4710,7 +4775,7 @@ function AppShell() {
                 <button
                   type="button"
                   className="danger-button"
-                  onClick={() => interruptTurn.mutate({ threadId: selectedThreadId ?? "", turnId: liveTurnId ?? "", profileId: selectedThreadProfileId })}
+                  onClick={() => interruptTurn.mutate({ threadId: selectedThreadId ?? "", turnId: liveTurnId ?? "", profileId: selectedThreadProfileId ?? undefined })}
                 >
                   {t(locale, "interrupt")}
                 </button>
@@ -4896,7 +4961,7 @@ function AppShell() {
                 <button
                   type="button"
                   className="danger-button compact-action"
-                  onClick={() => interruptTurn.mutate({ threadId: selectedThreadId ?? "", turnId: liveTurnId ?? "", profileId: selectedThreadProfileId })}
+                  onClick={() => interruptTurn.mutate({ threadId: selectedThreadId ?? "", turnId: liveTurnId ?? "", profileId: selectedThreadProfileId ?? undefined })}
                 >
                   {t(locale, "interrupt")}
                 </button>
