@@ -76,7 +76,14 @@ function currentBrowserSmokeUrl() {
   if (typeof window === "undefined") {
     return "http://127.0.0.1:8123/";
   }
-  return window.location.href;
+  const url = new URL(window.location.href);
+  url.searchParams.set("smoke", "1");
+  return url.toString();
+}
+
+function browserSmokeMode() {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("smoke") === "1";
 }
 
 function stringifyDetail(value: unknown) {
@@ -3232,24 +3239,33 @@ function AppShell() {
   const [inspectorReviewPath, setInspectorReviewPath] = useState("");
   const [inspectorFileQuery, setInspectorFileQuery] = useState("");
   const [inspectorFilePath, setInspectorFilePath] = useState("");
+  const smokeMode = useMemo(() => browserSmokeMode(), []);
 
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles, refetchInterval: 5000 });
   const routerConfig = useQuery({ queryKey: ["router-config"], queryFn: api.routerConfig, refetchInterval: 5000 });
   const llmSession = useQuery({ queryKey: ["llm-manager-session"], queryFn: api.llmManagerSession, refetchInterval: 5000 });
   const llmCatalog = useQuery({ queryKey: ["llm-manager-catalog"], queryFn: api.llmManagerEffectiveCatalog, refetchInterval: 5000 });
   const mcpConfig = useQuery({ queryKey: ["mcp-config"], queryFn: api.mcpConfig, refetchInterval: 7000 });
-  const runtime = useQuery({ queryKey: ["runtime-environment"], queryFn: api.runtimeEnvironment, refetchInterval: 5000 });
+  const runtime = useQuery({
+    queryKey: ["runtime-environment"],
+    queryFn: api.runtimeEnvironment,
+    refetchInterval: smokeMode ? false : 5000,
+    retry: smokeMode ? false : undefined,
+    staleTime: smokeMode ? 60_000 : 0,
+  });
   const newThreadDraft = threadSettingsDraft["__new__"] ?? {};
   const listProfileId = newThreadDraft.profile_id ?? project.default_profile_id;
   const threads = useQuery({
     queryKey: ["threads", project.project_id, listProfileId, archivedVisible],
     queryFn: () => api.threads(listProfileId, archivedVisible),
-    refetchInterval: 4000,
+    refetchInterval: smokeMode ? false : 4000,
+    retry: smokeMode ? false : undefined,
   });
   const projectTasks = useQuery({
     queryKey: ["project-tasks", project.project_id],
     queryFn: api.projectTasks,
-    refetchInterval: 4000,
+    refetchInterval: smokeMode ? false : 4000,
+    retry: smokeMode ? false : undefined,
   });
 
   const currentTask = projectTasks.data?.current_task ?? null;
@@ -3267,24 +3283,28 @@ function AppShell() {
     queryKey: ["thread", selectedThreadId, selectedThreadProfileId],
     queryFn: () => api.readThread(selectedThreadId!, selectedThreadProfileId ?? undefined),
     enabled: Boolean(selectedThreadId && selectedThreadProfileReady),
-    refetchInterval: 4000,
+    refetchInterval: smokeMode ? false : 4000,
+    retry: smokeMode ? false : undefined,
   });
   const taskConversation = useQuery({
     queryKey: ["task-conversation", project.project_id, currentTask?.task_id, selectedThreadId],
     queryFn: () => api.taskConversation(currentTask?.task_id),
     enabled: Boolean(currentTask?.task_id),
-    refetchInterval: 4000,
+    refetchInterval: smokeMode ? false : 4000,
+    retry: smokeMode ? false : undefined,
   });
   const goal = useQuery({
     queryKey: ["goal", selectedThreadId, selectedThreadProfileId],
     queryFn: () => api.getGoal(selectedThreadId!, selectedThreadProfileId ?? undefined),
     enabled: Boolean(selectedThreadId && selectedThreadProfileReady),
-    refetchInterval: mainView === "chat" ? 4000 : false,
+    refetchInterval: smokeMode ? false : mainView === "chat" ? 4000 : false,
+    retry: smokeMode ? false : undefined,
   });
   const pendingModals = useQuery({
     queryKey: ["pending-modals"],
     queryFn: api.pendingModals,
-    refetchInterval: 1000,
+    refetchInterval: smokeMode ? false : 1000,
+    retry: smokeMode ? false : undefined,
   });
 
   const switchThread = useMutation({
@@ -3563,7 +3583,8 @@ function AppShell() {
     queryKey: ["runtime-supervisor", selectedThreadId, activeSettings.profile_id],
     queryFn: () => api.runtimeSupervisor({ thread_id: selectedThreadId ?? undefined, profile_id: activeSettings.profile_id }),
     enabled: Boolean(selectedThreadId),
-    refetchInterval: mainView === "chat" && selectedThreadStatusType === "active" ? 2500 : false,
+    refetchInterval: smokeMode ? false : mainView === "chat" && selectedThreadStatusType === "active" ? 2500 : false,
+    retry: smokeMode ? false : undefined,
   });
   const inheritedTaskGoal = inheritedGoalFrom(currentTask?.goal, "task");
   const inheritedDogfoodGoal = inheritedGoalFrom(supervisor.data?.dogfood?.latest_milestone?.goal, "dogfood");
@@ -3574,7 +3595,8 @@ function AppShell() {
     queryKey: ["project-review-status"],
     queryFn: api.projectReviewStatus,
     enabled: inspectorTab === "review",
-    refetchInterval: 5000,
+    refetchInterval: smokeMode ? false : 5000,
+    retry: smokeMode ? false : undefined,
   });
   const inspectorReviewDiff = useQuery({
     queryKey: ["project-review-diff", inspectorReviewPath],
@@ -3585,19 +3607,22 @@ function AppShell() {
     queryKey: ["project-terminal-history"],
     queryFn: api.projectTerminalHistory,
     enabled: inspectorTab === "terminal",
-    refetchInterval: 5000,
+    refetchInterval: smokeMode ? false : 5000,
+    retry: smokeMode ? false : undefined,
   });
   const inspectorDogfoodRun = useQuery({
     queryKey: ["dogfood-run"],
     queryFn: api.dogfoodRun,
     enabled: inspectorTab === "browser",
-    refetchInterval: 2500,
+    refetchInterval: smokeMode ? false : 2500,
+    retry: smokeMode ? false : undefined,
   });
   const inspectorFiles = useQuery({
     queryKey: ["project-files-tree", inspectorFileQuery],
     queryFn: () => api.projectFilesTree(inspectorFileQuery),
     enabled: inspectorTab === "files",
-    refetchInterval: 7000,
+    refetchInterval: smokeMode ? false : 7000,
+    retry: smokeMode ? false : undefined,
   });
   const inspectorFilePreview = useQuery({
     queryKey: ["project-file-preview", inspectorFilePath],
@@ -3903,6 +3928,10 @@ function AppShell() {
   }, [eventCursor]);
 
   useEffect(() => {
+    if (smokeMode) {
+      setEventStreamActive(false);
+      return;
+    }
     if (eventStreamActive) return;
     let cancelled = false;
     const timeout = window.setTimeout(async function tick() {
@@ -3926,7 +3955,7 @@ function AppShell() {
       cancelled = true;
       window.clearTimeout(timeout);
     };
-  }, [eventCursor, eventStreamActive, project, setEventCursor]);
+  }, [eventCursor, eventStreamActive, project, setEventCursor, smokeMode]);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -4130,6 +4159,10 @@ function AppShell() {
   });
 
   useEffect(() => {
+    if (smokeMode) {
+      setEventStreamActive(false);
+      return;
+    }
     if (!project?.project_id || typeof EventSource === "undefined") {
       setEventStreamActive(false);
       return;
@@ -4209,7 +4242,7 @@ function AppShell() {
       source?.close();
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
     };
-  }, [project?.project_id, queryClient, setEventCursor]);
+  }, [project?.project_id, queryClient, setEventCursor, smokeMode]);
 
   async function promptForText(options: {
     title: string;

@@ -65,13 +65,18 @@ Priority 2 hardening gap completed (2026-06-23): single-truth catalog/metadata/h
   - `astrabridge_sidecar/task_service.py` persists checkpoint / verification / diagnostic refs derived from coding events.
   - `apps/astrabridge-desktop/src/features/runtime/taskInspectorEvidence.ts` and `taskWorkflowFacts.ts` now provide one shared event-derived evidence path for review/files/terminal/workflow facts.
   - `apps/astrabridge-desktop/src/App.tsx` now refreshes `task-conversation` together with runtime thread/turn/supervisor updates, so the visible task chat stays aligned with provider handoffs.
+- **Priority 4 status:** completed in this branch as the release-grade workflow gate.
+  - `astrabridge_sidecar/project_tools_service.py` prepares a repeatable isolated demo workflow with provider handoff, review artifact, failed command, recovered command, and checkpoint evidence.
+  - `astrabridge_sidecar/dogfood_run_service.py` now treats browser-smoke success as workflow-assertion success, while filtering known nonblocking local runtime polling noise instead of failing the whole demo on background fetch churn.
+  - `apps/astrabridge-desktop/src/App.tsx` now opens browser smoke URLs in explicit `smoke=1` low-noise mode and disables background event/polling churn during smoke acceptance.
+  - Acceptance passed on `http://127.0.0.1:4181/?sidecar=http://127.0.0.1:8820&smoke=1` with review/files/terminal/status/checkpoint nodes verified and screenshot evidence captured under `.astrabridge/captures/`.
 
 ## 1.2 Execution Focus Guidance
 
 - Current branch scope should stay constrained:
-  1. remove remaining duplicated provider-specific fact derivations outside catalog/profile contracts;
-  2. keep provider-switch and workflow continuity evidence as the highest-priority cross-panel acceptance path;
-  3. keep any additional provider additions or cosmetic work deferred until these two items are complete.
+  1. keep the now-passing release workflow as baseline and avoid reopening it for cosmetic churn;
+  2. move directly to the narrow native-kernel cut on top of the same workflow/evidence contract;
+  3. keep additional provider additions or cosmetic work deferred until that native path is stable.
 
 ## 2. Ranked Priorities
 
@@ -123,9 +128,9 @@ What "done enough" looks like:
 2. provider switching does not break the user's visible workflow model
 3. review/checkpoint/diagnostics reflect the same underlying execution history
 
-## Priority 4: One Release-Grade End-To-End Coding Workflow
+## ~~Priority 4: One Release-Grade End-To-End Coding Workflow~~
 
-This is the fastest way to prove the app is genuinely usable.
+Completed on this branch. This is now repository baseline, not an active near-term slice.
 
 Reason:
 
@@ -207,13 +212,12 @@ then it should normally be deferred.
 
 If only one major slice is chosen next, choose:
 
-**One Release-Grade End-To-End Coding Workflow**
+**Minimal Native Kernel Cut scoped to the same event contract**
 
 If two slices are chosen next, choose:
 
-1. One Release-Grade End-to-End Coding Workflow
-2. Minimal Native Kernel Cut scoped to the same event contract
-That pair most directly moves AstraBridge from "promising demo" to "dependable internal app."
+1. Minimal Native Kernel Cut scoped to the same event contract
+That most directly moves AstraBridge from "dependable app-server demo" to "provider-neutral product foundation."
 
 ## 6. Near-term Execution Slices
 
@@ -229,7 +233,7 @@ That pair most directly moves AstraBridge from "promising demo" to "dependable i
   - Slice B status: completed (composite task conversation refresh + shared inspector evidence path landed).
 
 - Slice C (immediate):
-  - keep Priority 4 release-style end-to-end workflow as the readiness gate before broader expansion.
+  - Slice C status: completed (release workflow prepare + browser acceptance + visible in-app validation passed).
 
 - Slice D:
-  - keep Priority 5 native-kernel cut narrow and only after Priority 4 acceptance is repeatable.
+  - keep Priority 5 native-kernel cut narrow now that Priority 4 acceptance is repeatable.

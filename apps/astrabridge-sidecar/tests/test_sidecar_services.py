@@ -13958,6 +13958,20 @@ class AstraBridgeServiceTests(unittest.TestCase):
             )
             self.assertEqual(failure_smoke["browser_smoke"]["status"], "fail")
             self.assertEqual(failure_smoke["browser_smoke"]["request_failures"][0]["resource_type"], "script")
+            filtered_errors, filtered_failures, ignored_noise = dogfood._filter_nonblocking_browser_smoke_noise(  # noqa: SLF001
+                ["error: Failed to load resource: net::ERR_INSUFFICIENT_RESOURCES"],
+                [
+                    {
+                        "url": "http://127.0.0.1:8820/api/runtime/environment",
+                        "method": "GET",
+                        "resource_type": "fetch",
+                        "error_text": "net::ERR_INSUFFICIENT_RESOURCES",
+                    }
+                ],
+            )
+            self.assertFalse(filtered_errors)
+            self.assertFalse(filtered_failures)
+            self.assertEqual(ignored_noise["ignored_request_failure_count"], 1)
             full_smoke = dogfood.browser_smoke(
                 {
                     "url": (workspace / "index.html").resolve().as_uri(),
