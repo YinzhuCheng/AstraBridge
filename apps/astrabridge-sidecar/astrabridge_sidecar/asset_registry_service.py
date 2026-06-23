@@ -13,8 +13,6 @@ from .security import SECRET_RE, SecurityError, redact_sensitive, resolve_under,
 
 REGISTRY_SCHEMA_VERSION = "astrabridge-asset-registry-v1"
 CONTEXT_SCHEMA_VERSION = "astrabridge-asset-context-pack-v1"
-LEGACY_REGISTRY_SCHEMA_VERSIONS = {"lcr-asset-registry-v1"}
-LEGACY_CONTEXT_SCHEMA_VERSIONS = {"lcr-asset-context-pack-v1"}
 
 
 class AssetRegistryService:
@@ -789,7 +787,7 @@ class AssetRegistryService:
     def _normalize_registry(self, payload: Any) -> dict[str, Any]:
         registry = dict(payload or {}) if isinstance(payload, dict) else {}
         schema_version = str(registry.get("schema_version") or "").strip()
-        if schema_version in LEGACY_REGISTRY_SCHEMA_VERSIONS:
+        if not schema_version or schema_version != REGISTRY_SCHEMA_VERSION:
             registry["schema_version"] = REGISTRY_SCHEMA_VERSION
         assets = [dict(item) for item in list(registry.get("assets") or []) if isinstance(item, dict)]
         for item in assets:

@@ -1207,7 +1207,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                             "startedAt": now_ts - 60,
                             "items": [
                                 {"type": "userMessage", "id": "user-old", "text": "Unrelated old task prompt."},
-                                {"type": "agentMessage", "id": "agent-old", "text": "Old answer."},
+                                {"type": "agentMessage", "id": "agent-old", "text": "This is a continuation test message."},
                             ],
                         },
                         {
@@ -1275,8 +1275,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                             "id": "turn-old",
                             "startedAt": now_ts - 60,
                             "items": [
-                                {"type": "userMessage", "id": "user-old", "text": "出一道数据结构题"},
-                                {"type": "agentMessage", "id": "agent-old", "text": "这里是一道旧题。"},
+                                {"type": "userMessage", "id": "user-old", "text": "Historical context sample text."},
+                                {"type": "agentMessage", "id": "agent-old", "text": "This is a continuation test message."},
                             ],
                         },
                         {
@@ -1297,7 +1297,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(pack["task_conversation_digest"]["task_id"], new_task["task_id"])
             self.assertIn("Implement a minimal release readiness scorecard", pack["text"])
             self.assertIn("scorecard.py", pack["text"])
-            self.assertNotIn("出一道数据结构题", pack["text"])
+            self.assertNotIn("Historical context sample text.", pack["text"])
             self.assertEqual([item["turn_id"] for item in pack["task_conversation_digest"]["items"]], ["turn-new"])
 
     def test_task_service_moves_provider_thread_ownership_to_new_task(self) -> None:
@@ -3324,10 +3324,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(turn_text_from_payload({}), "")
 
     def test_sse_frame_formats_event_data_and_comment(self) -> None:
-        event_frame = sse_frame(event="lcr.event", data={"cursor": 3, "message": "状态更新"}, retry=2000).decode("utf-8")
+        event_frame = sse_frame(event="lcr.event", data={"cursor": 3, "message": "status update complete."}, retry=2000).decode("utf-8")
         self.assertIn("retry: 2000\n", event_frame)
         self.assertIn("event: lcr.event\n", event_frame)
-        self.assertIn('data: {"cursor": 3, "message": "状态更新"}\n', event_frame)
+        self.assertIn('data: {"cursor": 3, "message": "status update complete."}\n', event_frame)
         self.assertTrue(event_frame.endswith("\n\n"))
 
         heartbeat = sse_frame(comment="heartbeat cursor=3").decode("utf-8")
@@ -7312,7 +7312,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             (registry_root / "asset_registry.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": "lcr-asset-registry-v1",
+                        "schema_version": "astrabridge-asset-registry-v1",
                         "assets": [
                             {
                                 "asset_id": "sprite-1",
@@ -7339,7 +7339,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("Do not call MCP resources/read", text)
             self.assertFalse(any(item.get("name") == "asset_registry.json" for item in mentions))
 
-    def test_asset_registry_snapshot_rewrites_legacy_schema_versions(self) -> None:
+    def test_asset_registry_snapshot_normalizes_to_current_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace = root / "workspace"
@@ -7352,7 +7352,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             registry_path.write_text(
                 json.dumps(
                     {
-                        "schema_version": "lcr-asset-registry-v1",
+                        "schema_version": "astrabridge-asset-registry-v1",
                         "assets": [
                             {
                                 "asset_id": "sprite-1",
@@ -7394,7 +7394,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             (registry_root / "asset_registry.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": "lcr-asset-registry-v1",
+                        "schema_version": "astrabridge-asset-registry-v1",
                         "assets": [
                             {
                                 "asset_id": "sprite-1",
@@ -7551,7 +7551,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             (registry_root / "asset_registry.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": "lcr-asset-registry-v1",
+                        "schema_version": "astrabridge-asset-registry-v1",
                         "assets": [
                             {
                                 "asset_id": "sprite-1",
@@ -7594,7 +7594,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             registry_root = workspace / ".astrabridge" / "assets"
             registry_root.mkdir(parents=True)
             (registry_root / "asset_registry.json").write_text(
-                json.dumps({"schema_version": "lcr-asset-registry-v1", "assets": [{"asset_id": "sprite-1", "kind": "heroine"}]}),
+                json.dumps({"schema_version": "astrabridge-asset-registry-v1", "assets": [{"asset_id": "sprite-1", "kind": "heroine"}]}),
                 encoding="utf-8",
             )
             assets = AssetRegistryService(projects)
@@ -7687,7 +7687,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     }
                 )
             (registry_root / "asset_registry.json").write_text(
-                json.dumps({"schema_version": "lcr-asset-registry-v1", "assets": assets}),
+                json.dumps({"schema_version": "astrabridge-asset-registry-v1", "assets": assets}),
                 encoding="utf-8",
             )
 
@@ -7715,7 +7715,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             (registry_root / "asset_registry.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": "lcr-asset-registry-v1",
+                        "schema_version": "astrabridge-asset-registry-v1",
                         "assets": [
                             {
                                 "asset_id": "yellow-key",
@@ -7747,7 +7747,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             (registry_root / "asset_registry.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": "lcr-asset-registry-v1",
+                        "schema_version": "astrabridge-asset-registry-v1",
                         "assets": [
                             {
                                 "asset_id": "forest-tree-wall",
@@ -8303,7 +8303,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("Context pack JSON paths are orientation references only", text)
             self.assertFalse(any(item.get("name") == "project_context_pack.json" for item in mentions))
 
-    def test_project_context_state_rewrites_legacy_schema_and_emits_astrabridge_pack(self) -> None:
+    def test_project_context_state_normalizes_to_astrabridge_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace = root / "workspace"
@@ -8315,7 +8315,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             (state_root / "project_context_state.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": "lcr-project-context-pack-v1",
+                        "schema_version": "astrabridge-project-context-pack-v1",
                         "threads": {
                             "thread-1": {
                                 "thread_id": "thread-1",
@@ -15202,6 +15202,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

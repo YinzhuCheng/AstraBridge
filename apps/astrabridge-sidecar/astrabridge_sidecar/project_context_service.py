@@ -15,8 +15,6 @@ from .task_service import _display_thread_name
 
 PROJECT_CONTEXT_SCHEMA_VERSION = "astrabridge-project-context-pack-v1"
 PROJECT_CONTEXT_STATE_SCHEMA_VERSION = "astrabridge-project-context-state-v1"
-LEGACY_PROJECT_CONTEXT_SCHEMA_VERSIONS = {"lcr-project-context-pack-v1"}
-LEGACY_PROJECT_CONTEXT_STATE_SCHEMA_VERSIONS = {"lcr-project-context-pack-v1"}
 PROJECT_FILE_MAP_MAX_FILES = 80
 PROJECT_FILE_MAP_TEXT_MAX_FILES = 36
 PROJECT_FILE_MAP_MAX_TOP_LEVEL = 60
@@ -1060,7 +1058,7 @@ class ProjectContextService:
         raw_state = read_json(state_path, {"schema_version": PROJECT_CONTEXT_STATE_SCHEMA_VERSION, "threads": {}})
         state = dict(raw_state)
         schema_version = str(state.get("schema_version") or "").strip()
-        if not schema_version or schema_version in LEGACY_PROJECT_CONTEXT_STATE_SCHEMA_VERSIONS:
+        if not schema_version or schema_version != PROJECT_CONTEXT_STATE_SCHEMA_VERSION:
             state["schema_version"] = PROJECT_CONTEXT_STATE_SCHEMA_VERSION
         state.setdefault("threads", {})
         if state != raw_state:
