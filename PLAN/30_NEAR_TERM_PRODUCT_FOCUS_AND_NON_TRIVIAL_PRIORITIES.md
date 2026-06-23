@@ -34,14 +34,23 @@ Near-term execution should not optimize for:
 - Completed by sidecar test harness team:
   - Extended browser smoke presets to assert checkpoint/review/diagnostic workflow facts and artifacts (`task-fact-*`, `workflow-fact-*`) rather than only presence of basic app chrome.
   - Added corresponding unit test assertions in `apps/astrabridge-sidecar/tests/test_sidecar_services.py` to lock in the new acceptance expectations.
-  - Verified `python -B -m unittest discover -s apps/astrabridge-sidecar/tests -p test_sidecar_services.py` passes (327 tests).
+  - Verified `python -B -m unittest discover -s apps/astrabridge-sidecar/tests -p test_sidecar_services.py` passes (331 tests).
+  - Verified `cmd /c npm run test` in `apps/astrabridge-desktop` passes (61 tests).
 - Follow-up hardening completed on this branch:
+  - Removed heuristic fallback logic in `astrabridge_sidecar/model_catalog/catalog.py` from `known_context_window()` and `known_input_modalities()`, so catalog/profile-derived facts now take precedence.
   - Added regression test to ensure each new `.abproj` gets an isolated runtime bundle root, with independent `project_runtime_root` and `codex_home_root` values under appdata runtime.
   - Reworked storage policy documentation in `docs/SECURITY_AND_ISOLATION.md` to make the default isolation model explicit (workspace state roots vs runtime roots vs injected launch env vars).
   - Reasserted router normalization test resilience (provider-error actionable hint can route to auth/connectivity/context hints instead of a single phrase).
 - Interpretation against current priorities:
   - **Priority 1 (Isolation Hardening):** strengthened by asserting workflow evidence surfaces and checkpoint/review artifacts that are part of the isolation/audit picture.
   - **Priority 3 (CodingEvent Contract Unification):** improved by forcing the product’s high-value workflow surfaces to remain in one observable acceptance trace.
+
+## 1.2 Execution Focus Guidance
+
+- Current branch scope should stay constrained:
+  1. remove remaining duplicated provider-specific fact derivations outside catalog/profile contracts;
+  2. keep provider-switch and workflow continuity evidence as the highest-priority cross-panel acceptance path;
+  3. keep any additional provider additions or cosmetic work deferred until these two items are complete.
 
 ## 2. Ranked Priorities
 

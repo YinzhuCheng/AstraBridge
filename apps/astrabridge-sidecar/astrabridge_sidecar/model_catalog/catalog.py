@@ -34,20 +34,6 @@ def known_context_window(provider_id: str, model: str) -> int | None:
     profile = _profile_for(provider_id, model)
     if profile and profile.context_window():
         return int(profile.context_window() or 0) or None
-    provider = provider_id.lower()
-    native_model = model.lower()
-    if "deepseek" in provider or "deepseek" in native_model:
-        return 1_000_000 if "v4" in native_model else 128_000
-    if "kimi" in provider or "kimi" in native_model or "moonshot" in provider:
-        return 256_000
-    if "glm" in provider or "zai" in provider or "zhipu" in provider or "glm" in native_model:
-        return 1_000_000 if "5.2" in native_model else 128_000
-    if "qwen" in provider or "dashscope" in provider or "qwen" in native_model:
-        return 1_000_000 if any(token in native_model for token in ("3.7", "coder", "long", "plus", "flash")) else 262_144
-    if "gpt-5.5" in native_model or "gpt-5.4" in native_model:
-        return 1_000_000
-    if "gpt-5" in native_model:
-        return 400_000
     return None
 
 
@@ -62,14 +48,6 @@ def known_input_modalities(provider_id: str, model: str) -> list[str] | None:
     profile = _profile_for(provider_id, model)
     if profile:
         return list(profile.context_policy.default_input_modalities)
-    signals = f"{provider_id} {model}".lower()
-    if ("kimi" in signals or "moonshot" in signals) and any(
-        token in signals for token in ("kimi-k2.7", "kimi-k2.6", "k2.6", "kimi-k2.5", "k2.5", "vision", "visual")
-    ):
-        return ["text", "image"]
-    if "glm" in signals or "zai" in signals or "zhipu" in signals:
-        if any(token in signals for token in ("5.2", "4.1v", "4.5", "vision", "visual")):
-            return ["text", "image"]
     return None
 
 
