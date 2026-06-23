@@ -9689,6 +9689,174 @@ class AstraBridgeServiceTests(unittest.TestCase):
             )
             self.assertNotIn("unit_secret", json.dumps(result, ensure_ascii=False))
 
+    def test_router_http_metadata_and_health_endpoints_expose_generated_catalog_provenance(self) -> None:
+        class FakeLlmManager:
+            def effective_catalog(self) -> dict[str, object]:
+                return {
+                    "mode": "anonymous",
+                    "model_count": 1,
+                    "models": [
+                        {
+                            "id": "kimi/kimi-k2.7-code",
+                            "provider": "kimi",
+                            "native_model": "kimi-k2.7-code",
+                            "source_status": "official_docs",
+                            "source_provenance": {
+                                "provider_id": "kimi",
+                                "source_url": "https://example.test/kimi/catalog",
+                            },
+                            "catalog_version": "astrabridge-generated-catalog-v1",
+                            "source_urls": ["https://example.test/kimi/catalog/models"],
+                            "verified": True,
+                            "default_for_provider": True,
+                        }
+                    ],
+                    "generated_at": "2026-06-23T00:00:00+00:00",
+                    "catalog_version": "astrabridge-generated-catalog-v1",
+                }
+
+            def health_results(self) -> dict[str, object]:
+                return {
+                    "results": [
+                        {
+                            "provider": "kimi",
+                            "model": "kimi/kimi-k2.7-code",
+                            "ok": True,
+                            "response_excerpt": "unit ok",
+                            "response_diagnostics": {
+                                "provider_data_keys": ["output_types", "provider_response_id"],
+                                "raw_ref": {"redaction_status": "redacted", "locator": "unit-health-1"},
+                            },
+                        }
+                    ],
+                    "model_health": {
+                        "kimi/kimi-k2.7-code": {
+                            "provider": "kimi",
+                            "model": "kimi/kimi-k2.7-code",
+                            "ok": True,
+                            "reasoning_effort": "pass",
+                            "web_smoke_status": "pass",
+                            "source_status": "official_docs",
+                            "source_provenance": {"provider_id": "kimi", "source_url": "https://example.test/kimi/catalog"},
+                            "catalog_version": "astrabridge-generated-catalog-v1",
+                        }
+                    },
+                }
+
+        class FakeMetadata:
+            def sources(self) -> dict[str, object]:
+                return {
+                    "catalog_schema": "astrabridge-generated-catalog-v1",
+                    "updated_at": "2026-06-23T00:00:00+00:00",
+                    "providers": [
+                        {
+                            "provider_id": "kimi",
+                            "display_name": "Kimi / Moonshot",
+                            "source_status": "official_docs",
+                            "urls": ["https://example.test/kimi/metadata"],
+                            "source_provenance": {"provider_id": "kimi"},
+                        }
+                    ],
+                }
+
+            def metadata_report(self) -> dict[str, object]:
+                return {
+                    "status": "ok",
+                    "generated_at": "2026-06-23T00:00:00+00:00",
+                    "catalog_version": "astrabridge-generated-catalog-v1",
+                    "summary": {"ok_sources": 1, "total_sources": 1},
+                }
+
+            def refresh_status(self, job_id: str | None = None) -> dict[str, object]:
+                return {"job_id": job_id, "status": "idle", "running": False}
+
+            def refresh_result(self, job_id: str | None = None) -> dict[str, object]:
+                return {"job_id": job_id, "status": "idle"}
+
+            def effective_catalog(self, model_id: str | None = None) -> dict[str, object]:
+                model_entry = {
+                    "id": "kimi/kimi-k2.7-code",
+                    "provider": "kimi",
+                    "native_model": "kimi-k2.7-code",
+                    "display_name": "Kimi K2.7 Code",
+                    "source_status": "official_docs",
+                    "source_provenance": {"provider_id": "kimi", "source_url": "https://example.test/kimi/catalog"},
+                    "catalog_version": "astrabridge-generated-catalog-v1",
+                    "default_for_provider": True,
+                    "advertised_context_window": 200000,
+                }
+                models = [model_entry]
+                if model_id is None:
+                    return {
+                        "models": models,
+                        "model_count": len(models),
+                        "catalog_version": "astrabridge-generated-catalog-v1",
+                        "generated_at": "2026-06-23T00:00:00+00:00",
+                    }
+                return {
+                    "models": [item for item in models if item["id"] == model_id],
+                    "model_count": 1 if model_id == model_entry["id"] else 0,
+                    "catalog_version": "astrabridge-generated-catalog-v1",
+                    "generated_at": "2026-06-23T00:00:00+00:00",
+                }
+
+        class FakeContext:
+            def __init__(self) -> None:
+                self.llm_manager = FakeLlmManager()
+                self.metadata = FakeMetadata()
+
+        class RouterMetadataHandler(Handler):
+            pass
+
+        router_metadata_handler = RouterMetadataHandler
+        router_metadata_handler.context = FakeContext()  # type: ignore[assignment]
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), router_metadata_handler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+
+        try:
+            port = server.server_address[1]
+
+            catalog_response = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/llm-manager/catalog/effective", timeout=5)
+            catalog_payload = json.loads(catalog_response.read().decode("utf-8"))
+            self.assertEqual(catalog_response.getcode(), 200)
+            self.assertEqual(catalog_payload["catalog_version"], "astrabridge-generated-catalog-v1")
+            self.assertEqual(catalog_payload["model_count"], 1)
+            first_model = catalog_payload["models"][0]
+            self.assertEqual(first_model["id"], "kimi/kimi-k2.7-code")
+            self.assertEqual(first_model["source_status"], "official_docs")
+            self.assertNotIn("secret", json.dumps(catalog_payload))
+
+            effective_catalog_response = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/router/models/effective-catalog", timeout=5)
+            effective_catalog_payload = json.loads(effective_catalog_response.read().decode("utf-8"))
+            self.assertEqual(effective_catalog_response.getcode(), 200)
+            self.assertEqual(effective_catalog_payload["models"][0]["id"], "kimi/kimi-k2.7-code")
+            self.assertEqual(effective_catalog_payload["models"][0]["source_status"], "official_docs")
+            self.assertEqual(effective_catalog_payload["models"][0]["catalog_version"], "astrabridge-generated-catalog-v1")
+
+            health_response = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/llm-manager/health/results", timeout=5)
+            health_payload = json.loads(health_response.read().decode("utf-8"))
+            self.assertEqual(health_response.getcode(), 200)
+            self.assertEqual(health_payload["model_health"]["kimi/kimi-k2.7-code"]["source_status"], "official_docs")
+            self.assertEqual(health_payload["model_health"]["kimi/kimi-k2.7-code"]["catalog_version"], "astrabridge-generated-catalog-v1")
+            self.assertEqual(health_payload["results"][0]["response_diagnostics"]["raw_ref"]["redaction_status"], "redacted")
+            self.assertNotIn("unit_secret", json.dumps(health_payload))
+
+            sources_response = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/router/metadata/sources", timeout=5)
+            sources_payload = json.loads(sources_response.read().decode("utf-8"))
+            self.assertEqual(sources_payload["catalog_schema"], "astrabridge-generated-catalog-v1")
+            self.assertEqual(sources_payload["providers"][0]["provider_id"], "kimi")
+            self.assertEqual(sources_payload["providers"][0]["source_status"], "official_docs")
+
+            report_response = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/router/metadata/report", timeout=5)
+            report_payload = json.loads(report_response.read().decode("utf-8"))
+            self.assertEqual(report_payload["status"], "ok")
+            self.assertEqual(report_payload["catalog_version"], "astrabridge-generated-catalog-v1")
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_llm_manager_health_falls_back_to_generated_catalog_when_configured_models_missing(self) -> None:
         class DocsHandler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
