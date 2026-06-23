@@ -239,6 +239,7 @@ class Handler(BaseHTTPRequestHandler):
         deadline = time.monotonic() + max(1.0, seconds)
         last_heartbeat = 0.0
         try:
+            self.wfile.write(sse_frame(event="astrabridge.hello", data={"cursor": cursor}, retry=2000))
             self.wfile.write(sse_frame(event="lcr.hello", data={"cursor": cursor}, retry=2000))
             self.wfile.flush()
             while time.monotonic() < deadline:
@@ -247,6 +248,7 @@ class Handler(BaseHTTPRequestHandler):
                 cursor = int(payload.get("cursor") or cursor)
                 if events:
                     for event in events:
+                        self.wfile.write(sse_frame(event="astrabridge.event", data={"cursor": cursor, "event": event}))
                         self.wfile.write(sse_frame(event="lcr.event", data={"cursor": cursor, "event": event}))
                     self.wfile.flush()
                     last_heartbeat = time.monotonic()
@@ -701,7 +703,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/router/mcp/preset/yunwu-image":
                 self.send_json(self.context.mcp_config.apply_yunwu_image_preset())
                 return
-            if path == "/api/router/mcp/preset/lcr-web":
+            if path in {"/api/router/mcp/preset/lcr-web", "/api/router/mcp/preset/astrabridge-web"}:
                 self.send_json(self.context.mcp_config.apply_lcr_web_preset())
                 return
             if path == "/api/router/image/yunwu/test":

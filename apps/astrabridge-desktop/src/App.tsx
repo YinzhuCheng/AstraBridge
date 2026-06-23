@@ -4132,9 +4132,11 @@ function AppShell() {
         if (cancelled) return;
         setEventStreamActive(true);
         source = new EventSource(url);
-        source.addEventListener("lcr.hello", (message) => {
+
+        const handleHelloEvent = (rawData: string | null) => {
           try {
-            const payload = JSON.parse((message as MessageEvent).data) as { cursor?: number };
+            if (!rawData) return;
+            const payload = JSON.parse(rawData) as { cursor?: number };
             if (typeof payload.cursor === "number") {
               eventCursorRef.current = payload.cursor;
               setEventCursor(payload.cursor);
@@ -4142,10 +4144,11 @@ function AppShell() {
           } catch {
             return;
           }
-        });
-        source.addEventListener("lcr.event", (message) => {
+        };
+        const handleRuntimeEvent = (rawData: string | null) => {
           try {
-            const payload = JSON.parse((message as MessageEvent).data) as { cursor?: number; event?: RuntimeEvent };
+            if (!rawData) return;
+            const payload = JSON.parse(rawData) as { cursor?: number; event?: RuntimeEvent };
             const event = payload.event;
             if (event) {
               handleEventsRef.current([event]);
@@ -4158,6 +4161,18 @@ function AppShell() {
           } catch {
             return;
           }
+        };
+        source.addEventListener("astrabridge.hello", (message) => {
+          handleHelloEvent((message as MessageEvent).data);
+        });
+        source.addEventListener("lcr.hello", (message) => {
+          handleHelloEvent((message as MessageEvent).data);
+        });
+        source.addEventListener("astrabridge.event", (message) => {
+          handleRuntimeEvent((message as MessageEvent).data);
+        });
+        source.addEventListener("lcr.event", (message) => {
+          handleRuntimeEvent((message as MessageEvent).data);
         });
         source.onerror = () => {
           source?.close();
