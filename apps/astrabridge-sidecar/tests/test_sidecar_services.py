@@ -594,6 +594,24 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     entry_mode="existing",
                 )
 
+    def test_project_create_registers_astrabridge_ignore_in_parent_git_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            init = subprocess.run(["git", "init"], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+            if init.returncode != 0:
+                self.skipTest("git is not available")
+            workspace = root / "PRIVATE" / "demo" / "workspace"
+            workspace.mkdir(parents=True)
+            service = ProjectService(root / "recent.json")
+
+            service.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+
+            exclude_file = root / ".git" / "info" / "exclude"
+            self.assertTrue(exclude_file.is_file())
+            exclude_text = exclude_file.read_text(encoding="utf-8")
+            self.assertIn("PRIVATE/demo/workspace/.astrabridge/", exclude_text)
+            self.assertNotIn("PRIVATE/demo/workspace/.lcr/", exclude_text)
+
     def test_project_create_new_without_paths_defaults_to_isolated_runtime_bundle(self) -> None:
         original_appdata = os.environ.get("ASTRABRIDGE_APPDATA")
         try:
@@ -10410,8 +10428,11 @@ class AstraBridgeServiceTests(unittest.TestCase):
             os.environ.pop("ASTRABRIDGE_APPDATA", None)
             with tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
-                workspace = root / "workspace"
-                workspace.mkdir()
+                init = subprocess.run(["git", "init"], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+                if init.returncode != 0:
+                    self.skipTest("git is not available")
+                workspace = root / "PRIVATE" / "demo" / "workspace"
+                workspace.mkdir(parents=True)
                 project_service = ProjectService(root / "projects.json")
                 project = project_service.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
                 storage_policy = json.loads((workspace / ".astrabridge" / "storage_policy.json").read_text(encoding="utf-8"))
@@ -10451,6 +10472,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 self.assertTrue(checks["workspace_storage_policy_managed_dirs_match"]["ok"])
                 self.assertTrue(checks["workspace_storage_policy_runtime_codex_home_matches"]["ok"])
                 self.assertTrue(checks["workspace_storage_policy_runtime_root_outside_workspace"]["ok"])
+                self.assertTrue(checks["workspace_git_repo_excludes_astrabridge_state"]["ok"])
                 self.assertTrue(checks["managed_state_dir_captures_exists"]["ok"])
                 self.assertTrue(checks["managed_state_dir_downloads_exists"]["ok"])
                 self.assertIsNotNone(audit["official_codex"]["config_sha256"])
@@ -10463,6 +10485,50 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 os.environ.pop("ASTRABRIDGE_APPDATA", None)
             else:
                 os.environ["ASTRABRIDGE_APPDATA"] = original_appdata
+
+    def test_isolation_audit_flags_missing_parent_git_exclude_for_workspace_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            init = subprocess.run(["git", "init"], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+            if init.returncode != 0:
+                self.skipTest("git is not available")
+            workspace = root / "PRIVATE" / "demo" / "workspace"
+            workspace.mkdir(parents=True)
+            project_service = ProjectService(root / "projects.json")
+            project = project_service.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            storage_policy = json.loads((workspace / ".astrabridge" / "storage_policy.json").read_text(encoding="utf-8"))
+            codex_home = Path(storage_policy["runtime"]["codex_home_root"]).resolve()
+            (codex_home / "config.toml").write_text('model = "deepseek/deepseek-v4-pro"\n', encoding="utf-8")
+            exclude_file = root / ".git" / "info" / "exclude"
+            exclude_text = exclude_file.read_text(encoding="utf-8")
+            exclude_file.write_text(exclude_text.replace("PRIVATE/demo/workspace/.astrabridge/\n", ""), encoding="utf-8")
+
+            audit = IsolationAuditService().snapshot(
+                current_project=project,
+                runtime_environment={
+                    "running": False,
+                    "codex_cli": "codex",
+                    "execution_host": "windows",
+                    "runtime_config": {"codex_home": str(codex_home)},
+                },
+                router_status={"listen_port": 8787, "base_url": "http://127.0.0.1:8787/v1"},
+                official_codex_status={
+                    "config_path": str(root / ".codex" / "config.toml"),
+                    "exists": False,
+                    "managed_by_app": False,
+                    "router_configured": False,
+                },
+                sidecar_port=8790,
+            )
+
+            checks = {item["name"]: item for item in audit["checks"]}
+            self.assertFalse(audit["ok"])
+            self.assertFalse(checks["workspace_git_repo_excludes_astrabridge_state"]["ok"])
+            self.assertEqual(checks["workspace_git_repo_excludes_astrabridge_state"]["detail"]["repo_root"], str(root.resolve()))
+            self.assertEqual(
+                checks["workspace_git_repo_excludes_astrabridge_state"]["detail"]["expected_pattern"],
+                "PRIVATE/demo/workspace/.astrabridge/",
+            )
 
     def test_isolation_audit_ignores_safe_env_key_and_token_limit_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

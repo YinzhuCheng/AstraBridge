@@ -521,18 +521,54 @@ class ProjectService:
         }
 
     def _ensure_git_exclude(self, workspace_root: Path) -> None:
-        git_root = workspace_root / ".git"
+        repo_root = self._git_repo_root_for_workspace(workspace_root)
+        if repo_root is None:
+            return
+        git_root = repo_root / ".git"
         if not git_root.exists() or not git_root.is_dir():
             return
         exclude_file = git_root / "info" / "exclude"
         exclude_file.parent.mkdir(parents=True, exist_ok=True)
         existing = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
         additions = []
-        if f"{WORKSPACE_STATE_DIRNAME}/" not in existing:
-            additions.append(f"{WORKSPACE_STATE_DIRNAME}/")
+        pattern = self._git_exclude_pattern(repo_root, workspace_root)
+        if pattern and pattern not in existing:
+            additions.append(pattern)
         if additions:
             suffix = "\n".join(additions) + "\n"
             exclude_file.write_text(existing.rstrip() + ("\n" if existing and not existing.endswith("\n") else "") + suffix, encoding="utf-8")
+
+    def _git_repo_root_for_workspace(self, workspace_root: Path) -> Path | None:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(workspace_root), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                timeout=5,
+            )
+        except Exception:
+            return None
+        if completed.returncode != 0:
+            return None
+        candidate = str(completed.stdout or "").strip()
+        if not candidate:
+            return None
+        try:
+            return Path(candidate).expanduser().resolve()
+        except OSError:
+            return None
+
+    def _git_exclude_pattern(self, repo_root: Path, workspace_root: Path) -> str:
+        try:
+            relative_workspace = workspace_root.resolve().relative_to(repo_root.resolve()).as_posix()
+        except ValueError:
+            return f"{WORKSPACE_STATE_DIRNAME}/"
+        if not relative_workspace or relative_workspace == ".":
+            return f"{WORKSPACE_STATE_DIRNAME}/"
+        return f"{relative_workspace}/{WORKSPACE_STATE_DIRNAME}/"
 
     def _default_ui_preferences(self) -> dict[str, Any]:
         runtime = self._default_runtime_preferences()

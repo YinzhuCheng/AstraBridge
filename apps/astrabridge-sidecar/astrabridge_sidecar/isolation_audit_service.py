@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,13 @@ class IsolationAuditService:
                     "workspace_storage_policy_runtime_root_outside_workspace",
                     _storage_policy_runtime_root_outside_workspace(storage_policy_payload, workspace),
                     str(storage_policy),
+                )
+            )
+            checks.append(
+                _check(
+                    "workspace_git_repo_excludes_astrabridge_state",
+                    _workspace_git_repo_excludes_astrabridge_state(workspace),
+                    _workspace_git_exclude_detail(workspace),
                 )
             )
         checks.append(_check("isolated_codex_home_present", codex_home is not None and codex_home.exists(), str(codex_home) if codex_home else None))
@@ -287,4 +295,64 @@ def _expected_runtime_codex_home_matches(
         except OSError:
             return False
     return _storage_policy_runtime_path_matches(payload, "codex_home_root", actual_path)
+
+
+def _workspace_git_repo_excludes_astrabridge_state(workspace: Path) -> bool:
+    repo_root = _git_repo_root_for_workspace(workspace)
+    if repo_root is None:
+        return True
+    exclude_file = repo_root / ".git" / "info" / "exclude"
+    if not exclude_file.exists() or not exclude_file.is_file():
+        return False
+    try:
+        content = exclude_file.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    pattern = _workspace_git_exclude_pattern(repo_root, workspace)
+    return bool(pattern) and pattern in content
+
+
+def _workspace_git_exclude_detail(workspace: Path) -> dict[str, str] | None:
+    repo_root = _git_repo_root_for_workspace(workspace)
+    if repo_root is None:
+        return None
+    return {
+        "repo_root": str(repo_root),
+        "expected_pattern": _workspace_git_exclude_pattern(repo_root, workspace),
+        "exclude_file": str(repo_root / ".git" / "info" / "exclude"),
+    }
+
+
+def _git_repo_root_for_workspace(workspace: Path) -> Path | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if completed.returncode != 0:
+        return None
+    candidate = str(completed.stdout or "").strip()
+    if not candidate:
+        return None
+    try:
+        return Path(candidate).expanduser().resolve()
+    except OSError:
+        return None
+
+
+def _workspace_git_exclude_pattern(repo_root: Path, workspace: Path) -> str:
+    try:
+        relative_workspace = workspace.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return f"{WORKSPACE_STATE_DIRNAME}/"
+    if not relative_workspace or relative_workspace == ".":
+        return f"{WORKSPACE_STATE_DIRNAME}/"
+    return f"{relative_workspace}/{WORKSPACE_STATE_DIRNAME}/"
 
