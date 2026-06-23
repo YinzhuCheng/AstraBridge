@@ -65,6 +65,25 @@ _OPENAI_DEFAULT_MODEL = str(
     (preferred_provider_model_record("openai", include_deprecated=False) or {}).get("native_model") or "gpt-5.5"
 )
 
+_LCR_WEB_TOOL_ALIAS_BY_NAME = {
+    "astrabridge_web_search_batch": "lcr_web_search_batch",
+    "astrabridge_web_research_brief": "lcr_web_research_brief",
+    "astrabridge_web_search": "lcr_web_search",
+    "astrabridge_web_fetch": "lcr_web_fetch",
+}
+_LCR_WEB_TOOL_CANONICAL_BY_ALIAS = {value: key for key, value in _LCR_WEB_TOOL_ALIAS_BY_NAME.items()}
+
+
+def _normalize_lcr_web_tool_name(tool: str) -> str:
+    if not tool:
+        return ""
+    return str(_LCR_WEB_TOOL_ALIAS_BY_NAME.get(str(tool).strip(), tool))
+
+
+def _is_lcr_or_astrabridge_web_tool(tool: str) -> bool:
+    normalized = _normalize_lcr_web_tool_name(tool).strip()
+    return normalized.startswith("lcr_web_") or normalized.startswith("astrabridge_web_")
+
 
 class RuntimeService:
     def __init__(
@@ -2474,8 +2493,8 @@ class RuntimeService:
     def _call_lcr_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if tool in BROWSER_SMOKE_TOOL_ALIASES:
             return self._call_lcr_browser_smoke_dynamic_tool(arguments)
-        if tool.startswith("lcr_web_"):
-            return self._call_lcr_web_dynamic_tool(tool, arguments)
+        if _is_lcr_or_astrabridge_web_tool(tool):
+            return self._call_lcr_web_dynamic_tool(_normalize_lcr_web_tool_name(tool), arguments)
         return self._call_yunwu_dynamic_tool(tool, arguments)
 
     def _arguments_with_tool_context(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2489,6 +2508,8 @@ class RuntimeService:
     def _summarize_lcr_dynamic_tool_result(self, tool: str, result: dict[str, Any]) -> dict[str, Any]:
         if tool.startswith("yunwu_image_"):
             return summarize_yunwu_image_result(result)
+        if _is_lcr_or_astrabridge_web_tool(tool):
+            return result
         if tool in BROWSER_SMOKE_TOOL_ALIASES:
             record = dict(result.get("browser_smoke") or {})
             return {
@@ -2510,8 +2531,8 @@ class RuntimeService:
     def _dynamic_tool_server(self, tool: str) -> str:
         if tool in BROWSER_SMOKE_TOOL_ALIASES:
             return "astrabridge_browser"
-        if tool.startswith("lcr_web_"):
-            return "lcr_web"
+        if _is_lcr_or_astrabridge_web_tool(tool):
+            return "astrabridge_web"
         if tool.startswith("yunwu_image_"):
             return "yunwu_image"
         return "lcr"
@@ -2528,11 +2549,11 @@ class RuntimeService:
         return self._dogfood_run.browser_smoke(payload)
 
     def _call_lcr_web_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if tool == "lcr_web_search_batch":
+        if tool == "astrabridge_web_search_batch" or tool == "lcr_web_search_batch":
             return self._lcr_web.search_batch(arguments)
-        if tool == "lcr_web_research_brief":
+        if tool == "astrabridge_web_research_brief" or tool == "lcr_web_research_brief":
             return self._lcr_web.research_brief(arguments)
-        if tool == "lcr_web_search":
+        if tool == "astrabridge_web_search" or tool == "lcr_web_search":
             return self._lcr_web.search_batch(
                 {
                     "queries": [{"query": str(arguments.get("query") or ""), "max_results": int(arguments.get("max_results") or 5)}],
@@ -2541,7 +2562,7 @@ class RuntimeService:
                     "tool_context": arguments.get("tool_context"),
                 }
             )
-        if tool == "lcr_web_fetch":
+        if tool == "astrabridge_web_fetch" or tool == "lcr_web_fetch":
             return self._lcr_web.fetch(arguments)
         raise ValueError(f"Unsupported AstraBridge web dynamic tool: {tool}")
 
@@ -3562,15 +3583,32 @@ for host in candidates:
                 }
             )
         if self._mcp_server_enabled("lcr_web"):
-            dynamic_tools.extend(
-                {
-                    "name": str(tool.get("name") or ""),
-                    "description": str(tool.get("description") or ""),
-                    "inputSchema": dict(tool.get("inputSchema") or {}),
-                }
-                for tool in lcr_web_dynamic_tools()
-                if tool.get("name")
-            )
+            web_tools: list[dict[str, Any]] = []
+            web_tool_names: set[str] = set()
+            for tool in lcr_web_dynamic_tools():
+                name = str(tool.get("name") or "").strip()
+                if not name:
+                    continue
+                if name not in web_tool_names:
+                    web_tools.append(
+                        {
+                            "name": name,
+                            "description": str(tool.get("description") or ""),
+                            "inputSchema": dict(tool.get("inputSchema") or {}),
+                        }
+                    )
+                    web_tool_names.add(name)
+                alias = _LCR_WEB_TOOL_CANONICAL_BY_ALIAS.get(name)
+                if alias and alias not in web_tool_names:
+                    web_tools.append(
+                        {
+                            "name": alias,
+                            "description": str(tool.get("description") or ""),
+                            "inputSchema": dict(tool.get("inputSchema") or {}),
+                        }
+                    )
+                    web_tool_names.add(alias)
+            dynamic_tools.extend(web_tools)
         if self._mcp_server_enabled("yunwu_image"):
             dynamic_tools.extend(
                 {
@@ -4225,7 +4263,7 @@ for host in candidates:
             request_failures = summary.get("request_failures")
             if isinstance(request_failures, list):
                 lines.append(f"request failures: {len(request_failures)}")
-        elif tool.startswith("lcr_web_"):
+        elif _is_lcr_or_astrabridge_web_tool(tool):
             if summary.get("record_id"):
                 lines.append(f"research record: {summary.get('record_id')}")
             result = summary.get("result")
@@ -4277,7 +4315,7 @@ for host in candidates:
                 continue
             quality = self._turn_completion_quality(turn)
             if quality:
-                decorated_turns.append({**turn, "lcrCompletionQuality": quality})
+                decorated_turns.append({**turn, "completionQuality": quality, "lcrCompletionQuality": quality})
                 changed = True
             else:
                 decorated_turns.append(turn)

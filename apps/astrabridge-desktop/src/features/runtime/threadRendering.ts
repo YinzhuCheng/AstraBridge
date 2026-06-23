@@ -40,6 +40,7 @@ type DecoratedTurn = {
   reasoning_effort?: string;
   reasoningEffort?: string;
   items?: ThreadMessageSource[];
+  completionQuality?: CompletionQuality;
   lcrCompletionQuality?: CompletionQuality;
   coding_events?: DecoratedCodingEvent[];
 };
@@ -238,7 +239,7 @@ function liveCollabPreview(item: Record<string, unknown>) {
 }
 
 function completionQualityBlock(turn: DecoratedTurn): ThreadRenderBlock | null {
-  const quality = turn.lcrCompletionQuality;
+  const quality = turn.completionQuality || turn.lcrCompletionQuality;
   if (!quality) return null;
   const preview = quality.final_preview || "The turn ended after tool activity, but the final assistant answer still looks incomplete.";
   const detail = [

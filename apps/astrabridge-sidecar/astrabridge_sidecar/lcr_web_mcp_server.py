@@ -24,6 +24,47 @@ DEFAULT_MAX_CHARS = 6000
 DEFAULT_BATCH_MAX_QUERIES = 8
 DEFAULT_RESEARCH_FETCH_TOP_N = 6
 _OUTPUT_FRAMING = "header"
+_LEGACY_TO_ASTRABRIDGE_WEB_TOOL = {
+    "lcr_web_search_batch": "astrabridge_web_search_batch",
+    "lcr_web_research_brief": "astrabridge_web_research_brief",
+    "lcr_web_search": "astrabridge_web_search",
+    "lcr_web_fetch": "astrabridge_web_fetch",
+}
+_ASTRABRIDGE_TO_LEGACY_WEB_TOOL = {astr: legacy for legacy, astr in _LEGACY_TO_ASTRABRIDGE_WEB_TOOL.items()}
+
+
+def _normalize_web_tool_name(name: str) -> str:
+    normalized = str(name or "").strip()
+    return _LEGACY_TO_ASTRABRIDGE_WEB_TOOL.get(normalized, normalized)
+
+
+def _canonicalize_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    payload["tool"] = tool_name
+    return payload
+
+
+def _web_tool_names() -> list[str]:
+    return [
+        "lcr_web_search_batch",
+        "lcr_web_research_brief",
+        "lcr_web_search",
+        "lcr_web_fetch",
+        "astrabridge_web_search_batch",
+        "astrabridge_web_research_brief",
+        "astrabridge_web_search",
+        "astrabridge_web_fetch",
+    ]
+
+
+def _is_web_tool_name(name: str) -> bool:
+    return str(name or "").strip() in _web_tool_names()
+
+
+def _as_bridge_name(tool_name: str) -> str:
+    normalized = str(tool_name or "").strip()
+    return _ASTRABRIDGE_TO_LEGACY_WEB_TOOL.get(normalized, normalized)
 PREFERRED_GAME_DEV_DOMAINS = {
     "gamedev.stackexchange.com",
     "developer.mozilla.org",
@@ -119,7 +160,7 @@ def _handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _tools() -> list[dict[str, Any]]:
-    return [
+    base_tools = [
         {
             "name": "lcr_web_search_batch",
             "description": (
@@ -228,14 +269,31 @@ def _tools() -> list[dict[str, Any]]:
             },
         },
     ]
+    tools: list[dict[str, Any]] = []
+    names = set()
+    for tool in base_tools:
+        name = str(tool.get("name") or "").strip()
+        if name in names:
+            continue
+        tools.append(dict(tool))
+        names.add(name)
+
+        alias = _LEGACY_TO_ASTRABRIDGE_WEB_TOOL.get(name)
+        if alias and alias not in names:
+            tools.append({**tool, "name": alias, "description": f"Alias for {name}; prefer {name} unless caller requires a prefixed AstraBridge tool name."})
+            names.add(alias)
+    return tools
 
 
 def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
-    name = str(params.get("name") or "")
+    name = _normalize_web_tool_name(str(params.get("name") or ""))
     args = params.get("arguments") or {}
+    if not _is_web_tool_name(name):
+        raise ValueError(f"Unknown AstraBridge web tool: {name}")
     if not isinstance(args, dict):
         raise ValueError("Tool arguments must be an object.")
-    if name == "lcr_web_search_batch":
+    canonical_name = _as_bridge_name(name)
+    if canonical_name == "lcr_web_search_batch":
         payload = _search_batch(
             args.get("queries"),
             dedupe=bool(args.get("dedupe", True)),
@@ -244,8 +302,8 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         context = _sanitize_tool_context(args.get("tool_context"))
         if context:
             payload["tool_context"] = context
-        return _tool_text(payload)
-    if name == "lcr_web_research_brief":
+        return _tool_text(_canonicalize_tool_payload(name, payload))
+    if canonical_name == "lcr_web_research_brief":
         payload = _research_brief(
             research_goal=str(args.get("research_goal") or "").strip(),
             queries=args.get("queries"),
@@ -258,8 +316,8 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         context = _sanitize_tool_context(args.get("tool_context"))
         if context:
             payload["tool_context"] = context
-        return _tool_text(payload)
-    if name == "lcr_web_search":
+        return _tool_text(_canonicalize_tool_payload(name, payload))
+    if canonical_name == "lcr_web_search":
         query = str(args.get("query") or "").strip()
         if not query:
             raise ValueError("query is required.")
@@ -272,8 +330,8 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         context = _sanitize_tool_context(args.get("tool_context"))
         if context:
             payload["tool_context"] = context
-        return _tool_text(payload)
-    if name == "lcr_web_fetch":
+        return _tool_text(_canonicalize_tool_payload(name, payload))
+    if canonical_name == "lcr_web_fetch":
         url = str(args.get("url") or "").strip()
         if not url:
             raise ValueError("url is required.")
@@ -281,7 +339,7 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         context = _sanitize_tool_context(args.get("tool_context"))
         if context:
             payload["tool_context"] = context
-        return _tool_text(payload)
+        return _tool_text(_canonicalize_tool_payload(name, payload))
     raise ValueError(f"Unknown AstraBridge web tool: {name}")
 
 

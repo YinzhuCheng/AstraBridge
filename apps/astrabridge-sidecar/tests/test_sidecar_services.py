@@ -3375,6 +3375,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("lcr_web_research_brief", names)
             self.assertIn("lcr_web_search", names)
             self.assertIn("lcr_web_fetch", names)
+            self.assertIn("astrabridge_web_search_batch", names)
+            self.assertIn("astrabridge_web_research_brief", names)
+            self.assertIn("astrabridge_web_search", names)
+            self.assertIn("astrabridge_web_fetch", names)
             self.assertNotIn("yunwu_image_generate", names)
 
     def test_runtime_thread_start_registers_browser_smoke_dynamic_tool_for_projects(self) -> None:
@@ -3550,7 +3554,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("tool_event_verified", text)
             event_payload = json.dumps(runtime.list_events()["events"][-1], ensure_ascii=False)
             self.assertIn("dynamic_tool_called", event_payload)
-            self.assertIn('"server": "lcr_web"', event_payload)
+            self.assertIn('"server": "astrabridge_web"', event_payload)
             self.assertIn("https://example.com/autotile", event_payload)
             context = dict(captured_arguments.get("tool_context") or {})
             self.assertEqual(context["tool_name"], "lcr_web_research_brief")
@@ -3611,6 +3615,63 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(context["selected_provider"], "deepseek")
             self.assertEqual(captured_arguments["queries"], [{"query": "JRPG meadow map overlay collision", "max_results": 5}])
             self.assertIn("tool_context", result["contentItems"][0]["text"])
+
+    def test_runtime_dynamic_astrabridge_web_tool_call_returns_research_brief_content(self) -> None:
+        captured_arguments: dict[str, object] = {}
+
+        class FakeLcrWeb:
+            def research_brief(self, arguments: dict[str, object]) -> dict[str, object]:
+                captured_arguments.update(arguments)
+                return {
+                    "ok": True,
+                    "record_id": "research-2",
+                    "tool_event_verified": True,
+                    "path": "D:/workspace/.astrabridge/research/research-2.json",
+                    "result": {
+                        "tool": "astrabridge_web_research_brief",
+                        "research_goal": arguments.get("research_goal"),
+                        "sources": [{"url": "https://example.com/autotile", "title": "Autotile"}],
+                        "citation_rule": "Use only URLs in sources.",
+                    },
+                }
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.ensure_default_task(thread_id="thread-1", title="Magic Tower", settings={"provider_id": "deepseek", "model": "deepseek-v4-pro"})
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                task_service=tasks,
+                lcr_web_service=FakeLcrWeb(),
+            )
+            runtime._mcp_config.enabled_servers = lambda: [{"name": "lcr_web", "enabled": True}]  # type: ignore[method-assign]
+
+            result = runtime._on_server_request(  # noqa: SLF001
+                "item/tool/call",
+                {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "tool": "astrabridge_web_research_brief",
+                    "arguments": {"research_goal": "RPG autotile map visual design"},
+                },
+            )
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["contentItems"][0]["type"], "inputText")
+            text = result["contentItems"][0]["text"]
+            self.assertIn("astrabridge_web_research_brief", text)
+            self.assertIn("https://example.com/autotile", text)
+            self.assertIn("tool_event_verified", text)
+            context = dict(captured_arguments.get("tool_context") or {})
+            self.assertEqual(context["tool_name"], "astrabridge_web_research_brief")
+            self.assertEqual(context["selected_model"], "deepseek-v4-pro")
+            event_payload = json.dumps(runtime.list_events()["events"][-1], ensure_ascii=False)
+            self.assertIn('"server": "astrabridge_web"', event_payload)
 
     def test_runtime_dynamic_browser_smoke_tool_call_returns_evidence(self) -> None:
         class FakeDogfood:
@@ -3735,7 +3796,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(items[1]["status"], "completed")
             self.assertIn("tool_event_verified", items[1]["contentItems"][0]["text"])
             self.assertTrue(items[1]["lcrVerifiedEvidence"]["verified"])
-            self.assertEqual(items[1]["lcrVerifiedEvidence"]["server"], "lcr_web")
+            self.assertEqual(items[1]["lcrVerifiedEvidence"]["server"], "astrabridge_web")
             self.assertIn("tool-event verified", items[1]["lcrVerifiedEvidence"]["label"])
 
     def test_runtime_read_thread_records_task_conversation_snapshot(self) -> None:

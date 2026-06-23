@@ -261,7 +261,7 @@ def _current_plan_step(value: Any) -> str:
 
 
 def _default_output_contract(tool_name: str) -> str:
-    if tool_name.startswith("lcr_web_"):
+    if tool_name.startswith("lcr_web_") or tool_name.startswith("astrabridge_web_"):
         return "Return source URLs, concise summaries, confidence/freshness notes, and unresolved questions. Do not claim facts without a source URL."
     if tool_name.startswith("yunwu_image_"):
         return "Return requested_n, actual_n, local paths, dimensions, format, alpha status, validation warnings, and intended game usage."

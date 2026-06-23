@@ -177,6 +177,37 @@ describe("thread rendering helpers", () => {
     expect(warning.activity.detail).toContain("continue_or_retry_final_answer");
   });
 
+  it("supports legacy and new completion quality field names", () => {
+    const thread = {
+      turns: [
+        {
+          id: "turn-1",
+          status: "completed",
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1000,
+          items: [
+            { type: "agentMessage", id: "agent-1", text: "done", phase: null, memoryCitation: null },
+          ],
+          completionQuality: {
+            status: "suspect",
+            reason: "completion summary incomplete",
+            recommended_action: "continue_or_retry_final_answer",
+            final_preview: "Need one more patch for compile.",
+          },
+        },
+      ],
+    } as unknown as Pick<ShellThread, "turns">;
+
+    const blocks = summarizeTurnBlocks(thread);
+    const warning = blocks.find((block) => block.role === "activity");
+
+    expect(warning).toBeTruthy();
+    if (!warning || warning.role !== "activity") throw new Error("expected warning activity");
+    expect(warning.activity.label).toBe("Final answer may need a follow-up");
+    expect(warning.activity.preview).toContain("Need one more patch for compile.");
+  });
+
   it("carries provider metadata from composite task turns onto render blocks", () => {
     const thread = {
       turns: [
