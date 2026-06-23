@@ -328,16 +328,6 @@ function joinList(values: string[] | undefined) {
   return (values ?? []).join(", ");
 }
 
-function inferProviderFromModel(value: string | undefined) {
-  const text = String(value || "").toLowerCase();
-  if (!text) return "";
-  if (text.startsWith("kimi") || text.startsWith("moonshot")) return "kimi";
-  if (text.startsWith("deepseek")) return "deepseek";
-  if (text.startsWith("qwen") || text.startsWith("dashscope")) return "qwen";
-  if (text.startsWith("gpt") || text.startsWith("o") || text.startsWith("text-") || text.startsWith("dall-e")) return "openai";
-  return "";
-}
-
 function optionalNumber(value: string) {
   if (!value.trim()) return null;
   const parsed = Number(value);
@@ -3661,7 +3651,7 @@ function AppShell() {
   }, [llmCatalog.data?.providers, llmSession.data?.mode, profiles.data?.profiles, routerConfig.data?.providers]);
   const metadataProviderForActiveModel = useMemo(() => {
     const models = [...(llmCatalog.data?.models ?? []), ...(routerConfig.data?.models ?? [])];
-    return models.find((model) => model.native_model === activeSettings.model || model.id === activeSettings.model)?.provider ?? inferProviderFromModel(activeSettings.model);
+    return models.find((model) => model.native_model === activeSettings.model || model.id === activeSettings.model)?.provider ?? null;
   }, [activeSettings.model, llmCatalog.data?.models, routerConfig.data?.models]);
   const composerProviderOptions = useMemo(() => {
     let options = [...providerOptions];
