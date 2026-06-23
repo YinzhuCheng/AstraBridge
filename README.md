@@ -1,31 +1,85 @@
-﻿# AstraBridge 鏄熸ˉ
+# AstraBridge
 
-AstraBridge 鏄熸ˉ is a local desktop coding-agent workbench built on Codex CLI/app-server runtime patterns, with first-class support for multiple OpenAI-compatible and third-party providers.
+AstraBridge is a local provider-neutral coding-agent workbench built around Codex CLI/app-server runtime patterns. It uses app-owned project state, app-owned provider routing, and isolated runtime paths instead of official Codex user state.
 
-It is not the official Codex App. AstraBridge treats OpenAI, DeepSeek, Kimi, Qwen, Yunwu, and other compatible providers as configurable API-key providers with model metadata, adapter policy, health checks, and local project state.
+It is not the official Codex App. OpenAI, DeepSeek, Kimi, Qwen, Yunwu, and other compatible backends are treated as configurable API-key providers with model metadata, adapter policy, health checks, and local project state.
 
-## Developer Quickstart
+## Product Facts
+
+- Normal project format: `.abproj`
+- Normal workspace state: `.astrabridge/`
+- Main operator surface: LLM API Manager
+- Main metadata source: provider/model catalog managed by AstraBridge
+- Main workflow targets: release-grade coding workflow and provider-neutral native-kernel workflow
+- Official OpenAI account login is not a product path
+- Legacy `.lcrproj`, `.lcr`, `.codexproj`, and `.codex-shell` are not normal product paths
+
+## Repo Layout
+
+- `apps/astrabridge-sidecar/`: sidecar services, project/runtime/provider/model APIs
+- `apps/astrabridge-desktop/`: desktop/web UI, i18n, browser-facing workflow surfaces
+- `docs/`: active operator, security, release, and demo documentation
+- `PLAN/`: active repository execution plan
+- `PRIVATE/`: local-only demo runs, screenshots, validation artifacts, and private operator material
+
+## Quickstart
+
+### Sidecar
 
 ```powershell
 cd D:\AstraBridge\apps\astrabridge-sidecar
 python -m unittest discover -s tests
-
-cd D:\AstraBridge\apps\astrabridge-desktop
-npm install
-npm run build
-npm run tauri dev
+python -m astrabridge_sidecar.server --serve --port 8826 --seed-root D:\AstraBridge
 ```
 
-Projects use `.abproj` and workspace-local `.astrabridge/` state. Legacy LCR and codex-shell project files are not imported; recreate AstraBridge projects from your backups when needed.
-## Private Credentials
+### Desktop
 
-AstraBridge supports provider keys as private operator-owned material. The repo includes `PRIVATE/README.md` to document local-only paths, while `PRIVATE/**` is ignored by git. Do not push real API keys or `Authorization` headers to a public remote.
+```powershell
+cd D:\AstraBridge\apps\astrabridge-desktop
+npm install
+cmd /c npm run test
+cmd /c npm run build
+cmd /c npm run dev -- --host 127.0.0.1 --port 4181
+```
 
-## Current Operator Baseline
+### Browser Smoke URL Shape
 
-Use these docs as the current product path:
+Use the desktop dev server with an explicit sidecar URL:
 
+```text
+http://127.0.0.1:4181/?sidecar=http://127.0.0.1:8826&smoke=1
+```
+
+## Demo Modes
+
+### No-key demo
+
+Use this by default when validating UI, project state, browser smoke wiring, or local product workflows.
+
+- Does not require real provider token spend
+- Suitable for layout checks, local state checks, and smoke plumbing
+
+### Key-backed smoke
+
+Use this only when the task explicitly requires real provider connectivity or model behavior verification.
+
+- Requires user-approved secret loading path
+- Must report only secret-safe status fields
+- Must not persist plaintext keys, headers, cookies, or raw provider secrets
+
+## Secret Safety
+
+- Do not commit API keys, bearer tokens, cookies, auth headers, or provider raw secrets
+- Do not read Desktop plaintext key files unless the user explicitly authorizes that exact action
+- Do not push anything under `PRIVATE/**` except intentionally tracked documentation such as `PRIVATE/README.md`
+- Do not write official Codex `~/.codex/config.toml` or project `.codex*` files during normal AstraBridge use
+
+## Current Entry Points
+
+- [Project Summary](/D:/AstraBridge/docs/PROJECT_SUMMARY.md)
+- [Project Log](/D:/AstraBridge/docs/PROJECT_LOG.md)
+- [Asset Sources](/D:/AstraBridge/docs/ASSET_SOURCES.md)
 - [Demo Runbook](/D:/AstraBridge/docs/DEMO_RUNBOOK.md)
 - [Security And Isolation](/D:/AstraBridge/docs/SECURITY_AND_ISOLATION.md)
 - [Release Checklist](/D:/AstraBridge/docs/RELEASE_CHECKLIST.md)
-- [Planning Baseline](/D:/AstraBridge/PLAN/30_NEAR_TERM_PRODUCT_FOCUS_AND_NON_TRIVIAL_PRIORITIES.md)
+- [Active Execution Plan](/D:/AstraBridge/PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md)

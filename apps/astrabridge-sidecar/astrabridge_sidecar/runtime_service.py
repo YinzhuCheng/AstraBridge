@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import mimetypes
@@ -20,8 +20,7 @@ from .app_server_client import AppServerClient, JsonRpcError
 from .coding_kernel import project_turn_to_coding_events
 from .common import WORKSPACE_STATE_DIRNAME, append_jsonl, new_id, now_iso, read_json, write_json
 from .dogfood_run_service import MAX_BROWSER_SMOKE_ACTIONS
-from .lcr_web_mcp_server import _tools as lcr_web_dynamic_tools
-from .lcr_web_service import LcrWebService
+from .astrabridge_web_mcp_server import _tools as astrabridge_web_dynamic_tools
 from .mcp_config_service import McpConfigService
 from .modal_service import ModalService
 from .model_catalog import (
@@ -37,6 +36,7 @@ from .security import SecurityError, redact_sensitive, resolve_under, scan_text_
 from .secret_service import SecretService
 from .task_service import _display_thread_name
 from .tool_context_service import ToolContextService, sanitize_tool_context
+from .web_tool_service import AstraBridgeWebService
 from .wsl_dependency_service import ASTRABRIDGE_WSL_BIN, ASTRABRIDGE_WSL_CODEX_HOME, ASTRABRIDGE_WSL_ROOT
 from .yunwu_image_mcp_server import _summarize_image_result as summarize_yunwu_image_result
 from .yunwu_image_mcp_server import _tools as yunwu_image_dynamic_tools
@@ -59,30 +59,13 @@ VALID_COLLABORATION_MODES = {"default", "plan"}
 VALID_CONTEXT_MODES = {"default", "full", "minimal_text", "minimal_visual", "no_context"}
 VALID_EXECUTION_BACKENDS = {"app_server", "native_kernel"}
 BROWSER_SMOKE_TOOL_NAME = "astrabridge_browser_smoke"
-LEGACY_BROWSER_SMOKE_TOOL_NAME = "lcr_browser_smoke"
-BROWSER_SMOKE_TOOL_ALIASES = {BROWSER_SMOKE_TOOL_NAME, LEGACY_BROWSER_SMOKE_TOOL_NAME}
+BROWSER_SMOKE_TOOL_ALIASES = {BROWSER_SMOKE_TOOL_NAME}
 _OPENAI_DEFAULT_MODEL = str(
     (preferred_provider_model_record("openai", include_deprecated=False) or {}).get("native_model") or "gpt-5.5"
 )
 
-_LCR_WEB_TOOL_ALIAS_BY_NAME = {
-    "astrabridge_web_search_batch": "lcr_web_search_batch",
-    "astrabridge_web_research_brief": "lcr_web_research_brief",
-    "astrabridge_web_search": "lcr_web_search",
-    "astrabridge_web_fetch": "lcr_web_fetch",
-}
-_LCR_WEB_TOOL_CANONICAL_BY_ALIAS = {value: key for key, value in _LCR_WEB_TOOL_ALIAS_BY_NAME.items()}
-
-
-def _normalize_lcr_web_tool_name(tool: str) -> str:
-    if not tool:
-        return ""
-    return str(_LCR_WEB_TOOL_ALIAS_BY_NAME.get(str(tool).strip(), tool))
-
-
-def _is_lcr_or_astrabridge_web_tool(tool: str) -> bool:
-    normalized = _normalize_lcr_web_tool_name(tool).strip()
-    return normalized.startswith("lcr_web_") or normalized.startswith("astrabridge_web_")
+def _is_astrabridge_web_tool(tool: str) -> bool:
+    return str(tool or "").strip().startswith("astrabridge_web_")
 
 
 class RuntimeService:
@@ -98,7 +81,7 @@ class RuntimeService:
         task_service: Any | None = None,
         task_conversation: Any | None = None,
         dogfood_run: Any | None = None,
-        lcr_web_service: Any | None = None,
+        web_tool_service: Any | None = None,
         profile_service: ProfileService | None = None,
         router_service: Any | None = None,
     ) -> None:
@@ -111,7 +94,7 @@ class RuntimeService:
         self._tasks = task_service
         self._task_conversation = task_conversation
         self._dogfood_run = dogfood_run
-        self._lcr_web = lcr_web_service or LcrWebService(project_service)
+        self._web_tools = web_tool_service or AstraBridgeWebService(project_service)
         self._tool_context = ToolContextService(project_service, task_service)
         codex_home_resolver = getattr(self._projects, "current_runtime_codex_home", None)
         self._runtime_config = runtime_config or RuntimeConfigService(
@@ -2451,11 +2434,11 @@ class RuntimeService:
         if not isinstance(arguments, dict):
             arguments = {}
         try:
-            if tool not in self._lcr_dynamic_tool_names():
+            if tool not in self._dynamic_tool_names():
                 raise ValueError(f"Unsupported AstraBridge dynamic tool: {tool}")
             arguments = self._arguments_with_tool_context(tool, arguments)
-            result = self._call_lcr_dynamic_tool(tool, arguments)
-            summary = self._summarize_lcr_dynamic_tool_result(tool, result)
+            result = self._call_dynamic_tool(tool, arguments)
+            summary = self._summarize_dynamic_tool_result(tool, result)
             context = sanitize_tool_context(arguments.get("tool_context"))
             if context:
                 summary["tool_context"] = context
@@ -2490,11 +2473,11 @@ class RuntimeService:
             )
             return {"success": False, "contentItems": [{"type": "inputText", "text": f"AstraBridge dynamic tool failed: {message}"}]}
 
-    def _call_lcr_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _call_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if tool in BROWSER_SMOKE_TOOL_ALIASES:
-            return self._call_lcr_browser_smoke_dynamic_tool(arguments)
-        if _is_lcr_or_astrabridge_web_tool(tool):
-            return self._call_lcr_web_dynamic_tool(_normalize_lcr_web_tool_name(tool), arguments)
+            return self._call_browser_smoke_dynamic_tool(arguments)
+        if _is_astrabridge_web_tool(tool):
+            return self._call_astrabridge_web_dynamic_tool(tool, arguments)
         return self._call_yunwu_dynamic_tool(tool, arguments)
 
     def _arguments_with_tool_context(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2505,10 +2488,10 @@ class RuntimeService:
         )
         return merged
 
-    def _summarize_lcr_dynamic_tool_result(self, tool: str, result: dict[str, Any]) -> dict[str, Any]:
+    def _summarize_dynamic_tool_result(self, tool: str, result: dict[str, Any]) -> dict[str, Any]:
         if tool.startswith("yunwu_image_"):
             return summarize_yunwu_image_result(result)
-        if _is_lcr_or_astrabridge_web_tool(tool):
+        if _is_astrabridge_web_tool(tool):
             return result
         if tool in BROWSER_SMOKE_TOOL_ALIASES:
             record = dict(result.get("browser_smoke") or {})
@@ -2531,13 +2514,13 @@ class RuntimeService:
     def _dynamic_tool_server(self, tool: str) -> str:
         if tool in BROWSER_SMOKE_TOOL_ALIASES:
             return "astrabridge_browser"
-        if _is_lcr_or_astrabridge_web_tool(tool):
+        if _is_astrabridge_web_tool(tool):
             return "astrabridge_web"
         if tool.startswith("yunwu_image_"):
             return "yunwu_image"
-        return "lcr"
+        return "astrabridge"
 
-    def _call_lcr_browser_smoke_dynamic_tool(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _call_browser_smoke_dynamic_tool(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._dogfood_run is None:
             raise ValueError("Dogfood browser smoke service is not available.")
         payload = {
@@ -2548,13 +2531,13 @@ class RuntimeService:
         }
         return self._dogfood_run.browser_smoke(payload)
 
-    def _call_lcr_web_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if tool == "astrabridge_web_search_batch" or tool == "lcr_web_search_batch":
-            return self._lcr_web.search_batch(arguments)
-        if tool == "astrabridge_web_research_brief" or tool == "lcr_web_research_brief":
-            return self._lcr_web.research_brief(arguments)
-        if tool == "astrabridge_web_search" or tool == "lcr_web_search":
-            return self._lcr_web.search_batch(
+    def _call_astrabridge_web_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if tool == "astrabridge_web_search_batch":
+            return self._web_tools.search_batch(arguments)
+        if tool == "astrabridge_web_research_brief":
+            return self._web_tools.research_brief(arguments)
+        if tool == "astrabridge_web_search":
+            return self._web_tools.search_batch(
                 {
                     "queries": [{"query": str(arguments.get("query") or ""), "max_results": int(arguments.get("max_results") or 5)}],
                     "dedupe": True,
@@ -2562,8 +2545,8 @@ class RuntimeService:
                     "tool_context": arguments.get("tool_context"),
                 }
             )
-        if tool == "astrabridge_web_fetch" or tool == "lcr_web_fetch":
-            return self._lcr_web.fetch(arguments)
+        if tool == "astrabridge_web_fetch":
+            return self._web_tools.fetch(arguments)
         raise ValueError(f"Unsupported AstraBridge web dynamic tool: {tool}")
 
     def _call_yunwu_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -3369,8 +3352,8 @@ for host in candidates:
         return (
             f"export CODEX_HOME={self._quote_wsl_value(os.environ.get('ASTRABRIDGE_WSL_CODEX_HOME') or ASTRABRIDGE_WSL_CODEX_HOME)}; "
             f"{self._wsl_codex_path_export()}"
-            f'if ! command -v {codex_command} > /tmp/lcr_codex_probe_path 2>/dev/null; then echo "codex executable not found: {codex_command}" >&2; exit 127; fi; '
-            'if grep -q "WindowsApps" /tmp/lcr_codex_probe_path; then printf "codex resolves to WindowsApps inside WSL: " >&2; cat /tmp/lcr_codex_probe_path >&2; exit 126; fi; '
+            f'if ! command -v {codex_command} > /tmp/astrabridge_codex_probe_path 2>/dev/null; then echo "codex executable not found: {codex_command}" >&2; exit 127; fi; '
+            'if grep -q "WindowsApps" /tmp/astrabridge_codex_probe_path; then printf "codex resolves to WindowsApps inside WSL: " >&2; cat /tmp/astrabridge_codex_probe_path >&2; exit 126; fi; '
             f"{codex_command} --version >/dev/null 2>&1"
         )
 
@@ -3462,15 +3445,15 @@ for host in candidates:
             "approvalsReviewer": "user",
             "modelProvider": profile.get("provider_id"),
             "model": codex_model_id(profile, model),
-            "serviceName": "local_codex_router_desktop",
+            "serviceName": "astrabridge_desktop",
         }
-        dynamic_tools = self._lcr_dynamic_tools()
+        dynamic_tools = self._dynamic_tools()
         if dynamic_tools:
             params["dynamicTools"] = dynamic_tools
         params.update(self._thread_permission_overrides(permission_mode))
         return params
 
-    def _lcr_dynamic_tools(self) -> list[dict[str, Any]]:
+    def _dynamic_tools(self) -> list[dict[str, Any]]:
         dynamic_tools: list[dict[str, Any]] = []
         if self._dogfood_run is not None:
             dynamic_tools.append(
@@ -3582,10 +3565,10 @@ for host in candidates:
                     },
                 }
             )
-        if self._mcp_server_enabled("lcr_web"):
+        if self._mcp_server_enabled("astrabridge_web"):
             web_tools: list[dict[str, Any]] = []
             web_tool_names: set[str] = set()
-            for tool in lcr_web_dynamic_tools():
+            for tool in astrabridge_web_dynamic_tools():
                 name = str(tool.get("name") or "").strip()
                 if not name:
                     continue
@@ -3598,16 +3581,6 @@ for host in candidates:
                         }
                     )
                     web_tool_names.add(name)
-                alias = _LCR_WEB_TOOL_CANONICAL_BY_ALIAS.get(name)
-                if alias and alias not in web_tool_names:
-                    web_tools.append(
-                        {
-                            "name": alias,
-                            "description": str(tool.get("description") or ""),
-                            "inputSchema": dict(tool.get("inputSchema") or {}),
-                        }
-                    )
-                    web_tool_names.add(alias)
             dynamic_tools.extend(web_tools)
         if self._mcp_server_enabled("yunwu_image"):
             dynamic_tools.extend(
@@ -3621,8 +3594,8 @@ for host in candidates:
             )
         return dynamic_tools
 
-    def _lcr_dynamic_tool_names(self) -> set[str]:
-        return {str(tool.get("name") or "") for tool in self._lcr_dynamic_tools()}
+    def _dynamic_tool_names(self) -> set[str]:
+        return {str(tool.get("name") or "") for tool in self._dynamic_tools()}
 
     def _mcp_server_enabled(self, name: str) -> bool:
         try:
@@ -3630,10 +3603,8 @@ for host in candidates:
         except Exception:
             return False
         server_names = {str(server.get("name") or "") for server in servers}
-        if name == "lcr_web":
-            return "lcr_web" in server_names or "astrabridge_web" in server_names
         if name == "astrabridge_web":
-            return "astrabridge_web" in server_names or "lcr_web" in server_names
+            return "astrabridge_web" in server_names
         return any(name == server_name for server_name in server_names)
 
     def _thread_permission_overrides(self, permission_mode: str) -> dict[str, Any]:
@@ -4169,7 +4140,7 @@ for host in candidates:
                     continue
                 evidence = self._item_verified_evidence(item)
                 if evidence:
-                    item = {**item, "lcrVerifiedEvidence": evidence}
+                    item = {**item, "verifiedEvidence": evidence}
                     changed = True
                 decorated_items.append(item)
             decorated_turns.append({**turn, "items": decorated_items} if changed else turn)
@@ -4268,7 +4239,7 @@ for host in candidates:
             request_failures = summary.get("request_failures")
             if isinstance(request_failures, list):
                 lines.append(f"request failures: {len(request_failures)}")
-        elif _is_lcr_or_astrabridge_web_tool(tool):
+        elif _is_astrabridge_web_tool(tool):
             if summary.get("record_id"):
                 lines.append(f"research record: {summary.get('record_id')}")
             result = summary.get("result")
@@ -4320,7 +4291,7 @@ for host in candidates:
                 continue
             quality = self._turn_completion_quality(turn)
             if quality:
-                decorated_turns.append({**turn, "completionQuality": quality, "lcrCompletionQuality": quality})
+                decorated_turns.append({**turn, "completionQuality": quality})
                 changed = True
             else:
                 decorated_turns.append(turn)
@@ -4454,4 +4425,5 @@ class _RuntimeRequestClient:
             self._runtime._close_client(f"{method}_transport_retry")
             self._client = self._runtime._ensure_client(self._runtime_status)
             return self._client.request(method, params, timeout=timeout)
+
 

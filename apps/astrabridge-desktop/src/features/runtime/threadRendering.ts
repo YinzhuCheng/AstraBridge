@@ -1,4 +1,4 @@
-import type { RuntimeActivityState, RuntimeDiffSummary, ThreadMessageSource, ThreadRenderBlock } from "../../types";
+﻿import type { RuntimeActivityState, RuntimeDiffSummary, ThreadMessageSource, ThreadRenderBlock } from "../../types";
 
 type VerifiedEvidence = {
   tool?: string;
@@ -22,7 +22,7 @@ type CompletionQuality = {
 };
 
 type DecoratedThreadItem = ThreadMessageSource & {
-  lcrVerifiedEvidence?: VerifiedEvidence;
+  verifiedEvidence?: VerifiedEvidence;
 };
 
 type DecoratedTurn = {
@@ -41,7 +41,6 @@ type DecoratedTurn = {
   reasoningEffort?: string;
   items?: ThreadMessageSource[];
   completionQuality?: CompletionQuality;
-  lcrCompletionQuality?: CompletionQuality;
   coding_events?: DecoratedCodingEvent[];
 };
 
@@ -106,8 +105,8 @@ function summarizeFileChanges(changes: FileChangeSummaryInput[]) {
     deleted += counts.deleted;
     files.push(path);
 
-    const changeLabel = kind === "add" ? "新增" : kind === "delete" ? "删除" : movePath ? `更新并移动到 ${movePath}` : "更新";
-    detailLines.push(`${path} · ${changeLabel} · +${counts.added} -${counts.deleted}`);
+    const changeLabel = kind === "add" ? "鏂板" : kind === "delete" ? "鍒犻櫎" : movePath ? `鏇存柊骞剁Щ鍔ㄥ埌 ${movePath}` : "鏇存柊";
+    detailLines.push(`${path} 路 ${changeLabel} 路 +${counts.added} -${counts.deleted}`);
 
     const excerpt = diff
       .split(/\r?\n/)
@@ -173,7 +172,7 @@ function dynamicToolResultDetail(item: Extract<DecoratedThreadItem, { type: "dyn
 
 function toolDetail(item: DecoratedThreadItem) {
   const detailChunks: string[] = [];
-  const evidence = item.lcrVerifiedEvidence;
+  const evidence = item.verifiedEvidence;
   if (evidence?.label) detailChunks.push(evidence.label);
   if (evidence?.summary?.length) detailChunks.push(...evidence.summary);
   if (evidence?.paths?.length) detailChunks.push(...evidence.paths.map((path) => `path: ${path}`));
@@ -190,7 +189,7 @@ function toolDetail(item: DecoratedThreadItem) {
 
 function commandDetail(item: Extract<DecoratedThreadItem, { type: "commandExecution" }>) {
   const detailChunks = [item.command];
-  if (item.lcrVerifiedEvidence?.summary?.length) detailChunks.push(...item.lcrVerifiedEvidence.summary);
+  if (item.verifiedEvidence?.summary?.length) detailChunks.push(...item.verifiedEvidence.summary);
   if (item.aggregatedOutput) detailChunks.push(item.aggregatedOutput);
   return detailChunks.filter(Boolean).join("\n\n");
 }
@@ -239,7 +238,7 @@ function liveCollabPreview(item: Record<string, unknown>) {
 }
 
 function completionQualityBlock(turn: DecoratedTurn): ThreadRenderBlock | null {
-  const quality = turn.completionQuality || turn.lcrCompletionQuality;
+  const quality = turn.completionQuality;
   if (!quality) return null;
   const preview = quality.final_preview || "The turn ended after tool activity, but the final assistant answer still looks incomplete.";
   const detail = [
@@ -398,7 +397,7 @@ function renderBlocksForCodingEvent(event: DecoratedCodingEvent, fallbackKey: st
         role: "activity",
         activity: {
           kind: "fork",
-          label: "执行通道已切换",
+          label: "Execution lane switched",
           status: "completed",
           preview: [event.provider_id, model].filter(Boolean).join(" / ") || "Provider handoff",
           detail: [
@@ -423,7 +422,7 @@ function renderBlocksForCodingEvent(event: DecoratedCodingEvent, fallbackKey: st
         role: "activity",
         activity: {
           kind: "review",
-          label: "运行时状态更新",
+          label: "Runtime status updated",
           status: "completed",
           preview: transition || "runtime transition",
           detail: review,
@@ -439,12 +438,12 @@ export function itemActivityFromPayload(item: Record<string, unknown>, status = 
   const itemType = String(item.type ?? "");
   const itemId = String(item.id ?? "");
   if (itemType === "reasoning") {
-    return { kind: "thinking", label: "正在思考", status, item_id: itemId };
+    return { kind: "thinking", label: "Thinking", status, item_id: itemId };
   }
   if (itemType === "commandExecution") {
     return {
       kind: "command",
-      label: "正在执行命令",
+      label: "姝ｅ湪鎵ц鍛戒护",
       status,
       preview: String(item.command ?? ""),
       detail: String(item.command ?? ""),
@@ -452,12 +451,12 @@ export function itemActivityFromPayload(item: Record<string, unknown>, status = 
     };
   }
   if (itemType === "fileChange") {
-    return { kind: "file_change", label: "正在修改文件", status, item_id: itemId };
+    return { kind: "file_change", label: "姝ｅ湪淇敼鏂囦欢", status, item_id: itemId };
   }
   if (itemType === "webSearch") {
     return {
       kind: "web_search",
-      label: "正在搜索",
+      label: "姝ｅ湪鎼滅储",
       status,
       preview: String(item.query ?? ""),
       detail: safeJsonPreview(item.action),
@@ -467,7 +466,7 @@ export function itemActivityFromPayload(item: Record<string, unknown>, status = 
   if (itemType === "mcpToolCall") {
     return {
       kind: "mcp",
-      label: "正在调用 MCP 工具",
+      label: "姝ｅ湪璋冪敤 MCP 宸ュ叿",
       status,
       preview: [item.server, item.tool].filter(Boolean).join("."),
       detail: safeJsonPreview(item.arguments),
@@ -477,7 +476,7 @@ export function itemActivityFromPayload(item: Record<string, unknown>, status = 
   if (itemType === "dynamicToolCall") {
     return {
       kind: "tool",
-      label: "正在调用工具",
+      label: "姝ｅ湪璋冪敤宸ュ叿",
       status,
       preview: [item.namespace, item.tool].filter(Boolean).join("."),
       detail: safeJsonPreview(item.arguments),
@@ -487,7 +486,7 @@ export function itemActivityFromPayload(item: Record<string, unknown>, status = 
   if (itemType === "enteredReviewMode" || itemType === "exitedReviewMode") {
     return {
       kind: "review",
-      label: itemType === "enteredReviewMode" ? "进入审查模式" : "退出审查模式",
+      label: itemType === "enteredReviewMode" ? "Entered review mode" : "Exited review mode",
       status,
       preview: String(item.review ?? ""),
       item_id: itemId,
@@ -497,7 +496,7 @@ export function itemActivityFromPayload(item: Record<string, unknown>, status = 
     const collab = liveCollabPreview(item);
     return {
       kind: item.tool === "spawnAgent" ? "fork" : "tool",
-      label: item.tool === "spawnAgent" ? "创建协作线程" : "正在调用协作工具",
+      label: item.tool === "spawnAgent" ? "鍒涘缓鍗忎綔绾跨▼" : "姝ｅ湪璋冪敤鍗忎綔宸ュ叿",
       status,
       preview: collab.preview,
       detail: [collab.detail, safeJsonPreview(item.agentsStates)].filter(Boolean).join("\n\n"),
@@ -507,7 +506,7 @@ export function itemActivityFromPayload(item: Record<string, unknown>, status = 
   if (itemType === "contextCompaction") {
     return {
       kind: "compact",
-      label: status === "completed" ? "上下文已压缩" : "正在压缩上下文",
+      label: status === "completed" ? "Context compacted" : "Compacting context",
       status,
       preview: "Context compaction",
       item_id: itemId,
@@ -579,7 +578,7 @@ export function renderBlocksForItem(item: ThreadMessageSource): ThreadRenderBloc
         role: "activity",
         activity: {
           kind: "web_search",
-          label: "网页搜索",
+          label: "缃戦〉鎼滅储",
           status: "completed",
           preview: item.query,
           detail: safeJsonPreview(item.action),
@@ -602,7 +601,7 @@ export function renderBlocksForItem(item: ThreadMessageSource): ThreadRenderBloc
         role: "activity",
         activity: {
           kind: "review",
-          label: "进入审查模式",
+          label: "杩涘叆瀹℃煡妯″紡",
           status: "completed",
           preview: item.review,
           item_id: item.id,
@@ -614,7 +613,7 @@ export function renderBlocksForItem(item: ThreadMessageSource): ThreadRenderBloc
         role: "activity",
         activity: {
           kind: "review",
-          label: "退出审查模式",
+          label: "Exited review mode",
           status: "completed",
           preview: item.review,
           item_id: item.id,
@@ -626,7 +625,7 @@ export function renderBlocksForItem(item: ThreadMessageSource): ThreadRenderBloc
         role: "activity",
         activity: {
           kind: "compact",
-          label: "上下文已压缩",
+          label: "涓婁笅鏂囧凡鍘嬬缉",
           status: "completed",
           preview: "Context compaction completed",
           item_id: item.id,
@@ -794,3 +793,4 @@ export function summarizeTurnBlocks(
   }
   return blocks;
 }
+

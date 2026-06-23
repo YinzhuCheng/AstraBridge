@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import binascii
@@ -29,8 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from astrabridge_sidecar import common as common_module
 from astrabridge_sidecar import project_service as project_service_module
 from astrabridge_sidecar import runtime_service as runtime_service_module
-from astrabridge_sidecar import lcr_web_service as lcr_web_service_module
+from astrabridge_sidecar import astrabridge_web_mcp_server
 from astrabridge_sidecar import lcr_web_mcp_server
+from astrabridge_sidecar import web_tool_service as web_tool_service_module
 from astrabridge_sidecar.app_server_client import AppServerClient, JsonRpcError
 from astrabridge_sidecar.asset_registry_service import AssetRegistryService
 from astrabridge_sidecar.coding_kernel import (
@@ -49,8 +50,8 @@ from astrabridge_sidecar.dogfood_run_service import DogfoodRunService
 from astrabridge_sidecar.image_prompt_strategy import apply_prompt_guide, build_rewrite_instruction, prompt_guides_payload
 from astrabridge_sidecar.isolation_audit_service import IsolationAuditService
 from astrabridge_sidecar.llm_api_manager_service import LlmApiManagerService
-from astrabridge_sidecar.lcr_web_service import LcrWebService
-from astrabridge_sidecar.lcr_web_mcp_server import _tools as lcr_web_mcp_tools
+from astrabridge_sidecar.astrabridge_web_mcp_server import _tools as astrabridge_web_mcp_tools
+from astrabridge_sidecar.web_tool_service import AstraBridgeWebService
 from astrabridge_sidecar.metadata_service import MetadataService, _model_seed
 from astrabridge_sidecar.mcp_config_service import McpConfigService
 from astrabridge_sidecar.model_catalog import (
@@ -3324,9 +3325,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(turn_text_from_payload({}), "")
 
     def test_sse_frame_formats_event_data_and_comment(self) -> None:
-        event_frame = sse_frame(event="lcr.event", data={"cursor": 3, "message": "status update complete."}, retry=2000).decode("utf-8")
+        event_frame = sse_frame(event="astrabridge.event", data={"cursor": 3, "message": "status update complete."}, retry=2000).decode("utf-8")
         self.assertIn("retry: 2000\n", event_frame)
-        self.assertIn("event: lcr.event\n", event_frame)
+        self.assertIn("event: astrabridge.event\n", event_frame)
         self.assertIn('data: {"cursor": 3, "message": "status update complete."}\n', event_frame)
         self.assertTrue(event_frame.endswith("\n\n"))
 
@@ -3354,7 +3355,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("yunwu_image_transparent_asset", names)
             self.assertIn("yunwu_image_edit", names)
 
-    def test_runtime_thread_start_registers_lcr_web_dynamic_tools_when_enabled(self) -> None:
+    def test_runtime_thread_start_registers_astrabridge_web_dynamic_tools_when_enabled_primary(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace = root / "workspace"
@@ -3362,7 +3363,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             projects = ProjectService(root / "recent.json")
             projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
             runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
-            runtime._mcp_config.enabled_servers = lambda: [{"name": "lcr_web", "enabled": True}]  # type: ignore[method-assign]
+            runtime._mcp_config.enabled_servers = lambda: [{"name": "astrabridge_web", "enabled": True}]  # type: ignore[method-assign]
 
             params = runtime._thread_start_params(  # noqa: SLF001
                 profile={"profile_id": "deepseek", "provider_id": "deepseek", "model": "deepseek-v4-pro"},
@@ -3371,10 +3372,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
             )
 
             names = {tool["name"] for tool in params["dynamicTools"]}
-            self.assertIn("lcr_web_search_batch", names)
-            self.assertIn("lcr_web_research_brief", names)
-            self.assertIn("lcr_web_search", names)
-            self.assertIn("lcr_web_fetch", names)
+            self.assertIn("astrabridge_web_search_batch", names)
+            self.assertIn("astrabridge_web_research_brief", names)
+            self.assertIn("astrabridge_web_search", names)
+            self.assertIn("astrabridge_web_fetch", names)
             self.assertIn("astrabridge_web_search_batch", names)
             self.assertIn("astrabridge_web_research_brief", names)
             self.assertIn("astrabridge_web_search", names)
@@ -3444,7 +3445,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 dogfood_run=DogfoodRunService(projects),
             )
 
-            tools = runtime._lcr_dynamic_tools()  # noqa: SLF001
+            tools = runtime._dynamic_tools()  # noqa: SLF001
 
             names = {tool["name"] for tool in tools}
             self.assertIn("astrabridge_browser_smoke", names)
@@ -3504,10 +3505,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("tool_context", event_payload)
             self.assertNotIn("iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB", event_payload)
 
-    def test_runtime_dynamic_lcr_web_tool_call_returns_research_brief_content(self) -> None:
+    def test_runtime_dynamic_astrabridge_web_tool_call_returns_research_brief_content_primary(self) -> None:
         captured_arguments: dict[str, object] = {}
 
-        class FakeLcrWeb:
+        class FakeWebTools:
             def research_brief(self, arguments: dict[str, object]) -> dict[str, object]:
                 captured_arguments.update(arguments)
                 return {
@@ -3516,7 +3517,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "tool_event_verified": True,
                     "path": "D:/workspace/.astrabridge/research/research-1.json",
                     "result": {
-                        "tool": "lcr_web_research_brief",
+                        "tool": "astrabridge_web_research_brief",
                         "research_goal": arguments.get("research_goal"),
                         "sources": [{"url": "https://example.com/autotile", "title": "Autotile"}],
                         "citation_rule": "Use only URLs in sources.",
@@ -3555,16 +3556,16 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 projects,
                 ModalService(projects.require_shell_state_root),
                 task_service=tasks,
-                lcr_web_service=FakeLcrWeb(),
+                web_tool_service=FakeWebTools(),
             )
-            runtime._mcp_config.enabled_servers = lambda: [{"name": "lcr_web", "enabled": True}]  # type: ignore[method-assign]
+            runtime._mcp_config.enabled_servers = lambda: [{"name": "astrabridge_web", "enabled": True}]  # type: ignore[method-assign]
 
             result = runtime._on_server_request(  # noqa: SLF001
                 "item/tool/call",
                 {
                     "threadId": "thread-1",
                     "turnId": "turn-1",
-                    "tool": "lcr_web_research_brief",
+                    "tool": "astrabridge_web_research_brief",
                     "arguments": {"research_goal": "RPG autotile map visual design"},
                 },
             )
@@ -3572,7 +3573,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(result["success"])
             self.assertEqual(result["contentItems"][0]["type"], "inputText")
             text = result["contentItems"][0]["text"]
-            self.assertIn("lcr_web_research_brief", text)
+            self.assertIn("astrabridge_web_research_brief", text)
             self.assertIn("https://example.com/autotile", text)
             self.assertIn("tool_event_verified", text)
             event_payload = json.dumps(runtime.list_events()["events"][-1], ensure_ascii=False)
@@ -3580,7 +3581,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn('"server": "astrabridge_web"', event_payload)
             self.assertIn("https://example.com/autotile", event_payload)
             context = dict(captured_arguments.get("tool_context") or {})
-            self.assertEqual(context["tool_name"], "lcr_web_research_brief")
+            self.assertEqual(context["tool_name"], "astrabridge_web_research_brief")
             self.assertEqual(context["task_goal"], "Build a three-floor magical tower game")
             self.assertEqual(context["current_plan_step"], "Implement free meadow background plus collision overlays")
             self.assertEqual(context["selected_provider"], "deepseek")
@@ -3588,10 +3589,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("Do not include raw .astrabridge/runtime_events.jsonl.", context["forbidden_inputs"])
             self.assertIn("tool_context", event_payload)
 
-    def test_runtime_dynamic_lcr_web_search_alias_preserves_default_tool_context(self) -> None:
+    def test_runtime_dynamic_astrabridge_web_search_alias_preserves_default_tool_context(self) -> None:
         captured_arguments: dict[str, object] = {}
 
-        class FakeLcrWeb:
+        class FakeWebTools:
             def search_batch(self, arguments: dict[str, object]) -> dict[str, object]:
                 captured_arguments.update(arguments)
                 return {
@@ -3600,7 +3601,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "tool_event_verified": True,
                     "path": "D:/workspace/.astrabridge/research/search-1.json",
                     "result": {
-                        "tool": "lcr_web_search_batch",
+                        "tool": "astrabridge_web_search_batch",
                         "merged_results": [{"url": "https://example.com/tilemap", "title": "Tilemap"}],
                     },
                 }
@@ -3617,23 +3618,23 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 projects,
                 ModalService(projects.require_shell_state_root),
                 task_service=tasks,
-                lcr_web_service=FakeLcrWeb(),
+                web_tool_service=FakeWebTools(),
             )
-            runtime._mcp_config.enabled_servers = lambda: [{"name": "lcr_web", "enabled": True}]  # type: ignore[method-assign]
+            runtime._mcp_config.enabled_servers = lambda: [{"name": "astrabridge_web", "enabled": True}]  # type: ignore[method-assign]
 
             result = runtime._on_server_request(  # noqa: SLF001
                 "item/tool/call",
                 {
                     "threadId": "thread-1",
                     "turnId": "turn-1",
-                    "tool": "lcr_web_search",
+                    "tool": "astrabridge_web_search",
                     "arguments": {"query": "JRPG meadow map overlay collision"},
                 },
             )
 
             self.assertTrue(result["success"])
             context = dict(captured_arguments.get("tool_context") or {})
-            self.assertEqual(context["tool_name"], "lcr_web_search")
+            self.assertEqual(context["tool_name"], "astrabridge_web_search")
             self.assertEqual(context["workspace_root"], str(workspace))
             self.assertEqual(context["selected_provider"], "deepseek")
             self.assertEqual(captured_arguments["queries"], [{"query": "JRPG meadow map overlay collision", "max_results": 5}])
@@ -3642,7 +3643,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
     def test_runtime_dynamic_astrabridge_web_tool_call_returns_research_brief_content(self) -> None:
         captured_arguments: dict[str, object] = {}
 
-        class FakeLcrWeb:
+        class FakeWebTools:
             def research_brief(self, arguments: dict[str, object]) -> dict[str, object]:
                 captured_arguments.update(arguments)
                 return {
@@ -3670,9 +3671,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 projects,
                 ModalService(projects.require_shell_state_root),
                 task_service=tasks,
-                lcr_web_service=FakeLcrWeb(),
+                web_tool_service=FakeWebTools(),
             )
-            runtime._mcp_config.enabled_servers = lambda: [{"name": "lcr_web", "enabled": True}]  # type: ignore[method-assign]
+            runtime._mcp_config.enabled_servers = lambda: [{"name": "astrabridge_web", "enabled": True}]  # type: ignore[method-assign]
 
             result = runtime._on_server_request(  # noqa: SLF001
                 "item/tool/call",
@@ -3784,7 +3785,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "item": {
                             "type": "dynamicToolCall",
                             "id": "tool-1",
-                            "tool": "lcr_web_search_batch",
+                            "tool": "astrabridge_web_search_batch",
                             "arguments": {"queries": [{"query": "autotile"}]},
                             "status": "inProgress",
                         },
@@ -3801,7 +3802,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "item": {
                             "type": "dynamicToolCall",
                             "id": "tool-1",
-                            "tool": "lcr_web_search_batch",
+                            "tool": "astrabridge_web_search_batch",
                             "arguments": {"queries": [{"query": "autotile"}]},
                             "status": "completed",
                             "contentItems": [{"type": "inputText", "text": "tool_event_verified=true"}],
@@ -3815,12 +3816,12 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             items = result["thread"]["turns"][0]["items"]
             self.assertEqual([item["type"] for item in items], ["userMessage", "dynamicToolCall", "agentMessage"])
-            self.assertEqual(items[1]["tool"], "lcr_web_search_batch")
+            self.assertEqual(items[1]["tool"], "astrabridge_web_search_batch")
             self.assertEqual(items[1]["status"], "completed")
             self.assertIn("tool_event_verified", items[1]["contentItems"][0]["text"])
-            self.assertTrue(items[1]["lcrVerifiedEvidence"]["verified"])
-            self.assertEqual(items[1]["lcrVerifiedEvidence"]["server"], "astrabridge_web")
-            self.assertIn("tool-event verified", items[1]["lcrVerifiedEvidence"]["label"])
+            self.assertTrue(items[1]["verifiedEvidence"]["verified"])
+            self.assertEqual(items[1]["verifiedEvidence"]["server"], "astrabridge_web")
+            self.assertIn("tool-event verified", items[1]["verifiedEvidence"]["label"])
 
     def test_runtime_read_thread_records_task_conversation_snapshot(self) -> None:
         class FakeClient:
@@ -4566,7 +4567,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             result = runtime.read_thread({"profile_id": "p"}, "thread-1")
 
             item = result["thread"]["turns"][0]["items"][1]
-            evidence = item["lcrVerifiedEvidence"]
+            evidence = item["verifiedEvidence"]
             self.assertTrue(evidence["verified"])
             self.assertEqual(evidence["tool"], "astrabridge_browser_smoke")
             self.assertEqual(evidence["server"], "astrabridge_browser")
@@ -4802,7 +4803,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             result = runtime.read_thread({"profile_id": "p"}, "thread-1")
 
-            evidence = result["thread"]["turns"][0]["items"][1]["lcrVerifiedEvidence"]
+            evidence = result["thread"]["turns"][0]["items"][1]["verifiedEvidence"]
             self.assertTrue(evidence["verified"])
             self.assertEqual(evidence["tool"], "yunwu_image_transparent_asset")
             self.assertEqual(evidence["server"], "yunwu_image")
@@ -4891,7 +4892,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             result = runtime.read_thread({"profile_id": "p"}, "thread-1")
 
             item = result["thread"]["turns"][0]["items"][1]
-            evidence = item["lcrVerifiedEvidence"]
+            evidence = item["verifiedEvidence"]
             self.assertEqual(item["status"], "completed")
             self.assertTrue(item["success"])
             self.assertTrue(evidence["verified"])
@@ -4936,7 +4937,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             result = runtime.read_thread({"profile_id": "p"}, "thread-1")
 
-            evidence = result["thread"]["turns"][0]["items"][1]["lcrVerifiedEvidence"]
+            evidence = result["thread"]["turns"][0]["items"][1]["verifiedEvidence"]
             self.assertTrue(evidence["verified"])
             self.assertEqual(evidence["tool"], "shell_command")
             self.assertEqual(evidence["server"], "codex_builtin")
@@ -4959,7 +4960,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                         {
                                             "type": "dynamicToolCall",
                                             "id": "tool-1",
-                                            "tool": "lcr_web_research_brief",
+                                            "tool": "astrabridge_web_research_brief",
                                             "status": "completed",
                                             "contentItems": [{"type": "inputText", "text": '{"tool_event_verified": true}'}],
                                         },
@@ -4983,7 +4984,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             result = runtime.read_thread({"profile_id": "p"}, "thread-1")
 
-            quality = result["thread"]["turns"][0]["lcrCompletionQuality"]
+            quality = result["thread"]["turns"][0]["completionQuality"]
             self.assertEqual(quality["status"], "suspect")
             self.assertEqual(quality["recommended_action"], "continue_or_retry_final_answer")
             self.assertEqual(quality["tool_item_count"], 1)
@@ -5006,7 +5007,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                         {
                                             "type": "dynamicToolCall",
                                             "id": "tool-1",
-                                            "tool": "lcr_web_research_brief",
+                                            "tool": "astrabridge_web_research_brief",
                                             "status": "completed",
                                             "contentItems": [{"type": "inputText", "text": '{"tool_event_verified": true}'}],
                                         },
@@ -5030,7 +5031,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             result = runtime.read_thread({"profile_id": "p"}, "thread-1")
 
-            self.assertNotIn("lcrCompletionQuality", result["thread"]["turns"][0])
+            self.assertNotIn("completionQuality", result["thread"]["turns"][0])
 
     def test_runtime_yunwu_tool_usage_refreshes_asset_registry(self) -> None:
         class FakeAssetRegistry:
@@ -5972,17 +5973,17 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(captured["thread_id"], "thread-kimi-missing")
         self.assertEqual(captured["profile"]["profile_id"], "kimi-k26")
 
-    def test_lcr_web_service_persists_verified_research_record(self) -> None:
+    def test_astrabridge_web_service_persists_verified_research_record(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace = root / "workspace"
             workspace.mkdir()
             projects = ProjectService(root / "recent.json")
             projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
-            service = LcrWebService(projects)
-            original_research_brief = lcr_web_service_module._research_brief
-            lcr_web_service_module._research_brief = lambda **_kwargs: {  # type: ignore[assignment]
-                "tool": "lcr_web_research_brief",
+            service = AstraBridgeWebService(projects)
+            original_research_brief = web_tool_service_module._research_brief
+            web_tool_service_module._research_brief = lambda **_kwargs: {  # type: ignore[assignment]
+                "tool": "astrabridge_web_research_brief",
                 "sources": [{"url": "https://example.com/", "title": "Example"}],
             }
 
@@ -6010,7 +6011,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     }
                 )
             finally:
-                lcr_web_service_module._research_brief = original_research_brief  # type: ignore[assignment]
+                web_tool_service_module._research_brief = original_research_brief  # type: ignore[assignment]
 
             self.assertTrue(result["ok"])
             self.assertTrue(result["tool_event_verified"])
@@ -6502,7 +6503,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             service.resolve(fake_write["modal_id"], {"decision": "decline"})
             self.assertEqual(service.list_pending()["modals"], [])
 
-            fake_log = service.create_fake("lcr_log_read")
+            fake_log = service.create_fake("runtime_log_read")
             self.assertIn(".astrabridge", str(fake_log["params"].get("command")))
             service.resolve(fake_log["modal_id"], {"decision": "decline"})
             self.assertEqual(service.list_pending()["modals"], [])
@@ -6578,34 +6579,6 @@ class AstraBridgeServiceTests(unittest.TestCase):
             "D:\\workflow\\magical-girl-tower-dogfood\\workspace",
         )
 
-    def test_mcp_config_lcr_web_preset_toml_and_schema(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            service = McpConfigService(Path(temp) / "mcp_servers.json")
-            applied = service.apply_lcr_web_preset()
-            self.assertEqual(applied["server"]["name"], "lcr_web")
-            toml = service.render_toml()
-            self.assertIn("[mcp_servers.lcr_web]", toml)
-            self.assertIn("lcr_web_mcp_server.py", toml)
-            self.assertIn('default_tools_approval_mode = "auto"', toml)
-            self.assertIn("[mcp_servers.lcr_web.tools.lcr_web_search_batch]", toml)
-            self.assertIn("[mcp_servers.lcr_web.tools.lcr_web_research_brief]", toml)
-            self.assertIn("[mcp_servers.lcr_web.tools.lcr_web_search]", toml)
-            self.assertIn("[mcp_servers.lcr_web.tools.lcr_web_fetch]", toml)
-            self.assertIn('approval_mode = "auto"', toml)
-            self.assertNotIn("Authorization", toml)
-
-            tools = {tool["name"]: tool for tool in lcr_web_mcp_tools()}
-            self.assertIn("lcr_web_search_batch", tools)
-            self.assertIn("lcr_web_research_brief", tools)
-            self.assertIn("lcr_web_search", tools)
-            self.assertIn("lcr_web_fetch", tools)
-            self.assertEqual(tools["lcr_web_search_batch"]["inputSchema"]["properties"]["queries"]["maxItems"], 8)
-            self.assertIn("tool_context", tools["lcr_web_search_batch"]["inputSchema"]["properties"])
-            self.assertEqual(tools["lcr_web_research_brief"]["inputSchema"]["properties"]["fetch_top_n"]["maximum"], 12)
-            self.assertIn("tool_context", tools["lcr_web_research_brief"]["inputSchema"]["properties"])
-            self.assertEqual(tools["lcr_web_search"]["inputSchema"]["properties"]["max_results"]["maximum"], 10)
-            self.assertIn("tool_context", tools["lcr_web_fetch"]["inputSchema"]["properties"])
-
     def test_mcp_config_astrabridge_web_preset_toml_and_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             service = McpConfigService(Path(temp) / "mcp_servers.json")
@@ -6613,7 +6586,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(applied["server"]["name"], "astrabridge_web")
             toml = service.render_toml()
             self.assertIn("[mcp_servers.astrabridge_web]", toml)
-            self.assertIn("lcr_web_mcp_server.py", toml)
+            self.assertIn("astrabridge_web_mcp_server.py", toml)
             self.assertIn('default_tools_approval_mode = "auto"', toml)
             self.assertIn("[mcp_servers.astrabridge_web.tools.astrabridge_web_search_batch]", toml)
             self.assertIn("[mcp_servers.astrabridge_web.tools.astrabridge_web_research_brief]", toml)
@@ -6621,13 +6594,13 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("[mcp_servers.astrabridge_web.tools.astrabridge_web_fetch]", toml)
             self.assertIn('approval_mode = "auto"', toml)
 
-            tools = {tool["name"]: tool for tool in lcr_web_mcp_tools()}
+            tools = {tool["name"]: tool for tool in astrabridge_web_mcp_tools()}
             self.assertIn("astrabridge_web_search_batch", tools)
             self.assertIn("astrabridge_web_research_brief", tools)
             self.assertIn("astrabridge_web_search", tools)
             self.assertIn("astrabridge_web_fetch", tools)
 
-    def test_lcr_web_batch_and_research_brief_are_structured_and_sanitized(self) -> None:
+    def test_astrabridge_web_batch_and_research_brief_are_structured_and_sanitized(self) -> None:
         encoded = "a1" + base64.urlsafe_b64encode(b"https://developers.openai.com/codex/mcp").decode("ascii").rstrip("=")
         self.assertEqual(
             lcr_web_mcp_server._clean_bing_url(f"https://www.bing.com/ck/a?u={encoded}&ntb=1"),
@@ -6639,7 +6612,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         def fake_search(query: str, *, max_results: int, timeout_sec: int) -> dict[str, object]:
             return {
-                "tool": "lcr_web_search",
+                "tool": "astrabridge_web_search",
                 "query": query,
                 "results": [
                     {"title": f"{query} A", "url": "https://example.com/a?utm_source=x", "snippet": "alpha"},
@@ -6652,7 +6625,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         def fake_fetch(url: str, *, max_chars: int, timeout_sec: int) -> dict[str, object]:
             return {
-                "tool": "lcr_web_fetch",
+                "tool": "astrabridge_web_fetch",
                 "url": url,
                 "content_type": "text/html",
                 "text": f"Fetched source text for {url}. X-Unit-Auth: Bearer unit",
@@ -6669,7 +6642,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 dedupe=True,
                 timeout_sec=5,
             )
-            self.assertEqual(batch["tool"], "lcr_web_search_batch")
+            self.assertEqual(batch["tool"], "astrabridge_web_search_batch")
             self.assertEqual(batch["query_count"], 2)
             urls = [item["url"] for item in batch["merged_results"]]
             self.assertEqual(urls.count("https://example.com/a?utm_source=x"), 1)
@@ -6683,7 +6656,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 max_chars_per_source=500,
                 timeout_sec=5,
             )
-            self.assertEqual(brief["tool"], "lcr_web_research_brief")
+            self.assertEqual(brief["tool"], "astrabridge_web_research_brief")
             self.assertGreaterEqual(brief["fetched_source_count"], 1)
             self.assertIn("citation_rule", brief)
             self.assertNotIn("unit_secret_test", json.dumps(brief))
@@ -6702,7 +6675,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             lcr_web_mcp_server._search = original_search
             lcr_web_mcp_server._fetch = original_fetch
 
-    def test_lcr_web_batch_repairs_ambiguous_magic_tower_queries(self) -> None:
+    def test_astrabridge_web_batch_repairs_ambiguous_magic_tower_queries(self) -> None:
         original_search = lcr_web_mcp_server._search
 
         def fake_search(query: str, *, max_results: int, timeout_sec: int) -> dict[str, object]:
@@ -6733,7 +6706,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     },
                 ]
             return {
-                "tool": "lcr_web_search",
+                "tool": "astrabridge_web_search",
                 "query": query,
                 "results": results[:max_results],
                 "result_count": min(max_results, len(results)),
@@ -6756,13 +6729,13 @@ class AstraBridgeServiceTests(unittest.TestCase):
         finally:
             lcr_web_mcp_server._search = original_search
 
-    def test_lcr_web_research_brief_uses_hinted_tilemap_sources_when_search_is_thin(self) -> None:
+    def test_astrabridge_web_research_brief_uses_hinted_tilemap_sources_when_search_is_thin(self) -> None:
         original_search = lcr_web_mcp_server._search
         original_fetch = lcr_web_mcp_server._fetch
 
         def fake_search(query: str, *, max_results: int, timeout_sec: int) -> dict[str, object]:
             return {
-                "tool": "lcr_web_search",
+                "tool": "astrabridge_web_search",
                 "query": query,
                 "results": [],
                 "result_count": 0,
@@ -6771,7 +6744,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         def fake_fetch(url: str, *, max_chars: int, timeout_sec: int) -> dict[str, object]:
             return {
-                "tool": "lcr_web_fetch",
+                "tool": "astrabridge_web_fetch",
                 "url": url,
                 "content_type": "text/html",
                 "text": f"Fetched doc for {url}",
@@ -15618,6 +15591,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
 
 
 

@@ -268,7 +268,7 @@ curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 CODEX_
 export PATH="$CODEX_INSTALL_DIR:$PATH"
 echo "[AstraBridge] Verifying Codex"
 codex --version
-printf '{"method":"initialize","id":1,"params":{"clientInfo":{"name":"lcr-bootstrap-check","version":"0.1.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}\n' | timeout 10s codex app-server --listen stdio:// --disable plugins --disable plugin_sharing --disable remote_plugin | head -20 | grep -q '"id"'
+printf '{"method":"initialize","id":1,"params":{"clientInfo":{"name":"astrabridge-bootstrap-check","version":"0.1.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false}}}\n' | timeout 10s codex app-server --listen stdio:// --disable plugins --disable plugin_sharing --disable remote_plugin | head -20 | grep -q '"id"'
 echo "[AstraBridge] WSL runtime is ready"
 """
 

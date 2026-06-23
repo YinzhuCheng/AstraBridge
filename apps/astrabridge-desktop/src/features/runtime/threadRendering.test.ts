@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 
 import { hasPersistedRenderableTurnContent, itemActivityFromPayload, renderBlocksForItem, summarizeTurnBlocks } from "./threadRendering";
 import type { ShellThread } from "../../types";
@@ -15,7 +15,7 @@ describe("thread rendering helpers", () => {
       contentItems: null,
       success: true,
       durationMs: 1234,
-      lcrVerifiedEvidence: {
+      verifiedEvidence: {
         verified: true,
         label: "tool-event verified",
         summary: ["browser smoke app pass"],
@@ -142,7 +142,7 @@ describe("thread rendering helpers", () => {
     expect(block.deleted).toBe(1);
     expect(block.detail).toContain("src/App.tsx");
     expect(block.detail).toContain("src/new.ts");
-    expect(block.detail).toContain("新增");
+    expect(block.detail).toContain("鏂板");
   });
 
   it("surfaces suspect turn completion quality as a follow-up warning block", () => {
@@ -157,7 +157,7 @@ describe("thread rendering helpers", () => {
           items: [
             { type: "agentMessage", id: "agent-1", text: "done", phase: null, memoryCitation: null },
           ],
-          lcrCompletionQuality: {
+          completionQuality: {
             status: "suspect",
             reason: "completed_with_short_or_progress_only_final_after_verified_activity",
             recommended_action: "continue_or_retry_final_answer",
@@ -255,7 +255,7 @@ describe("thread rendering helpers", () => {
       thread,
       "continuing in Kimi",
       undefined,
-      { kind: "thinking", label: "正在思考", status: "active" },
+      { kind: "thinking", label: "Thinking", status: "active" },
       undefined,
       "turn-kimi-live",
     );
@@ -287,8 +287,8 @@ describe("thread rendering helpers", () => {
     const compact = itemActivityFromPayload({ type: "contextCompaction", id: "compact-1" }, "completed");
     const review = itemActivityFromPayload({ type: "enteredReviewMode", id: "review-1", review: "Inspect diff" }, "completed");
 
-    expect(compact?.label).toBe("上下文已压缩");
-    expect(review?.label).toBe("进入审查模式");
+    expect(compact?.label).toBe("Context compacted");
+    expect(review?.label).toBe("Entered review mode");
   });
 
   it("detects when a completed persisted turn is ready to replace live content", () => {
@@ -443,3 +443,4 @@ describe("thread rendering helpers", () => {
     ).toBe(true);
   });
 });
+

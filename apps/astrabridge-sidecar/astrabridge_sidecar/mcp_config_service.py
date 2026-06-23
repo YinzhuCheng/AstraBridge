@@ -82,7 +82,7 @@ def yunwu_image_preset() -> dict[str, Any]:
 
 def astrabridge_web_preset() -> dict[str, Any]:
     sidecar_root = str(Path(__file__).resolve().parents[1])
-    server_script = str(Path(__file__).resolve().with_name("lcr_web_mcp_server.py"))
+    server_script = str(Path(__file__).resolve().with_name("astrabridge_web_mcp_server.py"))
     return {
         "name": "astrabridge_web",
         "display_name": "AstraBridge Built-in Web Tools",
@@ -113,18 +113,6 @@ def astrabridge_web_preset() -> dict[str, Any]:
         "source_url": "https://duckduckgo.com/",
     }
 
-
-def lcr_web_preset() -> dict[str, Any]:
-    preset = astrabridge_web_preset()
-    preset["name"] = "lcr_web"
-    preset["tools"] = {
-        "lcr_web_search_batch": {"approval_mode": "auto"},
-        "lcr_web_research_brief": {"approval_mode": "auto"},
-        "lcr_web_search": {"approval_mode": "auto"},
-        "lcr_web_fetch": {"approval_mode": "auto"},
-    }
-    return preset
-
 class McpConfigService:
     def __init__(self, store_path: Path | None = None) -> None:
         self.store_path = store_path or (app_data_dir() / "mcp_servers.json")
@@ -146,10 +134,6 @@ class McpConfigService:
 
     def apply_yunwu_image_preset(self) -> dict[str, Any]:
         server = self.upsert_server(yunwu_image_preset())
-        return {"server": server, "config": self.snapshot()}
-
-    def apply_lcr_web_preset(self) -> dict[str, Any]:
-        server = self.upsert_server(lcr_web_preset())
         return {"server": server, "config": self.snapshot()}
 
     def apply_astrabridge_web_preset(self) -> dict[str, Any]:

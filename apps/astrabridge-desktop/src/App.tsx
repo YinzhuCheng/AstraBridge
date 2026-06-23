@@ -1,10 +1,19 @@
 ﻿import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
-import { Files, GitCompare, GitFork, Globe2, ListChecks, Save, Terminal } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { GitFork, Save } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
 import { summarizeCodingEventInspector } from "./features/runtime/codingEventInspector";
+import {
+  BrowserInspectorPanel,
+  FilesInspectorPanel,
+  InspectorTabBar,
+  type InspectorTab,
+  ReviewInspectorPanel,
+  TerminalInspectorPanel,
+  WorkflowEvidencePanel,
+} from "./features/runtime/InspectorPanels";
 import { isolationAuditSummary, projectCaptureRoot, suggestedDogfoodScreenshotPath } from "./features/runtime/isolationAudit";
 import { summarizeTaskInspectorEvidence } from "./features/runtime/taskInspectorEvidence";
 import { modelAuthorityState } from "./features/runtime/modelAuthorityNotice";
@@ -611,6 +620,7 @@ function ActivityBlock({ activity, diff }: { activity: RuntimeActivityState; dif
 }
 
 function ChatMessageRow({
+  locale,
   block,
   providerName,
   modelName,
@@ -622,6 +632,7 @@ function ChatMessageRow({
   onFork,
   onSave,
 }: {
+  locale: "en" | "zh-CN";
   block: ThreadRenderBlock;
   providerName: string;
   modelName: string;
@@ -636,9 +647,9 @@ function ChatMessageRow({
   const isUser = block.role === "user";
   const isLive = block.role === "assistant_live";
   const actorName = isUser ? userName : modelName || providerName || "Assistant";
-  const actorDetail = isUser ? "用户" : [providerName, modelName].filter(Boolean).join(" / ");
+  const actorDetail = isUser ? t(locale, "manager_fact_users") : [providerName, modelName].filter(Boolean).join(" / ");
   const timeLabel = formatMessageTime(block.startedAt);
-  const duration = isLive ? "运行中" : formatDuration(block.durationMs);
+  const duration = isLive ? t(locale, "loading") : formatDuration(block.durationMs);
   return (
     <article className={`chat-message-row chat-message-${block.role}`}>
       <AvatarBadge
@@ -657,11 +668,11 @@ function ChatMessageRow({
         </div>
         {!isUser ? (
           <footer className="chat-message-footer">
-            {duration ? <span>{duration}</span> : <span>运行时长未知</span>}
-            <button type="button" className="message-action-button" title="创建分支线程" aria-label="创建分支线程" onClick={onFork}>
+            {duration ? <span>{duration}</span> : <span>-</span>}
+            <button type="button" className="message-action-button" title={t(locale, "fork_thread")} aria-label={t(locale, "fork_thread")} onClick={onFork}>
               <GitFork size={14} strokeWidth={1.8} aria-hidden="true" />
             </button>
-            <button type="button" data-testid="checkpoint-open" className="message-action-button" title="保存检查点" aria-label="保存检查点" onClick={onSave}>
+            <button type="button" data-testid="checkpoint-open" className="message-action-button" title={t(locale, "checkpoint_title")} aria-label={t(locale, "checkpoint_title")} onClick={onSave}>
               <Save size={14} strokeWidth={1.8} aria-hidden="true" />
             </button>
           </footer>
@@ -743,6 +754,7 @@ function MessageBlockContent({ block, reasoningDisplayPolicy }: { block: ThreadR
 }
 
 function SaveCheckpointModal({
+  locale,
   description,
   defaultDescription,
   projectName,
@@ -753,6 +765,7 @@ function SaveCheckpointModal({
   onCancel,
   onSave,
 }: {
+  locale: "en" | "zh-CN";
   description: string;
   defaultDescription: string;
   projectName: string;
@@ -767,25 +780,25 @@ function SaveCheckpointModal({
     <div className="modal-scrim">
       <div className="modal-card checkpoint-modal" data-testid="checkpoint-modal">
         <div className="card-header">
-          <h2>保存检查点</h2>
+          <h2>{t(locale, "checkpoint_title")}</h2>
           <span className="status-tag">.astrabridge/saves</span>
         </div>
-        <p className="muted">这会保存本地 AstraBridge 项目状态和工作区快照，不会提交到 Git，也不会写入官方 Codex 配置。</p>
+        <p className="muted compact-copy">{t(locale, "checkpoint_summary")}</p>
         <div className="checkpoint-facts">
-          <div><span>项目</span><strong>{projectName}</strong></div>
-          <div><span>线程</span><strong>{threadName}</strong></div>
-          <div><span>默认说明</span><strong>{defaultDescription}</strong></div>
+          <div><span>{t(locale, "checkpoint_project")}</span><strong>{projectName}</strong></div>
+          <div><span>{t(locale, "checkpoint_thread")}</span><strong>{threadName}</strong></div>
+          <div><span>{t(locale, "checkpoint_default_description")}</span><strong>{defaultDescription}</strong></div>
         </div>
         <label className="field">
-          <span>说明</span>
+          <span>{t(locale, "checkpoint_description")}</span>
           <textarea rows={3} value={description} onChange={(event) => onDescriptionChange(event.target.value)} placeholder={defaultDescription} />
         </label>
         {error ? <p className="error-text">{String((error as Error).message ?? error)}</p> : null}
         <div className="modal-actions">
           <button type="button" data-testid="checkpoint-save" className="primary-button" disabled={isPending} onClick={onSave}>
-            {isPending ? "保存中..." : "保存"}
+            {isPending ? t(locale, "checkpoint_saving") : t(locale, "checkpoint_save")}
           </button>
-          <button type="button" data-testid="checkpoint-cancel" className="ghost-button" onClick={onCancel}>取消</button>
+          <button type="button" data-testid="checkpoint-cancel" className="ghost-button" onClick={onCancel}>{t(locale, "cancel")}</button>
         </div>
       </div>
     </div>
@@ -935,12 +948,14 @@ function PlanProgressTimeline({ plan }: { plan: RuntimeSupervisorState["plan"] |
 }
 
 function EnvironmentStrip({
+  locale,
   supervisor,
   fallback,
   recoveryActions = [],
   recoveryPendingAction = null,
   onRecoveryAction,
 }: {
+  locale: "en" | "zh-CN";
   supervisor?: RuntimeSupervisorState;
   fallback: { provider?: string; model?: string; effort?: string; permission?: string };
   recoveryActions?: RuntimeErrorAction[];
@@ -960,11 +975,11 @@ function EnvironmentStrip({
       {runtimeError ? (
         <>
           <div className="environment-strip-row environment-strip-wide environment-error-row">
-            <span>运行时</span>
+            <span>{t(locale, "inspector_runtime")}</span>
             <strong>{runtimeError.category === "provider_timeout" ? "provider 超时" : runtimeError.category || "错误"}</strong>
           </div>
           <div className="environment-strip-row environment-strip-wide environment-error-copy">
-            <span>恢复建议</span>
+            <span>{t(locale, "inspector_recovery")}</span>
             <strong>{runtimeErrorNoticeText(runtimeError)}</strong>
             {recoveryActions.length > 0 ? (
               <div className="environment-error-actions">
@@ -978,7 +993,7 @@ function EnvironmentStrip({
                       disabled={pending || !onRecoveryAction}
                       onClick={() => onRecoveryAction?.(action)}
                     >
-                      {pending ? "处理中..." : action.label}
+                      {pending ? t(locale, "inspector_processing") : action.label}
                     </button>
                   );
                 })}
@@ -988,414 +1003,41 @@ function EnvironmentStrip({
         </>
       ) : null}
       <div className="environment-strip-row">
-        <span>提供方</span>
+        <span>{t(locale, "inspector_provider")}</span>
         <strong>{fallback.provider || environment?.provider || "-"}</strong>
       </div>
       <div className="environment-strip-row">
-        <span>模型</span>
+        <span>{t(locale, "inspector_model")}</span>
         <strong>{environment?.model || fallback.model || "-"}</strong>
       </div>
       <div className="environment-strip-row">
-        <span>推理强度</span>
+        <span>{t(locale, "inspector_effort")}</span>
         <strong>{environment?.effort || fallback.effort || "-"}</strong>
       </div>
       <div className="environment-strip-row">
-        <span>权限</span>
+        <span>{t(locale, "inspector_permission")}</span>
         <strong>{environment?.permission || fallback.permission || "-"}</strong>
       </div>
       <div className="environment-strip-row">
-        <span>上下文</span>
+        <span>{t(locale, "inspector_context")}</span>
         <strong>{contextLabel}</strong>
       </div>
       <div className="environment-strip-row">
-        <span>空闲</span>
-        <strong>{watchdog?.idle_seconds ? `${watchdog.idle_seconds}s` : "正常"}</strong>
+        <span>{t(locale, "inspector_idle")}</span>
+        <strong>{watchdog?.idle_seconds ? `${watchdog.idle_seconds}s` : t(locale, "inspector_normal")}</strong>
       </div>
       <div className="environment-strip-row">
-        <span>Git</span>
-        <strong>{git?.is_repo ? `${git.branch || "repo"} · +${git.added} -${git.deleted}` : "非 Git 仓库"}</strong>
+        <span>{t(locale, "inspector_git")}</span>
+        <strong>{git?.is_repo ? `${git.branch || "repo"} · +${git.added} -${git.deleted}` : t(locale, "inspector_non_git")}</strong>
       </div>
       <div className="environment-strip-row environment-strip-wide">
-        <span>浏览器</span>
-        <strong>{browser?.status === "pass" ? `通过 · ${browser.label || browser.url}` : browser?.status ? productStatusLabel(browser.status) : "未运行"}</strong>
+        <span>{t(locale, "inspector_browser")}</span>
+        <strong>{browser?.status === "pass" ? `${t(locale, "inspector_pass")} · ${browser.label || browser.url}` : browser?.status ? productStatusLabel(browser.status) : t(locale, "inspector_not_run")}</strong>
       </div>
       <div className="environment-strip-row environment-strip-wide">
-        <span>MCP</span>
+        <span>{t(locale, "inspector_mcp")}</span>
         <strong>{productStatusLabel(environment?.mcp?.status)}</strong>
       </div>
-    </section>
-  );
-}
-
-type InspectorTab = "status" | "review" | "terminal" | "browser" | "files";
-
-function InspectorTabButton({
-  tab,
-  active,
-  icon,
-  label,
-  onClick,
-}: {
-  tab: InspectorTab;
-  active: boolean;
-  icon: ReactNode;
-  label: string;
-  onClick: (tab: InspectorTab) => void;
-}) {
-  return (
-    <button type="button" data-testid={`inspector-tab-${tab}`} className={`inspector-tab-button ${active ? "active" : ""}`} onClick={() => onClick(tab)} title={label}>
-      {icon}
-      <span>{label}</span>
-    </button>
-  );
-}
-
-function ReviewInspectorPanel({
-  supervisor,
-  review,
-  diff,
-  fallback,
-  selectedPath,
-  onSelectPath,
-}: {
-  supervisor?: RuntimeSupervisorState;
-  review?: ProjectReviewStatus;
-  diff?: ProjectReviewDiff;
-  fallback?: ReturnType<typeof summarizeCodingEventInspector>;
-  selectedPath?: string;
-  onSelectPath: (path: string) => void;
-}) {
-  const git = review?.git ?? supervisor?.environment.git;
-  const files = (review?.files?.length ? review.files : fallback?.reviewFiles) ?? [];
-  const fallbackDetail = selectedPath ? fallback?.detailByPath[selectedPath] : "";
-  return (
-    <section className="inspector-tool-panel" data-testid="review-panel">
-      <div className="section-header">
-        <h2>审查</h2>
-        <span className="diff-progress-pill">
-          <span className="diff-added">+{(git?.added ?? 0).toLocaleString()}</span>
-          <span className="diff-deleted">-{(git?.deleted ?? 0).toLocaleString()}</span>
-        </span>
-      </div>
-      <div className="tool-list">
-        <div className="tool-row">
-          <span>修改文件</span>
-          <strong>{git?.changed_files ?? 0}</strong>
-        </div>
-        <div className="tool-row">
-          <span>Git 状态</span>
-          <strong>{git?.is_repo ? git.branch || "repo" : "非 Git 仓库"}</strong>
-        </div>
-      </div>
-      <div className="inspector-list" role="list" aria-label="修改文件">
-        {files.length ? (
-          files.slice(0, 12).map((file) => (
-            <button
-              type="button"
-              data-testid="review-file-row"
-              className={`inspector-list-row ${selectedPath === file.path ? "active" : ""}`}
-              onClick={() => onSelectPath(file.path)}
-              key={`${file.status}:${file.path}`}
-            >
-              <span>{file.path}</span>
-              <small>{file.status}</small>
-            </button>
-          ))
-        ) : (
-          <p className="muted compact-copy">当前没有可显示的修改文件。</p>
-        )}
-      </div>
-      {diff ? (
-        <pre className="tool-preview diff-preview">{diff.ok ? diff.diff || "这个文件当前没有 diff。" : diff.error || "暂时无法读取 diff。"}</pre>
-      ) : fallbackDetail ? (
-        <pre className="tool-preview diff-preview">{fallbackDetail}</pre>
-      ) : (
-        <p className="muted compact-copy">选择文件后查看只读 diff 预览。</p>
-      )}
-    </section>
-  );
-}
-
-function TerminalInspectorPanel({
-  supervisor,
-  history,
-  fallback,
-}: {
-  supervisor?: RuntimeSupervisorState;
-  history?: ProjectTerminalHistory;
-  fallback?: ReturnType<typeof summarizeCodingEventInspector>;
-}) {
-  const commandRows = history?.commands?.length
-    ? history.commands.slice(-12).map((item, index) => ({
-        key: `${item.timestamp}-${index}`,
-        summary: item.summary || item.command,
-        status: item.status,
-      }))
-    : (fallback?.commandRefs ?? []).slice(-12).map((item, index) => ({
-        key: `${item.command}:${index}`,
-        summary: item.command,
-        status: item.status || "event",
-      }));
-  return (
-    <section className="inspector-tool-panel" data-testid="terminal-panel">
-      <div className="section-header">
-        <h2>终端</h2>
-        <span className="status-tag">{history?.execution_host ?? (supervisor?.environment.cwd ? "已连接" : "未连接")}</span>
-      </div>
-      <p className="muted compact-copy">当前先显示 verified 命令历史；自由交互式 PTY 需要单独接审批、编码和会话生命周期。</p>
-      <pre className="tool-preview">{history?.workspace_root ?? supervisor?.environment.cwd ?? "当前没有活动工作区。"}</pre>
-      <div className="inspector-list" role="list" aria-label="命令历史">
-        {commandRows.length ? (
-          commandRows.map((item) => (
-            <div className="inspector-list-row static-row" data-testid="terminal-command-row" key={item.key}>
-              <span>{item.summary}</span>
-              <small>{item.status}</small>
-            </div>
-          ))
-        ) : (
-          <p className="muted compact-copy">还没有命令事件。</p>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function WorkflowEvidencePanel({
-  facts,
-}: {
-  facts: ReturnType<typeof summarizeTaskWorkflowFacts>;
-}) {
-  const checkpoints = facts.checkpointRefs;
-  const diagnostics = facts.diagnosticRefs;
-  return (
-    <section className="pane-section inspector-section" data-testid="workflow-evidence-panel">
-      <div className="section-header">
-        <h2>工作流事实</h2>
-      </div>
-      <div className="tool-list">
-        <div className="tool-row" data-testid="workflow-fact-lanes">
-          <span>执行通道</span>
-          <strong>{facts.laneCount}</strong>
-        </div>
-        <div className="tool-row" data-testid="workflow-fact-handoffs">
-          <span>Provider 切换</span>
-          <strong>{facts.handoffCount}</strong>
-        </div>
-        <div className="tool-row" data-testid="workflow-fact-checkpoints">
-          <span>检查点</span>
-          <strong>{facts.checkpointCount}</strong>
-        </div>
-        <div className="tool-row" data-testid="workflow-fact-commands">
-          <span>命令事件</span>
-          <strong>{facts.commandCount}</strong>
-        </div>
-        <div className="tool-row" data-testid="workflow-fact-diagnostics">
-          <span>诊断事件</span>
-          <strong>{facts.diagnosticCount}</strong>
-        </div>
-        <div className="tool-row" data-testid="workflow-fact-recovery">
-          <span>恢复路径</span>
-          <strong>
-            {facts.recoveredCommandCount > 0
-              ? `${facts.recoveredCommandCount} recovered`
-              : facts.failedCommandCount > 0
-                ? `${facts.failedCommandCount} pending`
-                : "clear"}
-          </strong>
-        </div>
-      </div>
-      {checkpoints.length ? (
-        <div className="inspector-list" role="list" aria-label="检查点事实">
-          {checkpoints.slice(-4).map((item) => (
-            <div className="inspector-list-row static-row" data-testid="workflow-checkpoint-row" key={item.save_id}>
-              <span>{item.description}</span>
-              <small>{item.save_id}</small>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      {diagnostics.length ? (
-        <div className="inspector-list" role="list" aria-label="诊断事实">
-          {diagnostics.slice(-4).map((item, index) => (
-            <div
-              className="inspector-list-row static-row"
-              data-testid="workflow-diagnostic-row"
-              key={`${item.kind}:${item.summary}:${index}`}
-            >
-              <span>{item.summary}</span>
-              <small>{item.kind}</small>
-            </div>
-          ))}
-        </div>
-      ) : !checkpoints.length ? (
-        <p className="muted compact-copy">当前线程还没有事件化的检查点或诊断摘要。</p>
-      ) : null}
-    </section>
-  );
-}
-
-function BrowserInspectorPanel({
-  supervisor,
-  latestSmoke,
-  isPreparingWorkflowDemo,
-  isPreparingNativeKernelDemo,
-  isRunningReleaseSmoke,
-  isRunningProviderSwitchSmoke,
-  isRunningNativeKernelSmoke,
-  onPrepareWorkflowDemo,
-  onPrepareNativeKernelDemo,
-  onRunReleaseSmoke,
-  onRunProviderSwitchSmoke,
-  onRunNativeKernelSmoke,
-}: {
-  supervisor?: RuntimeSupervisorState;
-  latestSmoke?: {
-    label?: string;
-    status?: string;
-    url?: string;
-    console_errors?: string[];
-    request_failures?: Array<{ url?: string; method?: string; resource_type?: string; error_text?: string }>;
-    screenshot_path?: string;
-  } | null;
-  isPreparingWorkflowDemo?: boolean;
-  isPreparingNativeKernelDemo?: boolean;
-  isRunningReleaseSmoke?: boolean;
-  isRunningProviderSwitchSmoke?: boolean;
-  isRunningNativeKernelSmoke?: boolean;
-  onPrepareWorkflowDemo: () => void;
-  onPrepareNativeKernelDemo: () => void;
-  onRunReleaseSmoke: () => void;
-  onRunProviderSwitchSmoke: () => void;
-  onRunNativeKernelSmoke: () => void;
-}) {
-  const browser = latestSmoke ?? supervisor?.browser;
-  return (
-    <section className="inspector-tool-panel" data-testid="browser-panel">
-      <div className="section-header">
-        <h2>浏览器</h2>
-        <span className={`status-tag ${browser?.status === "pass" ? "status-ok" : ""}`}>{browser?.status ? productStatusLabel(browser.status) : "未运行"}</span>
-      </div>
-      {browser ? (
-        <div className="tool-list">
-          <div className="tool-row">
-            <span>标签</span>
-            <strong>{browser.label || "-"}</strong>
-          </div>
-          <div className="tool-row">
-            <span>URL</span>
-            <strong>{browser.url || "-"}</strong>
-          </div>
-          <div className="tool-row">
-            <span>控制台</span>
-            <strong>{browser.console_errors?.length ?? 0} 个错误</strong>
-          </div>
-          <div className="tool-row">
-            <span>请求失败</span>
-            <strong>{browser.request_failures?.length ?? 0} 个</strong>
-          </div>
-          {browser.screenshot_path ? (
-            <div className="tool-row tool-row-wide">
-              <span>截图</span>
-              <strong title={browser.screenshot_path}>{browser.screenshot_path}</strong>
-            </div>
-          ) : null}
-        </div>
-      ) : (
-        <p className="muted compact-copy">还没有 browser smoke 结果。</p>
-      )}
-      {browser?.request_failures?.length ? (
-        <pre className="tool-preview">
-          {browser.request_failures
-            .slice(0, 4)
-            .map((item) => [item.method, item.resource_type, item.error_text, item.url].filter(Boolean).join(" | "))
-            .join("\n")}
-        </pre>
-      ) : null}
-      <div className="inspector-actions">
-        <button type="button" data-testid="prepare-release-workflow-demo" className="ghost-button inspector-inline-action" disabled={isPreparingWorkflowDemo} onClick={onPrepareWorkflowDemo}>
-          {isPreparingWorkflowDemo ? "准备中..." : "准备演示工作流"}
-        </button>
-        <button type="button" data-testid="prepare-native-kernel-demo" className="ghost-button inspector-inline-action" disabled={isPreparingNativeKernelDemo} onClick={onPrepareNativeKernelDemo}>
-          {isPreparingNativeKernelDemo ? "准备中..." : "准备 native kernel 演示"}
-        </button>
-        <button type="button" className="ghost-button inspector-inline-action" disabled={isRunningReleaseSmoke} onClick={onRunReleaseSmoke}>
-          {isRunningReleaseSmoke ? "运行中..." : "运行工作流 smoke"}
-        </button>
-        <button type="button" className="ghost-button inspector-inline-action" disabled={isRunningProviderSwitchSmoke} onClick={onRunProviderSwitchSmoke}>
-          {isRunningProviderSwitchSmoke ? "运行中..." : "运行 provider-switch smoke"}
-        </button>
-        <button type="button" className="ghost-button inspector-inline-action" disabled={isRunningNativeKernelSmoke} onClick={onRunNativeKernelSmoke}>
-          {isRunningNativeKernelSmoke ? "运行中..." : "运行 native-kernel smoke"}
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function FilesInspectorPanel({
-  project,
-  tree,
-  preview,
-  fallback,
-  query,
-  selectedPath,
-  onQueryChange,
-  onSelectPath,
-}: {
-  project: ProjectFile;
-  tree?: ProjectFilesTree;
-  preview?: ProjectFilePreview;
-  fallback?: ReturnType<typeof summarizeCodingEventInspector>;
-  query: string;
-  selectedPath?: string;
-  onQueryChange: (value: string) => void;
-  onSelectPath: (path: string) => void;
-}) {
-  const items = (tree?.items?.length ? tree.items : fallback?.recentFiles) ?? [];
-  const fallbackDetail = selectedPath ? fallback?.detailByPath[selectedPath] : "";
-  return (
-    <section className="inspector-tool-panel" data-testid="files-panel">
-      <div className="section-header">
-        <h2>项目文件</h2>
-        <span className="status-tag">{items.length}</span>
-      </div>
-      <input className="inspector-search" value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="筛选文件..." aria-label="筛选文件" />
-      <div className="inspector-list inspector-file-list" role="list" aria-label="项目文件">
-        {items.slice(0, 18).map((item) => (
-          <button
-            type="button"
-            data-testid="project-file-row"
-            className={`inspector-list-row ${selectedPath === item.path ? "active" : ""}`}
-            onClick={() => onSelectPath(item.path)}
-            key={item.path}
-          >
-            <span>{item.path}</span>
-            <small>{item.kind}</small>
-          </button>
-        ))}
-        {!items.length ? <p className="muted compact-copy">没有匹配文件。</p> : null}
-      </div>
-      {preview ? (
-        <div className="file-preview">
-          <div className="tool-row">
-            <span>{preview.path}</span>
-            <strong>{Math.round((preview.size || 0) / 1024)} KB</strong>
-          </div>
-          {preview.kind === "image" && preview.data_url ? <img src={preview.data_url} alt={preview.name} /> : null}
-          {preview.kind === "text" ? <pre className="tool-preview">{preview.content}</pre> : null}
-          {preview.kind !== "text" && preview.kind !== "image" ? <p className="muted compact-copy">{preview.message ?? "该文件暂不支持预览。"}</p> : null}
-        </div>
-      ) : fallbackDetail ? (
-        <div className="file-preview">
-          <div className="tool-row">
-            <span>{selectedPath}</span>
-            <strong>event summary</strong>
-          </div>
-          <pre className="tool-preview">{fallbackDetail}</pre>
-        </div>
-      ) : (
-        <pre className="tool-preview">{project.workspace_root}</pre>
-      )}
     </section>
   );
 }
@@ -1847,7 +1489,10 @@ function RouterControlCenter({
   const selectedProvider = routerConfig.data?.providers.find((item) => item.id === selectedProviderId) ?? null;
   const selectedManagedKey = (llmKeys.data?.keys ?? []).find((item) => item.key_id === selectedKeyId) ?? null;
   const managerMode = llmSession.data?.mode ?? "anonymous";
-  const managerStatusLabel = managerMode === "managed_user" ? `托管账户：${llmSession.data?.username ?? "user"}` : "匿名会话";
+  const managerStatusLabel =
+    managerMode === "managed_user"
+      ? t(locale, "manager_status_managed").replace("{user}", llmSession.data?.username ?? "user")
+      : t(locale, "manager_status_anonymous");
 
   useEffect(() => {
     if (!providerDraft && routerConfig.data?.providers?.[0]) setProviderDraft(routerConfig.data.providers[0]);
@@ -1945,11 +1590,11 @@ function RouterControlCenter({
 
   return (
     <section className="settings-shell">
-      <aside className="settings-nav" aria-label="LLM API Manager sections">
+      <aside className="settings-nav" aria-label={t(locale, "provider_model_settings")}>
         <div className="settings-nav-heading">
-          <span className="eyebrow">LLM API Manager</span>
+          <span className="eyebrow">{t(locale, "provider_model_settings")}</span>
           <strong>{managerStatusLabel}</strong>
-          <small>Keys, providers, models, tools, runtime, and reports.</small>
+          <small>{t(locale, "manager_nav_summary")}</small>
         </div>
         <div className="settings-nav-list">
           {setupTabs.map((item) => (
@@ -1971,36 +1616,34 @@ function RouterControlCenter({
         <div className="manager-panel">
           <div className="manager-hero">
             <div>
-              <span className="eyebrow">LLM API Manager</span>
+              <span className="eyebrow">{t(locale, "provider_model_settings")}</span>
               <h3>{managerStatusLabel}</h3>
-              <p className="muted">
-                Managed login unlocks your encrypted per-user key vault. Anonymous mode keeps keys session-only or environment-only. OpenAI is supported through API-key provider profiles, just like other providers.
-              </p>
+              <p className="muted compact-copy">{t(locale, "manager_login_summary")}</p>
             </div>
             <span className={`session-badge session-badge-${managerMode}`}>{managerStatusLabel}</span>
           </div>
           <div className="manager-grid">
             <section className="manager-section">
-              <h4>Managed vault login</h4>
-              <label className="field"><span>Username</span><input value={managerUsername} onChange={(event) => setManagerUsername(event.target.value)} placeholder="user" /></label>
-              <label className="field"><span>Password</span><input type="password" value={managerPassword} onChange={(event) => setManagerPassword(event.target.value)} placeholder="Vault password" /></label>
+              <h4>{t(locale, "manager_login_managed_title")}</h4>
+              <label className="field"><span>{t(locale, "manager_login_username")}</span><input value={managerUsername} onChange={(event) => setManagerUsername(event.target.value)} placeholder="user" /></label>
+              <label className="field"><span>{t(locale, "manager_login_password")}</span><input type="password" value={managerPassword} onChange={(event) => setManagerPassword(event.target.value)} placeholder={t(locale, "manager_login_password_placeholder")} /></label>
               <div className="field-row">
-                <button type="button" className="primary-button" disabled={!managerUsername.trim() || !managerPassword.trim() || loginManager.isPending} onClick={() => loginManager.mutate({ mode: "managed_user", username: managerUsername, password: managerPassword })}>Login</button>
-                <button type="button" className="ghost-button" disabled={createManagerUser.isPending} onClick={() => createManagerUser.mutate({ username: "user", use_desktop_key_file: true })}>Initialize user from Desktop key.txt</button>
+                <button type="button" className="primary-button" disabled={!managerUsername.trim() || !managerPassword.trim() || loginManager.isPending} onClick={() => loginManager.mutate({ mode: "managed_user", username: managerUsername, password: managerPassword })}>{t(locale, "manager_login_button")}</button>
+                <button type="button" className="ghost-button" disabled={createManagerUser.isPending} onClick={() => createManagerUser.mutate({ username: "user", use_desktop_key_file: true })}>{t(locale, "manager_login_init_desktop")}</button>
               </div>
               {loginManager.error || createManagerUser.error ? <p className="error-text">{String((loginManager.error || createManagerUser.error) as Error)}</p> : null}
             </section>
             <section className="manager-section">
-              <h4>Other login modes</h4>
-              <p className="muted">Use anonymous mode for pasted keys or CI environment variables. Use managed mode when you want AstraBridge to unlock your encrypted provider-key vault.</p>
+              <h4>{t(locale, "manager_login_other_title")}</h4>
+              <p className="muted compact-copy">{t(locale, "manager_login_other_summary")}</p>
               <div className="field-row">
-                <button type="button" className="ghost-button" onClick={() => loginManager.mutate({ mode: "anonymous" })}>Use anonymous</button>
-                <button type="button" className="ghost-button" onClick={() => logoutManager.mutate()}>Logout</button>
+                <button type="button" className="ghost-button" onClick={() => loginManager.mutate({ mode: "anonymous" })}>{t(locale, "manager_login_anonymous")}</button>
+                <button type="button" className="ghost-button" onClick={() => logoutManager.mutate()}>{t(locale, "manager_login_logout")}</button>
               </div>
               <dl className="manager-facts">
-                <div><dt>Users</dt><dd>{llmSession.data?.users.length ?? 0}</dd></div>
-                <div><dt>Managed keys</dt><dd>{llmSession.data?.key_count ?? 0}</dd></div>
-                <div><dt>Verified models</dt><dd>{llmCatalog.data?.verified_model_ids.length ?? 0}</dd></div>
+                <div><dt>{t(locale, "manager_fact_users")}</dt><dd>{llmSession.data?.users.length ?? 0}</dd></div>
+                <div><dt>{t(locale, "manager_fact_keys")}</dt><dd>{llmSession.data?.key_count ?? 0}</dd></div>
+                <div><dt>{t(locale, "manager_fact_models")}</dt><dd>{llmCatalog.data?.verified_model_ids.length ?? 0}</dd></div>
               </dl>
             </section>
           </div>
@@ -2011,41 +1654,41 @@ function RouterControlCenter({
         <div className="manager-panel">
           <div className="manager-grid">
             <section className="manager-section">
-              <h4>Users</h4>
+              <h4>{t(locale, "manager_users_title")}</h4>
               <div className="manager-list">
                 {(llmSession.data?.users ?? []).map((user) => (
                   <div className="manager-row" key={user.username}>
                     <span>{user.username}</span>
-                    <small>{user.has_vault ? "vault ready" : "no vault"}</small>
+                    <small>{user.has_vault ? t(locale, "manager_vault_ready") : t(locale, "manager_vault_missing")}</small>
                   </div>
                 ))}
-                {(llmSession.data?.users ?? []).length === 0 ? <p className="muted">No vault users yet. Initialize user from Desktop key.txt or create a new user password below.</p> : null}
+                {(llmSession.data?.users ?? []).length === 0 ? <p className="muted compact-copy">{t(locale, "manager_users_empty")}</p> : null}
               </div>
-              <label className="field"><span>New username</span><input value={managerUsername} onChange={(event) => setManagerUsername(event.target.value)} /></label>
-              <label className="field"><span>New password</span><input type="password" value={managerPassword} onChange={(event) => setManagerPassword(event.target.value)} /></label>
-              <button type="button" className="primary-button" disabled={!managerUsername.trim() || !managerPassword.trim()} onClick={() => createManagerUser.mutate({ username: managerUsername, password: managerPassword })}>Create user</button>
+              <label className="field"><span>{t(locale, "manager_user_new_username")}</span><input value={managerUsername} onChange={(event) => setManagerUsername(event.target.value)} /></label>
+              <label className="field"><span>{t(locale, "manager_user_new_password")}</span><input type="password" value={managerPassword} onChange={(event) => setManagerPassword(event.target.value)} /></label>
+              <button type="button" className="primary-button" disabled={!managerUsername.trim() || !managerPassword.trim()} onClick={() => createManagerUser.mutate({ username: managerUsername, password: managerPassword })}>{t(locale, "manager_user_create")}</button>
             </section>
             <section className="manager-section">
-              <h4>Profile</h4>
-              <p className="muted">Used by the chat header and message avatar. Avatar paths stay local; external hotlinks are not used in the conversation view.</p>
-              <label className="field"><span>Display name</span><input value={managerDisplayName} onChange={(event) => setManagerDisplayName(event.target.value)} placeholder={llmSession.data?.username ?? "user"} /></label>
-              <label className="field"><span>Avatar path</span><input value={managerAvatarPath} onChange={(event) => setManagerAvatarPath(event.target.value)} placeholder="D:\\avatars\\me.png" /></label>
+              <h4>{t(locale, "manager_profile_title")}</h4>
+              <p className="muted compact-copy">{t(locale, "manager_profile_summary")}</p>
+              <label className="field"><span>{t(locale, "manager_profile_display_name")}</span><input value={managerDisplayName} onChange={(event) => setManagerDisplayName(event.target.value)} placeholder={llmSession.data?.username ?? "user"} /></label>
+              <label className="field"><span>{t(locale, "manager_profile_avatar_path")}</span><input value={managerAvatarPath} onChange={(event) => setManagerAvatarPath(event.target.value)} placeholder="D:\\avatars\\me.png" /></label>
               <button
                 type="button"
                 className="primary-button"
                 disabled={saveManagerProfile.isPending}
                 onClick={() => saveManagerProfile.mutate({ username: llmSession.data?.username ?? managerUsername, display_name: managerDisplayName, avatar_path: managerAvatarPath })}
               >
-                Save profile
+                {t(locale, "manager_profile_save")}
               </button>
               {saveManagerProfile.error ? <p className="error-text">{String((saveManagerProfile.error as Error).message ?? saveManagerProfile.error)}</p> : null}
             </section>
             <section className="manager-section">
-              <h4>Change password</h4>
-              <p className="muted">The vault is decrypted with the old password and re-encrypted with the new one. API key records are preserved.</p>
-              <label className="field"><span>Old password</span><input type="password" value={managerOldPassword} onChange={(event) => setManagerOldPassword(event.target.value)} /></label>
-              <label className="field"><span>New password</span><input type="password" value={managerNewPassword} onChange={(event) => setManagerNewPassword(event.target.value)} /></label>
-              <button type="button" className="primary-button" disabled={!managerOldPassword.trim() || !managerNewPassword.trim()} onClick={() => changeManagerPassword.mutate({ username: managerUsername, old_password: managerOldPassword, new_password: managerNewPassword })}>Change password</button>
+              <h4>{t(locale, "manager_password_title")}</h4>
+              <p className="muted compact-copy">{t(locale, "manager_password_summary")}</p>
+              <label className="field"><span>{t(locale, "manager_password_old")}</span><input type="password" value={managerOldPassword} onChange={(event) => setManagerOldPassword(event.target.value)} /></label>
+              <label className="field"><span>{t(locale, "manager_password_new")}</span><input type="password" value={managerNewPassword} onChange={(event) => setManagerNewPassword(event.target.value)} /></label>
+              <button type="button" className="primary-button" disabled={!managerOldPassword.trim() || !managerNewPassword.trim()} onClick={() => changeManagerPassword.mutate({ username: managerUsername, old_password: managerOldPassword, new_password: managerNewPassword })}>{t(locale, "manager_password_change")}</button>
               {changeManagerPassword.error ? <p className="error-text">{String(changeManagerPassword.error as Error)}</p> : null}
             </section>
           </div>
@@ -2088,22 +1731,22 @@ function RouterControlCenter({
               })
             }
           >
-            New provider
+            {t(locale, "manager_provider_new")}
           </button>
           {providerDraft ? (
             <>
               <label className="field"><span>ID</span><input value={providerDraft.id} onChange={(event) => setProviderDraft({ ...providerDraft, id: event.target.value })} /></label>
               <label className="field"><span>{t(locale, "provider_label")}</span><input value={providerDraft.display_name} onChange={(event) => setProviderDraft({ ...providerDraft, display_name: event.target.value })} /></label>
               <label className="field"><span>{t(locale, "base_url")}</span><input value={providerDraft.base_url} onChange={(event) => setProviderDraft({ ...providerDraft, base_url: event.target.value })} /></label>
-              <label className="field"><span>Adapter</span><select value={providerDraft.adapter_type} onChange={(event) => setProviderDraft({ ...providerDraft, adapter_type: event.target.value })}><option value="responses">responses</option><option value="chat">chat</option></select></label>
-              <label className="field"><span>Default model</span><input value={providerDraft.default_model} onChange={(event) => setProviderDraft({ ...providerDraft, default_model: event.target.value })} /></label>
-              <label className="field"><span>Logo source URL</span><input value={providerDraft.logo_source_url ?? ""} onChange={(event) => setProviderDraft({ ...providerDraft, logo_source_url: event.target.value })} placeholder="Official brand/source URL" /></label>
-              <label className="field"><span>Logo asset path</span><input value={providerDraft.logo_asset_path ?? ""} onChange={(event) => setProviderDraft({ ...providerDraft, logo_asset_path: event.target.value })} placeholder="Local cached logo path" /></label>
-              <label className="field"><span>Accent color</span><input value={providerDraft.accent_color ?? ""} onChange={(event) => setProviderDraft({ ...providerDraft, accent_color: event.target.value })} placeholder="#1f2937" /></label>
-              <label className="field"><span>Logo license note</span><textarea rows={2} value={providerDraft.logo_license_note ?? ""} onChange={(event) => setProviderDraft({ ...providerDraft, logo_license_note: event.target.value })} /></label>
+              <label className="field"><span>{t(locale, "manager_provider_adapter")}</span><select value={providerDraft.adapter_type} onChange={(event) => setProviderDraft({ ...providerDraft, adapter_type: event.target.value })}><option value="responses">responses</option><option value="chat">chat</option></select></label>
+              <label className="field"><span>{t(locale, "manager_provider_default_model")}</span><input value={providerDraft.default_model} onChange={(event) => setProviderDraft({ ...providerDraft, default_model: event.target.value })} /></label>
+              <label className="field"><span>{t(locale, "manager_provider_logo_source_url")}</span><input value={providerDraft.logo_source_url ?? ""} onChange={(event) => setProviderDraft({ ...providerDraft, logo_source_url: event.target.value })} placeholder={t(locale, "manager_provider_logo_source_placeholder")} /></label>
+              <label className="field"><span>{t(locale, "manager_provider_logo_asset_path")}</span><input value={providerDraft.logo_asset_path ?? ""} onChange={(event) => setProviderDraft({ ...providerDraft, logo_asset_path: event.target.value })} placeholder={t(locale, "manager_provider_logo_asset_placeholder")} /></label>
+              <label className="field"><span>{t(locale, "manager_provider_accent_color")}</span><input value={providerDraft.accent_color ?? ""} onChange={(event) => setProviderDraft({ ...providerDraft, accent_color: event.target.value })} placeholder="#1f2937" /></label>
+              <label className="field"><span>{t(locale, "manager_provider_logo_license_note")}</span><textarea rows={2} value={providerDraft.logo_license_note ?? ""} onChange={(event) => setProviderDraft({ ...providerDraft, logo_license_note: event.target.value })} /></label>
               <div className="field-row">
-                <button type="button" className="primary-button" onClick={() => saveProvider.mutate(providerDraft)}>Save provider</button>
-                {providerDraft.id ? <button type="button" className="ghost-button" onClick={() => api.deleteProvider(providerDraft.id).then(() => queryClient.invalidateQueries({ queryKey: ["router-config"] }))}>Delete</button> : null}
+                <button type="button" className="primary-button" onClick={() => saveProvider.mutate(providerDraft)}>{t(locale, "manager_provider_save")}</button>
+                {providerDraft.id ? <button type="button" className="ghost-button" onClick={() => api.deleteProvider(providerDraft.id).then(() => queryClient.invalidateQueries({ queryKey: ["router-config"] }))}>{t(locale, "manager_delete")}</button> : null}
               </div>
             </>
           ) : null}
@@ -2114,8 +1757,8 @@ function RouterControlCenter({
         <div className="metadata-editor">
           <div className="metadata-list-pane">
             <label className="field">
-              <span>Search models</span>
-              <input value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="provider, model, capability, source" />
+              <span>{t(locale, "manager_model_search")}</span>
+              <input value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder={t(locale, "manager_model_search_placeholder")} />
             </label>
             <div className="metadata-model-list" role="list">
               {filteredModels.map((model) => (
@@ -2150,141 +1793,141 @@ function RouterControlCenter({
                 });
               }}
             >
-              New model
+              {t(locale, "manager_model_new")}
             </button>
           </div>
           {modelDraft ? (
             <div className="metadata-detail-pane">
               <div className="metadata-detail-header">
                 <div>
-                  <span className="eyebrow">Model contract</span>
-                  <h3>{modelDraft.display_name || modelDraft.id || "New model"}</h3>
+                  <span className="eyebrow">{t(locale, "manager_model_contract")}</span>
+                  <h3>{modelDraft.display_name || modelDraft.id || t(locale, "manager_model_new")}</h3>
                 </div>
                 <div className="field-row">
-                  <button type="button" className="primary-button" onClick={() => saveModel.mutate(modelDraft)}>Save model</button>
-                  {modelDraft.id ? <button type="button" className="ghost-button" onClick={() => api.deleteModelCatalogEntry(modelDraft.id).then(() => queryClient.invalidateQueries({ queryKey: ["router-config"] }))}>Delete</button> : null}
+                  <button type="button" className="primary-button" onClick={() => saveModel.mutate(modelDraft)}>{t(locale, "manager_model_save")}</button>
+                  {modelDraft.id ? <button type="button" className="ghost-button" onClick={() => api.deleteModelCatalogEntry(modelDraft.id).then(() => queryClient.invalidateQueries({ queryKey: ["router-config"] }))}>{t(locale, "manager_delete")}</button> : null}
                 </div>
               </div>
               <div className="metadata-section">
-                <h4>Identity</h4>
+                <h4>{t(locale, "manager_model_identity")}</h4>
                 <div className="form-grid">
                   <label className="field"><span>ID</span><input value={modelDraft.id} onChange={(event) => setModelDraft({ ...modelDraft, id: event.target.value })} /></label>
-                  <label className="field"><span>Provider</span><input value={modelDraft.provider} onChange={(event) => setModelDraft({ ...modelDraft, provider: event.target.value })} /></label>
-                  <label className="field"><span>Native model</span><input value={modelDraft.native_model} onChange={(event) => setModelDraft({ ...modelDraft, native_model: event.target.value })} /></label>
-                  <label className="field"><span>Display name</span><input value={modelDraft.display_name} onChange={(event) => setModelDraft({ ...modelDraft, display_name: event.target.value })} /></label>
-                  <label className="field"><span>Kind</span><input value={modelDraft.model_kind ?? "chat"} onChange={(event) => setModelDraft({ ...modelDraft, model_kind: event.target.value })} /></label>
-                  <label className="field"><span>Adapter profile</span><input value={modelDraft.adapter_profile} onChange={(event) => setModelDraft({ ...modelDraft, adapter_profile: event.target.value })} /></label>
+                  <label className="field"><span>{t(locale, "title_provider")}</span><input value={modelDraft.provider} onChange={(event) => setModelDraft({ ...modelDraft, provider: event.target.value })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_native")}</span><input value={modelDraft.native_model} onChange={(event) => setModelDraft({ ...modelDraft, native_model: event.target.value })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_display_name")}</span><input value={modelDraft.display_name} onChange={(event) => setModelDraft({ ...modelDraft, display_name: event.target.value })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_kind")}</span><input value={modelDraft.model_kind ?? "chat"} onChange={(event) => setModelDraft({ ...modelDraft, model_kind: event.target.value })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_adapter_profile")}</span><input value={modelDraft.adapter_profile} onChange={(event) => setModelDraft({ ...modelDraft, adapter_profile: event.target.value })} /></label>
                 </div>
                 <div className="check-row">
-                  <label><input type="checkbox" checked={modelDraft.enabled} onChange={(event) => setModelDraft({ ...modelDraft, enabled: event.target.checked })} /> Enabled</label>
-                  <label><input type="checkbox" checked={modelDraft.codex_agent_enabled ?? true} onChange={(event) => setModelDraft({ ...modelDraft, codex_agent_enabled: event.target.checked })} /> Expose as Codex agent model</label>
+                  <label><input type="checkbox" checked={modelDraft.enabled} onChange={(event) => setModelDraft({ ...modelDraft, enabled: event.target.checked })} /> {t(locale, "manager_model_enabled")}</label>
+                  <label><input type="checkbox" checked={modelDraft.codex_agent_enabled ?? true} onChange={(event) => setModelDraft({ ...modelDraft, codex_agent_enabled: event.target.checked })} /> {t(locale, "manager_model_expose_codex")}</label>
                 </div>
               </div>
               <div className="metadata-section">
-                <h4>Context and modalities</h4>
+                <h4>{t(locale, "manager_model_context")}</h4>
                 <div className="form-grid">
-                  <label className="field"><span>Context window</span><input type="number" value={modelDraft.advertised_context_window} onChange={(event) => setModelDraft({ ...modelDraft, advertised_context_window: Number(event.target.value) || 0 })} /></label>
-                  <label className="field"><span>Effective percent</span><input type="number" value={modelDraft.effective_context_window_percent ?? 80} onChange={(event) => setModelDraft({ ...modelDraft, effective_context_window_percent: Number(event.target.value) || 80 })} /></label>
-                  <label className="field"><span>Auto compact limit</span><input value={modelDraft.auto_compact_token_limit ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, auto_compact_token_limit: optionalNumber(event.target.value) })} /></label>
-                  <label className="field"><span>Tool output limit</span><input value={modelDraft.tool_output_token_limit ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, tool_output_token_limit: optionalNumber(event.target.value) })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_context_window")}</span><input type="number" value={modelDraft.advertised_context_window} onChange={(event) => setModelDraft({ ...modelDraft, advertised_context_window: Number(event.target.value) || 0 })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_effective_percent")}</span><input type="number" value={modelDraft.effective_context_window_percent ?? 80} onChange={(event) => setModelDraft({ ...modelDraft, effective_context_window_percent: Number(event.target.value) || 80 })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_auto_compact_limit")}</span><input value={modelDraft.auto_compact_token_limit ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, auto_compact_token_limit: optionalNumber(event.target.value) })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_tool_output_limit")}</span><input value={modelDraft.tool_output_token_limit ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, tool_output_token_limit: optionalNumber(event.target.value) })} /></label>
                 </div>
-                <label className="field"><span>Input modalities</span><input value={joinList(modelDraft.input_modalities)} onChange={(event) => setModelDraft({ ...modelDraft, input_modalities: splitList(event.target.value) })} /></label>
+                <label className="field"><span>{t(locale, "manager_model_input_modalities")}</span><input value={joinList(modelDraft.input_modalities)} onChange={(event) => setModelDraft({ ...modelDraft, input_modalities: splitList(event.target.value) })} /></label>
               </div>
               <div className="metadata-section">
-                <h4>Reasoning and temperature</h4>
+                <h4>{t(locale, "manager_model_reasoning_temp")}</h4>
                 <div className="form-grid">
-                  <label className="field"><span>Reasoning levels</span><input value={joinList(modelDraft.supported_reasoning_levels)} onChange={(event) => setModelDraft({ ...modelDraft, supported_reasoning_levels: splitList(event.target.value) })} /></label>
-                  <label className="field"><span>Default reasoning</span><input value={modelDraft.default_reasoning_level ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, default_reasoning_level: event.target.value })} /></label>
-                  <label className="field"><span>Reasoning display</span><select value={modelDraft.reasoning_display_policy ?? "collapsed_3_lines"} onChange={(event) => setModelDraft({ ...modelDraft, reasoning_display_policy: event.target.value })}><option value="collapsed_3_lines">collapsed 3 lines</option><option value="hidden">hidden</option><option value="expanded">expanded</option></select></label>
-                  <label className="field"><span>Temperature default</span><input type="number" step="0.1" value={modelDraft.temperature_default ?? 0} onChange={(event) => setModelDraft({ ...modelDraft, temperature_default: Number(event.target.value) })} /></label>
-                  <label className="field"><span>UI range</span><input value={`${modelDraft.temperature_ui_min ?? 0}, ${modelDraft.temperature_ui_max ?? 2}`} onChange={(event) => {
+                  <label className="field"><span>{t(locale, "manager_model_reasoning_levels")}</span><input value={joinList(modelDraft.supported_reasoning_levels)} onChange={(event) => setModelDraft({ ...modelDraft, supported_reasoning_levels: splitList(event.target.value) })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_default_reasoning")}</span><input value={modelDraft.default_reasoning_level ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, default_reasoning_level: event.target.value })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_reasoning_display")}</span><select value={modelDraft.reasoning_display_policy ?? "collapsed_3_lines"} onChange={(event) => setModelDraft({ ...modelDraft, reasoning_display_policy: event.target.value })}><option value="collapsed_3_lines">collapsed 3 lines</option><option value="hidden">hidden</option><option value="expanded">expanded</option></select></label>
+                  <label className="field"><span>{t(locale, "manager_model_temperature_default")}</span><input type="number" step="0.1" value={modelDraft.temperature_default ?? 0} onChange={(event) => setModelDraft({ ...modelDraft, temperature_default: Number(event.target.value) })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_ui_range")}</span><input value={`${modelDraft.temperature_ui_min ?? 0}, ${modelDraft.temperature_ui_max ?? 2}`} onChange={(event) => {
                     const [min, max] = splitList(event.target.value).map(Number);
                     setModelDraft({ ...modelDraft, temperature_ui_min: Number.isFinite(min) ? min : 0, temperature_ui_max: Number.isFinite(max) ? max : 2 });
                   }} /></label>
-                  <label className="field"><span>Provider range</span><input value={`${modelDraft.provider_temperature_min ?? 0}, ${modelDraft.provider_temperature_max ?? 2}`} onChange={(event) => {
+                  <label className="field"><span>{t(locale, "manager_model_provider_range")}</span><input value={`${modelDraft.provider_temperature_min ?? 0}, ${modelDraft.provider_temperature_max ?? 2}`} onChange={(event) => {
                     const [min, max] = splitList(event.target.value).map(Number);
                     setModelDraft({ ...modelDraft, provider_temperature_min: Number.isFinite(min) ? min : 0, provider_temperature_max: Number.isFinite(max) ? max : 2 });
                   }} /></label>
-                  <label className="field"><span>Adapter policy</span><select value={modelDraft.temperature_adapter_policy ?? "pass_through_0_2"} onChange={(event) => setModelDraft({ ...modelDraft, temperature_adapter_policy: event.target.value })}><option value="pass_through_0_2">OpenAI compatible 0-2</option><option value="qwen_omit_zero_clamp_1">Qwen omit 0, clamp to 1</option><option value="kimi_only_temperature_1">Kimi only temperature=1</option></select></label>
+                  <label className="field"><span>{t(locale, "manager_model_adapter_policy")}</span><select value={modelDraft.temperature_adapter_policy ?? "pass_through_0_2"} onChange={(event) => setModelDraft({ ...modelDraft, temperature_adapter_policy: event.target.value })}><option value="pass_through_0_2">OpenAI compatible 0-2</option><option value="qwen_omit_zero_clamp_1">Qwen omit 0, clamp to 1</option><option value="kimi_only_temperature_1">Kimi only temperature=1</option></select></label>
                 </div>
               </div>
               <div className="metadata-section">
-                <h4>Pricing cache</h4>
+                <h4>{t(locale, "manager_model_pricing")}</h4>
                 <div className="form-grid">
-                  <label className="field"><span>Currency</span><input value={modelDraft.pricing_currency ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, pricing_currency: event.target.value })} placeholder="USD / CNY" /></label>
-                  <label className="field"><span>Input / 1M</span><input type="number" step="0.0001" value={modelDraft.pricing_input_per_mtok ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, pricing_input_per_mtok: optionalNumber(event.target.value) })} /></label>
-                  <label className="field"><span>Output / 1M</span><input type="number" step="0.0001" value={modelDraft.pricing_output_per_mtok ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, pricing_output_per_mtok: optionalNumber(event.target.value) })} /></label>
-                  <label className="field"><span>Cached input / 1M</span><input type="number" step="0.0001" value={modelDraft.pricing_cached_input_per_mtok ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, pricing_cached_input_per_mtok: optionalNumber(event.target.value) })} /></label>
-                  <label className="field"><span>Pricing status</span><input value={modelDraft.pricing_status ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, pricing_status: event.target.value })} placeholder="official_docs / screenshot_seed" /></label>
-                  <label className="field"><span>Pricing source URL</span><input value={modelDraft.pricing_source_url ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, pricing_source_url: event.target.value })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_currency")}</span><input value={modelDraft.pricing_currency ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, pricing_currency: event.target.value })} placeholder="USD / CNY" /></label>
+                  <label className="field"><span>{t(locale, "manager_model_input_price")}</span><input type="number" step="0.0001" value={modelDraft.pricing_input_per_mtok ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, pricing_input_per_mtok: optionalNumber(event.target.value) })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_output_price")}</span><input type="number" step="0.0001" value={modelDraft.pricing_output_per_mtok ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, pricing_output_per_mtok: optionalNumber(event.target.value) })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_cached_input_price")}</span><input type="number" step="0.0001" value={modelDraft.pricing_cached_input_per_mtok ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, pricing_cached_input_per_mtok: optionalNumber(event.target.value) })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_pricing_status")}</span><input value={modelDraft.pricing_status ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, pricing_status: event.target.value })} placeholder="official_docs / screenshot_seed" /></label>
+                  <label className="field"><span>{t(locale, "manager_model_pricing_source_url")}</span><input value={modelDraft.pricing_source_url ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, pricing_source_url: event.target.value })} /></label>
                 </div>
               </div>
               <div className="metadata-section">
-                <h4>Tools</h4>
+                <h4>{t(locale, "manager_model_tools")}</h4>
                 <div className="check-row">
-                  <label><input type="checkbox" checked={modelDraft.supports_reasoning_summaries ?? false} onChange={(event) => setModelDraft({ ...modelDraft, supports_reasoning_summaries: event.target.checked })} /> Reasoning summaries</label>
-                  <label><input type="checkbox" checked={modelDraft.supports_parallel_tool_calls ?? false} onChange={(event) => setModelDraft({ ...modelDraft, supports_parallel_tool_calls: event.target.checked })} /> Parallel tool calls</label>
-                  <label><input type="checkbox" checked={modelDraft.supports_search_tool ?? false} onChange={(event) => setModelDraft({ ...modelDraft, supports_search_tool: event.target.checked })} /> Search tool</label>
-                  <label><input type="checkbox" checked={modelDraft.use_responses_lite ?? false} onChange={(event) => setModelDraft({ ...modelDraft, use_responses_lite: event.target.checked })} /> Responses lite</label>
+                  <label><input type="checkbox" checked={modelDraft.supports_reasoning_summaries ?? false} onChange={(event) => setModelDraft({ ...modelDraft, supports_reasoning_summaries: event.target.checked })} /> {t(locale, "manager_model_reasoning_summaries")}</label>
+                  <label><input type="checkbox" checked={modelDraft.supports_parallel_tool_calls ?? false} onChange={(event) => setModelDraft({ ...modelDraft, supports_parallel_tool_calls: event.target.checked })} /> {t(locale, "manager_model_parallel_tools")}</label>
+                  <label><input type="checkbox" checked={modelDraft.supports_search_tool ?? false} onChange={(event) => setModelDraft({ ...modelDraft, supports_search_tool: event.target.checked })} /> {t(locale, "manager_model_search_tool")}</label>
+                  <label><input type="checkbox" checked={modelDraft.use_responses_lite ?? false} onChange={(event) => setModelDraft({ ...modelDraft, use_responses_lite: event.target.checked })} /> {t(locale, "manager_model_responses_lite")}</label>
                 </div>
                 <div className="form-grid">
-                  <label className="field"><span>apply_patch tool type</span><input value={modelDraft.apply_patch_tool_type ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, apply_patch_tool_type: event.target.value || null })} placeholder="leave blank unless verified" /></label>
-                  <label className="field"><span>Web search tool type</span><input value={modelDraft.web_search_tool_type ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, web_search_tool_type: event.target.value || null })} /></label>
-                  <label className="field"><span>Tool mode</span><input value={modelDraft.tool_mode ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, tool_mode: event.target.value || null })} /></label>
-                  <label className="field"><span>Multi-agent version</span><input value={modelDraft.multi_agent_version ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, multi_agent_version: event.target.value || null })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_apply_patch_tool")}</span><input value={modelDraft.apply_patch_tool_type ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, apply_patch_tool_type: event.target.value || null })} placeholder={t(locale, "manager_model_blank_unless_verified")} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_web_search_tool")}</span><input value={modelDraft.web_search_tool_type ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, web_search_tool_type: event.target.value || null })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_tool_mode")}</span><input value={modelDraft.tool_mode ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, tool_mode: event.target.value || null })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_multi_agent_version")}</span><input value={modelDraft.multi_agent_version ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, multi_agent_version: event.target.value || null })} /></label>
                 </div>
               </div>
               <div className="metadata-section">
-                <h4>Web capability</h4>
+                <h4>{t(locale, "manager_model_web_capability")}</h4>
                 <div className="form-grid">
-                  <label className="field"><span>Native web search</span><select value={modelDraft.native_web_search_support ?? "unverified"} onChange={(event) => setModelDraft({ ...modelDraft, native_web_search_support: event.target.value })}><option value="unverified">unverified</option><option value="unsupported">unsupported</option><option value="verified">verified</option></select></label>
-                  <label className="field"><span>Tool web search</span><select value={modelDraft.tool_web_search_support ?? "unverified"} onChange={(event) => setModelDraft({ ...modelDraft, tool_web_search_support: event.target.value })}><option value="unverified">unverified</option><option value="not_requested">not requested</option><option value="verified">verified</option><option value="fail">fail</option></select></label>
-                  <label className="field"><span>MCP web</span><input value={modelDraft.mcp_web_support ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, mcp_web_support: event.target.value })} placeholder="context7 pass / unverified" /></label>
-                  <label className="field"><span>Web smoke</span><select value={modelDraft.web_smoke_status ?? "untested"} onChange={(event) => setModelDraft({ ...modelDraft, web_smoke_status: event.target.value })}><option value="untested">untested</option><option value="not_requested">not requested</option><option value="pass">pass</option><option value="fail">fail</option><option value="blocked_no_source">blocked no source</option></select></label>
-                  <label className="field"><span>Citation quality</span><input value={modelDraft.citation_quality ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, citation_quality: event.target.value })} placeholder="source_url_verified / untested" /></label>
-                  <label className="field"><span>Last web verified</span><input value={modelDraft.last_web_verified_at ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, last_web_verified_at: event.target.value || null })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_native_web_search")}</span><select value={modelDraft.native_web_search_support ?? "unverified"} onChange={(event) => setModelDraft({ ...modelDraft, native_web_search_support: event.target.value })}><option value="unverified">unverified</option><option value="unsupported">unsupported</option><option value="verified">verified</option></select></label>
+                  <label className="field"><span>{t(locale, "manager_model_tool_web_search")}</span><select value={modelDraft.tool_web_search_support ?? "unverified"} onChange={(event) => setModelDraft({ ...modelDraft, tool_web_search_support: event.target.value })}><option value="unverified">unverified</option><option value="not_requested">not requested</option><option value="verified">verified</option><option value="fail">fail</option></select></label>
+                  <label className="field"><span>{t(locale, "manager_model_mcp_web")}</span><input value={modelDraft.mcp_web_support ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, mcp_web_support: event.target.value })} placeholder="context7 pass / unverified" /></label>
+                  <label className="field"><span>{t(locale, "manager_model_web_smoke")}</span><select value={modelDraft.web_smoke_status ?? "untested"} onChange={(event) => setModelDraft({ ...modelDraft, web_smoke_status: event.target.value })}><option value="untested">untested</option><option value="not_requested">not requested</option><option value="pass">pass</option><option value="fail">fail</option><option value="blocked_no_source">blocked no source</option></select></label>
+                  <label className="field"><span>{t(locale, "manager_model_citation_quality")}</span><input value={modelDraft.citation_quality ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, citation_quality: event.target.value })} placeholder="source_url_verified / untested" /></label>
+                  <label className="field"><span>{t(locale, "manager_model_last_web_verified")}</span><input value={modelDraft.last_web_verified_at ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, last_web_verified_at: event.target.value || null })} /></label>
                 </div>
               </div>
               <div className="metadata-section">
-                <h4>Codex and MCP behavior</h4>
+                <h4>{t(locale, "manager_model_codex_mcp")}</h4>
                 <div className="check-row">
-                  <label><input type="checkbox" checked={modelDraft.supports_mcp_tools ?? false} onChange={(event) => setModelDraft({ ...modelDraft, supports_mcp_tools: event.target.checked })} /> MCP tools verified</label>
+                  <label><input type="checkbox" checked={modelDraft.supports_mcp_tools ?? false} onChange={(event) => setModelDraft({ ...modelDraft, supports_mcp_tools: event.target.checked })} /> {t(locale, "manager_model_mcp_verified")}</label>
                 </div>
                 <div className="form-grid">
-                  <label className="field"><span>MCP policy</span><select value={modelDraft.mcp_tool_call_policy ?? "unsupported"} onChange={(event) => setModelDraft({ ...modelDraft, mcp_tool_call_policy: event.target.value })}><option value="unsupported">unsupported</option><option value="conservative">conservative</option><option value="verified">verified</option></select></label>
-                  <label className="field"><span>MCP smoke status</span><select value={modelDraft.mcp_smoke_status ?? "untested"} onChange={(event) => setModelDraft({ ...modelDraft, mcp_smoke_status: event.target.value })}><option value="untested">untested</option><option value="pass">pass</option><option value="warn">warn</option><option value="fail">fail</option></select></label>
-                  <label className="field"><span>Argument validation</span><select value={modelDraft.mcp_tool_argument_validation ?? "unsupported"} onChange={(event) => setModelDraft({ ...modelDraft, mcp_tool_argument_validation: event.target.value })}><option value="unsupported">unsupported</option><option value="router_repair">router repair</option><option value="native">native</option></select></label>
-                  <label className="field"><span>Verified MCP servers</span><input value={joinList(modelDraft.mcp_verified_servers)} onChange={(event) => setModelDraft({ ...modelDraft, mcp_verified_servers: splitList(event.target.value) })} placeholder="context7" /></label>
+                  <label className="field"><span>{t(locale, "manager_model_mcp_policy")}</span><select value={modelDraft.mcp_tool_call_policy ?? "unsupported"} onChange={(event) => setModelDraft({ ...modelDraft, mcp_tool_call_policy: event.target.value })}><option value="unsupported">unsupported</option><option value="conservative">conservative</option><option value="verified">verified</option></select></label>
+                  <label className="field"><span>{t(locale, "manager_model_mcp_smoke")}</span><select value={modelDraft.mcp_smoke_status ?? "untested"} onChange={(event) => setModelDraft({ ...modelDraft, mcp_smoke_status: event.target.value })}><option value="untested">untested</option><option value="pass">pass</option><option value="warn">warn</option><option value="fail">fail</option></select></label>
+                  <label className="field"><span>{t(locale, "manager_model_argument_validation")}</span><select value={modelDraft.mcp_tool_argument_validation ?? "unsupported"} onChange={(event) => setModelDraft({ ...modelDraft, mcp_tool_argument_validation: event.target.value })}><option value="unsupported">unsupported</option><option value="router_repair">router repair</option><option value="native">native</option></select></label>
+                  <label className="field"><span>{t(locale, "manager_model_verified_mcp_servers")}</span><input value={joinList(modelDraft.mcp_verified_servers)} onChange={(event) => setModelDraft({ ...modelDraft, mcp_verified_servers: splitList(event.target.value) })} placeholder="context7" /></label>
                 </div>
-                <label className="field"><span>Planner support JSON</span><textarea rows={3} value={JSON.stringify(modelDraft.planner_support ?? {}, null, 2)} onChange={(event) => setModelDraft({ ...modelDraft, planner_support: safeParseStringMap(event.target.value) })} /></label>
-                <label className="field"><span>Context compaction JSON</span><textarea rows={3} value={JSON.stringify(modelDraft.context_compaction_support ?? {}, null, 2)} onChange={(event) => setModelDraft({ ...modelDraft, context_compaction_support: safeParseStringMap(event.target.value) })} /></label>
-                <label className="field"><span>UI warnings</span><textarea rows={3} value={(modelDraft.ui_warnings ?? []).join("\n")} onChange={(event) => setModelDraft({ ...modelDraft, ui_warnings: splitList(event.target.value) })} /></label>
+                <label className="field"><span>{t(locale, "manager_model_planner_json")}</span><textarea rows={3} value={JSON.stringify(modelDraft.planner_support ?? {}, null, 2)} onChange={(event) => setModelDraft({ ...modelDraft, planner_support: safeParseStringMap(event.target.value) })} /></label>
+                <label className="field"><span>{t(locale, "manager_model_compaction_json")}</span><textarea rows={3} value={JSON.stringify(modelDraft.context_compaction_support ?? {}, null, 2)} onChange={(event) => setModelDraft({ ...modelDraft, context_compaction_support: safeParseStringMap(event.target.value) })} /></label>
+                <label className="field"><span>{t(locale, "manager_model_ui_warnings")}</span><textarea rows={3} value={(modelDraft.ui_warnings ?? []).join("\n")} onChange={(event) => setModelDraft({ ...modelDraft, ui_warnings: splitList(event.target.value) })} /></label>
               </div>
               <div className="metadata-section">
-                <h4>Provenance</h4>
+                <h4>{t(locale, "manager_model_provenance")}</h4>
                 <div className="form-grid">
-                  <label className="field"><span>Source status</span><input value={modelDraft.source_status ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, source_status: event.target.value })} /></label>
-                  <label className="field"><span>Last verified</span><input value={modelDraft.last_verified_at ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, last_verified_at: event.target.value || null })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_source_status")}</span><input value={modelDraft.source_status ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, source_status: event.target.value })} /></label>
+                  <label className="field"><span>{t(locale, "manager_model_last_verified")}</span><input value={modelDraft.last_verified_at ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, last_verified_at: event.target.value || null })} /></label>
                 </div>
-                <label className="field"><span>Source URLs</span><textarea rows={3} value={(modelDraft.source_urls ?? []).join("\n")} onChange={(event) => setModelDraft({ ...modelDraft, source_urls: splitList(event.target.value) })} /></label>
-                <label className="field"><span>Verification notes</span><textarea rows={3} value={modelDraft.verification_notes ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, verification_notes: event.target.value })} /></label>
+                <label className="field"><span>{t(locale, "manager_model_source_urls")}</span><textarea rows={3} value={(modelDraft.source_urls ?? []).join("\n")} onChange={(event) => setModelDraft({ ...modelDraft, source_urls: splitList(event.target.value) })} /></label>
+                <label className="field"><span>{t(locale, "manager_model_verification_notes")}</span><textarea rows={3} value={modelDraft.verification_notes ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, verification_notes: event.target.value })} /></label>
               </div>
               <div className="metadata-section" data-testid="metadata-model-generated-catalog-provenance">
-                <h4>Generated catalog provenance</h4>
+                <h4>{t(locale, "manager_model_generated_catalog")}</h4>
                 <div className="form-grid">
-                  <label className="field" data-testid="metadata-model-catalog-version"><span>Catalog version</span><input value={effectiveCatalog.data?.catalog_version ?? ""} readOnly /></label>
-                  <label className="field" data-testid="metadata-model-models-lock"><span>Models lock</span><input value={effectiveCatalog.data?.models_lock_path ?? ""} readOnly /></label>
-                  <label className="field" data-testid="metadata-model-sources-lock"><span>Sources lock</span><input value={effectiveCatalog.data?.sources_lock_path ?? ""} readOnly /></label>
-                  <label className="field" data-testid="metadata-model-review-path"><span>Review</span><input value={effectiveCatalog.data?.review_path ?? ""} readOnly /></label>
-                  <label className="field" data-testid="metadata-model-source-status"><span>Source status</span><input value={selectedCatalogEntry?.source_status ?? ""} readOnly /></label>
-                  <label className="field" data-testid="metadata-model-source-provenance"><span>Source provenance</span><input value={JSON.stringify(selectedCatalogEntry?.source_provenance ?? {})} readOnly /></label>
-                  <label className="field" data-testid="metadata-model-catalog-version-model"><span>Catalog version (model)</span><input value={selectedCatalogEntry?.catalog_version ?? ""} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-catalog-version"><span>{t(locale, "manager_model_catalog_version")}</span><input value={effectiveCatalog.data?.catalog_version ?? ""} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-models-lock"><span>{t(locale, "manager_model_models_lock")}</span><input value={effectiveCatalog.data?.models_lock_path ?? ""} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-sources-lock"><span>{t(locale, "manager_model_sources_lock")}</span><input value={effectiveCatalog.data?.sources_lock_path ?? ""} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-review-path"><span>{t(locale, "manager_model_review")}</span><input value={effectiveCatalog.data?.review_path ?? ""} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-source-status"><span>{t(locale, "manager_model_source_status")}</span><input value={selectedCatalogEntry?.source_status ?? ""} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-source-provenance"><span>{t(locale, "manager_model_source_provenance")}</span><input value={JSON.stringify(selectedCatalogEntry?.source_provenance ?? {})} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-catalog-version-model"><span>{t(locale, "manager_model_catalog_version_model")}</span><input value={selectedCatalogEntry?.catalog_version ?? ""} readOnly /></label>
                 </div>
-                <label className="field" data-testid="metadata-model-recommended-defaults"><span>Recommended / defaults / deprecated</span><input value={`recommended=${selectedCatalogEntry?.recommended ? "yes" : "no"} default=${selectedCatalogEntry?.default_for_provider ? "yes" : "no"} deprecated=${selectedCatalogEntry?.deprecated ? "yes" : "no"}`} readOnly /></label>
+                <label className="field" data-testid="metadata-model-recommended-defaults"><span>{t(locale, "manager_model_recommended_defaults")}</span><input value={`recommended=${selectedCatalogEntry?.recommended ? "yes" : "no"} default=${selectedCatalogEntry?.default_for_provider ? "yes" : "no"} deprecated=${selectedCatalogEntry?.deprecated ? "yes" : "no"}`} readOnly /></label>
               </div>
               <div className="metadata-section">
-                <h4>Effective Codex catalog preview</h4>
-                {selectedCatalogEntry ? <pre className="json-preview">{JSON.stringify(selectedCatalogEntry, null, 2)}</pre> : <p className="muted">This model is disabled or not exposed as a Codex agent model.</p>}
+                <h4>{t(locale, "manager_model_effective_preview")}</h4>
+                {selectedCatalogEntry ? <pre className="json-preview">{JSON.stringify(selectedCatalogEntry, null, 2)}</pre> : <p className="muted">{t(locale, "manager_model_disabled_preview")}</p>}
               </div>
             </div>
           ) : null}
@@ -2295,23 +1938,23 @@ function RouterControlCenter({
         <div className="mcp-dashboard">
           <div className="metadata-actions">
             <div>
-              <span className="eyebrow">MCP servers</span>
-              <h3>Context tools for Codex</h3>
-              <p className="muted">MCP config is written only to the AstraBridge isolated CODEX_HOME. Secrets are rejected; use environment variable names for tokens.</p>
+              <span className="eyebrow">{t(locale, "manager_mcp_servers")}</span>
+              <h3>{t(locale, "manager_mcp_context_tools")}</h3>
+              <p className="muted">{t(locale, "manager_mcp_summary")}</p>
             </div>
             <div className="field-row">
-              <button type="button" className="ghost-button" onClick={() => applyContext7.mutate()} disabled={applyContext7.isPending}>Install Context7 preset</button>
-              <button type="button" className="ghost-button" onClick={() => applyYunwuImage.mutate()} disabled={applyYunwuImage.isPending}>Install Yunwu Image Tool</button>
-              <button type="button" className="ghost-button" onClick={() => testYunwuImage.mutate()} disabled={testYunwuImage.isPending}>Test Yunwu image</button>
-              <button type="button" className="primary-button" onClick={() => reloadMcp.mutate()} disabled={!selectedProviderId || reloadMcp.isPending}>Reload runtime MCP</button>
+              <button type="button" className="ghost-button" onClick={() => applyContext7.mutate()} disabled={applyContext7.isPending}>{t(locale, "manager_mcp_install_context7")}</button>
+              <button type="button" className="ghost-button" onClick={() => applyYunwuImage.mutate()} disabled={applyYunwuImage.isPending}>{t(locale, "manager_mcp_install_yunwu")}</button>
+              <button type="button" className="ghost-button" onClick={() => testYunwuImage.mutate()} disabled={testYunwuImage.isPending}>{t(locale, "manager_mcp_test_yunwu")}</button>
+              <button type="button" className="primary-button" onClick={() => reloadMcp.mutate()} disabled={!selectedProviderId || reloadMcp.isPending}>{t(locale, "manager_mcp_reload")}</button>
             </div>
           </div>
           <div className="mcp-health-row">
-            <span className={mcpConfig.data?.environment.node ? "capability-ok" : "capability-warn"}>Node {mcpConfig.data?.environment.node ? "ready" : "missing"}</span>
-            <span className={mcpConfig.data?.environment.npx ? "capability-ok" : "capability-warn"}>npx {mcpConfig.data?.environment.npx ? "ready" : "missing"}</span>
-            <span className={mcpConfig.data?.environment.python ? "capability-ok" : "capability-warn"}>Python {mcpConfig.data?.environment.python ? "ready" : "missing"}</span>
-            <span>{mcpConfig.data?.servers.length ?? 0} configured</span>
-            <span>{mcpStatus.data?.servers.length ?? 0} runtime visible</span>
+            <span className={mcpConfig.data?.environment.node ? "capability-ok" : "capability-warn"}>Node {mcpConfig.data?.environment.node ? t(locale, "manager_mcp_ready") : t(locale, "manager_mcp_missing")}</span>
+            <span className={mcpConfig.data?.environment.npx ? "capability-ok" : "capability-warn"}>npx {mcpConfig.data?.environment.npx ? t(locale, "manager_mcp_ready") : t(locale, "manager_mcp_missing")}</span>
+            <span className={mcpConfig.data?.environment.python ? "capability-ok" : "capability-warn"}>Python {mcpConfig.data?.environment.python ? t(locale, "manager_mcp_ready") : t(locale, "manager_mcp_missing")}</span>
+            <span>{mcpConfig.data?.servers.length ?? 0} {t(locale, "manager_mcp_configured")}</span>
+            <span>{mcpStatus.data?.servers.length ?? 0} {t(locale, "manager_mcp_runtime_visible")}</span>
           </div>
           {mcpOutput ? <pre className="json-preview compact-preview">{mcpOutput}</pre> : null}
           <div className="metadata-editor mcp-editor">
@@ -2356,14 +1999,14 @@ function RouterControlCenter({
                   })
                 }
               >
-                New MCP server
+                {t(locale, "manager_mcp_new")}
               </button>
               {mcpStatus.error ? <p className="error-text">{String((mcpStatus.error as Error).message ?? mcpStatus.error)}</p> : null}
               {(mcpStatus.data?.servers ?? []).map((server) => (
                 <section key={server.name} className="mcp-status-card">
                   <strong>{server.name}</strong>
-                  <span>{Object.keys(server.tools ?? {}).length} tools</span>
-                  <small>Auth: {typeof server.authStatus === "string" ? server.authStatus : JSON.stringify(server.authStatus)}</small>
+                  <span>{Object.keys(server.tools ?? {}).length} {t(locale, "manager_mcp_tools_count")}</span>
+                  <small>{t(locale, "manager_mcp_auth")}: {typeof server.authStatus === "string" ? server.authStatus : JSON.stringify(server.authStatus)}</small>
                 </section>
               ))}
             </div>
@@ -2371,53 +2014,53 @@ function RouterControlCenter({
               <div className="metadata-detail-pane">
                 <div className="metadata-detail-header">
                   <div>
-                    <span className="eyebrow">MCP contract</span>
-                    <h3>{mcpDraft.display_name || mcpDraft.name || "New MCP server"}</h3>
+                    <span className="eyebrow">{t(locale, "manager_mcp_contract")}</span>
+                    <h3>{mcpDraft.display_name || mcpDraft.name || t(locale, "manager_mcp_new")}</h3>
                   </div>
                   <div className="field-row">
-                    <button type="button" className="primary-button" onClick={() => saveMcpServer.mutate(mcpDraft)} disabled={saveMcpServer.isPending}>Save MCP</button>
-                    {mcpDraft.name ? <button type="button" className="ghost-button" onClick={() => api.deleteMcpServer(mcpDraft.name).then(() => queryClient.invalidateQueries({ queryKey: ["mcp-config"] }))}>Delete</button> : null}
+                    <button type="button" className="primary-button" onClick={() => saveMcpServer.mutate(mcpDraft)} disabled={saveMcpServer.isPending}>{t(locale, "manager_mcp_save")}</button>
+                    {mcpDraft.name ? <button type="button" className="ghost-button" onClick={() => api.deleteMcpServer(mcpDraft.name).then(() => queryClient.invalidateQueries({ queryKey: ["mcp-config"] }))}>{t(locale, "manager_delete")}</button> : null}
                   </div>
                 </div>
                 <div className="metadata-section">
-                  <h4>Server</h4>
+                  <h4>{t(locale, "manager_mcp_server")}</h4>
                   <div className="form-grid">
-                    <label className="field"><span>Name</span><input value={mcpDraft.name} onChange={(event) => setMcpDraft({ ...mcpDraft, name: event.target.value })} /></label>
-                    <label className="field"><span>Display name</span><input value={mcpDraft.display_name} onChange={(event) => setMcpDraft({ ...mcpDraft, display_name: event.target.value })} /></label>
-                    <label className="field"><span>Transport</span><select value={mcpDraft.transport} onChange={(event) => setMcpDraft({ ...mcpDraft, transport: event.target.value as McpServerConfig["transport"] })}><option value="stdio">stdio</option><option value="streamable_http">streamable HTTP</option></select></label>
-                    <label className="field"><span>Approval</span><select value={mcpDraft.default_tools_approval_mode} onChange={(event) => setMcpDraft({ ...mcpDraft, default_tools_approval_mode: event.target.value as McpServerConfig["default_tools_approval_mode"] })}><option value="prompt">prompt</option><option value="auto">auto</option><option value="approve">approve</option></select></label>
+                    <label className="field"><span>{t(locale, "manager_mcp_name")}</span><input value={mcpDraft.name} onChange={(event) => setMcpDraft({ ...mcpDraft, name: event.target.value })} /></label>
+                    <label className="field"><span>{t(locale, "manager_model_display_name")}</span><input value={mcpDraft.display_name} onChange={(event) => setMcpDraft({ ...mcpDraft, display_name: event.target.value })} /></label>
+                    <label className="field"><span>{t(locale, "manager_mcp_transport")}</span><select value={mcpDraft.transport} onChange={(event) => setMcpDraft({ ...mcpDraft, transport: event.target.value as McpServerConfig["transport"] })}><option value="stdio">stdio</option><option value="streamable_http">streamable HTTP</option></select></label>
+                    <label className="field"><span>{t(locale, "manager_mcp_approval")}</span><select value={mcpDraft.default_tools_approval_mode} onChange={(event) => setMcpDraft({ ...mcpDraft, default_tools_approval_mode: event.target.value as McpServerConfig["default_tools_approval_mode"] })}><option value="prompt">prompt</option><option value="auto">auto</option><option value="approve">approve</option></select></label>
                   </div>
                   <div className="check-row">
-                    <label><input type="checkbox" checked={mcpDraft.enabled} onChange={(event) => setMcpDraft({ ...mcpDraft, enabled: event.target.checked })} /> Enabled</label>
-                    <label><input type="checkbox" checked={mcpDraft.required} onChange={(event) => setMcpDraft({ ...mcpDraft, required: event.target.checked })} /> Required at startup</label>
+                    <label><input type="checkbox" checked={mcpDraft.enabled} onChange={(event) => setMcpDraft({ ...mcpDraft, enabled: event.target.checked })} /> {t(locale, "manager_mcp_enabled")}</label>
+                    <label><input type="checkbox" checked={mcpDraft.required} onChange={(event) => setMcpDraft({ ...mcpDraft, required: event.target.checked })} /> {t(locale, "manager_mcp_required")}</label>
                   </div>
                 </div>
                 <div className="metadata-section">
-                  <h4>Transport details</h4>
+                  <h4>{t(locale, "manager_mcp_transport_details")}</h4>
                   <div className="form-grid">
-                    <label className="field"><span>Command</span><input value={mcpDraft.command} onChange={(event) => setMcpDraft({ ...mcpDraft, command: event.target.value })} placeholder="npx" /></label>
-                    <label className="field"><span>Args</span><input value={joinList(mcpDraft.args)} onChange={(event) => setMcpDraft({ ...mcpDraft, args: splitList(event.target.value) })} placeholder="-y, @upstash/context7-mcp" /></label>
+                    <label className="field"><span>{t(locale, "manager_mcp_command")}</span><input value={mcpDraft.command} onChange={(event) => setMcpDraft({ ...mcpDraft, command: event.target.value })} placeholder="npx" /></label>
+                    <label className="field"><span>{t(locale, "manager_mcp_args")}</span><input value={joinList(mcpDraft.args)} onChange={(event) => setMcpDraft({ ...mcpDraft, args: splitList(event.target.value) })} placeholder="-y, @upstash/context7-mcp" /></label>
                     <label className="field"><span>URL</span><input value={mcpDraft.url} onChange={(event) => setMcpDraft({ ...mcpDraft, url: event.target.value })} placeholder="https://..." /></label>
-                    <label className="field"><span>Bearer token env var</span><input value={mcpDraft.bearer_token_env_var ?? ""} onChange={(event) => setMcpDraft({ ...mcpDraft, bearer_token_env_var: event.target.value || null })} placeholder="CONTEXT7_API_KEY" /></label>
-                    <label className="field"><span>Startup timeout</span><input type="number" value={mcpDraft.startup_timeout_sec} onChange={(event) => setMcpDraft({ ...mcpDraft, startup_timeout_sec: Number(event.target.value) || 20 })} /></label>
-                    <label className="field"><span>Tool timeout</span><input type="number" value={mcpDraft.tool_timeout_sec} onChange={(event) => setMcpDraft({ ...mcpDraft, tool_timeout_sec: Number(event.target.value) || 60 })} /></label>
+                    <label className="field"><span>{t(locale, "manager_mcp_bearer_env")}</span><input value={mcpDraft.bearer_token_env_var ?? ""} onChange={(event) => setMcpDraft({ ...mcpDraft, bearer_token_env_var: event.target.value || null })} placeholder="CONTEXT7_API_KEY" /></label>
+                    <label className="field"><span>{t(locale, "manager_mcp_startup_timeout")}</span><input type="number" value={mcpDraft.startup_timeout_sec} onChange={(event) => setMcpDraft({ ...mcpDraft, startup_timeout_sec: Number(event.target.value) || 20 })} /></label>
+                    <label className="field"><span>{t(locale, "manager_mcp_tool_timeout")}</span><input type="number" value={mcpDraft.tool_timeout_sec} onChange={(event) => setMcpDraft({ ...mcpDraft, tool_timeout_sec: Number(event.target.value) || 60 })} /></label>
                   </div>
-                  <label className="field"><span>Env var names</span><input value={joinList(mcpDraft.env_vars)} onChange={(event) => setMcpDraft({ ...mcpDraft, env_vars: splitList(event.target.value) })} placeholder="LOCAL_TOKEN, CONTEXT7_API_KEY" /></label>
+                  <label className="field"><span>{t(locale, "manager_mcp_env_vars")}</span><input value={joinList(mcpDraft.env_vars)} onChange={(event) => setMcpDraft({ ...mcpDraft, env_vars: splitList(event.target.value) })} placeholder="LOCAL_TOKEN, CONTEXT7_API_KEY" /></label>
                 </div>
                 <div className="metadata-section">
-                  <h4>Tools and trust</h4>
+                  <h4>{t(locale, "manager_mcp_tools_trust")}</h4>
                   <div className="form-grid">
-                    <label className="field"><span>Enabled tools</span><input value={joinList(mcpDraft.enabled_tools)} onChange={(event) => setMcpDraft({ ...mcpDraft, enabled_tools: splitList(event.target.value) })} /></label>
-                    <label className="field"><span>Disabled tools</span><input value={joinList(mcpDraft.disabled_tools)} onChange={(event) => setMcpDraft({ ...mcpDraft, disabled_tools: splitList(event.target.value) })} /></label>
+                    <label className="field"><span>{t(locale, "manager_mcp_enabled_tools")}</span><input value={joinList(mcpDraft.enabled_tools)} onChange={(event) => setMcpDraft({ ...mcpDraft, enabled_tools: splitList(event.target.value) })} /></label>
+                    <label className="field"><span>{t(locale, "manager_mcp_disabled_tools")}</span><input value={joinList(mcpDraft.disabled_tools)} onChange={(event) => setMcpDraft({ ...mcpDraft, disabled_tools: splitList(event.target.value) })} /></label>
                   </div>
-                  <label className="field"><span>Per-tool approvals JSON</span><textarea rows={4} value={JSON.stringify(mcpDraft.tools, null, 2)} onChange={(event) => setMcpDraft({ ...mcpDraft, tools: safeParseToolMap(event.target.value) })} /></label>
-                  <label className="field"><span>HTTP headers JSON (no secrets)</span><textarea rows={3} value={JSON.stringify(mcpDraft.http_headers, null, 2)} onChange={(event) => setMcpDraft({ ...mcpDraft, http_headers: safeParseStringMap(event.target.value) })} /></label>
-                  <label className="field"><span>Trust note</span><textarea rows={3} value={mcpDraft.trust_note} onChange={(event) => setMcpDraft({ ...mcpDraft, trust_note: event.target.value })} /></label>
-                  <label className="field"><span>Source URL</span><input value={mcpDraft.source_url} onChange={(event) => setMcpDraft({ ...mcpDraft, source_url: event.target.value })} /></label>
+                  <label className="field"><span>{t(locale, "manager_mcp_approvals_json")}</span><textarea rows={4} value={JSON.stringify(mcpDraft.tools, null, 2)} onChange={(event) => setMcpDraft({ ...mcpDraft, tools: safeParseToolMap(event.target.value) })} /></label>
+                  <label className="field"><span>{t(locale, "manager_mcp_headers_json")}</span><textarea rows={3} value={JSON.stringify(mcpDraft.http_headers, null, 2)} onChange={(event) => setMcpDraft({ ...mcpDraft, http_headers: safeParseStringMap(event.target.value) })} /></label>
+                  <label className="field"><span>{t(locale, "manager_mcp_trust_note")}</span><textarea rows={3} value={mcpDraft.trust_note} onChange={(event) => setMcpDraft({ ...mcpDraft, trust_note: event.target.value })} /></label>
+                  <label className="field"><span>{t(locale, "manager_mcp_source_url")}</span><input value={mcpDraft.source_url} onChange={(event) => setMcpDraft({ ...mcpDraft, source_url: event.target.value })} /></label>
                 </div>
               </div>
             ) : (
-              <div className="metadata-detail-pane empty-state">Install Context7 or create an MCP server to begin.</div>
+              <div className="metadata-detail-pane empty-state">{t(locale, "manager_mcp_empty")}</div>
             )}
           </div>
         </div>
@@ -2427,24 +2070,24 @@ function RouterControlCenter({
         <div className="manager-panel">
           <div className="manager-hero">
             <div>
-              <span className="eyebrow">WSL Runtime Setup</span>
-              <h3>{wslDependencies.data?.ok ? "WSL runtime is ready" : "WSL runtime needs setup"}</h3>
-              <p className="muted">AstraBridge uses an isolated Codex install inside WSL. The installer fetches WSL dependencies from official sources and does not bundle WSL, Node, or Codex binaries.</p>
+              <span className="eyebrow">{t(locale, "manager_runtime_setup")}</span>
+              <h3>{wslDependencies.data?.ok ? t(locale, "manager_runtime_ready_title") : t(locale, "manager_runtime_needs_setup_title")}</h3>
+              <p className="muted">{t(locale, "manager_runtime_summary")}</p>
             </div>
             <span className={`session-badge ${wslDependencies.data?.ok ? "capability-ok" : "capability-warn"}`}>
-              {wslDependencies.data?.ok ? "Ready" : "Needs setup"}
+              {wslDependencies.data?.ok ? t(locale, "manager_runtime_ready") : t(locale, "manager_runtime_needs_setup")}
             </span>
           </div>
           <div className="metadata-actions">
             <label className="field wsl-distro-field">
-              <span>WSL distro</span>
+              <span>{t(locale, "manager_runtime_distro")}</span>
               <input value={wslSetupDistro} onChange={(event) => setWslSetupDistro(event.target.value)} placeholder="Ubuntu-24.04" />
             </label>
             <div className="field-row">
-              <button type="button" className="ghost-button" onClick={() => wslDependencies.refetch()} disabled={wslDependencies.isFetching}>Recheck</button>
-              <button type="button" className="ghost-button" onClick={() => isolationAudit.refetch()} disabled={isolationAudit.isFetching}>Refresh isolation audit</button>
-              <button type="button" className="ghost-button" onClick={() => writeWslScripts.mutate()} disabled={writeWslScripts.isPending}>Generate scripts</button>
-              <button type="button" className="primary-button" onClick={() => launchWslInstaller.mutate()} disabled={launchWslInstaller.isPending}>Run installer</button>
+              <button type="button" className="ghost-button" onClick={() => wslDependencies.refetch()} disabled={wslDependencies.isFetching}>{t(locale, "manager_runtime_recheck")}</button>
+              <button type="button" className="ghost-button" onClick={() => isolationAudit.refetch()} disabled={isolationAudit.isFetching}>{t(locale, "manager_runtime_refresh_audit")}</button>
+              <button type="button" className="ghost-button" onClick={() => writeWslScripts.mutate()} disabled={writeWslScripts.isPending}>{t(locale, "manager_runtime_generate_scripts")}</button>
+              <button type="button" className="primary-button" onClick={() => launchWslInstaller.mutate()} disabled={launchWslInstaller.isPending}>{t(locale, "manager_runtime_run_installer")}</button>
             </div>
           </div>
           {wslDependencies.error ? <p className="error-text">{String((wslDependencies.error as Error).message ?? wslDependencies.error)}</p> : null}
@@ -2452,24 +2095,24 @@ function RouterControlCenter({
           {isolationAudit.data ? (
             <section className="metadata-section">
               <div className="section-header">
-                <h4>Isolation boundary audit</h4>
+                <h4>{t(locale, "manager_runtime_audit")}</h4>
                 <span className={`status-tag ${isolationAudit.data.ok ? "status-ok" : ""}`}>
                   {isolationSummary.failed === 0 ? "pass" : `${isolationSummary.failed} fail`}
                 </span>
               </div>
               <div className="mcp-health-row">
-                <span>{isolationSummary.passed}/{isolationSummary.total} checks passed</span>
-                <span>{isolationAudit.data.process_boundary.execution_host || "unknown host"}</span>
+                <span>{isolationSummary.passed}/{isolationSummary.total} {t(locale, "manager_runtime_checks_passed")}</span>
+                <span>{isolationAudit.data.process_boundary.execution_host || t(locale, "manager_runtime_unknown_host")}</span>
                 <span>sidecar {isolationAudit.data.ports.sidecar ?? "n/a"}</span>
                 <span>router {isolationAudit.data.ports.router ?? "n/a"}</span>
               </div>
               <div className="env-list">
-                <div><span>Workspace state</span><strong>{isolationAudit.data.paths.astrabridge_state || "n/a"}</strong></div>
-                <div><span>Project runtime root</span><strong>{isolationAudit.data.paths.project_runtime_root || "n/a"}</strong></div>
-                <div><span>Isolated CODEX_HOME</span><strong>{isolationAudit.data.paths.isolated_codex_home || "n/a"}</strong></div>
-                <div><span>Downloads root</span><strong>{isolationAudit.data.paths.downloads_root || "n/a"}</strong></div>
-                <div><span>Caches root</span><strong>{isolationAudit.data.paths.caches_root || "n/a"}</strong></div>
-                <div><span>Temp root</span><strong>{isolationAudit.data.paths.tmp_root || "n/a"}</strong></div>
+                <div><span>{t(locale, "manager_runtime_workspace_state")}</span><strong>{isolationAudit.data.paths.astrabridge_state || "n/a"}</strong></div>
+                <div><span>{t(locale, "manager_runtime_project_root")}</span><strong>{isolationAudit.data.paths.project_runtime_root || "n/a"}</strong></div>
+                <div><span>{t(locale, "manager_runtime_isolated_home")}</span><strong>{isolationAudit.data.paths.isolated_codex_home || "n/a"}</strong></div>
+                <div><span>{t(locale, "manager_runtime_downloads_root")}</span><strong>{isolationAudit.data.paths.downloads_root || "n/a"}</strong></div>
+                <div><span>{t(locale, "manager_runtime_caches_root")}</span><strong>{isolationAudit.data.paths.caches_root || "n/a"}</strong></div>
+                <div><span>{t(locale, "manager_runtime_temp_root")}</span><strong>{isolationAudit.data.paths.tmp_root || "n/a"}</strong></div>
               </div>
               {isolationSummary.failed ? (
                 <div className="manager-list">
@@ -2477,14 +2120,14 @@ function RouterControlCenter({
                     <div className="manager-row" key={check.name}>
                       <span>
                         <strong>{check.name}</strong>
-                        <small>isolation check failed</small>
+                        <small>{t(locale, "manager_runtime_check_failed")}</small>
                       </span>
-                      <code>{stringifyDetail(check.detail) || "no detail"}</code>
+                      <code>{stringifyDetail(check.detail) || t(locale, "manager_runtime_no_detail")}</code>
                     </div>
                   ))}
                 </div>
               ) : (
-                <p className="muted">Project state, runtime roots, and isolated CODEX_HOME all match the current storage policy.</p>
+                <p className="muted">{t(locale, "manager_runtime_audit_pass_summary")}</p>
               )}
             </section>
           ) : null}
@@ -2502,11 +2145,11 @@ function RouterControlCenter({
             ))}
           </div>
           <div className="metadata-section">
-            <h4>Managed WSL paths</h4>
+            <h4>{t(locale, "manager_runtime_managed_paths")}</h4>
             <div className="env-list">
-              <div><span>Codex bin</span><strong>{wslDependencies.data?.paths.astrabridge_wsl_codex_bin ?? "$HOME/.local/share/astrabridge/bin/codex"}</strong></div>
+              <div><span>{t(locale, "manager_runtime_codex_bin")}</span><strong>{wslDependencies.data?.paths.astrabridge_wsl_codex_bin ?? "$HOME/.local/share/astrabridge/bin/codex"}</strong></div>
               <div><span>CODEX_HOME</span><strong>{wslDependencies.data?.paths.astrabridge_wsl_codex_home ?? "$HOME/.local/share/astrabridge/codex-home"}</strong></div>
-              <div><span>Installed distros</span><strong>{(wslDependencies.data?.distros ?? []).map((item) => `${item.name}${item.version ? ` WSL${item.version}` : ""}`).join(", ") || "none detected"}</strong></div>
+              <div><span>{t(locale, "manager_runtime_installed_distros")}</span><strong>{(wslDependencies.data?.distros ?? []).map((item) => `${item.name}${item.version ? ` WSL${item.version}` : ""}`).join(", ") || t(locale, "manager_runtime_none_detected")}</strong></div>
             </div>
           </div>
           {wslSetupOutput ? <pre className="json-preview compact-preview">{wslSetupOutput}</pre> : null}
@@ -3758,7 +3401,7 @@ function AppShell() {
       });
     return candidates[0]?.native_model ?? null;
   };
-  const userDisplayName = llmSession.data?.profile?.display_name || llmSession.data?.username || (llmSession.data?.mode === "anonymous" ? "匿名会话" : "用户");
+  const userDisplayName = llmSession.data?.profile?.display_name || llmSession.data?.username || (llmSession.data?.mode === "anonymous" ? t(locale, "manager_status_anonymous") : t(locale, "manager_fact_users"));
   const userAvatarPath = llmSession.data?.profile?.avatar_path || "";
   const runtimeModelList = useQuery({
     queryKey: ["runtime-models", activeSettings.profile_id],
@@ -4220,13 +3863,7 @@ function AppShell() {
         source.addEventListener("astrabridge.hello", (message) => {
           handleHelloEvent((message as MessageEvent).data);
         });
-        source.addEventListener("lcr.hello", (message) => {
-          handleHelloEvent((message as MessageEvent).data);
-        });
         source.addEventListener("astrabridge.event", (message) => {
-          handleRuntimeEvent((message as MessageEvent).data);
-        });
-        source.addEventListener("lcr.event", (message) => {
           handleRuntimeEvent((message as MessageEvent).data);
         });
         source.onerror = () => {
@@ -4577,7 +4214,7 @@ function AppShell() {
             created_at: String(item?.created_at ?? currentTask?.updated_at ?? project.updated_at ?? ""),
             project_name: project.name,
             thread_id: String(item?.thread_id ?? providerThread?.thread_id ?? currentTask?.active_provider_thread_id ?? "") || null,
-            thread_name: String(item?.thread_name ?? providerThread?.name ?? "当前线程"),
+            thread_name: String(item?.thread_name ?? providerThread?.name ?? t(locale, "title_thread")),
             description: String(item?.description ?? ""),
             default_description: String(item?.description ?? saveId),
             provider: providerId || null,
@@ -4731,7 +4368,7 @@ function AppShell() {
           <button type="button" className="nav-row nav-row-session" onClick={() => setMainView("setup")}>
             <span className="nav-icon" aria-hidden="true">●</span>
             <span>
-              {llmSession.data?.mode === "managed_user" ? `托管账户：${llmSession.data.username ?? "user"}` : "匿名会话"}
+              {llmSession.data?.mode === "managed_user" ? t(locale, "manager_status_managed").replace("{user}", llmSession.data.username ?? "user") : t(locale, "manager_status_anonymous")}
             </span>
           </button>
           <button type="button" className="nav-row" onClick={() => closeProject.mutate()}>
@@ -4868,6 +4505,7 @@ function AppShell() {
             return (
               <ChatMessageRow
                 key={block.key}
+                locale={locale}
                 block={block}
                 providerName={blockProviderMeta?.display_name || blockProviderId || activeProviderDisplay}
                 modelName={block.model || activeSettings.model || blockProviderMeta?.default_model || "Assistant"}
@@ -5069,13 +4707,7 @@ function AppShell() {
 
       {rightSidebarOpen ? (
         <aside className="inspector">
-          <nav className="inspector-tabbar" aria-label="Inspector views">
-            <InspectorTabButton tab="status" active={inspectorTab === "status"} icon={<ListChecks size={14} aria-hidden="true" />} label="状态" onClick={setInspectorTab} />
-            <InspectorTabButton tab="review" active={inspectorTab === "review"} icon={<GitCompare size={14} aria-hidden="true" />} label="审查" onClick={setInspectorTab} />
-            <InspectorTabButton tab="terminal" active={inspectorTab === "terminal"} icon={<Terminal size={14} aria-hidden="true" />} label="终端" onClick={setInspectorTab} />
-            <InspectorTabButton tab="browser" active={inspectorTab === "browser"} icon={<Globe2 size={14} aria-hidden="true" />} label="浏览器" onClick={setInspectorTab} />
-            <InspectorTabButton tab="files" active={inspectorTab === "files"} icon={<Files size={14} aria-hidden="true" />} label="文件" onClick={setInspectorTab} />
-          </nav>
+          <InspectorTabBar locale={locale} activeTab={inspectorTab} onChange={setInspectorTab} />
 
           {inspectorTab === "status" ? (
             <>
@@ -5131,10 +4763,11 @@ function AppShell() {
 
               <section className="pane-section inspector-section inspector-environment-section">
                 <div className="section-header">
-                  <h2>环境信息</h2>
+                  <h2>{t(locale, "inspector_environment")}</h2>
                   <span className={`mini-guard mini-guard-${supervisor.data?.guard.level ?? "ok"}`}>{productStatusLabel(supervisor.data?.guard.level ?? "ok")}</span>
                 </div>
                 <EnvironmentStrip
+                  locale={locale}
                   supervisor={supervisor.data}
                   fallback={{
                     provider: activeProviderDisplay,
@@ -5149,11 +4782,12 @@ function AppShell() {
                 {supervisor.data?.guard.message ? <p className={`guard-copy guard-copy-${supervisor.data.guard.level}`}>{supervisor.data.guard.message}</p> : null}
               </section>
 
-              <WorkflowEvidencePanel facts={workflowFacts} />
+              <WorkflowEvidencePanel locale={locale} facts={workflowFacts} />
             </>
           ) : null}
           {inspectorTab === "review" ? (
             <ReviewInspectorPanel
+              locale={locale}
               supervisor={supervisor.data}
               review={inspectorReview.data}
               diff={inspectorReviewDiff.data}
@@ -5162,11 +4796,13 @@ function AppShell() {
               onSelectPath={setInspectorReviewPath}
             />
           ) : null}
-          {inspectorTab === "terminal" ? <TerminalInspectorPanel supervisor={supervisor.data} history={inspectorTerminal.data} fallback={taskInspectorEvidence} /> : null}
+          {inspectorTab === "terminal" ? <TerminalInspectorPanel locale={locale} supervisor={supervisor.data} history={inspectorTerminal.data} fallback={taskInspectorEvidence} /> : null}
           {inspectorTab === "browser" ? (
               <BrowserInspectorPanel
+                locale={locale}
                 supervisor={supervisor.data}
                 latestSmoke={(inspectorDogfoodRun.data?.run?.browser_smokes ?? []).slice(-1)[0] ?? null}
+                statusLabel={productStatusLabel}
                 isPreparingWorkflowDemo={prepareReleaseWorkflowDemo.isPending}
                 isPreparingNativeKernelDemo={prepareNativeKernelWorkflowDemo.isPending}
                 isRunningReleaseSmoke={inspectorBrowserSmoke.isPending}
@@ -5181,6 +4817,7 @@ function AppShell() {
           ) : null}
           {inspectorTab === "files" ? (
             <FilesInspectorPanel
+              locale={locale}
               project={project}
               tree={inspectorFiles.data}
               preview={inspectorFilePreview.data}
@@ -5234,6 +4871,7 @@ function AppShell() {
       {modal ? <ModalHost modal={modal} locale={locale} queryClient={queryClient} /> : null}
       {saveModal.open ? (
         <SaveCheckpointModal
+          locale={locale}
           description={saveDescription}
           defaultDescription={checkpointDefaultDescription}
           projectName={project.name}
@@ -5330,16 +4968,16 @@ function ModalHost({ modal, locale, queryClient }: { modal: RuntimeModal; locale
     <div className="modal-scrim">
       <div className="modal-card">
         <div className="card-header">
-          <h2>{modal.kind === "user_input" ? t(locale, "user_input_title") : modal.kind === "mcp_elicitation" ? "MCP input" : t(locale, "approval_title")}</h2>
+          <h2>{modal.kind === "user_input" ? t(locale, "user_input_title") : modal.kind === "mcp_elicitation" ? t(locale, "modal_mcp_input") : t(locale, "approval_title")}</h2>
           <span className="status-tag">{modal.method}</span>
         </div>
         {modal.kind === "mcp_elicitation" ? (
           <div className="stack">
-            <p>{String(params.message ?? "The MCP server needs additional input.")}</p>
+            <p>{String(params.message ?? t(locale, "modal_mcp_default_message"))}</p>
             <span className="status-tag">{String(params.serverName ?? "mcp")}</span>
             {params.mode === "url" ? (
               <p className="muted">
-                Open this URL to continue: <a href={String(params.url ?? "#")} target="_blank" rel="noreferrer">{String(params.url ?? "")}</a>
+                {t(locale, "modal_mcp_open_url")} <a href={String(params.url ?? "#")} target="_blank" rel="noreferrer">{String(params.url ?? "")}</a>
               </p>
             ) : null}
             {Object.entries(mcpProperties).map(([key, schema]) => {
@@ -5397,7 +5035,7 @@ function ModalHost({ modal, locale, queryClient }: { modal: RuntimeModal; locale
                     rows={3}
                     value={entry.freeText ?? ""}
                     onChange={(event) => setAnswers((current) => ({ ...current, [id]: { ...current[id], freeText: event.target.value } }))}
-                    placeholder="Free-form answer"
+                    placeholder={t(locale, "modal_freeform_answer")}
                   />
                 </div>
               );
@@ -5412,41 +5050,41 @@ function ModalHost({ modal, locale, queryClient }: { modal: RuntimeModal; locale
               <div className={`approval-summary approval-risk-${approval.risk}`}>
                 <div className="approval-summary-head">
                   <span className="approval-action">{approval.action}</span>
-                  <span className="approval-risk">{approval.risk} risk</span>
+                  <span className="approval-risk">{approval.risk} {t(locale, "approval_risk_suffix")}</span>
                 </div>
                 <p>{approval.reason}</p>
                 {approval.encodingRisk ? (
                   <div className="approval-warning">
-                    <strong>Encoding risk</strong>
-                    <span>Windows file write command does not explicitly request UTF-8. Prefer UTF8Encoding without BOM before approving.</span>
+                    <strong>{t(locale, "approval_encoding_risk")}</strong>
+                    <span>{t(locale, "approval_encoding_risk_detail")}</span>
                   </div>
                 ) : null}
                 {approval.astrabridgeLogRisk ? (
                   <div className="approval-warning">
-                    <strong>Context risk</strong>
-                    <span>This command reads raw .astrabridge event logs. Prefer summaries or a small tail to avoid context explosion.</span>
+                    <strong>{t(locale, "approval_context_risk")}</strong>
+                    <span>{t(locale, "approval_context_risk_detail")}</span>
                   </div>
                 ) : null}
                 {approval.cwd ? (
                   <div className="approval-fact">
-                    <span>Working directory</span>
+                    <span>{t(locale, "approval_working_directory")}</span>
                     <code>{approval.cwd}</code>
                   </div>
                 ) : null}
                 <div className="approval-fact">
-                  <span>Action preview</span>
+                  <span>{t(locale, "approval_action_preview")}</span>
                   <code>{clippedCommand(approval.command)}</code>
                 </div>
                 {approval.paths.length > 0 ? (
                   <div className="approval-paths">
-                    <span>Likely target paths</span>
+                    <span>{t(locale, "approval_target_paths")}</span>
                     {approval.paths.map((path) => (
                       <code key={path}>{path}</code>
                     ))}
                   </div>
                 ) : null}
                 <details className="approval-raw">
-                  <summary>Show raw request</summary>
+                  <summary>{t(locale, "approval_show_raw")}</summary>
                   <pre className="modal-json">{JSON.stringify(params, null, 2)}</pre>
                 </details>
               </div>

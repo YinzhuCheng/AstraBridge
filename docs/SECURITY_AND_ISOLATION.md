@@ -1,6 +1,6 @@
 # Security And Isolation
 
-Last updated: 2026-06-21
+Last updated: 2026-06-23
 
 ## Product Boundaries
 
@@ -135,6 +135,13 @@ Before a release candidate or public push:
 - confirm official Codex config remains untouched
 
 The release gate reference is [RELEASE_CHECKLIST.md](/D:/AstraBridge/docs/RELEASE_CHECKLIST.md).
+
+Current operator entry points:
+
+- [README.md](/D:/AstraBridge/README.md)
+- [HANDOFF.md](/D:/AstraBridge/docs/HANDOFF.md)
+- [Project Summary](/D:/AstraBridge/docs/PROJECT_SUMMARY.md)
+- [Project Log](/D:/AstraBridge/docs/PROJECT_LOG.md)
 
 ## Operator Guidance
 

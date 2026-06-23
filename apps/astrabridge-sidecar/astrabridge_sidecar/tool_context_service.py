@@ -8,7 +8,6 @@ from .security import redact_sensitive
 
 
 BROWSER_SMOKE_TOOL_NAME = "astrabridge_browser_smoke"
-LEGACY_BROWSER_SMOKE_TOOL_NAME = "lcr_browser_smoke"
 TOOL_CONTEXT_SCHEMA_VERSION = "astrabridge-tool-context-envelope-v1"
 
 _TEXT_LIMITS = {
@@ -261,11 +260,11 @@ def _current_plan_step(value: Any) -> str:
 
 
 def _default_output_contract(tool_name: str) -> str:
-    if tool_name.startswith("lcr_web_") or tool_name.startswith("astrabridge_web_"):
+    if tool_name.startswith("astrabridge_web_"):
         return "Return source URLs, concise summaries, confidence/freshness notes, and unresolved questions. Do not claim facts without a source URL."
     if tool_name.startswith("yunwu_image_"):
         return "Return requested_n, actual_n, local paths, dimensions, format, alpha status, validation warnings, and intended game usage."
-    if tool_name in {BROWSER_SMOKE_TOOL_NAME, LEGACY_BROWSER_SMOKE_TOOL_NAME}:
+    if tool_name == BROWSER_SMOKE_TOOL_NAME:
         return "Return screenshot path, URL, pass/fail status, console error count, and any blocking failure reason."
     if tool_name.startswith("asset_"):
         return "Return asset_id, manifest key, promoted path, validation status, and screenshot evidence when available."

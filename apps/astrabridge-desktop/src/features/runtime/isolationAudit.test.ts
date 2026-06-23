@@ -40,7 +40,7 @@ describe("isolation audit helpers", () => {
       ok: false,
       checks: [
         { name: "workspace_storage_policy_exists", ok: true },
-        { name: "workspace_no_old_lcr_state", ok: false, detail: "D:\\AstraBridge\\PRIVATE\\workspace\\.lcr" },
+        { name: "workspace_no_legacy_router_state", ok: false, detail: "D:\\AstraBridge\\PRIVATE\\workspace\\.lcr" },
       ],
       paths: {},
       official_codex: { exists: false, managed_by_app: false, router_configured: false, config_sha256: null },
@@ -52,7 +52,7 @@ describe("isolation audit helpers", () => {
       total: 2,
       passed: 1,
       failed: 1,
-      failedChecks: [{ name: "workspace_no_old_lcr_state", ok: false, detail: "D:\\AstraBridge\\PRIVATE\\workspace\\.lcr" }],
+      failedChecks: [{ name: "workspace_no_legacy_router_state", ok: false, detail: "D:\\AstraBridge\\PRIVATE\\workspace\\.lcr" }],
     });
   });
 });

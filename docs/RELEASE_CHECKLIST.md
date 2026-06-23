@@ -1,6 +1,6 @@
 # AstraBridge Release Checklist
 
-Last updated: 2026-06-21
+Last updated: 2026-06-23
 
 This checklist is the product-ready gate for a local AstraBridge preview build. It is written as an operator checklist, not just a developer reminder list.
 
@@ -35,8 +35,8 @@ cd D:\AstraBridge\apps\astrabridge-sidecar
 
 ```powershell
 cd D:\AstraBridge\apps\astrabridge-desktop
-npm test
-npm run build
+cmd /c npm run test
+cmd /c npm run build
 ```
 
 Bundled Node fallback:
@@ -52,18 +52,18 @@ cd D:\AstraBridge\apps\astrabridge-desktop
 
 ```powershell
 cd D:\AstraBridge\apps\astrabridge-sidecar
-python -m astrabridge_sidecar.server --serve --port 8790 --seed-root D:\AstraBridge
+python -m astrabridge_sidecar.server --serve --port 8826 --seed-root D:\AstraBridge
 ```
 
 ```powershell
 cd D:\AstraBridge\apps\astrabridge-desktop
-npm run preview
+cmd /c npm run preview -- --host 127.0.0.1 --port 4181
 ```
 
-Preview URL pattern:
+Preview/dev URL pattern:
 
 ```text
-http://127.0.0.1:<preview-port>/?sidecar=http://127.0.0.1:8790
+http://127.0.0.1:<port>/?sidecar=http://127.0.0.1:8826
 ```
 
 ## Build Gate
@@ -207,10 +207,12 @@ This gate is required for release-candidate level work, not for every developmen
 The following docs must be aligned with the current product path:
 
 - [README.md](/D:/AstraBridge/README.md)
-- [HANDOFF.md](/D:/AstraBridge/HANDOFF.md)
+- [HANDOFF.md](/D:/AstraBridge/docs/HANDOFF.md)
+- [PROJECT_SUMMARY.md](/D:/AstraBridge/docs/PROJECT_SUMMARY.md)
+- [PROJECT_LOG.md](/D:/AstraBridge/docs/PROJECT_LOG.md)
+- [ASSET_SOURCES.md](/D:/AstraBridge/docs/ASSET_SOURCES.md)
 - [DEMO_RUNBOOK.md](/D:/AstraBridge/docs/DEMO_RUNBOOK.md)
 - [SECURITY_AND_ISOLATION.md](/D:/AstraBridge/docs/SECURITY_AND_ISOLATION.md)
-- [Security and Isolation Runbook](/D:/AstraBridge/docs/SECURITY_AND_ISOLATION.md)
 
 Required content coverage:
 

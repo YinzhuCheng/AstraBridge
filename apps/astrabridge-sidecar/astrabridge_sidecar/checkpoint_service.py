@@ -26,11 +26,11 @@ EXCLUDED_DIR_NAMES = {
     ".next",
     ".vite",
 }
-EXCLUDED_LCR_LOG_NAMES = {
+EXCLUDED_RUNTIME_LOG_NAMES = {
     "approvals.jsonl",
     "runtime_events.jsonl",
 }
-EXCLUDED_LCR_ASSET_DIR_NAMES = {
+EXCLUDED_ASSET_CACHE_DIR_NAMES = {
     "generated",
     "refs",
     "sliced",
@@ -279,11 +279,11 @@ class CheckpointService:
             return "Excluded AstraBridge checkpoint store."
         if len(parts) >= 3 and parts[0] == WORKSPACE_STATE_DIRNAME and parts[1] == "assets":
             asset_dir = parts[2]
-            if asset_dir in EXCLUDED_LCR_ASSET_DIR_NAMES or asset_dir.startswith("sliced_failed"):
+            if asset_dir in EXCLUDED_ASSET_CACHE_DIR_NAMES or asset_dir.startswith("sliced_failed"):
                 return "Excluded heavy AstraBridge generated/sliced asset artifact directory; asset registry keeps references."
         if parts and parts[0] == WORKSPACE_STATE_DIRNAME and path.is_file() and path.name.startswith(".") and path.name.endswith(".tmp"):
             return "Excluded transient AstraBridge atomic-write temp file."
-        if len(parts) == 2 and parts[0] == WORKSPACE_STATE_DIRNAME and parts[1] in EXCLUDED_LCR_LOG_NAMES:
+        if len(parts) == 2 and parts[0] == WORKSPACE_STATE_DIRNAME and parts[1] in EXCLUDED_RUNTIME_LOG_NAMES:
             return "Excluded verbose AstraBridge runtime log; source log remains in project state."
         if parts and parts[0] == WORKSPACE_STATE_DIRNAME and any(part.startswith("venv") or part.endswith("-venv") for part in parts):
             return "Excluded AstraBridge local Python virtual environment."

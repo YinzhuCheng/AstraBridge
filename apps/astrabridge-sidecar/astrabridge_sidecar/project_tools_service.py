@@ -55,7 +55,7 @@ SKIP_DIRS = {
     "node_modules",
     "target",
 }
-SKIP_LCR_DIRS = {"saves", "runtime_events.jsonl", "approvals.jsonl"}
+MANAGED_STATE_PREVIEW_ALLOWLIST = {"saves", "runtime_events.jsonl", "approvals.jsonl"}
 SECRET_NAME_PARTS = ("secret", "token", "apikey", "api_key", "authorization", "cookie", "password", ".env")
 MAX_TEXT_BYTES = 1_000_000
 MAX_IMAGE_BYTES = 2_500_000
@@ -97,7 +97,7 @@ class ProjectToolsService:
     def review_diff(self, rel_path: str | None = None) -> dict[str, Any]:
         root = self._workspace_root()
         if rel_path:
-            target = self._safe_rel_path(root, rel_path, allow_lcr=False)
+            target = self._safe_rel_path(root, rel_path, allow_managed_state=False)
             display_path = target.relative_to(root).as_posix()
             args = ["git", "-C", str(root), "diff", "--", display_path]
         else:
@@ -154,7 +154,7 @@ class ProjectToolsService:
 
     def read_file(self, rel_path: str) -> dict[str, Any]:
         root = self._workspace_root()
-        path = self._safe_rel_path(root, rel_path, allow_lcr=True)
+        path = self._safe_rel_path(root, rel_path, allow_managed_state=True)
         stat = path.stat()
         kind = self._file_kind(path)
         payload: dict[str, Any] = {
@@ -1243,7 +1243,7 @@ class ProjectToolsService:
             "source": "sidecar",
         }
 
-    def _safe_rel_path(self, root: Path, rel_path: str, *, allow_lcr: bool) -> Path:
+    def _safe_rel_path(self, root: Path, rel_path: str, *, allow_managed_state: bool) -> Path:
         raw = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
         if not raw:
             raise ValueError("path is required.")
@@ -1255,8 +1255,11 @@ class ProjectToolsService:
             raise ValueError("Refusing to preview secret-like file names.")
         if rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME and self._skip_file(rel):
             raise ValueError("This .astrabridge file is intentionally summarized elsewhere and is not exposed as raw preview.")
-        if not allow_lcr and rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME:
+        if not allow_managed_state and rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME:
             raise ValueError("Raw .astrabridge files are not exposed through the file preview.")
+        if allow_managed_state and rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME:
+            if len(rel.parts) < 2 or rel.parts[1] not in MANAGED_STATE_PREVIEW_ALLOWLIST:
+                raise ValueError("Only selected AstraBridge state files can be previewed.")
         if not candidate.is_file():
             raise ValueError("File does not exist or is not a regular file.")
         return candidate

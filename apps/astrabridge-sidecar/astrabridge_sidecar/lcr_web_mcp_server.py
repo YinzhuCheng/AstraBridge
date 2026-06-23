@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import html
 import ipaddress
@@ -17,25 +17,15 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 
-SERVER_NAME = "lcr-web-tools"
+SERVER_NAME = "astrabridge-web-tools"
 SERVER_VERSION = "0.1.0"
 DEFAULT_TIMEOUT_SEC = 20
 DEFAULT_MAX_CHARS = 6000
 DEFAULT_BATCH_MAX_QUERIES = 8
 DEFAULT_RESEARCH_FETCH_TOP_N = 6
 _OUTPUT_FRAMING = "header"
-_LEGACY_TO_ASTRABRIDGE_WEB_TOOL = {
-    "lcr_web_search_batch": "astrabridge_web_search_batch",
-    "lcr_web_research_brief": "astrabridge_web_research_brief",
-    "lcr_web_search": "astrabridge_web_search",
-    "lcr_web_fetch": "astrabridge_web_fetch",
-}
-_ASTRABRIDGE_TO_LEGACY_WEB_TOOL = {astr: legacy for legacy, astr in _LEGACY_TO_ASTRABRIDGE_WEB_TOOL.items()}
-
-
 def _normalize_web_tool_name(name: str) -> str:
-    normalized = str(name or "").strip()
-    return _LEGACY_TO_ASTRABRIDGE_WEB_TOOL.get(normalized, normalized)
+    return str(name or "").strip()
 
 
 def _canonicalize_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -47,10 +37,6 @@ def _canonicalize_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[
 
 def _web_tool_names() -> list[str]:
     return [
-        "lcr_web_search_batch",
-        "lcr_web_research_brief",
-        "lcr_web_search",
-        "lcr_web_fetch",
         "astrabridge_web_search_batch",
         "astrabridge_web_research_brief",
         "astrabridge_web_search",
@@ -60,11 +46,6 @@ def _web_tool_names() -> list[str]:
 
 def _is_web_tool_name(name: str) -> bool:
     return str(name or "").strip() in _web_tool_names()
-
-
-def _as_bridge_name(tool_name: str) -> str:
-    normalized = str(tool_name or "").strip()
-    return _ASTRABRIDGE_TO_LEGACY_WEB_TOOL.get(normalized, normalized)
 PREFERRED_GAME_DEV_DOMAINS = {
     "gamedev.stackexchange.com",
     "developer.mozilla.org",
@@ -106,7 +87,7 @@ GAME_DEV_HINT_TOKENS = {
 MAGIC_TOWER_ALIASES = (
     "magic tower",
     "tower of the sorcerer",
-    "魔塔",
+    "榄斿",
 )
 
 
@@ -162,7 +143,7 @@ def _handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
 def _tools() -> list[dict[str, Any]]:
     base_tools = [
         {
-            "name": "lcr_web_search_batch",
+            "name": "astrabridge_web_search_batch",
             "description": (
                 "Run one or more public web searches and return a deduplicated result set. A single basic "
                 "search is represented as queries=[{query: ...}]. Use this before claiming current facts, "
@@ -206,7 +187,7 @@ def _tools() -> list[dict[str, Any]]:
             },
         },
         {
-            "name": "lcr_web_research_brief",
+            "name": "astrabridge_web_research_brief",
             "description": (
                 "Build a lightweight research brief from a goal: run multiple searches, fetch top public pages, "
                 "redact/truncate page text, and return sources, excerpts, unresolved questions, and suggested "
@@ -239,8 +220,8 @@ def _tools() -> list[dict[str, Any]]:
             },
         },
         {
-            "name": "lcr_web_search",
-            "description": "Compatibility alias for lcr_web_search_batch with one query. Prefer lcr_web_search_batch.",
+            "name": "astrabridge_web_search",
+            "description": "Run one public web search with a single query. Prefer astrabridge_web_search_batch when batching or adding domain hints.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -254,8 +235,8 @@ def _tools() -> list[dict[str, Any]]:
             },
         },
         {
-            "name": "lcr_web_fetch",
-            "description": "Compatibility low-level public HTTP(S) fetch. Prefer lcr_web_research_brief for agent research.",
+            "name": "astrabridge_web_fetch",
+            "description": "Low-level public HTTP(S) fetch. Prefer astrabridge_web_research_brief for agent research with citations and source packs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -278,10 +259,6 @@ def _tools() -> list[dict[str, Any]]:
         tools.append(dict(tool))
         names.add(name)
 
-        alias = _LEGACY_TO_ASTRABRIDGE_WEB_TOOL.get(name)
-        if alias and alias not in names:
-            tools.append({**tool, "name": alias, "description": f"Alias for {name}; prefer {name} unless caller requires a prefixed AstraBridge tool name."})
-            names.add(alias)
     return tools
 
 
@@ -292,8 +269,8 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unknown AstraBridge web tool: {name}")
     if not isinstance(args, dict):
         raise ValueError("Tool arguments must be an object.")
-    canonical_name = _as_bridge_name(name)
-    if canonical_name == "lcr_web_search_batch":
+    canonical_name = name
+    if canonical_name == "astrabridge_web_search_batch":
         payload = _search_batch(
             args.get("queries"),
             dedupe=bool(args.get("dedupe", True)),
@@ -303,7 +280,7 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         if context:
             payload["tool_context"] = context
         return _tool_text(_canonicalize_tool_payload(name, payload))
-    if canonical_name == "lcr_web_research_brief":
+    if canonical_name == "astrabridge_web_research_brief":
         payload = _research_brief(
             research_goal=str(args.get("research_goal") or "").strip(),
             queries=args.get("queries"),
@@ -317,7 +294,7 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         if context:
             payload["tool_context"] = context
         return _tool_text(_canonicalize_tool_payload(name, payload))
-    if canonical_name == "lcr_web_search":
+    if canonical_name == "astrabridge_web_search":
         query = str(args.get("query") or "").strip()
         if not query:
             raise ValueError("query is required.")
@@ -326,12 +303,12 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
             dedupe=True,
             timeout_sec=int(args.get("timeout_sec") or DEFAULT_TIMEOUT_SEC),
         )
-        payload["tool"] = "lcr_web_search"
+        payload["tool"] = "astrabridge_web_search"
         context = _sanitize_tool_context(args.get("tool_context"))
         if context:
             payload["tool_context"] = context
         return _tool_text(_canonicalize_tool_payload(name, payload))
-    if canonical_name == "lcr_web_fetch":
+    if canonical_name == "astrabridge_web_fetch":
         url = str(args.get("url") or "").strip()
         if not url:
             raise ValueError("url is required.")
@@ -479,14 +456,14 @@ def _search_batch(queries: Any, *, dedupe: bool, timeout_sec: int) -> dict[str, 
             exclude_domains=[domain for spec in query_specs for domain in spec.get("exclude_domains") or []],
         )
     return {
-        "tool": "lcr_web_search_batch",
+        "tool": "astrabridge_web_search_batch",
         "source": "duckduckgo_html_with_ranked_variants",
         "query_count": len(query_specs),
         "result_count": len(merged),
         "results_by_query": results_by_query,
         "merged_results": merged,
         "warnings": warnings,
-        "note": "Basic search is queries=[{query: ...}]. Queries may be expanded with domain hints and ambiguity repairs. Use lcr_web_research_brief when page fetching and a source pack are needed.",
+        "note": "Basic search is queries=[{query: ...}]. Queries may be expanded with domain hints and ambiguity repairs. Use astrabridge_web_research_brief when page fetching and a source pack are needed.",
     }
 
 
@@ -554,7 +531,7 @@ def _research_brief(
     if len(fetched_sources) < min(3, fetch_top_n):
         unresolved.append("Source coverage is thin; treat claims as provisional and run another brief with targeted queries.")
     return {
-        "tool": "lcr_web_research_brief",
+        "tool": "astrabridge_web_research_brief",
         "research_goal": research_goal,
         "query_plan": query_texts[:DEFAULT_BATCH_MAX_QUERIES],
         "search": {
@@ -601,7 +578,7 @@ def _search(query: str, *, max_results: int, timeout_sec: int) -> dict[str, Any]
             bing["fallback_from"] = "duckduckgo_html"
             return bing
         return {
-            "tool": "lcr_web_search",
+            "tool": "astrabridge_web_search",
             "query": query,
             "source": "duckduckgo_html",
             "url": final_url,
@@ -621,7 +598,7 @@ def _search(query: str, *, max_results: int, timeout_sec: int) -> dict[str, Any]
             return bing
         except Exception:
             return {
-                "tool": "lcr_web_search",
+                "tool": "astrabridge_web_search",
                 "query": query,
                 "source": "duckduckgo_html",
                 "results": [],
@@ -638,7 +615,7 @@ def _search_bing(query: str, *, max_results: int, timeout_sec: int) -> dict[str,
         parser.feed(body)
         results = parser.results[:max_results]
         return {
-            "tool": "lcr_web_search",
+            "tool": "astrabridge_web_search",
             "query": query,
             "source": "bing_html",
             "url": final_url,
@@ -649,7 +626,7 @@ def _search_bing(query: str, *, max_results: int, timeout_sec: int) -> dict[str,
         }
     except Exception as exc:  # noqa: BLE001
         return {
-            "tool": "lcr_web_search",
+            "tool": "astrabridge_web_search",
             "query": query,
             "source": "bing_html",
             "results": [],
@@ -875,7 +852,7 @@ def _derive_research_queries(goal: str) -> list[str]:
                 "site:docs.godotengine.org tilemap autotile terrain set",
             ]
         )
-    if any(token in lowered for token in ["魔塔", "tower", "rpg", "game", "autotile", "sprite"]):
+    if any(token in lowered for token in ["榄斿", "tower", "rpg", "game", "autotile", "sprite"]):
         queries.extend(
             [
                 f"{compact} best practices",
@@ -940,7 +917,7 @@ def _fetch(url: str, *, max_chars: int, timeout_sec: int) -> dict[str, Any]:
     max_chars = max(500, min(20000, int(max_chars or DEFAULT_MAX_CHARS)))
     truncated = len(text) > max_chars
     return {
-        "tool": "lcr_web_fetch",
+        "tool": "astrabridge_web_fetch",
         "url": final_url,
         "content_type": content_type,
         "text": text[:max_chars],
@@ -1247,12 +1224,12 @@ def _write_message(stream: BinaryIO, message: dict[str, Any]) -> None:
 
 def _debug(event: str, **fields: Any) -> None:
     try:
-        raw_path = os.environ.get("LCR_MCP_DEBUG_LOG")
+        raw_path = os.environ.get("ASTRABRIDGE_MCP_DEBUG_LOG")
         if not raw_path:
             local_app_data = os.environ.get("LOCALAPPDATA")
             if not local_app_data:
                 return
-            raw_path = str(Path(local_app_data) / "AstraBridge" / "mcp" / "lcr_web_debug.jsonl")
+            raw_path = str(Path(local_app_data) / "AstraBridge" / "mcp" / "astrabridge_web_debug.jsonl")
         path = Path(raw_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         record = {"timestamp": datetime.now(timezone.utc).isoformat(), "event": event, **fields}
@@ -1264,4 +1241,5 @@ def _debug(event: str, **fields: Any) -> None:
 
 if __name__ == "__main__":
     main()
+
 

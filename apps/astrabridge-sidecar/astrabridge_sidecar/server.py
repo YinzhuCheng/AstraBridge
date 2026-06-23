@@ -17,7 +17,6 @@ from .common import now_iso, read_json, write_json
 from .dogfood_run_service import DogfoodRunService
 from .image_prompt_strategy import build_rewrite_instruction, prompt_guides_payload
 from .isolation_audit_service import IsolationAuditService
-from .lcr_web_service import LcrWebService
 from .modal_service import ModalService
 from .metadata_service import MetadataService
 from .mcp_config_service import McpConfigService
@@ -36,6 +35,7 @@ from .runtime_service import RuntimeService
 from .secret_service import SecretService
 from .task_conversation_service import TaskConversationService
 from .task_service import TaskService
+from .web_tool_service import AstraBridgeWebService
 from .wsl_dependency_service import WslDependencyService
 from .yunwu_image_service import YunwuImageService
 
@@ -99,7 +99,7 @@ class AppContext:
         self.tasks = TaskService(self.projects)
         self.assets = AssetRegistryService(self.projects, self.tasks)
         self.yunwu_image = YunwuImageService()
-        self.lcr_web = LcrWebService(self.projects)
+        self.web_tools = AstraBridgeWebService(self.projects)
         self.dogfood = DogfoodRunService(self.projects)
         self.checkpoints = CheckpointService(self.projects)
         self.task_conversation = TaskConversationService(self.projects, self.tasks)
@@ -240,7 +240,6 @@ class Handler(BaseHTTPRequestHandler):
         last_heartbeat = 0.0
         try:
             self.wfile.write(sse_frame(event="astrabridge.hello", data={"cursor": cursor}, retry=2000))
-            self.wfile.write(sse_frame(event="lcr.hello", data={"cursor": cursor}, retry=2000))
             self.wfile.flush()
             while time.monotonic() < deadline:
                 payload = self.context.runtime.list_events(after=cursor, limit=limit)
@@ -249,7 +248,6 @@ class Handler(BaseHTTPRequestHandler):
                 if events:
                     for event in events:
                         self.wfile.write(sse_frame(event="astrabridge.event", data={"cursor": cursor, "event": event}))
-                        self.wfile.write(sse_frame(event="lcr.event", data={"cursor": cursor, "event": event}))
                     self.wfile.flush()
                     last_heartbeat = time.monotonic()
                 elif time.monotonic() - last_heartbeat >= 15:
@@ -703,9 +701,6 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/router/mcp/preset/yunwu-image":
                 self.send_json(self.context.mcp_config.apply_yunwu_image_preset())
                 return
-            if path == "/api/router/mcp/preset/lcr-web":
-                self.send_json(self.context.mcp_config.apply_lcr_web_preset())
-                return
             if path == "/api/router/mcp/preset/astrabridge-web":
                 self.send_json(self.context.mcp_config.apply_astrabridge_web_preset())
                 return
@@ -888,14 +883,14 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/router/payload-preview":
                 self.send_json(self.context.router.preview_payload(payload))
                 return
-            if path in {"/api/tools/web/search-batch", "/api/lcr-web/search-batch"}:
-                self.send_json(self.context.lcr_web.search_batch(payload))
+            if path == "/api/tools/web/search-batch":
+                self.send_json(self.context.web_tools.search_batch(payload))
                 return
-            if path in {"/api/tools/web/research-brief", "/api/lcr-web/research-brief"}:
-                self.send_json(self.context.lcr_web.research_brief(payload))
+            if path == "/api/tools/web/research-brief":
+                self.send_json(self.context.web_tools.research_brief(payload))
                 return
-            if path in {"/api/tools/web/fetch", "/api/lcr-web/fetch"}:
-                self.send_json(self.context.lcr_web.fetch(payload))
+            if path == "/api/tools/web/fetch":
+                self.send_json(self.context.web_tools.fetch(payload))
                 return
             if path == "/api/router/test-provider":
                 self.send_json(

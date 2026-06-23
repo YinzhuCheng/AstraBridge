@@ -53,8 +53,8 @@ class IsolationAuditService:
                 )
             )
             checks.append(_check("workspace_no_owned_codex_state", not (workspace / ".codex").exists(), str(workspace / ".codex")))
-            checks.append(_check("workspace_no_old_lcr_state", not (workspace / ".lcr").exists(), str(workspace / ".lcr")))
-            checks.append(_check("workspace_no_old_codex_shell_state", not (workspace / ".codex-shell").exists(), str(workspace / ".codex-shell")))
+            checks.append(_check("workspace_no_legacy_router_state", not (workspace / ".lcr").exists(), str(workspace / ".lcr")))
+            checks.append(_check("workspace_no_legacy_shell_state", not (workspace / ".codex-shell").exists(), str(workspace / ".codex-shell")))
             for dirname in MANAGED_STATE_DIRS:
                 checks.append(
                     _check(

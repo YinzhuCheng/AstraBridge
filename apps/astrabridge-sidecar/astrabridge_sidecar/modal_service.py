@@ -276,11 +276,11 @@ class ModalService:
                 {
                     **common,
                     "cwd": "D:\\workflow",
-                    "command": "Set-Content -Path D:\\workflow\\lcr-approval-smoke.txt -Value 'hello'",
+                    "command": "Set-Content -Path D:\\workflow\\astrabridge-approval-smoke.txt -Value 'hello'",
                     "reason": "Smoke check for a Windows write command that should warn about explicit UTF-8 encoding.",
                 },
             )
-        if normalized in {"lcr_log_read", "runtime_log", "approvals_log"}:
+        if normalized in {"runtime_log_read", "runtime_log", "approvals_log"}:
             return (
                 "item/commandExecution/requestApproval",
                 {

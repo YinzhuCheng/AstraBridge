@@ -536,7 +536,7 @@ class YunwuImageService:
         *,
         timeout_sec: int,
     ) -> dict[str, Any]:
-        boundary = f"----lcr-yunwu-{uuid.uuid4().hex}"
+        boundary = f"----astrabridge-yunwu-{uuid.uuid4().hex}"
         chunks: list[bytes] = []
         for name, value in fields.items():
             chunks.append(f"--{boundary}\r\n".encode("utf-8"))

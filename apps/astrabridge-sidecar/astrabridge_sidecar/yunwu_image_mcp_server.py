@@ -18,7 +18,7 @@ else:
     from .yunwu_image_service import MAX_YUNWU_IMAGE_CONCURRENCY, YunwuImageService
 
 
-SERVER_NAME = "lcr-yunwu-image"
+SERVER_NAME = "astrabridge-yunwu-image"
 SERVER_VERSION = "0.1.0"
 _OUTPUT_FRAMING = "header"
 def main() -> None:
@@ -383,12 +383,12 @@ def _read_message(stream: BinaryIO) -> dict[str, Any] | None:
 
 def _debug(event: str, **fields: Any) -> None:
     try:
-        raw_path = os.environ.get("LCR_MCP_DEBUG_LOG")
+        raw_path = os.environ.get("ASTRABRIDGE_MCP_DEBUG_LOG")
         if not raw_path:
             local_app_data = os.environ.get("LOCALAPPDATA")
             if not local_app_data:
                 return
-            raw_path = str(Path(local_app_data) / "AstraBridge" / "mcp" / "yunwu_image_debug.jsonl")
+            raw_path = str(Path(local_app_data) / "AstraBridge" / "mcp" / "astrabridge_yunwu_image_debug.jsonl")
         path = Path(raw_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         record = {

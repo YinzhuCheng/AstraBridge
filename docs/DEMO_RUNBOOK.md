@@ -1,10 +1,10 @@
 # AstraBridge Demo Runbook
 
-Last updated: 2026-06-21
+Last updated: 2026-06-23
 
 ## Purpose
 
-This runbook defines the repeatable AstraBridge product demo path for browser-based acceptance. It is designed so that a follow-up operator can run the same flow without relying on private handoff knowledge.
+This runbook defines the repeatable AstraBridge product demo path for browser-based acceptance. It is designed so that a follow-up operator can run the same flow without relying on undocumented local context.
 
 ## Supported Demo Modes
 
@@ -38,10 +38,10 @@ Never print, paste, screenshot, or commit plaintext keys.
 
 ## Preconditions
 
-- Sidecar is healthy at `http://127.0.0.1:8790/health`
+- Sidecar is healthy at `http://127.0.0.1:8826/health`
 - Web app is reachable at either:
-  - `http://127.0.0.1:<preview-port>/?sidecar=http://127.0.0.1:8790`
-  - `http://127.0.0.1:<dev-port>/?sidecar=http://127.0.0.1:8790`
+  - `http://127.0.0.1:<preview-port>/?sidecar=http://127.0.0.1:8826`
+  - `http://127.0.0.1:<dev-port>/?sidecar=http://127.0.0.1:8826`
 - Current project uses `.abproj` and `.astrabridge/`
 - Generated catalog is active
 - At least one primary lane is healthy for a key-backed run
@@ -61,7 +61,7 @@ Recommended lanes:
 ```powershell
 cd D:\AstraBridge\apps\astrabridge-sidecar
 $env:PYTHONDONTWRITEBYTECODE='1'
-python -m astrabridge_sidecar.server --serve --port 8790 --seed-root D:\AstraBridge
+python -m astrabridge_sidecar.server --serve --port 8826 --seed-root D:\AstraBridge
 ```
 
 ### Preview
@@ -69,7 +69,7 @@ python -m astrabridge_sidecar.server --serve --port 8790 --seed-root D:\AstraBri
 ```powershell
 cd D:\AstraBridge\apps\astrabridge-desktop
 npm run build
-npm run preview
+cmd /c npm run preview -- --host 127.0.0.1 --port 4181
 ```
 
 ### Optional isolated demo roots
@@ -87,6 +87,13 @@ Use isolated roots when you want a clean operator-facing run without contaminati
 - Never save raw `Authorization` headers or cookies into reports.
 - Prefer provider status, supervisor status, browser captures, review diff, and project summaries over raw transport logs.
 - Preserve artifacts by default, but keep them secret-safe.
+
+Primary operator entry points:
+
+- [README.md](/D:/AstraBridge/README.md)
+- [HANDOFF.md](/D:/AstraBridge/docs/HANDOFF.md)
+- [Project Summary](/D:/AstraBridge/docs/PROJECT_SUMMARY.md)
+- [Project Log](/D:/AstraBridge/docs/PROJECT_LOG.md)
 
 ## First Project Workflow
 
@@ -199,6 +206,10 @@ Typical artifact locations:
 - Checkpoints: `<workspace>\.astrabridge\checkpoints\`
 - Demo artifacts: `D:\AstraBridge\PRIVATE\demo-runs\<timestamp>\`
 - Private credential policy: [PRIVATE/README.md](/D:/AstraBridge/PRIVATE/README.md)
+
+Preferred local artifact root:
+
+- `D:\AstraBridge\PRIVATE\demo-runs\`
 
 ## Known Limitations
 
