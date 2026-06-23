@@ -80,6 +80,29 @@ Isolation objective:
 - make demo and smoke runs reproducible
 - make cleanup optional rather than required
 
+### Safe default storage model
+
+Default per-project storage is intentionally split into:
+
+- Workspace state (visible to users): `<workspace>/.astrabridge/`
+  - `attachments`, `captures`, `downloads`, `caches`, `reviews`, `runtime-cwd`, `tmp`
+  - `storage_policy.json`
+  - runtime events and thread state snapshots
+- Runtime execution roots (large/cross-run artifacts): `%APPDATA%/AstraBridge/runtime/<project-runtime-id>/`
+  - `project_runtime_root` (shared runtime workspace bucket)
+  - `project_runtime_root/codex_home`
+  - `project_runtime_root/downloads`
+  - `project_runtime_root/caches`
+  - `project_runtime_root/tmp`
+- Temporary process env injected at launch:
+  - `ASTRABRIDGE_PROJECT_RUNTIME_ROOT`
+  - `ASTRABRIDGE_DOWNLOADS_ROOT`
+  - `ASTRABRIDGE_CACHES_ROOT`
+  - `ASTRABRIDGE_TMP_ROOT`
+  - `ASTRABRIDGE_CODEX_HOME`
+
+These roots must not be inside the user workspace.
+
 ## Artifact Policy
 
 Preserve diagnostics and experiment artifacts by default, but only in secret-safe form.

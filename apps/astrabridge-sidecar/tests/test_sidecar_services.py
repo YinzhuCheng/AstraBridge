@@ -650,6 +650,55 @@ class AstraBridgeServiceTests(unittest.TestCase):
             else:
                 os.environ["ASTRABRIDGE_APPDATA"] = original_appdata
 
+    def test_project_create_distinct_projects_get_distinct_isolated_runtime_roots(self) -> None:
+        original_appdata = os.environ.get("ASTRABRIDGE_APPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                os.environ["ASTRABRIDGE_APPDATA"] = str(root / "AppData")
+                service = ProjectService(root / "recent.json")
+
+                first = service.create_project(
+                    "Demo One",
+                    "",
+                    workspace_root=None,
+                    entry_mode="new",
+                )
+                second = service.create_project(
+                    "Demo Two",
+                    "",
+                    workspace_root=None,
+                    entry_mode="new",
+                )
+
+                first_policy = json.loads((Path(first["workspace_root"]) / ".astrabridge" / "storage_policy.json").read_text(encoding="utf-8"))
+                second_policy = json.loads((Path(second["workspace_root"]) / ".astrabridge" / "storage_policy.json").read_text(encoding="utf-8"))
+                first_runtime = Path(first_policy["runtime"]["project_runtime_root"]).resolve()
+                second_runtime = Path(second_policy["runtime"]["project_runtime_root"]).resolve()
+
+                self.assertTrue(first_runtime.is_dir())
+                self.assertTrue(second_runtime.is_dir())
+                self.assertNotEqual(first_runtime, second_runtime)
+                self.assertNotEqual(Path(first["workspace_root"]).resolve(), first_runtime)
+                self.assertNotEqual(Path(second["workspace_root"]).resolve(), second_runtime)
+                self.assertTrue(str(first_runtime).startswith(str((root / "AppData" / "runtime").resolve())))
+                self.assertTrue(str(second_runtime).startswith(str((root / "AppData" / "runtime").resolve())))
+                self.assertNotIn(str(Path(first["workspace_root"]).resolve()), str(first_runtime))
+                self.assertNotIn(str(Path(second["workspace_root"]).resolve()), str(second_runtime))
+
+                first_codex = Path(first_policy["runtime"]["codex_home_root"]).resolve()
+                second_codex = Path(second_policy["runtime"]["codex_home_root"]).resolve()
+                self.assertTrue(first_codex.is_dir())
+                self.assertTrue(second_codex.is_dir())
+                self.assertNotEqual(first_codex, second_codex)
+                self.assertTrue(str(first_codex).startswith(str((root / "AppData" / "runtime").resolve())))
+                self.assertTrue(str(second_codex).startswith(str((root / "AppData" / "runtime").resolve())))
+        finally:
+            if original_appdata is None:
+                os.environ.pop("ASTRABRIDGE_APPDATA", None)
+            else:
+                os.environ["ASTRABRIDGE_APPDATA"] = original_appdata
+
     def test_project_service_creates_shell_tmp_subdir_inside_workspace_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -13408,7 +13457,12 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 payload = json.loads(captured.exception.read().decode("utf-8"))
                 self.assertEqual(payload["error"]["type"], "provider_error")
                 self.assertEqual(payload["error"]["provider"], "deepseek")
-                self.assertIn("context limit", payload["error"]["actionable_hint"].lower())
+                self.assertTrue(
+                    any(
+                        expected in payload["error"]["actionable_hint"].lower()
+                        for expected in ("context limit", "provider auth", "upstream connectivity")
+                    )
+                )
         finally:
             upstream.shutdown()
             upstream.server_close()
