@@ -2,7 +2,7 @@
 
 Status: active focus guidance. This file is meant to reduce drift, not to replace the broader architecture plans.
 
-Last updated: 2026-06-22
+Last updated: 2026-06-23
 
 Related documents:
 
@@ -28,6 +28,16 @@ Near-term execution should not optimize for:
 2. metadata micro-tuning without workflow impact
 3. broad provider expansion before current contracts are stable
 4. installer/packaging work before the core workflow is dependable
+
+## 1.1 Execution checkpoint (2026-06-23)
+
+- Completed by sidecar test harness team:
+  - Extended browser smoke presets to assert checkpoint/review/diagnostic workflow facts and artifacts (`task-fact-*`, `workflow-fact-*`) rather than only presence of basic app chrome.
+  - Added corresponding unit test assertions in `apps/astrabridge-sidecar/tests/test_sidecar_services.py` to lock in the new acceptance expectations.
+  - Verified `python -B -m unittest discover -s apps/astrabridge-sidecar/tests -p test_sidecar_services.py` passes (327 tests).
+- Interpretation against current priorities:
+  - **Priority 1 (Isolation Hardening):** strengthened by asserting workflow evidence surfaces and checkpoint/review artifacts that are part of the isolation/audit picture.
+  - **Priority 3 (CodingEvent Contract Unification):** improved by forcing the product’s high-value workflow surfaces to remain in one observable acceptance trace.
 
 ## 2. Ranked Priorities
 

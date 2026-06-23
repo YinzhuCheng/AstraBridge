@@ -8394,6 +8394,13 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 )
             )
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-recovery']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='task-workflow-facts']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-checkpoints']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-lanes']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-checkpoints']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-commands']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-diagnostics']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-evidence-panel']" for item in final_assertions if isinstance(item, dict)))
 
     def test_dogfood_browser_smoke_provider_switch_preset_exposes_workflow_facts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -8435,6 +8442,11 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-backend']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-evidence-panel']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-recovery']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-checkpoints']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-lanes']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-checkpoints']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-commands']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-diagnostics']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(
                 any(
                     item.get("type") == "expect_selector_count_at_least"
@@ -8498,6 +8510,11 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     if isinstance(item, dict)
                 )
             )
+            self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-checkpoints']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-lanes']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-checkpoints']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-commands']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-diagnostics']" for item in final_assertions if isinstance(item, dict)))
 
     def test_dogfood_browser_smoke_accepts_fill_and_select_actions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
