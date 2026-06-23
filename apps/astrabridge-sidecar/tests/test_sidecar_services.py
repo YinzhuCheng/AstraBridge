@@ -3381,6 +3381,29 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("astrabridge_web_fetch", names)
             self.assertNotIn("yunwu_image_generate", names)
 
+    def test_runtime_thread_start_registers_astrabridge_web_dynamic_tools_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            runtime._mcp_config.enabled_servers = lambda: [{"name": "astrabridge_web", "enabled": True}]  # type: ignore[method-assign]
+
+            params = runtime._thread_start_params(  # noqa: SLF001
+                profile={"profile_id": "deepseek", "provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                model="deepseek-v4-pro",
+                permission_mode="auto",
+            )
+
+            names = {tool["name"] for tool in params["dynamicTools"]}
+            self.assertIn("astrabridge_web_search_batch", names)
+            self.assertIn("astrabridge_web_research_brief", names)
+            self.assertIn("astrabridge_web_search", names)
+            self.assertIn("astrabridge_web_fetch", names)
+            self.assertNotIn("yunwu_image_generate", names)
+
     def test_runtime_thread_start_registers_browser_smoke_dynamic_tool_for_projects(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -6583,6 +6606,27 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(tools["lcr_web_search"]["inputSchema"]["properties"]["max_results"]["maximum"], 10)
             self.assertIn("tool_context", tools["lcr_web_fetch"]["inputSchema"]["properties"])
 
+    def test_mcp_config_astrabridge_web_preset_toml_and_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            service = McpConfigService(Path(temp) / "mcp_servers.json")
+            applied = service.apply_astrabridge_web_preset()
+            self.assertEqual(applied["server"]["name"], "astrabridge_web")
+            toml = service.render_toml()
+            self.assertIn("[mcp_servers.astrabridge_web]", toml)
+            self.assertIn("lcr_web_mcp_server.py", toml)
+            self.assertIn('default_tools_approval_mode = "auto"', toml)
+            self.assertIn("[mcp_servers.astrabridge_web.tools.astrabridge_web_search_batch]", toml)
+            self.assertIn("[mcp_servers.astrabridge_web.tools.astrabridge_web_research_brief]", toml)
+            self.assertIn("[mcp_servers.astrabridge_web.tools.astrabridge_web_search]", toml)
+            self.assertIn("[mcp_servers.astrabridge_web.tools.astrabridge_web_fetch]", toml)
+            self.assertIn('approval_mode = "auto"', toml)
+
+            tools = {tool["name"]: tool for tool in lcr_web_mcp_tools()}
+            self.assertIn("astrabridge_web_search_batch", tools)
+            self.assertIn("astrabridge_web_research_brief", tools)
+            self.assertIn("astrabridge_web_search", tools)
+            self.assertIn("astrabridge_web_fetch", tools)
+
     def test_lcr_web_batch_and_research_brief_are_structured_and_sanitized(self) -> None:
         encoded = "a1" + base64.urlsafe_b64encode(b"https://developers.openai.com/codex/mcp").decode("ascii").rstrip("=")
         self.assertEqual(
@@ -8536,6 +8580,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(any(item.get("selector") == "[data-testid='sidebar-nav-setup']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='setup-tab-saves']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='saves-panel']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='setup-tab-models']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='metadata-model-generated-catalog-provenance']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='metadata-model-catalog-version']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='metadata-model-source-status']" for item in actions if isinstance(item, dict)))
             self.assertTrue(
                 any(
                     item.get("type") == "expect_selector_count_at_least"
@@ -8566,6 +8614,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-commands']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-diagnostics']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-evidence-panel']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='metadata-model-generated-catalog-provenance']" for item in final_assertions if isinstance(item, dict)))
 
     def test_dogfood_browser_smoke_provider_switch_preset_exposes_workflow_facts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -8603,6 +8652,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 )
             )
             self.assertTrue(any(item.get("selector") == "[data-testid='terminal-panel']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='setup-tab-models']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='metadata-model-generated-catalog-provenance']" for item in actions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='metadata-model-catalog-version']" for item in actions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-handoffs']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='task-fact-backend']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-evidence-panel']" for item in final_assertions if isinstance(item, dict)))
@@ -8612,6 +8664,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-checkpoints']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-commands']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(any(item.get("selector") == "[data-testid='workflow-fact-diagnostics']" for item in final_assertions if isinstance(item, dict)))
+            self.assertTrue(any(item.get("selector") == "[data-testid='metadata-model-generated-catalog-provenance']" for item in final_assertions if isinstance(item, dict)))
             self.assertTrue(
                 any(
                     item.get("type") == "expect_selector_count_at_least"
@@ -9826,6 +9879,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             first_model = catalog_payload["models"][0]
             self.assertEqual(first_model["id"], "kimi/kimi-k2.7-code")
             self.assertEqual(first_model["source_status"], "official_docs")
+            self.assertEqual(first_model["catalog_version"], "astrabridge-generated-catalog-v1")
+            self.assertEqual(first_model["source_provenance"]["provider_id"], "kimi")
+            self.assertEqual(first_model["source_provenance"]["source_url"], "https://example.test/kimi/catalog")
             self.assertNotIn("secret", json.dumps(catalog_payload))
 
             effective_catalog_response = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/router/models/effective-catalog", timeout=5)
@@ -9834,12 +9890,20 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(effective_catalog_payload["models"][0]["id"], "kimi/kimi-k2.7-code")
             self.assertEqual(effective_catalog_payload["models"][0]["source_status"], "official_docs")
             self.assertEqual(effective_catalog_payload["models"][0]["catalog_version"], "astrabridge-generated-catalog-v1")
+            self.assertEqual(effective_catalog_payload["models"][0]["source_provenance"]["provider_id"], "kimi")
+            self.assertEqual(effective_catalog_payload["models"][0]["source_provenance"]["source_url"], "https://example.test/kimi/catalog")
+            self.assertEqual(first_model["source_status"], effective_catalog_payload["models"][0]["source_status"])
+            self.assertEqual(first_model["catalog_version"], effective_catalog_payload["models"][0]["catalog_version"])
 
             health_response = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/llm-manager/health/results", timeout=5)
             health_payload = json.loads(health_response.read().decode("utf-8"))
             self.assertEqual(health_response.getcode(), 200)
             self.assertEqual(health_payload["model_health"]["kimi/kimi-k2.7-code"]["source_status"], "official_docs")
             self.assertEqual(health_payload["model_health"]["kimi/kimi-k2.7-code"]["catalog_version"], "astrabridge-generated-catalog-v1")
+            self.assertEqual(health_payload["model_health"]["kimi/kimi-k2.7-code"]["source_provenance"]["provider_id"], "kimi")
+            self.assertEqual(health_payload["model_health"]["kimi/kimi-k2.7-code"]["source_provenance"]["source_url"], "https://example.test/kimi/catalog")
+            self.assertEqual(effective_catalog_payload["models"][0]["source_status"], health_payload["model_health"]["kimi/kimi-k2.7-code"]["source_status"])
+            self.assertEqual(effective_catalog_payload["models"][0]["catalog_version"], health_payload["model_health"]["kimi/kimi-k2.7-code"]["catalog_version"])
             self.assertEqual(health_payload["results"][0]["response_diagnostics"]["raw_ref"]["redaction_status"], "redacted")
             self.assertNotIn("unit_secret", json.dumps(health_payload))
 
@@ -9848,11 +9912,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(sources_payload["catalog_schema"], "astrabridge-generated-catalog-v1")
             self.assertEqual(sources_payload["providers"][0]["provider_id"], "kimi")
             self.assertEqual(sources_payload["providers"][0]["source_status"], "official_docs")
+            self.assertEqual(sources_payload["providers"][0]["source_provenance"]["provider_id"], "kimi")
+            self.assertEqual(sources_payload["catalog_schema"], effective_catalog_payload["catalog_version"])
 
             report_response = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/router/metadata/report", timeout=5)
             report_payload = json.loads(report_response.read().decode("utf-8"))
             self.assertEqual(report_payload["status"], "ok")
             self.assertEqual(report_payload["catalog_version"], "astrabridge-generated-catalog-v1")
+            self.assertEqual(report_payload["catalog_version"], effective_catalog_payload["catalog_version"])
         finally:
             server.shutdown()
             server.server_close()
@@ -13297,7 +13364,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(deepseek["supported_reasoning_levels"], ["high", "xhigh", "max"])
         self.assertEqual(deepseek["default_reasoning_level"], "xhigh")
         self.assertEqual(deepseek["supports_mcp_tools"], True)
-        self.assertEqual(deepseek["mcp_verified_servers"], ["lcr_web"])
+        self.assertEqual(deepseek["mcp_verified_servers"], ["astrabridge_web"])
+        self.assertEqual(deepseek["mcp_web_support"], "verified_astrabridge_web")
         self.assertEqual(qwen["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
         self.assertAlmostEqual(float(qwen["provider_temperature_min"]), 0.00001)
         self.assertEqual(kimi["temperature_default"], 1.0)
@@ -13388,7 +13456,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(provider["fallback_models"], ["deepseek-v4-pro", "deepseek-v4-flash"])
             self.assertEqual(provider["supports_mcp_tools"], True)
             self.assertEqual(provider["mcp_tool_call_policy"], "conservative")
-            self.assertEqual(provider["mcp_verified_servers"], ["lcr_web"])
+            self.assertEqual(provider["mcp_verified_servers"], ["astrabridge_web"])
             self.assertEqual(provider["tool_web_search_support"], "verified")
             self.assertEqual(provider["planner_support"]["plan_mode"], "conservative")
             self.assertEqual(provider["goal_support"]["thread_goal"], "app_server_native")
@@ -13659,7 +13727,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(deepseek["temperature_default"], 0.0)
             self.assertTrue(deepseek["supports_mcp_tools"])
             self.assertEqual(deepseek["mcp_tool_call_policy"], "conservative")
-            self.assertIn("lcr_web", deepseek["mcp_verified_servers"])
+            self.assertIn("astrabridge_web", deepseek["mcp_verified_servers"])
             self.assertEqual(deepseek["mcp_smoke_status"], "pass_direct_tool_call")
             self.assertEqual(deepseek["tool_web_search_support"], "verified")
             self.assertTrue(any("propose changes" in warning.lower() for warning in deepseek["ui_warnings"]))

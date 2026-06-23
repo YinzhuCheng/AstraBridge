@@ -3629,7 +3629,12 @@ for host in candidates:
             servers = self._mcp_config.enabled_servers()
         except Exception:
             return False
-        return any(str(server.get("name") or "") == name for server in servers)
+        server_names = {str(server.get("name") or "") for server in servers}
+        if name == "lcr_web":
+            return "lcr_web" in server_names or "astrabridge_web" in server_names
+        if name == "astrabridge_web":
+            return "astrabridge_web" in server_names or "lcr_web" in server_names
+        return any(name == server_name for server_name in server_names)
 
     def _thread_permission_overrides(self, permission_mode: str) -> dict[str, Any]:
         mode = (permission_mode or "auto").strip().lower()

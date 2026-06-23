@@ -2262,18 +2262,18 @@ function RouterControlCenter({
                 <label className="field"><span>Source URLs</span><textarea rows={3} value={(modelDraft.source_urls ?? []).join("\n")} onChange={(event) => setModelDraft({ ...modelDraft, source_urls: splitList(event.target.value) })} /></label>
                 <label className="field"><span>Verification notes</span><textarea rows={3} value={modelDraft.verification_notes ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, verification_notes: event.target.value })} /></label>
               </div>
-              <div className="metadata-section">
+              <div className="metadata-section" data-testid="metadata-model-generated-catalog-provenance">
                 <h4>Generated catalog provenance</h4>
                 <div className="form-grid">
-                  <label className="field"><span>Catalog version</span><input value={effectiveCatalog.data?.catalog_version ?? ""} readOnly /></label>
-                  <label className="field"><span>Models lock</span><input value={effectiveCatalog.data?.models_lock_path ?? ""} readOnly /></label>
-                  <label className="field"><span>Sources lock</span><input value={effectiveCatalog.data?.sources_lock_path ?? ""} readOnly /></label>
-                  <label className="field"><span>Review</span><input value={effectiveCatalog.data?.review_path ?? ""} readOnly /></label>
-                  <label className="field"><span>Source status</span><input value={selectedCatalogEntry?.source_status ?? ""} readOnly /></label>
-                  <label className="field"><span>Source provenance</span><input value={JSON.stringify(selectedCatalogEntry?.source_provenance ?? {})} readOnly /></label>
-                  <label className="field"><span>Catalog version (model)</span><input value={selectedCatalogEntry?.catalog_version ?? ""} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-catalog-version"><span>Catalog version</span><input value={effectiveCatalog.data?.catalog_version ?? ""} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-models-lock"><span>Models lock</span><input value={effectiveCatalog.data?.models_lock_path ?? ""} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-sources-lock"><span>Sources lock</span><input value={effectiveCatalog.data?.sources_lock_path ?? ""} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-review-path"><span>Review</span><input value={effectiveCatalog.data?.review_path ?? ""} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-source-status"><span>Source status</span><input value={selectedCatalogEntry?.source_status ?? ""} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-source-provenance"><span>Source provenance</span><input value={JSON.stringify(selectedCatalogEntry?.source_provenance ?? {})} readOnly /></label>
+                  <label className="field" data-testid="metadata-model-catalog-version-model"><span>Catalog version (model)</span><input value={selectedCatalogEntry?.catalog_version ?? ""} readOnly /></label>
                 </div>
-                <label className="field"><span>Recommended / defaults / deprecated</span><input value={`recommended=${selectedCatalogEntry?.recommended ? "yes" : "no"} default=${selectedCatalogEntry?.default_for_provider ? "yes" : "no"} deprecated=${selectedCatalogEntry?.deprecated ? "yes" : "no"}`} readOnly /></label>
+                <label className="field" data-testid="metadata-model-recommended-defaults"><span>Recommended / defaults / deprecated</span><input value={`recommended=${selectedCatalogEntry?.recommended ? "yes" : "no"} default=${selectedCatalogEntry?.default_for_provider ? "yes" : "no"} deprecated=${selectedCatalogEntry?.deprecated ? "yes" : "no"}`} readOnly /></label>
               </div>
               <div className="metadata-section">
                 <h4>Effective Codex catalog preview</h4>
@@ -4115,11 +4115,13 @@ function AppShell() {
       queryClient.invalidateQueries({ queryKey: ["project-terminal-history"] });
       queryClient.invalidateQueries({ queryKey: ["project-files-tree"] });
       queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task-conversation"] });
     }
     if (method.startsWith("thread/") || method.startsWith("turn/")) {
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["thread"] });
       queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task-conversation"] });
     }
   }
 
@@ -4487,11 +4489,10 @@ function AppShell() {
 
   const activeThread = taskConversation.data?.thread ?? selectedThread.data?.thread;
   const activeExecutionThread = selectedThread.data?.thread;
-  const eventInspectorFallback = useMemo(() => summarizeCodingEventInspector(activeThread), [activeThread]);
   const taskInspectorEvidence = useMemo(() => summarizeTaskInspectorEvidence(currentTask, activeThread), [activeThread, currentTask]);
   const workflowFacts = useMemo(
-    () => summarizeTaskWorkflowFacts(currentTask, activeExecutionThread ?? null, eventInspectorFallback),
-    [activeExecutionThread, currentTask, eventInspectorFallback],
+    () => summarizeTaskWorkflowFacts(currentTask, activeExecutionThread ?? null, taskInspectorEvidence),
+    [activeExecutionThread, currentTask, taskInspectorEvidence],
   );
   const activeExecutionBackendLabel = workflowFacts.backend === "native_kernel" ? "native kernel" : "app server";
   const activeThreadName = activeThread?.displayName ?? selectedThreadSummary?.displayName ?? "Thread";

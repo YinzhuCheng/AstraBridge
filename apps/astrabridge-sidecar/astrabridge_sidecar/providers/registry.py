@@ -19,11 +19,11 @@ DEFAULT_TOOL_POLICY = ToolPolicy()
 DEEPSEEK_TOOL_POLICY = ToolPolicy(
     supports_mcp_tools=True,
     mcp_tool_call_policy="conservative",
-    mcp_verified_servers=("lcr_web",),
+    mcp_verified_servers=("astrabridge_web",),
     mcp_smoke_status="pass_direct_tool_call",
     mcp_tool_argument_validation="router_repair",
     tool_web_search_support="verified",
-    mcp_web_support="verified_lcr_web",
+    mcp_web_support="verified_astrabridge_web",
     web_smoke_status="pass_direct_tool_call",
     citation_quality="requires_explicit_url_instruction",
 )

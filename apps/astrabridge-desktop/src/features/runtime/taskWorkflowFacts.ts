@@ -30,6 +30,11 @@ export type TaskWorkflowFacts = {
   diagnosticRefs: TaskWorkflowRef[];
 };
 
+export type TaskWorkflowEvidenceSummary = Pick<
+  CodingEventInspectorSummary,
+  "checkpointRefs" | "commandRefs" | "diagnosticRefs"
+>;
+
 function nonEmptyText(value: unknown): string | undefined {
   const text = String(value ?? "").trim();
   return text || undefined;
@@ -189,7 +194,7 @@ function mergedCommandRefs(
 export function summarizeTaskWorkflowFacts(
   task: ProjectTask | null | undefined,
   executionThread: Pick<ShellThread, "shellSettings"> | null | undefined,
-  eventSummary?: Pick<CodingEventInspectorSummary, "checkpointRefs" | "commandRefs" | "diagnosticRefs"> | null,
+  eventSummary?: TaskWorkflowEvidenceSummary | null,
 ): TaskWorkflowFacts {
   const checkpointRefs = mergedCheckpointRefs(task, eventSummary);
   const diagnosticRefs = mergedDiagnosticRefs(task, eventSummary);

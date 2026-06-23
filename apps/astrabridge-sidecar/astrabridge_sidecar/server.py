@@ -703,8 +703,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/router/mcp/preset/yunwu-image":
                 self.send_json(self.context.mcp_config.apply_yunwu_image_preset())
                 return
-            if path in {"/api/router/mcp/preset/lcr-web", "/api/router/mcp/preset/astrabridge-web"}:
+            if path == "/api/router/mcp/preset/lcr-web":
                 self.send_json(self.context.mcp_config.apply_lcr_web_preset())
+                return
+            if path == "/api/router/mcp/preset/astrabridge-web":
+                self.send_json(self.context.mcp_config.apply_astrabridge_web_preset())
                 return
             if path == "/api/router/image/yunwu/test":
                 self.send_json(self.context.yunwu_image.test_connectivity(api_key=self._ephemeral_key(payload)))

@@ -185,7 +185,7 @@ describe("reasoning options", () => {
       },
       supports_mcp_tools: true,
       mcp_tool_call_policy: "conservative",
-      mcp_verified_servers: ["lcr_web"],
+      mcp_verified_servers: ["astrabridge_web"],
       mcp_smoke_status: "pass_direct_tool_call",
       mcp_tool_argument_validation: "router_repair",
       codex_builtin_tools: {
@@ -204,7 +204,7 @@ describe("reasoning options", () => {
         structured_summary_quality: "verified",
       },
       tool_web_search_support: "verified",
-      mcp_web_support: "verified_lcr_web",
+      mcp_web_support: "verified_astrabridge_web",
       web_smoke_status: "pass_direct_tool_call",
       citation_quality: "requires_explicit_url_instruction",
     } satisfies RouterProvider;
@@ -216,7 +216,7 @@ describe("reasoning options", () => {
       default_reasoning_level: "xhigh",
       supports_mcp_tools: true,
       mcp_tool_call_policy: "conservative",
-      mcp_verified_servers: ["lcr_web"],
+      mcp_verified_servers: ["astrabridge_web"],
       mcp_smoke_status: "pass_direct_tool_call",
       mcp_tool_argument_validation: "router_repair",
       codex_builtin_tools: {

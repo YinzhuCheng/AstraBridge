@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { summarizeTaskWorkflowFacts } from "./taskWorkflowFacts";
+import { summarizeTaskInspectorEvidence } from "./taskInspectorEvidence";
 import type { ProjectTask, ShellThread } from "../../types";
 
 function buildTask(overrides: Partial<ProjectTask> = {}): ProjectTask {
@@ -152,5 +153,35 @@ describe("task workflow facts", () => {
     expect(facts.commandCount).toBe(2);
     expect(facts.failedCommandCount).toBe(1);
     expect(facts.recoveredCommandCount).toBe(1);
+  });
+
+  it("accepts task inspector evidence as the single workflow summary input", () => {
+    const task = buildTask({
+      checkpoint_refs: [{ save_id: "save-1", description: "Persisted checkpoint" }],
+      verification_refs: [
+        {
+          event_id: "verify-1",
+          kind: "verification_result",
+          tool: "review_diff",
+          files: ["src/scorecard.py"],
+        },
+      ],
+      diagnostic_refs: [
+        { event_id: "handoff-1", kind: "provider_handoff", provider_id: "kimi", model: "kimi-k2.6", to_thread_id: "thread-2" },
+        { event_id: "cmd-1", kind: "command_execution", command: "python -m unittest", status: "failed" },
+        { event_id: "cmd-2", kind: "command_execution", command: "python -m unittest", status: "completed" },
+      ],
+    });
+    const evidence = summarizeTaskInspectorEvidence(task, { turns: [] });
+    const facts = summarizeTaskWorkflowFacts(task, buildThread("app_server"), evidence);
+
+    expect(facts.laneCount).toBe(1);
+    expect(facts.handoffCount).toBe(1);
+    expect(facts.checkpointCount).toBe(1);
+    expect(facts.commandCount).toBe(2);
+    expect(facts.failedCommandCount).toBe(1);
+    expect(facts.recoveredCommandCount).toBe(1);
+    expect(facts.diagnosticRefs[0]?.kind).toBe("provider_handoff");
+    expect(facts.diagnosticRefs[0]?.summary).toBe("Handoff to kimi kimi-k2.6");
   });
 });

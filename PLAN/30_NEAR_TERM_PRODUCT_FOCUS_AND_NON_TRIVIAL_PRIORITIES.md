@@ -34,7 +34,7 @@ Near-term execution should not optimize for:
 - Completed by sidecar test harness team:
   - Extended browser smoke presets to assert checkpoint/review/diagnostic workflow facts and artifacts (`task-fact-*`, `workflow-fact-*`) rather than only presence of basic app chrome.
   - Added corresponding unit test assertions in `apps/astrabridge-sidecar/tests/test_sidecar_services.py` to lock in the new acceptance expectations.
-- Verified `python -B -m unittest discover -s apps/astrabridge-sidecar/tests -p test_sidecar_services.py` passes (332 tests).
+- Verified `python -B -m unittest discover -s apps/astrabridge-sidecar/tests -p test_sidecar_services.py` passes (335 tests).
 - Verified `cmd /c npm run test` in `apps/astrabridge-desktop` passes (61 tests).
 - Verified `cmd /c npm run build` in `apps/astrabridge-desktop` passes.
 - Follow-up hardening completed on this branch:
@@ -51,18 +51,20 @@ Near-term execution should not optimize for:
 
 ### Execution status snapshot
 
-- **Status:** `Priority 1` is considered complete for this branch, and now enters the repository baseline.
-- **Priority 2 status:** started and on-track. Core provider/profile truth paths are consolidated in:
+- **Priority 1 status:** completed and retired into the repository baseline.
+- **Priority 2 status:** completed in this branch for demoability gates. Core provider/profile truth paths are consolidated in:
   - `astrabridge_sidecar/model_catalog/catalog.py` (`known_*` no legacy model-name heuristics)
   - `astrabridge_sidecar/router_service.py` / `astrabridge_sidecar/router_config_service.py` (`provider_family` required for implicit profile inheritance)
   - `astrabridge_sidecar/llm_api_manager_service.py` (`web_smoke` source URL now catalog-driven)
   - `astrabridge_sidecar/tests/test_sidecar_services.py` (provider_family regression guard)
 
-What remains before calling Priority 2 complete:
+Priority 2 hardening gap completed (2026-06-23): single-truth catalog/metadata/health consistency and explicit user-facing metadata model panel checks are now in place.
 
-1. ~~remove any remaining public paths that still document or expose legacy `lcr_*` model sources (if any) outside compatibility-only tooling names;~~ (checked: generation notes and metadata model provenance now avoid `lcr_*` in exposed status payloads)
-2. complete one more router/metadata smoke pass using generated catalog source/status as the single truth;
-3. add a short, user-visible acceptance check that provider-truth fields appear in metadata model panel. (in progress: runtime metadata panel now shows catalog version, lock paths, source provenance, source status; remaining is explicit regression lock-in)
+- **Priority 3 status:** completed in this branch for visible workflow semantics.
+  - `astrabridge_sidecar/task_conversation_service.py` keeps one canonical visible task conversation with event-only handoff turns.
+  - `astrabridge_sidecar/task_service.py` persists checkpoint / verification / diagnostic refs derived from coding events.
+  - `apps/astrabridge-desktop/src/features/runtime/taskInspectorEvidence.ts` and `taskWorkflowFacts.ts` now provide one shared event-derived evidence path for review/files/terminal/workflow facts.
+  - `apps/astrabridge-desktop/src/App.tsx` now refreshes `task-conversation` together with runtime thread/turn/supervisor updates, so the visible task chat stays aligned with provider handoffs.
 
 ## 1.2 Execution Focus Guidance
 
@@ -73,30 +75,9 @@ What remains before calling Priority 2 complete:
 
 ## 2. Ranked Priorities
 
-## Priority 1: Isolation Boundary Hardening
+## ~~Priority 2: ProviderProfile Plus Generated Catalog As The Only Truth~~
 
-This is the highest-value immediate priority.
-
-Reason:
-
-- Recent repository pollution proved that shared repo roots, shared output roots, shared caches, and unrelated experiment artifacts can directly make the product unreliable.
-- A coding app that cannot keep task artifacts, downloads, caches, and generated outputs inside the correct boundaries is not yet a dependable app.
-
-What this priority includes:
-
-1. define default roots for task artifacts, generated outputs, model caches, downloads, and temporary files
-2. ensure unrelated tasks do not write into the main repo tree by default
-3. ensure high-risk or high-volume workflows use isolated artifact roots or worktrees
-4. ensure repo-facing Git operations cannot silently absorb large local experiment outputs
-5. make the product's "safe default storage model" explicit in code and docs
-
-What "done enough" looks like:
-
-1. a new coding task cannot accidentally pollute the repo with large non-source artifacts
-2. browser/demo tasks, model-cache tasks, and experimental tasks have clear separate roots
-3. the product can survive multiple concurrent tasks without cross-contamination
-
-## Priority 2: ProviderProfile Plus Generated Catalog As The Only Truth
+Completed on this branch. This is now repository baseline, not an active near-term slice.
 
 This is the most important architecture consolidation after isolation.
 
@@ -118,7 +99,9 @@ What "done enough" looks like:
 2. desktop and sidecar stop carrying shadow logic for the same provider facts
 3. adding a provider family no longer requires broad if-else edits
 
-## Priority 3: CodingEvent Contract Unification
+## ~~Priority 3: CodingEvent Contract Unification~~
+
+Completed on this branch. This is now repository baseline, not an active near-term slice.
 
 This is the most important product-shaping priority.
 
@@ -224,13 +207,12 @@ then it should normally be deferred.
 
 If only one major slice is chosen next, choose:
 
-**Isolation Boundary Hardening**
+**One Release-Grade End-To-End Coding Workflow**
 
 If two slices are chosen next, choose:
 
-1. Isolation Boundary Hardening
-2. ProviderProfile Plus Generated Catalog Single-Truth Consolidation
-
+1. One Release-Grade End-to-End Coding Workflow
+2. Minimal Native Kernel Cut scoped to the same event contract
 That pair most directly moves AstraBridge from "promising demo" to "dependable internal app."
 
 ## 6. Near-term Execution Slices
@@ -240,9 +222,14 @@ That pair most directly moves AstraBridge from "promising demo" to "dependable i
     - keep `lcr_*` usage only in explicit compatibility aliases,
     - complete one metadata/health smoke validation against generated catalog records,
     - keep desktop status and model panels aligned to provider-family derived fields.
+  - Slice A status: completed (metadata provenance regression + smoke acceptance hooks landed).
 
-- Slice B:
+- Slice B (immediate):
   - complete Priority 3 visible event-contract pass around task/thread evidence and handoff rows.
+  - Slice B status: completed (composite task conversation refresh + shared inspector evidence path landed).
 
-- Slice C:
+- Slice C (immediate):
   - keep Priority 4 release-style end-to-end workflow as the readiness gate before broader expansion.
+
+- Slice D:
+  - keep Priority 5 native-kernel cut narrow and only after Priority 4 acceptance is repeatable.
