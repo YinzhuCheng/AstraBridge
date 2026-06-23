@@ -35,6 +35,7 @@ MANAGED_STATE_DIRS = (
     "caches",
     "reviews",
     "tmp",
+    "runtime-cwd",
 )
 MANAGED_STATE_FILES = (
     "runtime_events.jsonl",

@@ -572,6 +572,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue((workspace / ".astrabridge" / "downloads").exists())
             self.assertTrue((workspace / ".astrabridge" / "caches").exists())
             self.assertTrue((workspace / ".astrabridge" / "reviews").exists())
+            self.assertTrue((workspace / ".astrabridge" / "runtime-cwd").exists())
             self.assertTrue((workspace / ".astrabridge" / "runtime_events.jsonl").exists())
             storage_policy = json.loads((workspace / ".astrabridge" / "storage_policy.json").read_text(encoding="utf-8"))
             self.assertEqual(storage_policy["schema_version"], "astrabridge-storage-policy-v1")

@@ -259,9 +259,9 @@ if [ -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict ]; then
   sudo install -m 0644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/bwrap-userns-restrict || true
   sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict || true
 fi
-export LCR_ROOT="$HOME/.local/share/astrabridge"
-export CODEX_HOME="$LCR_ROOT/codex-home"
-export CODEX_INSTALL_DIR="$LCR_ROOT/bin"
+export ASTRABRIDGE_WSL_ROOT="$HOME/.local/share/astrabridge"
+export CODEX_HOME="$ASTRABRIDGE_WSL_ROOT/codex-home"
+export CODEX_INSTALL_DIR="$ASTRABRIDGE_WSL_ROOT/bin"
 mkdir -p "$CODEX_HOME" "$CODEX_INSTALL_DIR"
 echo "[AstraBridge] Installing Codex CLI into $CODEX_INSTALL_DIR"
 curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 CODEX_HOME="$CODEX_HOME" CODEX_INSTALL_DIR="$CODEX_INSTALL_DIR" sh
