@@ -38,6 +38,7 @@ Near-term execution should not optimize for:
   - Verified `cmd /c npm run test` in `apps/astrabridge-desktop` passes (61 tests).
 - Follow-up hardening completed on this branch:
   - Removed heuristic fallback logic in `astrabridge_sidecar/model_catalog/catalog.py` from `known_context_window()` and `known_input_modalities()`, so catalog/profile-derived facts now take precedence.
+  - Removed provider-name prefix hardcoding from `apps/astrabridge-desktop/src/App.tsx` for active model provider inference; Composer now prefers explicit model metadata.
   - Added regression test to ensure each new `.abproj` gets an isolated runtime bundle root, with independent `project_runtime_root` and `codex_home_root` values under appdata runtime.
   - Reworked storage policy documentation in `docs/SECURITY_AND_ISOLATION.md` to make the default isolation model explicit (workspace state roots vs runtime roots vs injected launch env vars).
   - Reasserted router normalization test resilience (provider-error actionable hint can route to auth/connectivity/context hints instead of a single phrase).
