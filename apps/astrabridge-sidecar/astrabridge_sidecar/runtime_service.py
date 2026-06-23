@@ -2279,6 +2279,11 @@ class RuntimeService:
                 workspace_root = self._projects.require_workspace_root()
                 env["ASTRABRIDGE_WORKSPACE_ROOT"] = str(workspace_root)
                 env["ASTRABRIDGE_ASSET_ROOT"] = str(workspace_root / WORKSPACE_STATE_DIRNAME / "assets" / "generated")
+                runtime_roots = self._projects.current_runtime_roots()
+                env["ASTRABRIDGE_PROJECT_RUNTIME_ROOT"] = str(runtime_roots["project_runtime_root"])
+                env["ASTRABRIDGE_DOWNLOADS_ROOT"] = str(runtime_roots["downloads_root"])
+                env["ASTRABRIDGE_CACHES_ROOT"] = str(runtime_roots["caches_root"])
+                env["ASTRABRIDGE_TMP_ROOT"] = str(runtime_roots["tmp_root"])
             except Exception:
                 pass
             client = AppServerClient(
@@ -3371,6 +3376,15 @@ for host in candidates:
             values["ASTRABRIDGE_ASSET_ROOT"] = str(asset_root)
             values["ASTRABRIDGE_WORKSPACE_ROOT_WSL"] = self._windows_path_to_wsl(workspace_root)
             values["ASTRABRIDGE_ASSET_ROOT_WSL"] = self._windows_path_to_wsl(asset_root)
+            runtime_roots = self._projects.current_runtime_roots()
+            values["ASTRABRIDGE_PROJECT_RUNTIME_ROOT"] = str(runtime_roots["project_runtime_root"])
+            values["ASTRABRIDGE_DOWNLOADS_ROOT"] = str(runtime_roots["downloads_root"])
+            values["ASTRABRIDGE_CACHES_ROOT"] = str(runtime_roots["caches_root"])
+            values["ASTRABRIDGE_TMP_ROOT"] = str(runtime_roots["tmp_root"])
+            values["ASTRABRIDGE_PROJECT_RUNTIME_ROOT_WSL"] = self._windows_path_to_wsl(runtime_roots["project_runtime_root"])
+            values["ASTRABRIDGE_DOWNLOADS_ROOT_WSL"] = self._windows_path_to_wsl(runtime_roots["downloads_root"])
+            values["ASTRABRIDGE_CACHES_ROOT_WSL"] = self._windows_path_to_wsl(runtime_roots["caches_root"])
+            values["ASTRABRIDGE_TMP_ROOT_WSL"] = self._windows_path_to_wsl(runtime_roots["tmp_root"])
         except Exception:
             pass
         env_key = str(runtime_status.get("env_key") or "")

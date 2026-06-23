@@ -22,6 +22,7 @@ from .model_catalog import (
     default_seed_models,
     default_seed_providers,
     effective_model_records,
+    known_context_window,
 )
 
 
@@ -488,8 +489,14 @@ def _provider_seed(provider: dict[str, Any]) -> dict[str, Any]:
 
 
 def _model_seed(model: dict[str, Any]) -> dict[str, Any]:
-    provider = str(model.get("provider") or "")
-    native = str(model.get("native_model") or "")
+    provider = str(model.get("provider") or model.get("provider_id") or "").strip()
+    native = str(model.get("native_model") or "").strip()
+    if not provider and "/" in str(model.get("id") or ""):
+        provider = str(model.get("id") or "").split("/", 1)[0]
+    if not native and "/" in str(model.get("id") or ""):
+        parts = str(model.get("id") or "").split("/", 1)
+        if len(parts) == 2:
+            native = parts[1]
     context_window = int(model.get("advertised_context_window") or known_context_window(provider, native) or 128_000)
     return {
         "enabled": True,

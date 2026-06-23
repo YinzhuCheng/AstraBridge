@@ -51,7 +51,7 @@ from astrabridge_sidecar.isolation_audit_service import IsolationAuditService
 from astrabridge_sidecar.llm_api_manager_service import LlmApiManagerService
 from astrabridge_sidecar.lcr_web_service import LcrWebService
 from astrabridge_sidecar.lcr_web_mcp_server import _tools as lcr_web_mcp_tools
-from astrabridge_sidecar.metadata_service import MetadataService
+from astrabridge_sidecar.metadata_service import MetadataService, _model_seed
 from astrabridge_sidecar.mcp_config_service import McpConfigService
 from astrabridge_sidecar.model_catalog import (
     default_seed_models,
@@ -2627,6 +2627,61 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     for event in runtime.list_events()["events"]
                 )
             )
+
+    def test_runtime_ensure_client_injects_isolated_runtime_env(self) -> None:
+        class FakeRuntimeConfig:
+            def prepare_profile(self, profile: dict[str, object], *, require_secret: bool) -> dict[str, object]:  # noqa: ARG002
+                return {"profile_id": profile.get("profile_id"), "provider_id": profile.get("provider_id")}
+
+            def runtime_signature(self, status: dict[str, object]) -> tuple[object, ...]:
+                return (status.get("provider_id"),)
+
+        class FakeAppServerClient:
+            instances: list["FakeAppServerClient"] = []
+
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+                self.started = False
+                self.closed = False
+                FakeAppServerClient.instances.append(self)
+
+            def start(self) -> None:
+                self.started = True
+
+            def is_running(self) -> bool:
+                return self.started and not self.closed
+
+            def close(self) -> None:
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                runtime_config=FakeRuntimeConfig(),  # type: ignore[arg-type]
+            )
+            runtime._resolve_launch_target = lambda _status: {  # type: ignore[method-assign]
+                "codex_executable": "codex",
+                "launch_command": ["codex"],
+                "cwd": workspace,
+                "env_updates": {},
+            }
+
+            with patch.object(runtime_service_module, "AppServerClient", FakeAppServerClient):
+                runtime._ensure_client({"provider_id": "deepseek"})
+
+            runtime_client = FakeAppServerClient.instances[-1]
+            runtime_env = dict(runtime_client.kwargs.get("env") or {})
+            runtime_roots = projects.current_runtime_roots()
+            self.assertEqual(runtime_env["ASTRABRIDGE_PROJECT_RUNTIME_ROOT"], str(runtime_roots["project_runtime_root"]))
+            self.assertEqual(runtime_env["ASTRABRIDGE_DOWNLOADS_ROOT"], str(runtime_roots["downloads_root"]))
+            self.assertEqual(runtime_env["ASTRABRIDGE_CACHES_ROOT"], str(runtime_roots["caches_root"]))
+            self.assertEqual(runtime_env["ASTRABRIDGE_TMP_ROOT"], str(runtime_roots["tmp_root"]))
 
     def test_runtime_thread_list_defers_provider_switch_while_turn_runtime_is_pinned(self) -> None:
         class FakeRuntimeConfig:
@@ -10085,16 +10140,41 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 self.assertIn('YUNWU_API_KEY="${YUNWU_API_KEY:-}"', joined_launch)
                 self.assertIn('ASTRABRIDGE_WORKSPACE_ROOT="${ASTRABRIDGE_WORKSPACE_ROOT:-}"', joined_launch)
                 self.assertIn('ASTRABRIDGE_WORKSPACE_ROOT_WSL="${ASTRABRIDGE_WORKSPACE_ROOT_WSL:-}"', joined_launch)
+                self.assertIn("ASTRABRIDGE_PROJECT_RUNTIME_ROOT=\"${ASTRABRIDGE_PROJECT_RUNTIME_ROOT:-}\"", joined_launch)
+                self.assertIn("ASTRABRIDGE_PROJECT_RUNTIME_ROOT_WSL=\"${ASTRABRIDGE_PROJECT_RUNTIME_ROOT_WSL:-}\"", joined_launch)
+                self.assertIn("ASTRABRIDGE_DOWNLOADS_ROOT=\"${ASTRABRIDGE_DOWNLOADS_ROOT:-}\"", joined_launch)
+                self.assertIn("ASTRABRIDGE_DOWNLOADS_ROOT_WSL=\"${ASTRABRIDGE_DOWNLOADS_ROOT_WSL:-}\"", joined_launch)
+                self.assertIn("ASTRABRIDGE_CACHES_ROOT=\"${ASTRABRIDGE_CACHES_ROOT:-}\"", joined_launch)
+                self.assertIn("ASTRABRIDGE_CACHES_ROOT_WSL=\"${ASTRABRIDGE_CACHES_ROOT_WSL:-}\"", joined_launch)
+                self.assertIn("ASTRABRIDGE_TMP_ROOT=\"${ASTRABRIDGE_TMP_ROOT:-}\"", joined_launch)
+                self.assertIn("ASTRABRIDGE_TMP_ROOT_WSL=\"${ASTRABRIDGE_TMP_ROOT_WSL:-}\"", joined_launch)
                 self.assertNotIn("router-token-for-wsl-test", joined_launch)
                 self.assertNotIn("yunwu-token-for-wsl-test", joined_launch)
                 self.assertEqual(target["env_updates"]["CODEX_ROUTER_API_KEY"], "router-token-for-wsl-test")
                 self.assertEqual(target["env_updates"]["YUNWU_API_KEY"], "yunwu-token-for-wsl-test")
                 self.assertEqual(target["env_updates"]["ASTRABRIDGE_WORKSPACE_ROOT"], str(workspace))
+                runtime_roots = project.current_runtime_roots()
+                self.assertEqual(target["env_updates"]["ASTRABRIDGE_PROJECT_RUNTIME_ROOT"], str(runtime_roots["project_runtime_root"]))
+                self.assertEqual(target["env_updates"]["ASTRABRIDGE_DOWNLOADS_ROOT"], str(runtime_roots["downloads_root"]))
+                self.assertEqual(target["env_updates"]["ASTRABRIDGE_CACHES_ROOT"], str(runtime_roots["caches_root"]))
+                self.assertEqual(target["env_updates"]["ASTRABRIDGE_TMP_ROOT"], str(runtime_roots["tmp_root"]))
                 self.assertTrue(str(target["env_updates"]["ASTRABRIDGE_WORKSPACE_ROOT_WSL"]).startswith("/mnt/"))
+                self.assertTrue(str(target["env_updates"]["ASTRABRIDGE_PROJECT_RUNTIME_ROOT_WSL"]).startswith("/mnt/"))
+                self.assertTrue(str(target["env_updates"]["ASTRABRIDGE_DOWNLOADS_ROOT_WSL"]).startswith("/mnt/"))
+                self.assertTrue(str(target["env_updates"]["ASTRABRIDGE_CACHES_ROOT_WSL"]).startswith("/mnt/"))
+                self.assertTrue(str(target["env_updates"]["ASTRABRIDGE_TMP_ROOT_WSL"]).startswith("/mnt/"))
                 self.assertIn("CODEX_ROUTER_API_KEY", target["env_updates"]["WSLENV"])
                 self.assertIn("YUNWU_API_KEY", target["env_updates"]["WSLENV"])
                 self.assertIn("ASTRABRIDGE_WORKSPACE_ROOT", target["env_updates"]["WSLENV"])
                 self.assertIn("ASTRABRIDGE_WORKSPACE_ROOT_WSL", target["env_updates"]["WSLENV"])
+                self.assertIn("ASTRABRIDGE_PROJECT_RUNTIME_ROOT", target["env_updates"]["WSLENV"])
+                self.assertIn("ASTRABRIDGE_PROJECT_RUNTIME_ROOT_WSL", target["env_updates"]["WSLENV"])
+                self.assertIn("ASTRABRIDGE_DOWNLOADS_ROOT", target["env_updates"]["WSLENV"])
+                self.assertIn("ASTRABRIDGE_DOWNLOADS_ROOT_WSL", target["env_updates"]["WSLENV"])
+                self.assertIn("ASTRABRIDGE_CACHES_ROOT", target["env_updates"]["WSLENV"])
+                self.assertIn("ASTRABRIDGE_CACHES_ROOT_WSL", target["env_updates"]["WSLENV"])
+                self.assertIn("ASTRABRIDGE_TMP_ROOT", target["env_updates"]["WSLENV"])
+                self.assertIn("ASTRABRIDGE_TMP_ROOT_WSL", target["env_updates"]["WSLENV"])
                 self.assertIn("/home/demo/.local/share/astrabridge/bin/codex app-server", joined_launch)
             finally:
                 if original_router_token is None:
@@ -13008,6 +13088,16 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(known_reasoning_efforts("deepseek", "deepseek-v4-pro"), ["high", "xhigh", "max"])
         self.assertEqual(known_input_modalities("glm", "glm-5.2"), ["text", "image"])
         self.assertEqual(known_context_window("qwen", "qwen3.7-plus"), 1_000_000)
+
+    def test_model_seed_uses_known_context_window_fallback_when_missing(self) -> None:
+        model = _model_seed(
+            {
+                "id": "qwen/qwen3.7-plus",
+                "provider": "qwen",
+                "native_model": "qwen3.7-plus",
+            }
+        )
+        self.assertEqual(model["advertised_context_window"], known_context_window("qwen", "qwen3.7-plus"))
 
     def test_effective_model_records_merge_generated_and_configured_overrides_and_extras(self) -> None:
         configured = [
