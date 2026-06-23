@@ -2608,7 +2608,7 @@ function RouterControlCenter({
                     onClick={() => setDogfoodDraft({
                       ...activeDogfood,
                       enabled: true,
-                      phase: "lcr_autonomy_hardening",
+                      phase: "astrabridge_autonomy_hardening",
                       status: "running",
                       goal: activeDogfood.goal || "Build a playable original anime magical-girl tower game while evaluating AstraBridge autonomy.",
                       current_provider: activeDogfood.current_provider || "deepseek",

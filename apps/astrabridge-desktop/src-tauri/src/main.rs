@@ -44,7 +44,7 @@ fn sidecar_locations(app: &tauri::App) -> Option<(PathBuf, PathBuf)> {
 }
 
 #[cfg(windows)]
-fn stop_existing_lcr_sidecar_on_port() {
+fn stop_existing_astrabridge_sidecar_on_port() {
     let script = format!(
         r#"$ErrorActionPreference = 'SilentlyContinue';
 $conn = Get-NetTCPConnection -LocalPort {port} -State Listen | Select-Object -First 1;
@@ -70,10 +70,10 @@ if ($conn) {{
 }
 
 #[cfg(not(windows))]
-fn stop_existing_lcr_sidecar_on_port() {}
+fn stop_existing_astrabridge_sidecar_on_port() {}
 
 fn spawn_sidecar(app: &tauri::App) -> Option<Child> {
-    stop_existing_lcr_sidecar_on_port();
+    stop_existing_astrabridge_sidecar_on_port();
     let (sidecar, seed_root) = sidecar_locations(app)?;
     if !sidecar.exists() {
         eprintln!("AstraBridge sidecar was not found: {}", sidecar.display());
