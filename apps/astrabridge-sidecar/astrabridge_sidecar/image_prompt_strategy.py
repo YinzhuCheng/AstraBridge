@@ -347,7 +347,7 @@ def _fit_prompt_with_suffix(base_prompt: str, suffix: str, *, max_length: int) -
 def prompt_guides_payload() -> dict[str, Any]:
     return {
         "schema_version": 3,
-        "default_rewrite_model": "kimi/kimi-k2.6",
+        "default_rewrite_model": "kimi/kimi-k2.7-code",
         "fallback_rewrite_model": "deepseek/deepseek-v4-pro",
         "max_yunwu_prompt_chars": 1000,
         "rewrite_policy": {

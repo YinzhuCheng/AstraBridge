@@ -3,6 +3,7 @@
 AstraBridge is a product split from the Research OS Local Codex Router prototype. Keep the product independent and do not rely on Research OS project state.
 
 - Do not store API keys, bearer tokens, cookies, auth headers, or provider raw secrets in git, project files, reports, or logs.
+- In any commit/push path, ensure no secrets are logged, printed, persisted, or staged; run a quick secret scan before pushing and exclude any raw secret-bearing artifacts.
 - New projects use `.abproj` and workspace-local `.astrabridge/` state only.
 - Legacy `.lcrproj/.lcr` may be imported explicitly; do not create them for new projects.
 - Do not write official Codex `~/.codex/config.toml` or project `.codex*` files during normal use.

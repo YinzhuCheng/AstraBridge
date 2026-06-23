@@ -20,6 +20,7 @@ from .common import (
     write_json,
 )
 from .profile_service import ProfileService
+from .model_catalog import preferred_provider_model_record
 from .wsl_dependency_service import DEFAULT_WSL_DISTRO, ASTRABRIDGE_WSL_CODEX_HOME, ASTRABRIDGE_WSL_ROOT
 
 
@@ -42,6 +43,9 @@ MANAGED_STATE_FILES = (
     "ui_state.json",
 )
 STORAGE_POLICY_SCHEMA_VERSION = "astrabridge-storage-policy-v1"
+_OPENAI_DEFAULT_MODEL = str(
+    (preferred_provider_model_record("openai", include_deprecated=False) or {}).get("native_model") or "gpt-5.5"
+)
 
 
 class ProjectService:
@@ -85,7 +89,7 @@ class ProjectService:
             "workspace_root": str(resolved_workspace),
             "entry_mode": entry_mode,
             "default_profile_id": "openai-compatible",
-            "default_model": "gpt-5.5",
+            "default_model": _OPENAI_DEFAULT_MODEL,
             "default_effort": "high",
             "current_thread_id": None,
             "recent_threads": [],
@@ -608,7 +612,7 @@ class ProjectService:
         requested_effort = self._normalize_reasoning_effort(merged.get("default_effort"))
         profile_effort = self._normalize_reasoning_effort(profile.get("reasoning_effort"))
         merged["default_profile_id"] = default_profile_id
-        merged["default_model"] = requested_model or profile_model or "gpt-5.5"
+        merged["default_model"] = requested_model or profile_model or self._default_provider_model(provider_id)
         merged["default_effort"] = requested_effort or profile_effort or "high"
         return merged
 
@@ -623,9 +627,15 @@ class ProjectService:
                 return {
                     "profile_id": fallback_profile_id,
                     "provider_id": "openai",
-                    "model": "gpt-5.5",
+                    "model": _OPENAI_DEFAULT_MODEL,
                     "reasoning_effort": "high",
                 }
+
+    @staticmethod
+    def _default_provider_model(provider_id: str) -> str:
+        provider = str(provider_id or "openai").strip() or "openai"
+        preferred_model = (preferred_provider_model_record(provider, include_deprecated=False) or {}).get("native_model")
+        return str(preferred_model or _OPENAI_DEFAULT_MODEL).strip() or _OPENAI_DEFAULT_MODEL
 
     def _normalize_native_model(self, value: Any, provider_id: str) -> str:
         model = str(value or "").strip()

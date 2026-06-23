@@ -6,8 +6,9 @@ Last updated: 2026-06-22
 
 Related documents:
 
-- [14_PROVIDER_NEUTRAL_CODING_RUNTIME_ROADMAP.md](D:/AstraBridge/PLAN/14_PROVIDER_NEUTRAL_CODING_RUNTIME_ROADMAP.md)
-- [29_HERMES_SUGGESTION_CANONICAL_PRODUCT_UPGRADE_MASTER_EXECUTION_GUIDE.md](D:/AstraBridge/PLAN/29_HERMES_SUGGESTION_CANONICAL_PRODUCT_UPGRADE_MASTER_EXECUTION_GUIDE.md)
+- Current active tracking for this branch is this plan itself and:
+- [HANDOFF.md](/D:/AstraBridge/HANDOFF.md)
+- [README.md](/D:/AstraBridge/README.md)
 
 ## 1. Current Judgment
 

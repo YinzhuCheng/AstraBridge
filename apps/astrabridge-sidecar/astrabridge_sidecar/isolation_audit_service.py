@@ -88,6 +88,12 @@ class IsolationAuditService:
                     str(storage_policy),
                 )
             )
+            checks.extend(
+                _storage_policy_runtime_roots_outside_workspace_checks(
+                    storage_policy_payload,
+                    workspace,
+                )
+            )
             checks.append(
                 _check(
                     "workspace_git_repo_excludes_astrabridge_state",
@@ -269,8 +275,24 @@ def _storage_policy_runtime_path_matches(payload: dict[str, Any] | None, key: st
         return False
 
 
-def _storage_policy_runtime_root_outside_workspace(payload: dict[str, Any] | None, workspace: Path) -> bool:
-    expected = _storage_policy_runtime_path(payload, "project_runtime_root")
+def _storage_policy_runtime_roots_outside_workspace_checks(
+    payload: dict[str, Any] | None,
+    workspace: Path,
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    for key in ("project_runtime_root", "downloads_root", "caches_root", "tmp_root"):
+        checks.append(
+            _check(
+                f"workspace_storage_policy_{key}_outside_workspace",
+                _storage_policy_runtime_root_outside_workspace(payload, workspace, key=key),
+                str(payload.get("runtime", {}).get(key, "")) if isinstance(payload, dict) else None,
+            )
+        )
+    return checks
+
+
+def _storage_policy_runtime_root_outside_workspace(payload: dict[str, Any] | None, workspace: Path, *, key: str = "project_runtime_root") -> bool:
+    expected = _storage_policy_runtime_path(payload, key)
     if not expected:
         return False
     try:

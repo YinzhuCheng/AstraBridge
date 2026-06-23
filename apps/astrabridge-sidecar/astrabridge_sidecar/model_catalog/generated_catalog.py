@@ -201,7 +201,7 @@ def default_seed_models() -> list[dict[str, Any]]:
             "kimi-k2.7-code",
             "Kimi K2.7 Code",
             recommended=True,
-            default_for_provider=False,
+            default_for_provider=True,
             modality_limits={
                 "image_transport": "chat_completions_base64_image_url",
                 "remote_image_url_supported": False,
@@ -216,7 +216,7 @@ def default_seed_models() -> list[dict[str, Any]]:
             "kimi",
             "kimi-k2.6",
             "Kimi K2.6",
-            default_for_provider=True,
+            default_for_provider=False,
             input_modalities=["text", "image", "video"],
             modality_limits={
                 "image_transport": "chat_completions_base64_image_url",

@@ -20,3 +20,12 @@ Projects use `.abproj` and workspace-local `.astrabridge/` state. Legacy LCR and
 ## Private Credentials
 
 AstraBridge supports provider keys as private operator-owned material. The repo includes `PRIVATE/README.md` to document local-only paths, while `PRIVATE/**` is ignored by git. Do not push real API keys or `Authorization` headers to a public remote.
+
+## Current Operator Baseline
+
+Use these docs as the current product path:
+
+- [Demo Runbook](/D:/AstraBridge/docs/DEMO_RUNBOOK.md)
+- [Security And Isolation](/D:/AstraBridge/docs/SECURITY_AND_ISOLATION.md)
+- [Release Checklist](/D:/AstraBridge/docs/RELEASE_CHECKLIST.md)
+- [Planning Baseline](/D:/AstraBridge/PLAN/30_NEAR_TERM_PRODUCT_FOCUS_AND_NON_TRIVIAL_PRIORITIES.md)

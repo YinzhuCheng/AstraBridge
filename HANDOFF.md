@@ -65,6 +65,13 @@ AstraBridge can point developers to local private-property credential locations,
 - Store durable provider keys in the encrypted app vault when possible: `%APPDATA%/AstraBridge/llm_api_manager/users/<username>/vault.abvault`.
 - Use environment variables for automation or CI-like local runs.
 - Never push `PRIVATE/secrets/`, real provider keys, `Authorization` headers, cookies, bearer tokens, or raw provider responses to a public remote.
-## Next required document
+## Current operator baseline
 
-Before feature work resumes, follow `PLAN/02_PRODUCT_STABILIZATION_HANDOFF.md`. It is the stabilization gate for tests, build, installer, secret handling, and product UI backlog.
+The old stabilization handoff is no longer the only useful planning entrypoint. Current operators should use these as the active baseline:
+
+- [PLAN/30_NEAR_TERM_PRODUCT_FOCUS_AND_NON_TRIVIAL_PRIORITIES.md](/D:/AstraBridge/PLAN/30_NEAR_TERM_PRODUCT_FOCUS_AND_NON_TRIVIAL_PRIORITIES.md)
+- [docs/DEMO_RUNBOOK.md](/D:/AstraBridge/docs/DEMO_RUNBOOK.md)
+- [docs/SECURITY_AND_ISOLATION.md](/D:/AstraBridge/docs/SECURITY_AND_ISOLATION.md)
+- [docs/RELEASE_CHECKLIST.md](/D:/AstraBridge/docs/RELEASE_CHECKLIST.md)
+
+`PLAN/02_PRODUCT_STABILIZATION_HANDOFF.md` remains useful as historical context, but it is no longer the main operator handoff for product-ready work.

@@ -8,6 +8,7 @@ from typing import Any
 
 from .common import app_data_dir, now_iso, write_json
 from .model_catalog import catalog_entry_from_record, effective_model_records, known_context_window, model_catalog_entry
+from .model_catalog import preferred_provider_model_record
 
 
 MANAGED_BLOCK_START = "# BEGIN LOCAL CODEX ROUTER MANAGED BLOCK"
@@ -106,6 +107,10 @@ class OfficialCodexService:
         return target
 
     def _default_router_model(self) -> str:
+        preferred = preferred_provider_model_record("openai", include_deprecated=False)
+        native_model = str((preferred or {}).get("native_model") or "").strip()
+        if native_model:
+            return f"openai/{native_model}"
         if self._router_config is not None:
             for model in self._router_config.models():
                 if model.get("enabled", True):

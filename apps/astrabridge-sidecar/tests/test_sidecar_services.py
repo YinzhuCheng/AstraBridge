@@ -10486,6 +10486,54 @@ class AstraBridgeServiceTests(unittest.TestCase):
             else:
                 os.environ["ASTRABRIDGE_APPDATA"] = original_appdata
 
+    def test_isolation_audit_flags_runtime_roots_inside_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            init = subprocess.run(["git", "init"], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+            if init.returncode != 0:
+                self.skipTest("git is not available")
+            workspace = root / "PRIVATE" / "demo" / "workspace"
+            workspace.mkdir(parents=True)
+            project_service = ProjectService(root / "projects.json")
+            project = project_service.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+
+            storage_policy_path = workspace / ".astrabridge" / "storage_policy.json"
+            storage_policy = json.loads(storage_policy_path.read_text(encoding="utf-8"))
+            storage_policy["runtime"]["downloads_root"] = str(workspace / "workspace_downloads")
+            storage_policy["runtime"]["caches_root"] = str(workspace / "workspace_caches")
+            storage_policy["runtime"]["tmp_root"] = str(workspace / "workspace_tmp")
+            storage_policy_path.write_text(json.dumps(storage_policy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            (workspace / "workspace_downloads").mkdir(exist_ok=True)
+            (workspace / "workspace_caches").mkdir(exist_ok=True)
+            (workspace / "workspace_tmp").mkdir(exist_ok=True)
+            codex_home = Path(storage_policy["runtime"]["codex_home_root"])
+            codex_home.mkdir(parents=True, exist_ok=True)
+            (codex_home / "config.toml").write_text("model = \"deepseek/deepseek-v4-pro\"\n", encoding="utf-8")
+
+            audit = IsolationAuditService().snapshot(
+                current_project=project,
+                runtime_environment={
+                    "running": False,
+                    "codex_cli": "codex",
+                    "execution_host": "windows",
+                    "runtime_config": {"codex_home": str(codex_home)},
+                },
+                router_status={"listen_port": 8787, "base_url": "http://127.0.0.1:8787/v1"},
+                official_codex_status={"config_path": str(root / ".codex" / "config.toml"), "exists": False, "managed_by_app": False, "router_configured": False},
+                sidecar_port=8790,
+            )
+
+            checks = {item["name"]: item for item in audit["checks"]}
+            self.assertFalse(audit["ok"])
+            self.assertFalse(checks["workspace_storage_policy_downloads_root_outside_workspace"]["ok"])
+            self.assertFalse(checks["workspace_storage_policy_caches_root_outside_workspace"]["ok"])
+            self.assertFalse(checks["workspace_storage_policy_tmp_root_outside_workspace"]["ok"])
+
+            self.assertEqual(checks["workspace_storage_policy_downloads_root_outside_workspace"]["detail"], str(workspace / "workspace_downloads"))
+            self.assertEqual(checks["workspace_storage_policy_caches_root_outside_workspace"]["detail"], str(workspace / "workspace_caches"))
+            self.assertEqual(checks["workspace_storage_policy_tmp_root_outside_workspace"]["detail"], str(workspace / "workspace_tmp"))
+
     def test_isolation_audit_flags_missing_parent_git_exclude_for_workspace_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

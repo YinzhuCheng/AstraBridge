@@ -246,7 +246,7 @@ class RuntimeConfigService:
             raise SecurityError("env_key must be a valid environment variable name.")
         proxy_mode, proxy_url = self._normalize_proxy(profile)
         preferred_model = preferred_provider_model_record(provider_id, include_deprecated=False)
-        model = str(profile.get("model") or (preferred_model or {}).get("native_model") or "gpt-5").strip()
+        model = str(profile.get("model") or (preferred_model or {}).get("native_model") or "gpt-5.5").strip()
         if not model:
             raise SecurityError("model is required.")
         configured_models = self._configured_models_resolver() if self._configured_models_resolver is not None else None

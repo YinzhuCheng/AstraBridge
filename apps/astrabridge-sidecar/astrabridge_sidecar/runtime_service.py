@@ -24,7 +24,11 @@ from .lcr_web_mcp_server import _tools as lcr_web_dynamic_tools
 from .lcr_web_service import LcrWebService
 from .mcp_config_service import McpConfigService
 from .modal_service import ModalService
-from .model_catalog import ASTRABRIDGE_MODEL_CATALOG_FILENAME, ASTRABRIDGE_MODELS_CACHE_FILENAME
+from .model_catalog import (
+    ASTRABRIDGE_MODELS_CACHE_FILENAME,
+    ASTRABRIDGE_MODEL_CATALOG_FILENAME,
+    preferred_provider_model_record,
+)
 from .profile_service import ProfileService
 from .providers import HistoryProjector, NeutralMessage, ReasoningArtifact, classify_runtime_failure
 from .router_service import ROUTER_ENV_KEY, ROUTER_PORT
@@ -57,6 +61,9 @@ VALID_EXECUTION_BACKENDS = {"app_server", "native_kernel"}
 BROWSER_SMOKE_TOOL_NAME = "astrabridge_browser_smoke"
 LEGACY_BROWSER_SMOKE_TOOL_NAME = "lcr_browser_smoke"
 BROWSER_SMOKE_TOOL_ALIASES = {BROWSER_SMOKE_TOOL_NAME, LEGACY_BROWSER_SMOKE_TOOL_NAME}
+_OPENAI_DEFAULT_MODEL = str(
+    (preferred_provider_model_record("openai", include_deprecated=False) or {}).get("native_model") or "gpt-5.5"
+)
 
 
 class RuntimeService:
@@ -3844,7 +3851,11 @@ for host in candidates:
         execution_backend = self._normalize_execution_backend(settings.get("execution_backend"))
         return {
             "profile_id": profile_id,
-            "model": chosen_model or self._normalize_shell_model(target_profile.get("model"), provider_id) or "gpt-5.5",
+            "model": (
+                chosen_model
+                or self._normalize_shell_model(target_profile.get("model"), provider_id)
+                or self._default_model_for_provider(provider_id)
+            ),
             "reasoning_effort": chosen_effort or codex_reasoning_effort(target_profile.get("reasoning_effort")),
             "permission_mode": permission_mode,
             "collaboration_mode": collaboration_mode,
@@ -3868,9 +3879,15 @@ for host in candidates:
                 return {
                     "profile_id": fallback,
                     "provider_id": "openai",
-                    "model": "gpt-5.5",
+                    "model": _OPENAI_DEFAULT_MODEL,
                     "reasoning_effort": "high",
                 }
+
+    @staticmethod
+    def _default_model_for_provider(provider_id: str) -> str:
+        provider = str(provider_id or "openai").strip() or "openai"
+        preferred_model = (preferred_provider_model_record(provider, include_deprecated=False) or {}).get("native_model")
+        return str(preferred_model or _OPENAI_DEFAULT_MODEL).strip() or _OPENAI_DEFAULT_MODEL
 
     def _normalize_shell_model(self, value: Any, provider_id: str) -> str:
         model = str(value or "").strip()
