@@ -591,6 +591,7 @@ class ProjectService:
             "appearance": "codex",
             "execution_host": runtime["execution_host"],
             "wsl_distro": runtime["wsl_distro"],
+            "left_sidebar_open": True,
             "left_sidebar_width": 288,
             "right_sidebar_width": 328,
             "right_sidebar_open": True,

@@ -64,6 +64,7 @@ export type ProjectFile = {
     appearance?: AppearancePreset;
     execution_host?: ExecutionHost;
     wsl_distro?: string;
+    left_sidebar_open?: boolean;
     left_sidebar_width?: number;
     right_sidebar_width?: number;
     right_sidebar_open?: boolean;

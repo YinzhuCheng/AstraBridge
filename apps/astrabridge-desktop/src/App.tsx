@@ -1,6 +1,6 @@
 ﻿import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
-import { GitFork, Save } from "lucide-react";
+import { GitFork, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Save } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
@@ -3164,6 +3164,8 @@ function AppShell() {
   const clearLiveTurn = useAppStore((store) => store.clearLiveTurn);
   const threadSettingsDraft = useAppStore((store) => store.threadSettingsDraft);
   const setThreadSettingsDraft = useAppStore((store) => store.setThreadSettingsDraft);
+  const leftSidebarOpen = useAppStore((store) => store.leftSidebarOpen);
+  const toggleLeftSidebar = useAppStore((store) => store.toggleLeftSidebar);
   const rightSidebarOpen = useAppStore((store) => store.rightSidebarOpen);
   const toggleRightSidebar = useAppStore((store) => store.toggleRightSidebar);
   const commandPaletteOpen = useAppStore((store) => store.commandPaletteOpen);
@@ -3839,13 +3841,14 @@ function AppShell() {
         appearance,
         execution_host: executionHostDraft,
         wsl_distro: executionHostDraft === "wsl" ? wslDistroDraft : "",
+        left_sidebar_open: leftSidebarOpen,
         left_sidebar_width: leftPane.width,
         right_sidebar_width: rightPane.width,
         right_sidebar_open: rightSidebarOpen,
       });
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [appearance, executionHostDraft, leftPane.width, locale, project?.project_id, rightPane.width, rightSidebarOpen, wslDistroDraft]);
+  }, [appearance, executionHostDraft, leftPane.width, leftSidebarOpen, locale, project?.project_id, rightPane.width, rightSidebarOpen, wslDistroDraft]);
 
   useEffect(() => {
     if (providerOptions.length === 0) return;
@@ -4567,14 +4570,20 @@ function AppShell() {
   const messagePlanAnchor = inspectorPlan && !hasRenderedPlanBlock ? inspectorPlan : null;
   const sidebarTasks = !archivedVisible ? (projectTasks.data?.tasks ?? []) : [];
   const inspectorVisible = mainView === "chat" && rightSidebarOpen;
+  const shellColumns = [
+    ...(leftSidebarOpen ? [`${leftPane.width}px`, "8px"] : []),
+    "minmax(0, 1fr)",
+    ...(inspectorVisible ? ["8px", `${rightPane.width}px`] : []),
+  ].join(" ");
   return (
     <div
       data-testid="app-shell"
       className="shell-grid"
       style={{
-        gridTemplateColumns: `${leftPane.width}px 8px minmax(0, 1fr) ${inspectorVisible ? `8px ${rightPane.width}px` : ""}`,
+        gridTemplateColumns: shellColumns,
       }}
     >
+      {leftSidebarOpen ? (
       <aside className="sidebar app-sidebar">
         <nav className="sidebar-nav" aria-label="Primary">
           <button type="button" className="nav-row nav-row-primary" onClick={() => { setMainView("chat"); handleCreateThread(); }}>
@@ -4691,11 +4700,22 @@ function AppShell() {
           </button>
         </div>
       </aside>
+      ) : null}
 
-      <div className="resize-handle" {...leftPane.bind} />
+      {leftSidebarOpen ? <div className="resize-handle" {...leftPane.bind} /> : null}
 
       <section className="workspace">
         <header className="workspace-topbar">
+          <button
+            type="button"
+            className="icon-button pane-toggle-button"
+            data-testid="topbar-toggle-left-sidebar"
+            title={leftSidebarOpen ? t(locale, "hide_sidebar") : t(locale, "show_sidebar")}
+            aria-label={leftSidebarOpen ? t(locale, "hide_sidebar") : t(locale, "show_sidebar")}
+            onClick={toggleLeftSidebar}
+          >
+            {leftSidebarOpen ? <PanelLeftClose size={16} aria-hidden="true" /> : <PanelLeftOpen size={16} aria-hidden="true" />}
+          </button>
           <div className="title-stack">
             <p className="eyebrow">{mainView === "setup" ? providerSetupLabel(locale) : t(locale, "title_thread")}</p>
             <h2>{mainView === "setup" ? t(locale, "provider_model_settings") : activeThread?.displayName ?? t(locale, "no_threads")}</h2>
@@ -4730,8 +4750,15 @@ function AppShell() {
                 <button type="button" className="ghost-button" data-testid="topbar-fork" onClick={handleForkThread} disabled={!selectedThreadId}>
                   {locale === "zh-CN" ? "创建分支线程" : t(locale, "fork_thread")}
                 </button>
-                <button type="button" className="ghost-button" data-testid="topbar-toggle-inspector" onClick={toggleRightSidebar}>
-                  {rightSidebarOpen ? t(locale, "hide_inspector") : t(locale, "show_inspector")}
+                <button
+                  type="button"
+                  className="icon-button pane-toggle-button"
+                  data-testid="topbar-toggle-inspector"
+                  title={rightSidebarOpen ? t(locale, "hide_inspector") : t(locale, "show_inspector")}
+                  aria-label={rightSidebarOpen ? t(locale, "hide_inspector") : t(locale, "show_inspector")}
+                  onClick={toggleRightSidebar}
+                >
+                  {rightSidebarOpen ? <PanelRightClose size={16} aria-hidden="true" /> : <PanelRightOpen size={16} aria-hidden="true" />}
                 </button>
               </>
             ) : (
@@ -5134,6 +5161,9 @@ function AppShell() {
             </button>
             <button type="button" className="command-item" onClick={() => { setCommandPaletteOpen(false); closeProject.mutate(); }}>
               {t(locale, "command_new_project")}
+            </button>
+            <button type="button" className="command-item" onClick={() => { setCommandPaletteOpen(false); toggleLeftSidebar(); }}>
+              {t(locale, "command_toggle_sidebar")}
             </button>
             <button type="button" className="command-item" onClick={() => { setCommandPaletteOpen(false); toggleRightSidebar(); }}>
               {t(locale, "command_toggle_inspector")}

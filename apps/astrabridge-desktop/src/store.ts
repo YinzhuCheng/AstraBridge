@@ -5,6 +5,7 @@ type AppState = {
   project: ProjectFile | null;
   locale: LocaleCode;
   appearance: AppearancePreset;
+  leftSidebarOpen: boolean;
   leftSidebarWidth: number;
   rightSidebarWidth: number;
   rightSidebarOpen: boolean;
@@ -16,6 +17,7 @@ type AppState = {
   setAppearance: (appearance: AppearancePreset) => void;
   setLeftSidebarWidth: (width: number) => void;
   setRightSidebarWidth: (width: number) => void;
+  toggleLeftSidebar: () => void;
   toggleRightSidebar: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
   setEventCursor: (cursor: number) => void;
@@ -48,6 +50,7 @@ export const useAppStore = create<AppState>((set) => ({
   project: null,
   locale: "zh-CN",
   appearance: "codex",
+  leftSidebarOpen: true,
   leftSidebarWidth: 300,
   rightSidebarWidth: 340,
   rightSidebarOpen: true,
@@ -60,6 +63,7 @@ export const useAppStore = create<AppState>((set) => ({
       project,
       locale: project?.ui_preferences.locale ?? "zh-CN",
       appearance: project?.ui_preferences.appearance ?? "codex",
+      leftSidebarOpen: project?.ui_preferences.left_sidebar_open ?? true,
       leftSidebarWidth: project?.ui_preferences.left_sidebar_width ?? 300,
       rightSidebarWidth: project?.ui_preferences.right_sidebar_width ?? 340,
       rightSidebarOpen: project?.ui_preferences.right_sidebar_open ?? true,
@@ -71,6 +75,7 @@ export const useAppStore = create<AppState>((set) => ({
   setAppearance: (appearance) => set(() => ({ appearance })),
   setLeftSidebarWidth: (width) => set(() => ({ leftSidebarWidth: Math.max(220, Math.min(width, 420)) })),
   setRightSidebarWidth: (width) => set(() => ({ rightSidebarWidth: Math.max(260, Math.min(width, 460)) })),
+  toggleLeftSidebar: () => set((state) => ({ leftSidebarOpen: !state.leftSidebarOpen })),
   toggleRightSidebar: () => set((state) => ({ rightSidebarOpen: !state.rightSidebarOpen })),
   setCommandPaletteOpen: (open) => set(() => ({ commandPaletteOpen: open })),
   setEventCursor: (cursor) => set(() => ({ eventCursor: cursor })),

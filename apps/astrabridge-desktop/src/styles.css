@@ -644,6 +644,15 @@ textarea {
   justify-content: space-between;
 }
 
+.workspace-topbar {
+  align-items: flex-start;
+}
+
+.workspace-topbar .title-stack {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .composer-controls {
   flex-wrap: wrap;
 }
@@ -662,6 +671,27 @@ textarea {
 .section-actions > button {
   white-space: nowrap;
   min-width: 104px;
+}
+
+.pane-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 2rem;
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--control-bg);
+  color: var(--muted-strong);
+}
+
+.pane-toggle-button:hover,
+.pane-toggle-button:focus-visible {
+  background: var(--control-active-bg);
+  color: var(--accent);
 }
 
 .title-stack h2,
@@ -4176,6 +4206,13 @@ select {
   border-radius: 7px;
   padding: 0.34rem 0.66rem;
   font-size: 0.82rem;
+}
+
+.workspace-topbar .topbar-actions > .pane-toggle-button {
+  width: 2rem;
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0;
 }
 
 .workspace-topbar .topbar-actions {
