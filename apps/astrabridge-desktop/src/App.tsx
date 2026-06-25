@@ -1,6 +1,6 @@
 ﻿import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
-import { GitFork, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Save } from "lucide-react";
+import { CalendarClock, ClipboardCheck, GitFork, Package, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Save, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
@@ -82,6 +82,10 @@ const DEFAULT_GAMEPLAY_SMOKE_ACTIONS: Array<Record<string, unknown>> = [
 const RELEASE_WORKFLOW_SMOKE_PRESET = "astrabridge_release_workflow_v1";
 const PROVIDER_SWITCH_WORKFLOW_SMOKE_PRESET = "astrabridge_provider_switch_workflow_v1";
 const NATIVE_KERNEL_WORKFLOW_SMOKE_PRESET = "astrabridge_native_kernel_workflow_v1";
+const SETUP_TABS = ["login", "users", "keys", "providers", "models", "capabilities", "health", "mcp", "extensions", "runtime", "automations", "saves", "dogfood", "reports"] as const;
+
+type SetupTab = (typeof SETUP_TABS)[number];
+type ExtensionInventoryInitialKind = "all" | "plugins" | "skills";
 
 function localAssetUrl(path: string) {
   return isTauri() ? convertFileSrc(path) : `file://${path.replace(/\\/g, "/")}`;
@@ -1144,10 +1148,16 @@ function RouterControlCenter({
   locale,
   queryClient,
   fallbackCheckpoints,
+  initialTab = "login",
+  initialExtensionsKind = "all",
+  onTabChange,
 }: {
   locale: "en" | "zh-CN";
   queryClient: ReturnType<typeof useQueryClient>;
   fallbackCheckpoints: ProjectCheckpoint[];
+  initialTab?: SetupTab;
+  initialExtensionsKind?: ExtensionInventoryInitialKind;
+  onTabChange?: (tab: SetupTab) => void;
 }) {
   const project = useAppStore((store) => store.project);
   const setProject = useAppStore((store) => store.setProject);
@@ -1191,8 +1201,19 @@ function RouterControlCenter({
     enabled: Boolean(project?.project_id),
     refetchInterval: 7000,
   });
-  const setupTabs = ["login", "users", "keys", "providers", "models", "capabilities", "health", "mcp", "extensions", "runtime", "automations", "saves", "dogfood", "reports"] as const;
-  const [tab, setTab] = useState<(typeof setupTabs)[number]>("login");
+  const [tab, setTab] = useState<SetupTab>(initialTab);
+  const [extensionKind, setExtensionKind] = useState<ExtensionInventoryInitialKind>(initialExtensionsKind);
+  const selectSetupTab = (nextTab: SetupTab, options?: { extensionKind?: ExtensionInventoryInitialKind }) => {
+    if (options?.extensionKind) setExtensionKind(options.extensionKind);
+    setTab(nextTab);
+    onTabChange?.(nextTab);
+  };
+  useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab]);
+  useEffect(() => {
+    setExtensionKind(initialExtensionsKind);
+  }, [initialExtensionsKind]);
   const capabilityArtifacts = useQuery({ queryKey: ["capability-artifacts"], queryFn: () => api.capabilityArtifacts(20), enabled: tab === "capabilities", refetchInterval: 10000, retry: false });
   const [providerDraft, setProviderDraft] = useState<RouterProvider | null>(null);
   const [modelDraft, setModelDraft] = useState<RouterModelEntry | null>(null);
@@ -1788,13 +1809,13 @@ function RouterControlCenter({
           <small>{t(locale, "manager_nav_summary")}</small>
         </div>
         <div className="settings-nav-list">
-          {setupTabs.map((item) => (
+          {SETUP_TABS.map((item) => (
             <button
               key={item}
               type="button"
               data-testid={`setup-tab-${item}`}
               className={tab === item ? "settings-nav-item active" : "settings-nav-item"}
-              onClick={() => setTab(item as typeof tab)}
+              onClick={() => selectSetupTab(item)}
             >
               <span>{t(locale, `setup_tab_${item}`)}</span>
             </button>
@@ -2331,6 +2352,7 @@ function RouterControlCenter({
             isLoading={runtimePluginSkillRegistry.isLoading || runtimePluginSkillRegistry.isFetching}
             error={runtimePluginSkillRegistry.error}
             project={project}
+            initialKind={extensionKind}
             onProjectChanged={(nextProject) => setProject(nextProject)}
             onRegistryChanged={() => runtimePluginSkillRegistry.refetch()}
           />
@@ -2543,16 +2565,47 @@ function RouterControlCenter({
         <div className="manager-panel">
           <div className="manager-hero">
             <div>
-              <span className="eyebrow">Dogfood Run</span>
-              <h3>{activeDogfood?.enabled ? activeDogfood.phase || "active" : "Not active"}</h3>
-              <p className="muted">Project-local supervision ledger for autonomous model runs. It records budgets, screenshots, blockers, and next steps under .astrabridge only.</p>
+              <span className="eyebrow">{locale === "zh-CN" ? "狗粮运行" : "Dogfood Run"}</span>
+              <h3>{activeDogfood?.enabled ? activeDogfood.phase || (locale === "zh-CN" ? "运行中" : "active") : locale === "zh-CN" ? "未启用" : "Not active"}</h3>
+              <p className="muted">{locale === "zh-CN" ? "项目内的自治运行监督台账。用于记录预算、截图、阻塞和下一步，数据只写入 .astrabridge。" : "Project-local supervision ledger for autonomous model runs. It records budgets, screenshots, blockers, and next steps under .astrabridge only."}</p>
             </div>
             <span className={`session-badge ${activeDogfood?.enabled ? "capability-ok" : ""}`}>{activeDogfood?.status ?? "idle"}</span>
           </div>
+          <section className="manager-section dogfood-entry-checks" data-testid="sidebar-dogfood-tasks">
+            <div className="dogfood-task-header">
+              <div>
+                <span className="eyebrow">{locale === "zh-CN" ? "侧边栏能力狗粮" : "Sidebar capability dogfood"}</span>
+                <h4>侧边栏能力入口验收任务</h4>
+              </div>
+              <span className="status-tag">{locale === "zh-CN" ? "4 个任务" : "4 tasks"}</span>
+            </div>
+            <div className="dogfood-task-grid">
+              <article className="dogfood-task-card">
+                <strong>自动化入口巡检</strong>
+                <p>从左侧栏进入自动化，确认调度器状态、配置列表、收件箱和运行历史都能在同一视图操作。</p>
+                <button type="button" className="ghost-button" onClick={() => selectSetupTab("automations")}>打开自动化</button>
+              </article>
+              <article className="dogfood-task-card">
+                <strong>插件库存巡检</strong>
+                <p>从左侧栏进入插件，确认插件清单、安装计划、来源目录、项目预设和兼容性提示可见。</p>
+                <button type="button" className="ghost-button" onClick={() => selectSetupTab("extensions", { extensionKind: "plugins" })}>打开插件</button>
+              </article>
+              <article className="dogfood-task-card">
+                <strong>技能启用巡检</strong>
+                <p>从左侧栏进入技能，确认技能筛选、运行时启用状态、全局默认值和项目覆盖项可见。</p>
+                <button type="button" className="ghost-button" onClick={() => selectSetupTab("extensions", { extensionKind: "skills" })}>打开技能</button>
+              </article>
+              <article className="dogfood-task-card">
+                <strong>截图验收记录</strong>
+                <p>用 in-app browser 分别点击左侧栏入口，保存自动化、插件、技能和狗粮页截图作为 UI 验收记录。</p>
+                <button type="button" className="primary-button" onClick={() => selectSetupTab("dogfood")}>停留在狗粮任务</button>
+              </article>
+            </div>
+          </section>
           {activeDogfood ? (
             <div className="manager-grid">
               <section className="manager-section">
-                <h4>Run control</h4>
+                <h4>{locale === "zh-CN" ? "运行控制" : "Run control"}</h4>
                 <div className="check-row">
                   <label>
                     <input
@@ -2560,20 +2613,20 @@ function RouterControlCenter({
                       checked={activeDogfood.enabled}
                       onChange={(event) => setDogfoodDraft({ ...activeDogfood, enabled: event.target.checked })}
                     />
-                    Enabled
+                    {locale === "zh-CN" ? "启用" : "Enabled"}
                   </label>
                 </div>
-                <label className="field"><span>Goal</span><textarea rows={3} value={activeDogfood.goal} onChange={(event) => setDogfoodDraft({ ...activeDogfood, goal: event.target.value })} /></label>
+                <label className="field"><span>{locale === "zh-CN" ? "目标" : "Goal"}</span><textarea rows={3} value={activeDogfood.goal} onChange={(event) => setDogfoodDraft({ ...activeDogfood, goal: event.target.value })} /></label>
                 <div className="form-grid">
-                  <label className="field"><span>Phase</span><input value={activeDogfood.phase} onChange={(event) => setDogfoodDraft({ ...activeDogfood, phase: event.target.value })} /></label>
-                  <label className="field"><span>Status</span><select value={activeDogfood.status} onChange={(event) => setDogfoodDraft({ ...activeDogfood, status: event.target.value })}><option value="idle">idle</option><option value="running">running</option><option value="waiting">waiting</option><option value="blocked">blocked</option><option value="complete">complete</option></select></label>
-                  <label className="field"><span>Current provider</span><input value={activeDogfood.current_provider} onChange={(event) => setDogfoodDraft({ ...activeDogfood, current_provider: event.target.value })} placeholder="deepseek / kimi / yunwu_image" /></label>
-                  <label className="field"><span>Warn percent</span><input type="number" value={activeDogfood.budgets.warn_percent} onChange={(event) => setDogfoodDraft({ ...activeDogfood, budgets: { ...activeDogfood.budgets, warn_percent: Number(event.target.value) || 80 } })} /></label>
+                  <label className="field"><span>{locale === "zh-CN" ? "阶段" : "Phase"}</span><input value={activeDogfood.phase} onChange={(event) => setDogfoodDraft({ ...activeDogfood, phase: event.target.value })} /></label>
+                  <label className="field"><span>{locale === "zh-CN" ? "状态" : "Status"}</span><select value={activeDogfood.status} onChange={(event) => setDogfoodDraft({ ...activeDogfood, status: event.target.value })}><option value="idle">idle</option><option value="running">running</option><option value="waiting">waiting</option><option value="blocked">blocked</option><option value="complete">complete</option></select></label>
+                  <label className="field"><span>{locale === "zh-CN" ? "当前提供方" : "Current provider"}</span><input value={activeDogfood.current_provider} onChange={(event) => setDogfoodDraft({ ...activeDogfood, current_provider: event.target.value })} placeholder="deepseek / kimi / yunwu_image" /></label>
+                  <label className="field"><span>{locale === "zh-CN" ? "预警百分比" : "Warn percent"}</span><input type="number" value={activeDogfood.budgets.warn_percent} onChange={(event) => setDogfoodDraft({ ...activeDogfood, budgets: { ...activeDogfood.budgets, warn_percent: Number(event.target.value) || 80 } })} /></label>
                 </div>
-                <label className="field"><span>Blocker</span><textarea rows={2} value={activeDogfood.blocker} onChange={(event) => setDogfoodDraft({ ...activeDogfood, blocker: event.target.value })} /></label>
-                <label className="field"><span>Next step</span><textarea rows={2} value={activeDogfood.next_step} onChange={(event) => setDogfoodDraft({ ...activeDogfood, next_step: event.target.value })} /></label>
+                <label className="field"><span>{locale === "zh-CN" ? "阻塞" : "Blocker"}</span><textarea rows={2} value={activeDogfood.blocker} onChange={(event) => setDogfoodDraft({ ...activeDogfood, blocker: event.target.value })} /></label>
+                <label className="field"><span>{locale === "zh-CN" ? "下一步" : "Next step"}</span><textarea rows={2} value={activeDogfood.next_step} onChange={(event) => setDogfoodDraft({ ...activeDogfood, next_step: event.target.value })} /></label>
                 <div className="field-row">
-                  <button type="button" className="primary-button" disabled={saveDogfood.isPending} onClick={() => saveDogfood.mutate(activeDogfood)}>Save run</button>
+                  <button type="button" className="primary-button" disabled={saveDogfood.isPending} onClick={() => saveDogfood.mutate(activeDogfood)}>{locale === "zh-CN" ? "保存运行" : "Save run"}</button>
                   <button
                     type="button"
                     className="ghost-button"
@@ -2587,32 +2640,32 @@ function RouterControlCenter({
                       budgets: { ...activeDogfood.budgets, kimi_cny: 50, deepseek_cny: 50, yunwu_gpt_usd: 50, yunwu_images: 200, warn_percent: 80 },
                     })}
                   >
-                    Use tower-game defaults
+                    {locale === "zh-CN" ? "使用塔防游戏默认值" : "Use tower-game defaults"}
                   </button>
                 </div>
                 {saveDogfood.error ? <p className="error-text">{String(saveDogfood.error as Error)}</p> : null}
-                <p className="muted">Ledger path: {dogfoodRun.data?.path ?? ""}</p>
+                <p className="muted">{locale === "zh-CN" ? "台账路径" : "Ledger path"}: {dogfoodRun.data?.path ?? ""}</p>
               </section>
               <section className="manager-section">
-                <h4>Asset memory</h4>
-                <p className="muted">Generated and sliced assets are tracked as project memory, then auto-injected into future DS/Kimi/Yunwu turns as a compact context pack.</p>
+                <h4>{locale === "zh-CN" ? "资源记忆" : "Asset memory"}</h4>
+                <p className="muted">{locale === "zh-CN" ? "生成和切片后的资源会作为项目记忆追踪，并在后续 DS/Kimi/Yunwu 轮次中以紧凑上下文包注入。" : "Generated and sliced assets are tracked as project memory, then auto-injected into future DS/Kimi/Yunwu turns as a compact context pack."}</p>
                 <div className="dogfood-budget-list">
                   <div className="dogfood-budget">
-                    <div><strong>Total assets</strong><span>{assetSummaryCount(assetSummary, "total")}</span></div>
+                    <div><strong>{locale === "zh-CN" ? "资源总数" : "Total assets"}</strong><span>{assetSummaryCount(assetSummary, "total")}</span></div>
                   </div>
                   <div className="dogfood-budget">
-                    <div><strong>In game</strong><span>{assetSummaryCount(assetSummary, "promoted_or_in_use")}</span></div>
+                    <div><strong>{locale === "zh-CN" ? "已进入游戏" : "In game"}</strong><span>{assetSummaryCount(assetSummary, "promoted_or_in_use")}</span></div>
                   </div>
                   <div className="dogfood-budget">
-                    <div><strong>Approved, not used</strong><span>{assetSummaryCount(assetSummary, "approved_unpromoted")}</span></div>
+                    <div><strong>{locale === "zh-CN" ? "已通过未使用" : "Approved, not used"}</strong><span>{assetSummaryCount(assetSummary, "approved_unpromoted")}</span></div>
                   </div>
                   <div className="dogfood-budget">
-                    <div><strong>Needs review</strong><span>{assetSummaryCount(assetSummary, "needs_review")}</span></div>
+                    <div><strong>{locale === "zh-CN" ? "需要复核" : "Needs review"}</strong><span>{assetSummaryCount(assetSummary, "needs_review")}</span></div>
                   </div>
                 </div>
                 <div className="field-row">
-                  <button type="button" className="ghost-button" onClick={() => rebuildDogfoodAssets.mutate()} disabled={rebuildDogfoodAssets.isPending}>Rebuild registry</button>
-                  <span className="muted">{assetRegistry?.rebuilt_at ? `rebuilt ${summarizeRelativeTime(assetRegistry.rebuilt_at)}` : "registry not built"}</span>
+                  <button type="button" className="ghost-button" onClick={() => rebuildDogfoodAssets.mutate()} disabled={rebuildDogfoodAssets.isPending}>{locale === "zh-CN" ? "重建登记表" : "Rebuild registry"}</button>
+                  <span className="muted">{assetRegistry?.rebuilt_at ? `${locale === "zh-CN" ? "已重建" : "rebuilt"} ${summarizeRelativeTime(assetRegistry.rebuilt_at)}` : locale === "zh-CN" ? "尚未构建登记表" : "registry not built"}</span>
                 </div>
                 <div className="manager-list manager-list-tall">
                   {[...promotedAssets.slice(0, 4), ...approvedAssets.slice(0, 6), ...reviewAssets.slice(0, 4)].map((asset) => (
@@ -2624,7 +2677,7 @@ function RouterControlCenter({
                       <code>{asset.promoted_path || asset.source_path || asset.sliced_manifest_path || "path n/a"}</code>
                     </div>
                   ))}
-                  {assetRegistry && assetRegistry.assets.length === 0 ? <p className="muted">No generated or sliced assets registered yet.</p> : null}
+                  {assetRegistry && assetRegistry.assets.length === 0 ? <p className="muted">{locale === "zh-CN" ? "还没有登记生成或切片资源。" : "No generated or sliced assets registered yet."}</p> : null}
                   {dogfoodAssets.error ? <p className="error-text">{String((dogfoodAssets.error as Error).message ?? dogfoodAssets.error)}</p> : null}
                 </div>
                 <div className="form-grid">
@@ -3182,6 +3235,8 @@ function AppShell() {
   const [archivedVisible, setArchivedVisible] = useState(false);
   const [routerBaseUrl, setRouterBaseUrl] = useState("http://127.0.0.1:8787/v1");
   const [mainView, setMainView] = useState<"chat" | "setup">("chat");
+  const [setupInitialTab, setSetupInitialTab] = useState<SetupTab>("login");
+  const [setupExtensionsKind, setSetupExtensionsKind] = useState<ExtensionInventoryInitialKind>("all");
   const [sendStage, setSendStage] = useState<string | null>(null);
   const [sendFailure, setSendFailure] = useState<string | null>(null);
   const [executionHostDraft, setExecutionHostDraft] = useState<ExecutionHost>((project.ui_preferences.execution_host as ExecutionHost) ?? "windows");
@@ -3221,6 +3276,21 @@ function AppShell() {
     queryFn: api.projectTasks,
     refetchInterval: smokeMode ? false : 4000,
     retry: smokeMode ? false : undefined,
+  });
+  const sidebarAutomations = useQuery({
+    queryKey: ["sidebar-automations", project.project_id],
+    queryFn: api.automations,
+    enabled: Boolean(project.project_id),
+    refetchInterval: smokeMode ? false : 15000,
+    retry: false,
+  });
+  const sidebarPluginSkillRegistry = useQuery({
+    queryKey: ["sidebar-plugin-skill-registry", project.project_id],
+    queryFn: () => api.runtimePluginSkillRegistry(),
+    enabled: Boolean(project.project_id),
+    refetchInterval: smokeMode ? false : 30000,
+    retry: false,
+    staleTime: 15000,
   });
 
   const currentTask = projectTasks.data?.current_task ?? null;
@@ -4238,6 +4308,12 @@ function AppShell() {
     });
   }
 
+  function openSetupTab(nextTab: SetupTab, options?: { extensionKind?: ExtensionInventoryInitialKind }) {
+    if (options?.extensionKind) setSetupExtensionsKind(options.extensionKind);
+    setSetupInitialTab(nextTab);
+    setMainView("setup");
+  }
+
   async function handleCreateThread() {
     const name = await promptForText({
       title: t(locale, "new_thread"),
@@ -4576,6 +4652,16 @@ function AppShell() {
   } : null);
   const messagePlanAnchor = inspectorPlan && !hasRenderedPlanBlock ? inspectorPlan : null;
   const sidebarTasks = !archivedVisible ? (projectTasks.data?.tasks ?? []) : [];
+  const sidebarAutomationCount = sidebarAutomations.data?.automations.length ?? 0;
+  const sidebarPluginCount = sidebarPluginSkillRegistry.data?.plugins.length ?? 0;
+  const sidebarSkillCount = sidebarPluginSkillRegistry.data?.skills.length ?? 0;
+  const sidebarAutomationCountLabel = sidebarAutomations.isLoading && !sidebarAutomations.data ? "…" : String(sidebarAutomationCount);
+  const sidebarPluginCountLabel = sidebarPluginSkillRegistry.isLoading && !sidebarPluginSkillRegistry.data ? "…" : String(sidebarPluginCount);
+  const sidebarSkillCountLabel = sidebarPluginSkillRegistry.isLoading && !sidebarPluginSkillRegistry.data ? "…" : String(sidebarSkillCount);
+  const setupTabActive = (targetTab: SetupTab, extensionKind?: ExtensionInventoryInitialKind) =>
+    mainView === "setup" &&
+    setupInitialTab === targetTab &&
+    (!extensionKind || setupExtensionsKind === extensionKind);
   const inspectorVisible = mainView === "chat" && rightSidebarOpen;
   const shellColumns = [
     ...(leftSidebarOpen ? [`${leftPane.width}px`, "8px"] : []),
@@ -4603,7 +4689,7 @@ function AppShell() {
             <span>{t(locale, "search")}</span>
             <kbd>{t(locale, "command_k_hint")}</kbd>
           </button>
-          <button type="button" data-testid="sidebar-nav-setup" className={`nav-row ${mainView === "setup" ? "nav-row-active" : ""}`} onClick={() => setMainView("setup")}>
+          <button type="button" data-testid="sidebar-nav-setup" className={`nav-row ${setupTabActive("login") ? "nav-row-active" : ""}`} onClick={() => openSetupTab("login")}>
             <span className="nav-icon" aria-hidden="true">◎</span>
             <span>{providerSetupLabel(locale)}</span>
           </button>
@@ -4612,6 +4698,52 @@ function AppShell() {
             <span>{t(locale, "archived_threads")}</span>
           </button>
         </nav>
+
+        <section className="sidebar-group sidebar-capability-group" aria-label={t(locale, "sidebar_capability_tools")}>
+          <div className="sidebar-heading">
+            <span>{t(locale, "sidebar_capability_tools")}</span>
+          </div>
+          <button
+            type="button"
+            data-testid="sidebar-nav-automations"
+            className={`nav-row ${setupTabActive("automations") ? "nav-row-active" : ""}`}
+            onClick={() => openSetupTab("automations")}
+          >
+            <span className="nav-icon" aria-hidden="true"><CalendarClock size={15} /></span>
+            <span>{t(locale, "sidebar_nav_automations")}</span>
+            <span className="sidebar-nav-count">{sidebarAutomationCountLabel}</span>
+          </button>
+          <button
+            type="button"
+            data-testid="sidebar-nav-plugins"
+            className={`nav-row ${setupTabActive("extensions", "plugins") ? "nav-row-active" : ""}`}
+            onClick={() => openSetupTab("extensions", { extensionKind: "plugins" })}
+          >
+            <span className="nav-icon" aria-hidden="true"><Package size={15} /></span>
+            <span>{t(locale, "sidebar_nav_plugins")}</span>
+            <span className="sidebar-nav-count">{sidebarPluginCountLabel}</span>
+          </button>
+          <button
+            type="button"
+            data-testid="sidebar-nav-skills"
+            className={`nav-row ${setupTabActive("extensions", "skills") ? "nav-row-active" : ""}`}
+            onClick={() => openSetupTab("extensions", { extensionKind: "skills" })}
+          >
+            <span className="nav-icon" aria-hidden="true"><Sparkles size={15} /></span>
+            <span>{t(locale, "sidebar_nav_skills")}</span>
+            <span className="sidebar-nav-count">{sidebarSkillCountLabel}</span>
+          </button>
+          <button
+            type="button"
+            data-testid="sidebar-nav-dogfood"
+            className={`nav-row ${setupTabActive("dogfood") ? "nav-row-active" : ""}`}
+            onClick={() => openSetupTab("dogfood")}
+          >
+            <span className="nav-icon" aria-hidden="true"><ClipboardCheck size={15} /></span>
+            <span>{t(locale, "sidebar_nav_dogfood_tasks")}</span>
+            <span className="sidebar-nav-count">4</span>
+          </button>
+        </section>
 
         <section className="sidebar-group">
           <div className="sidebar-heading">
@@ -4695,7 +4827,7 @@ function AppShell() {
         </section>
 
         <div className="sidebar-footer">
-          <button type="button" className="nav-row nav-row-session" onClick={() => setMainView("setup")}>
+          <button type="button" className="nav-row nav-row-session" onClick={() => openSetupTab("login")}>
             <span className="nav-icon" aria-hidden="true">●</span>
             <span>
               {llmSession.data?.mode === "managed_user" ? t(locale, "manager_status_managed").replace("{user}", llmSession.data.username ?? "user") : t(locale, "manager_status_anonymous")}
@@ -4782,6 +4914,9 @@ function AppShell() {
               locale={locale}
               queryClient={queryClient}
               fallbackCheckpoints={fallbackSetupCheckpoints}
+              initialTab={setupInitialTab}
+              initialExtensionsKind={setupExtensionsKind}
+              onTabChange={setSetupInitialTab}
             />
           </div>
         ) : (

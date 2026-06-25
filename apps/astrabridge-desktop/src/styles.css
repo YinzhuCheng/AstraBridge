@@ -317,6 +317,24 @@ textarea {
   font-size: 0.95rem;
 }
 
+.nav-icon svg {
+  display: block;
+}
+
+.sidebar-nav-count {
+  min-width: 1.45rem;
+  justify-self: end;
+  padding: 0.05rem 0.38rem;
+  border: 1px solid rgba(41, 44, 49, 0.1);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.25;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 .nav-row kbd {
   border: 1px solid rgba(41, 44, 49, 0.12);
   border-radius: 7px;
@@ -2712,6 +2730,50 @@ textarea {
   gap: 0.7rem;
 }
 
+.dogfood-entry-checks {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.dogfood-task-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.dogfood-task-header h4 {
+  margin: 0.1rem 0 0;
+}
+
+.dogfood-task-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.dogfood-task-card {
+  display: grid;
+  align-content: start;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+}
+
+.dogfood-task-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.dogfood-task-card button {
+  width: fit-content;
+  max-width: 100%;
+}
+
 .dogfood-budget {
   display: grid;
   gap: 0.45rem;
@@ -2889,6 +2951,7 @@ textarea {
   .capability-artifact-list,
   .capability-route-meta,
   .automation-detail-grid,
+  .dogfood-task-grid,
   .extensions-detail-grid,
   .extensions-filter-grid,
   .form-grid {

@@ -226,6 +226,61 @@ const LABELS = {
     plugin: "插件",
     skill: "技能",
     noWarnings: "没有兼容性告警。",
+    official: "官方",
+    bundledLocal: "本地内置",
+    generatedFallback: "生成占位",
+    icon: "图标",
+    iconProvenance: "图标来源",
+    iconValidated: "图标已验证",
+    asset: "资源",
+    planTitle: "安装计划",
+    planSummary: "在发生任何文件变更前预览安装或更新范围。",
+    planAction: "动作",
+    planReason: "原因",
+    planSourceRoot: "来源根目录",
+    planTargetRoot: "目标根目录",
+    planRollback: "回滚快照",
+    planPreview: "预览计划",
+    planPreviewPending: "正在生成计划...",
+    planNotLoaded: "还没有为这个插件生成安装或更新计划。",
+    currentVersion: "当前版本",
+    targetVersion: "目标版本",
+    sourceFiles: "来源文件",
+    targetFiles: "现有目标文件",
+    plannedWrites: "计划写入",
+    planErrors: "计划错误",
+    planWarnings: "计划告警",
+    rollbackFiles: "回滚捕获",
+    rollbackStatus: "回滚状态",
+    apps: "应用",
+    applyAction: "执行",
+    applyPending: "正在执行...",
+    applyResult: "执行结果",
+    executionStatus: "执行状态",
+    reportPath: "报告路径",
+    projectPreset: "项目预设",
+    activePreset: "当前预设",
+    presetPlugins: "预设插件",
+    presetSkills: "预设技能",
+    addToPreset: "加入项目预设",
+    removeFromPreset: "移出项目预设",
+    resetPreset: "重置预设",
+    presetPending: "正在保存预设...",
+    presetSummary: "项目内的插件和技能引用保存在 AstraBridge 项目文件中，不写入官方 Codex 状态。",
+    skillControls: "技能控制",
+    observedEnablement: "运行时观测",
+    effectiveEnablement: "实际启用状态",
+    globalDefault: "全局默认",
+    projectOverride: "项目覆盖",
+    enablementSourceLabel: "启用来源",
+    enableGlobally: "全局启用",
+    disableGlobally: "全局禁用",
+    enableForProject: "本项目启用",
+    disableForProject: "本项目禁用",
+    useGlobalSetting: "使用全局设置",
+    globalStatePath: "全局状态路径",
+    projectStatePath: "项目状态路径",
+    skillUpdatePending: "正在更新...",
   },
 } as const;
 
@@ -235,6 +290,7 @@ export function PluginSkillInventoryPanel({
   isLoading,
   error,
   project,
+  initialKind = "all",
   onProjectChanged,
   onRegistryChanged,
 }: {
@@ -243,6 +299,7 @@ export function PluginSkillInventoryPanel({
   isLoading: boolean;
   error?: unknown;
   project?: ProjectFile | null;
+  initialKind?: InventoryKind;
   onProjectChanged?: (project: ProjectFile) => void;
   onRegistryChanged?: () => void | Promise<unknown>;
 }) {
@@ -290,6 +347,10 @@ export function PluginSkillInventoryPanel({
       return item.searchText.includes(normalizedSearch);
     });
   }, [items, kind, search, status]);
+
+  useEffect(() => {
+    setKind(initialKind);
+  }, [initialKind]);
 
   useEffect(() => {
     if (!filteredItems.length) {
