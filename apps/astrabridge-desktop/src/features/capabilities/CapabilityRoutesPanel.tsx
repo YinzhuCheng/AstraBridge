@@ -631,7 +631,7 @@ function resolveCapabilityRuntimeToolingGuide(
       label: plugin?.display_name || guide.fallback_label,
       summary_key: guide.summary_key,
       state,
-      detail: plugin ? `${plugin.install_status} / ${plugin.enablement_status}` : null,
+      detail: null,
     };
   }
   const skill = skillRegistryByName.get(guide.skill_name);
@@ -642,7 +642,7 @@ function resolveCapabilityRuntimeToolingGuide(
     label: skill?.display_name || guide.fallback_label,
     summary_key: guide.summary_key,
     state,
-    detail: skill ? `${skill.install_status} / ${skill.effective_enablement_status || skill.enablement_status}` : null,
+    detail: null,
   };
 }
 

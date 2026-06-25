@@ -4566,12 +4566,13 @@ function AppShell() {
   } : null);
   const messagePlanAnchor = inspectorPlan && !hasRenderedPlanBlock ? inspectorPlan : null;
   const sidebarTasks = !archivedVisible ? (projectTasks.data?.tasks ?? []) : [];
+  const inspectorVisible = mainView === "chat" && rightSidebarOpen;
   return (
     <div
       data-testid="app-shell"
       className="shell-grid"
       style={{
-        gridTemplateColumns: `${leftPane.width}px 8px minmax(0, 1fr) ${rightSidebarOpen ? `8px ${rightPane.width}px` : ""}`,
+        gridTemplateColumns: `${leftPane.width}px 8px minmax(0, 1fr) ${inspectorVisible ? `8px ${rightPane.width}px` : ""}`,
       }}
     >
       <aside className="sidebar app-sidebar">
@@ -4993,9 +4994,9 @@ function AppShell() {
         )}
       </section>
 
-      {rightSidebarOpen ? <div className="resize-handle" {...rightPane.bind} /> : null}
+      {inspectorVisible ? <div className="resize-handle" {...rightPane.bind} /> : null}
 
-      {rightSidebarOpen ? (
+      {inspectorVisible ? (
         <aside className="inspector">
           <InspectorTabBar locale={locale} activeTab={inspectorTab} onChange={setInspectorTab} />
 
