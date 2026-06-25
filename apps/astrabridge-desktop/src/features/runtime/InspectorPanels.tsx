@@ -1,8 +1,11 @@
-import { Files, GitCompare, Globe2, ListChecks, Terminal } from "lucide-react";
-import { useMemo, useState } from "react";
+import { ExternalLink, Files, GitCompare, Globe2, Grid2X2, ListChecks, RefreshCw, Terminal, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
+import { api } from "../../api";
 import { t } from "../i18n/catalog";
 import type {
+  BrowserWorkbenchSession,
+  ComputerUseBrowserScenarioReport,
   ProjectFile,
   ProjectFilePreview,
   ProjectFilesTree,
@@ -35,6 +38,39 @@ function normalizeBrowserUrl(value: string) {
     return `http://${trimmed}`;
   }
   return `https://${trimmed}`;
+}
+
+function normalizeManagedBrowserUrl(value: string) {
+  const normalized = normalizeBrowserUrl(value);
+  const parsed = new URL(normalized);
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("Only http and https URLs are supported.");
+  }
+  return parsed.toString();
+}
+
+function roleFromUrl(url: string) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    if (!host) return "Browser";
+    const name = host.split(".")[0] || host;
+    return name.slice(0, 1).toUpperCase() + name.slice(1);
+  } catch {
+    return "Browser";
+  }
+}
+
+function workbenchStatusLabel(locale: Locale, status: string) {
+  if (status === "open") return t(locale, "browser_workbench_status_open");
+  if (status === "focused") return t(locale, "browser_workbench_status_focused");
+  if (status === "web_fallback") return t(locale, "browser_workbench_status_fallback");
+  return status || "-";
+}
+
+function browserRoleLabel(locale: Locale, role: string) {
+  const normalized = role.trim().toLowerCase();
+  if (locale === "zh-CN" && normalized === "news") return "新闻";
+  return role || "Browser";
 }
 
 function formatBytes(value: number | null | undefined) {
@@ -421,12 +457,117 @@ export function BrowserInspectorPanel({
   const defaultUrl = useMemo(() => browser?.url || (typeof window === "undefined" ? "about:blank" : window.location.origin), [browser?.url]);
   const [address, setAddress] = useState(defaultUrl);
   const [frameUrl, setFrameUrl] = useState(defaultUrl);
+  const [sessions, setSessions] = useState<BrowserWorkbenchSession[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState("");
+  const [isWorkbenchBusy, setIsWorkbenchBusy] = useState(false);
+  const [workbenchError, setWorkbenchError] = useState("");
+  const [computerUseReport, setComputerUseReport] = useState<ComputerUseBrowserScenarioReport | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .browserList()
+      .then((items) => {
+        if (cancelled) return;
+        setSessions(items);
+        setSelectedSessionId((current) => (current && items.some((item) => item.id === current) ? current : items[0]?.id ?? ""));
+      })
+      .catch((error) => {
+        if (!cancelled) setWorkbenchError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function refreshWorkbench() {
+    const items = await api.browserList();
+    setSessions(items);
+    setSelectedSessionId((current) => (current && items.some((item) => item.id === current) ? current : items[0]?.id ?? ""));
+    return items;
+  }
+
+  async function runWorkbench(action: () => Promise<void>) {
+    setIsWorkbenchBusy(true);
+    setWorkbenchError("");
+    try {
+      await action();
+    } catch (error) {
+      setWorkbenchError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsWorkbenchBusy(false);
+    }
+  }
 
   function handleBrowse(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const normalized = normalizeBrowserUrl(address);
     setAddress(normalized);
     setFrameUrl(normalized);
+  }
+
+  function openManagedBrowser() {
+    void runWorkbench(async () => {
+      const url = normalizeManagedBrowserUrl(address);
+      await api.browserCreate({
+        id: `manual-${Date.now()}`,
+        role: roleFromUrl(url),
+        url,
+      });
+      await refreshWorkbench();
+    });
+  }
+
+  function navigateSelectedBrowser() {
+    void runWorkbench(async () => {
+      const id = selectedSessionId || sessions[0]?.id;
+      if (!id) throw new Error(t(locale, "browser_workbench_select_first"));
+      const url = normalizeManagedBrowserUrl(address);
+      await api.browserNavigate({ id, url });
+      await refreshWorkbench();
+    });
+  }
+
+  function openNewsYoutubeScenario() {
+    void runWorkbench(async () => {
+      const news = await api.browserCreate({
+        id: "news",
+        role: "News",
+        url: "https://www.google.com/search?q=%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB&tbm=nws",
+      });
+      const youtube = await api.browserCreate({
+        id: "youtube",
+        role: "YouTube",
+        url: "https://www.youtube.com/",
+      });
+      await api.browserTileTwoUp([news.id, youtube.id]);
+      const report = await api.runtimeComputerUseBrowserScenario();
+      setComputerUseReport(report);
+      await refreshWorkbench();
+    });
+  }
+
+  function tileTwoUp() {
+    void runWorkbench(async () => {
+      const ids = sessions.slice(0, 2).map((item) => item.id);
+      await api.browserTileTwoUp(ids);
+      await refreshWorkbench();
+    });
+  }
+
+  function focusBrowser(id: string) {
+    void runWorkbench(async () => {
+      await api.browserFocus(id);
+      await refreshWorkbench();
+    });
+  }
+
+  function closeBrowser(id: string) {
+    void runWorkbench(async () => {
+      const items = await api.browserClose(id);
+      setSessions(items);
+      setSelectedSessionId((current) => (current === id ? items[0]?.id ?? "" : current));
+    });
   }
 
   function openInNewWindow() {
@@ -452,10 +593,68 @@ export function BrowserInspectorPanel({
         <button type="submit" className="ghost-button inspector-inline-action" data-testid="browser-go-button">
           {t(locale, "browser_go")}
         </button>
+        <button type="button" className="ghost-button inspector-inline-action" onClick={openManagedBrowser} disabled={isWorkbenchBusy}>
+          <ExternalLink size={13} aria-hidden="true" />
+          <span>{t(locale, "browser_workbench_open")}</span>
+        </button>
         <button type="button" className="ghost-button inspector-inline-action" onClick={openInNewWindow}>
           {t(locale, "browser_open_external")}
         </button>
       </form>
+      <div className="browser-workbench" data-testid="browser-workbench">
+        <div className="browser-workbench-header">
+          <div>
+            <strong>{t(locale, "browser_workbench_title")}</strong>
+            <span>{t(locale, "browser_workbench_summary")}</span>
+          </div>
+          <span className="status-tag">{sessions.length}</span>
+        </div>
+        <div className="browser-workbench-actions">
+          <button type="button" className="ghost-button inspector-inline-action" data-testid="browser-open-scenario-button" disabled={isWorkbenchBusy} onClick={openNewsYoutubeScenario}>
+            <Grid2X2 size={13} aria-hidden="true" />
+            <span>{t(locale, "browser_workbench_open_scenario")}</span>
+          </button>
+          <button type="button" className="ghost-button inspector-inline-action" disabled={isWorkbenchBusy || sessions.length < 2} onClick={tileTwoUp}>
+            <Grid2X2 size={13} aria-hidden="true" />
+            <span>{t(locale, "browser_workbench_tile")}</span>
+          </button>
+          <button type="button" className="ghost-button inspector-inline-action" disabled={isWorkbenchBusy || !sessions.length} onClick={navigateSelectedBrowser}>
+            {t(locale, "browser_workbench_navigate")}
+          </button>
+          <button type="button" className="ghost-button inspector-inline-action icon-button" disabled={isWorkbenchBusy} onClick={() => void runWorkbench(async () => { await refreshWorkbench(); })} title={t(locale, "browser_workbench_refresh")}>
+            <RefreshCw size={13} aria-hidden="true" />
+          </button>
+        </div>
+        {sessions.length ? (
+          <div className="browser-workbench-list" role="list" aria-label={t(locale, "browser_workbench_title")}>
+            {sessions.map((session) => (
+              <div className={`browser-workbench-row ${selectedSessionId === session.id ? "active" : ""}`} data-testid="browser-workbench-row" key={session.id}>
+                <button type="button" className="browser-workbench-main" onClick={() => setSelectedSessionId(session.id)}>
+                  <span>{browserRoleLabel(locale, session.role)}</span>
+                  <small>{session.url || session.title}</small>
+                </button>
+                <span className="status-tag">{workbenchStatusLabel(locale, session.status)}</span>
+                <button type="button" className="ghost-button inspector-inline-action" disabled={isWorkbenchBusy} onClick={() => focusBrowser(session.id)}>
+                  {t(locale, "browser_workbench_focus")}
+                </button>
+                <button type="button" className="ghost-button inspector-inline-action icon-button" disabled={isWorkbenchBusy} onClick={() => closeBrowser(session.id)} title={t(locale, "browser_workbench_close")}>
+                  <X size={13} aria-hidden="true" />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted compact-copy">{t(locale, "browser_workbench_empty")}</p>
+        )}
+        {workbenchError ? <p className="muted compact-copy browser-workbench-error">{workbenchError}</p> : null}
+        {computerUseReport ? (
+          <div className="browser-workbench-report" data-testid="browser-cua-report">
+            <span>{computerUseReport.status}</span>
+            <small title={computerUseReport.artifact_path}>{computerUseReport.artifact_path}</small>
+          </div>
+        ) : null}
+        <p className="muted compact-copy">{t(locale, "browser_workbench_cua_hint")}</p>
+      </div>
       <div className="browser-frame-shell">
         <iframe
           data-testid="browser-preview-frame"

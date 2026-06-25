@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { api } from "../../api";
 import type { ProjectFile, ProjectFilePreview, ProjectFilesTree } from "../../types";
 import { BrowserInspectorPanel, FilesInspectorPanel } from "./InspectorPanels";
 
@@ -103,5 +104,45 @@ describe("InspectorPanels", () => {
     const frame = screen.getByTitle("sample.pdf");
     expect(frame.tagName).toBe("IFRAME");
     expect(frame).toHaveAttribute("src", expect.stringContaining("reports%2Fsample.pdf"));
+  });
+
+  it("prepares the managed News and YouTube browser scenario for Computer Use", async () => {
+    const news = {
+      id: "ab-browser-news",
+      role: "News",
+      title: "AstraBridge Browser - News",
+      url: "https://www.google.com/search?q=%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB&tbm=nws",
+      status: "open",
+      error: null,
+    };
+    const youtube = {
+      id: "ab-browser-youtube",
+      role: "YouTube",
+      title: "AstraBridge Browser - YouTube",
+      url: "https://www.youtube.com/",
+      status: "open",
+      error: null,
+    };
+    vi.spyOn(api, "browserList").mockResolvedValueOnce([]).mockResolvedValueOnce([news, youtube]);
+    vi.spyOn(api, "browserCreate").mockResolvedValueOnce(news).mockResolvedValueOnce(youtube);
+    vi.spyOn(api, "browserTileTwoUp").mockResolvedValue([news, youtube]);
+    vi.spyOn(api, "runtimeComputerUseBrowserScenario").mockResolvedValue({
+      schema_version: "astrabridge-computer-use-browser-scenario-v1",
+      scenario_id: "CUA_test",
+      scenario: "google-news-youtube-two-window",
+      generated_at: "2026-06-26T00:00:00+08:00",
+      status: "prepared",
+      artifact_path: "D:/AstraBridge/.astrabridge/dogfood/computer-use/CUA_test.json",
+      browser_targets: [],
+    });
+
+    renderBrowserPanel();
+    fireEvent.click(screen.getByTestId("browser-open-scenario-button"));
+
+    await waitFor(() => {
+      expect(api.browserTileTwoUp).toHaveBeenCalledWith(["ab-browser-news", "ab-browser-youtube"]);
+    });
+    expect(await screen.findByTestId("browser-cua-report")).toHaveTextContent("prepared");
+    expect(screen.getAllByTestId("browser-workbench-row")).toHaveLength(2);
   });
 });

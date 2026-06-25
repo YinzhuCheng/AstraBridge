@@ -76,8 +76,10 @@ class RuntimeConfigService:
         *,
         require_secret: bool,
         session_key: str | None = None,
+        enable_computer_use_plugins: bool = False,
     ) -> dict[str, Any]:
         runtime = self._normalize_profile(profile)
+        runtime["computer_use_plugins_enabled"] = bool(enable_computer_use_plugins)
         if session_key is not None and session_key.strip():
             os.environ[runtime["env_key"]] = session_key.strip()
         elif runtime["auth_mode"] == "os_keychain" and runtime.get("secret_ref"):
@@ -85,7 +87,7 @@ class RuntimeConfigService:
             if loaded:
                 os.environ[runtime["env_key"]] = loaded
         self.codex_home.mkdir(parents=True, exist_ok=True)
-        self._write_config(runtime)
+        self._write_config(runtime, enable_computer_use_plugins=enable_computer_use_plugins)
         self._apply_proxy_environment(runtime)
         os.environ["CODEX_HOME"] = str(self.codex_home)
         secret_loaded = bool(os.environ.get(runtime["env_key"]))
@@ -183,6 +185,7 @@ class RuntimeConfigService:
             "mcp_verified_servers": runtime.get("mcp_verified_servers"),
             "mcp_smoke_status": runtime.get("mcp_smoke_status"),
             "mcp_tool_argument_validation": runtime.get("mcp_tool_argument_validation"),
+            "computer_use_plugins_enabled": bool(runtime.get("computer_use_plugins_enabled")),
             "secret_source": runtime.get("secret_source"),
             "secret_fingerprint": runtime.get("secret_fingerprint"),
             "mcp_config_updated_at": self._mcp_config.snapshot().get("updated_at"),
@@ -223,6 +226,7 @@ class RuntimeConfigService:
             tuple(runtime_status.get("mcp_verified_servers") or []),
             runtime_status.get("mcp_smoke_status"),
             runtime_status.get("mcp_tool_argument_validation"),
+            bool(runtime_status.get("computer_use_plugins_enabled")),
         )
 
     def _normalize_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
@@ -340,7 +344,7 @@ class RuntimeConfigService:
         os.environ["NO_PROXY"] = LOCAL_NO_PROXY
         os.environ["no_proxy"] = LOCAL_NO_PROXY
 
-    def _write_config(self, runtime: dict[str, Any]) -> None:
+    def _write_config(self, runtime: dict[str, Any], *, enable_computer_use_plugins: bool = False) -> None:
         codex_model = codex_model_id(runtime, runtime["model"])
         codex_base_url = os.environ.get("ASTRABRIDGE_BASE_URL", DEFAULT_ROUTER_BASE_URL).rstrip("/")
         context_window = (
@@ -375,7 +379,7 @@ class RuntimeConfigService:
                 *self._model_provider_section_lines(runtime, codex_base_url),
                 "",
                 "[features]",
-                "plugins = false",
+                f"plugins = {str(bool(enable_computer_use_plugins)).lower()}",
                 "plugin_sharing = false",
                 "remote_plugin = false",
                 "",

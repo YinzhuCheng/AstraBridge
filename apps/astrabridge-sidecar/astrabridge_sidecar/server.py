@@ -1115,6 +1115,10 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 )
                 return
+            if path == "/api/runtime/computer-use/browser-scenario":
+                profile = self._resolve_runtime_profile(payload.get("profile_id"))
+                self.send_json(self.context.runtime.computer_use_browser_scenario(profile))
+                return
             if path == "/api/runtime/skill-enablement":
                 profile = self._resolve_runtime_profile(payload.get("profile_id"))
                 record_id = str(payload.get("record_id") or "").strip()

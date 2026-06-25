@@ -29,6 +29,14 @@ DEFAULT_APP_SERVER_COMMAND = [
 ]
 
 
+def app_server_command(*, listen: str = "stdio://", allow_plugins: bool = False) -> list[str]:
+    command = ["app-server", "--listen", listen]
+    if not allow_plugins:
+        command.extend(["--disable", "plugins"])
+    command.extend(["--disable", "plugin_sharing", "--disable", "remote_plugin"])
+    return command
+
+
 class JsonRpcError(RuntimeError):
     def __init__(self, message: str, code: int | None = None, data: Any | None = None) -> None:
         super().__init__(message)
@@ -52,6 +60,7 @@ class AppServerClient:
         ws_url: str | None = None,
         env: dict[str, str] | None = None,
         cwd: Path | None = None,
+        allow_plugins: bool = False,
         on_notification: Callable[[str, Any], None] | None = None,
         on_server_request: Callable[[str, Any], Any] | None = None,
         on_stderr: Callable[[str], None] | None = None,
@@ -61,6 +70,7 @@ class AppServerClient:
         self.ws_url = ws_url
         self.env = env
         self.cwd = cwd
+        self.allow_plugins = allow_plugins
         self.on_notification = on_notification
         self.on_server_request = on_server_request
         self.on_stderr = on_stderr
@@ -80,7 +90,7 @@ class AppServerClient:
             return
         self._closed.clear()
         self._disconnected.clear()
-        launch_command = self.launch_command or [self.codex_executable, *DEFAULT_APP_SERVER_COMMAND]
+        launch_command = self.launch_command or [self.codex_executable, *app_server_command(allow_plugins=self.allow_plugins)]
         if self.ws_url:
             self._process = subprocess.Popen(
                 launch_command,

@@ -10,6 +10,10 @@ import type {
   AutomationSpec,
   AssetRegistryResponse,
   AttachmentDraft,
+  BrowserWorkbenchCreateRequest,
+  BrowserWorkbenchNavigateRequest,
+  BrowserWorkbenchSession,
+  ComputerUseBrowserScenarioReport,
   CapabilityArtifactsResponse,
   CollaborationMode,
   CapabilityManagementResponse,
@@ -175,6 +179,108 @@ function jsonRequest<T>(path: string, payload: Record<string, unknown>) {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+let browserWorkbenchFallbackSessions: BrowserWorkbenchSession[] = [];
+
+function normalizeWorkbenchUrl(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("URL is required.");
+  const candidate = /^[a-z][a-z0-9+.-]*:/i.test(trimmed)
+    ? trimmed
+    : /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(\/|$)/i.test(trimmed)
+      ? `http://${trimmed}`
+      : `https://${trimmed}`;
+  const url = new URL(candidate);
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("Only http and https URLs are supported.");
+  }
+  return url.toString();
+}
+
+function fallbackBrowserToken(value: string) {
+  const token = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return token || "browser";
+}
+
+function fallbackBrowserId(payload: Pick<BrowserWorkbenchCreateRequest, "id" | "role">) {
+  const token = fallbackBrowserToken(payload.id || payload.role || "browser");
+  return token.startsWith("ab-browser-") ? token : `ab-browser-${token}`;
+}
+
+function fallbackBrowserRole(role?: string) {
+  const value = role?.trim();
+  return value ? value.slice(0, 40) : "Browser";
+}
+
+async function browserCreate(payload: BrowserWorkbenchCreateRequest) {
+  const normalized = { ...payload, url: normalizeWorkbenchUrl(payload.url) };
+  if (isTauri()) {
+    return invoke<BrowserWorkbenchSession>("browser_create", { request: normalized });
+  }
+  const role = fallbackBrowserRole(normalized.role);
+  const session: BrowserWorkbenchSession = {
+    id: fallbackBrowserId(normalized),
+    role,
+    title: `AstraBridge Browser - ${role}`,
+    url: normalized.url,
+    status: "web_fallback",
+    error: null,
+  };
+  browserWorkbenchFallbackSessions = [
+    ...browserWorkbenchFallbackSessions.filter((item) => item.id !== session.id),
+    session,
+  ];
+  return session;
+}
+
+async function browserNavigate(payload: BrowserWorkbenchNavigateRequest) {
+  const normalizedUrl = normalizeWorkbenchUrl(payload.url);
+  if (isTauri()) {
+    return invoke<BrowserWorkbenchSession>("browser_navigate", { request: { ...payload, url: normalizedUrl } });
+  }
+  const current = browserWorkbenchFallbackSessions.find((item) => item.id === payload.id);
+  if (!current) throw new Error(`Browser window not found: ${payload.id}`);
+  const next = { ...current, url: normalizedUrl, status: "web_fallback" };
+  browserWorkbenchFallbackSessions = browserWorkbenchFallbackSessions.map((item) => (item.id === payload.id ? next : item));
+  return next;
+}
+
+async function browserList() {
+  if (isTauri()) {
+    return invoke<BrowserWorkbenchSession[]>("browser_list");
+  }
+  return browserWorkbenchFallbackSessions;
+}
+
+async function browserFocus(id: string) {
+  if (isTauri()) {
+    return invoke<BrowserWorkbenchSession>("browser_focus", { id });
+  }
+  const current = browserWorkbenchFallbackSessions.find((item) => item.id === id);
+  if (!current) throw new Error(`Browser window not found: ${id}`);
+  return { ...current, status: "web_fallback" };
+}
+
+async function browserClose(id: string) {
+  if (isTauri()) {
+    return invoke<BrowserWorkbenchSession[]>("browser_close", { id });
+  }
+  browserWorkbenchFallbackSessions = browserWorkbenchFallbackSessions.filter((item) => item.id !== id);
+  return browserWorkbenchFallbackSessions;
+}
+
+async function browserTileTwoUp(ids: string[]) {
+  if (isTauri()) {
+    return invoke<BrowserWorkbenchSession[]>("browser_tile_two_up", { ids });
+  }
+  if (ids.length !== 2) throw new Error("Two browser window ids are required.");
+  return browserWorkbenchFallbackSessions;
 }
 
 export const api = {
@@ -351,6 +457,12 @@ export const api = {
     jsonRequest<Record<string, unknown>>("/api/router/image/yunwu/generate", payload),
   dogfoodRun: () => request<DogfoodRunResponse>("/api/dogfood/run"),
   saveDogfoodRun: (payload: Partial<DogfoodRun>) => jsonRequest<DogfoodRunResponse>("/api/dogfood/run/save", payload as Record<string, unknown>),
+  browserCreate,
+  browserNavigate,
+  browserList,
+  browserFocus,
+  browserClose,
+  browserTileTwoUp,
   addDogfoodCapture: (payload: { path: string; label?: string; provider?: string }) =>
     jsonRequest<DogfoodRunResponse & { capture: Record<string, unknown> }>("/api/dogfood/captures/add", payload),
   dogfoodBrowserSmoke: (payload: { url: string; label?: string; preset?: string; screenshot_path?: string; console_errors?: string[]; auto_milestone?: boolean; include_run?: boolean; actions?: Array<Record<string, unknown>> }) =>
@@ -405,6 +517,8 @@ export const api = {
     jsonRequest<CodexPluginInstallPlan>("/api/runtime/plugin-install-plan", payload),
   runtimePluginInstallApply: (payload: { profile_id?: string; plugin_id: string; source_catalog_id?: string }) =>
     jsonRequest<CodexPluginInstallExecution>("/api/runtime/plugin-install-apply", payload),
+  runtimeComputerUseBrowserScenario: (payload?: { profile_id?: string }) =>
+    jsonRequest<ComputerUseBrowserScenarioReport>("/api/runtime/computer-use/browser-scenario", payload ?? {}),
   wslDependencies: (distro?: string) => {
     const suffix = distro ? `?distro=${encodeURIComponent(distro)}` : "";
     return request<WslDependencyStatus>(`/api/runtime/dependencies/wsl${suffix}`, { timeoutMs: 45000 });

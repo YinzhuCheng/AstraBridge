@@ -9025,7 +9025,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             files = tools.files_tree()
             self.assertTrue(any(item["path"] == "scorecard.py" for item in files["items"]))
             preview = tools.read_file("checks.json")
-            self.assertEqual(preview["kind"], "text")
+            self.assertEqual(preview["kind"], "json")
             self.assertIn("\"build\"", preview["content"])
 
             failing = tools.run_tests({"command": "python -m unittest -q test_scorecard"})

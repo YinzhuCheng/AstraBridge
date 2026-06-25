@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .app_server_client import AppServerClient, JsonRpcError
+from .app_server_client import AppServerClient, JsonRpcError, app_server_command
 from .coding_kernel import project_turn_to_coding_events
 from .common import WORKSPACE_STATE_DIRNAME, append_jsonl, new_id, now_iso, read_json, write_json
 from .codex_kernel_probe import discover_codex_binary_and_version, resolve_codex_binary_metadata
@@ -2572,6 +2572,7 @@ class RuntimeService:
                 ws_url=launch.get("ws_url"),
                 env={**env, **dict(launch.get("env_updates") or {})},
                 cwd=launch["cwd"],
+                allow_plugins=bool(launch.get("allow_plugins")),
                 on_notification=self._on_notification,
                 on_server_request=self._on_server_request,
                 on_stderr=self._on_stderr,
@@ -2816,6 +2817,120 @@ class RuntimeService:
             "auto_milestone": bool(arguments.get("auto_milestone", True)),
         }
         return self._dogfood_run.browser_smoke(payload)
+
+    def computer_use_browser_scenario(self, profile: dict[str, Any]) -> dict[str, Any]:
+        scenario_id = new_id("CUA")
+        generated_at = now_iso()
+        targets = [
+            {
+                "id": "ab-browser-news",
+                "role": "News",
+                "title": "AstraBridge Browser - News",
+                "url": "https://www.google.com/search?q=%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB&tbm=nws",
+            },
+            {
+                "id": "ab-browser-youtube",
+                "role": "YouTube",
+                "title": "AstraBridge Browser - YouTube",
+                "url": "https://www.youtube.com/",
+            },
+        ]
+        artifact_root = self._projects.require_shell_state_root() / "dogfood" / "computer-use"
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        report_path = artifact_root / f"{scenario_id}.json"
+        report: dict[str, Any] = {
+            "schema_version": "astrabridge-computer-use-browser-scenario-v1",
+            "scenario_id": scenario_id,
+            "scenario": "google-news-youtube-two-window",
+            "generated_at": generated_at,
+            "status": "prepared",
+            "artifact_path": str(report_path),
+            "browser_targets": targets,
+            "safety_boundaries": [
+                "Do not log in.",
+                "Do not submit forms except ordinary cookie consent.",
+                "Do not upload, comment, purchase, or bypass CAPTCHA.",
+                "Use only AstraBridge-owned windows titled AstraBridge Browser - <role>.",
+            ],
+            "attempts": [
+                {
+                    "attempt_id": "current-model",
+                    "provider_id": profile.get("provider_id"),
+                    "model": profile.get("model"),
+                    "status": "pending_computer_use_validation",
+                    "expected_action": "Confirm both AstraBridge browser windows are visible and record screenshots.",
+                },
+                {
+                    "attempt_id": "yunwu-gpt-5.5",
+                    "provider_id": "yunwu",
+                    "model": "gpt-5.5",
+                    "status": "pending_computer_use_validation",
+                    "expected_action": "Run the same confirmation flow for comparison.",
+                },
+            ],
+            "app_server_plugin_gate": {
+                "mode": "computer_use_plugins_allowed",
+                "plugins": "enabled_for_this_probe_only",
+                "plugin_sharing": "disabled",
+                "remote_plugin": "disabled",
+                "probe_status": "not_run",
+            },
+            "notes": [
+                "The UI-created WebView2 windows are the target surface for Computer Use.",
+                "The model comparison result must be appended after actual Computer Use validation.",
+            ],
+        }
+        try:
+            runtime_status = self._runtime_config.prepare_profile(
+                profile,
+                require_secret=False,
+                enable_computer_use_plugins=True,
+            )
+            runtime_status["execution_host"] = self._execution_host()
+            runtime_status["wsl_distro"] = self._wsl_distro()
+            launch_target = self._resolve_launch_target(runtime_status, enable_computer_use_plugins=True)
+            plugin_report = probe_plugin_discovery(
+                codex_home=Path(str(runtime_status.get("codex_home") or "")).expanduser().resolve(),
+                client_factory=self._spawned_probe_client_factory(launch_target),
+                local_search_roots=self._kernel_probe_search_roots(),
+                artifact_root=artifact_root / "plugin-probes",
+                request_timeout=8.0,
+            )
+            report["app_server_plugin_gate"] = {
+                **report["app_server_plugin_gate"],
+                "probe_status": "ok",
+                "config_feature_state": ((plugin_report.get("plugin") or {}).get("config_feature_state") or "unknown"),
+                "list_status": ((plugin_report.get("plugin") or {}).get("list_status") or "unknown"),
+                "installed_status": ((plugin_report.get("plugin") or {}).get("installed_status") or "unknown"),
+                "discovered_plugins": [
+                    (item.get("plugin_id") or item.get("name") or "")
+                    for item in ((plugin_report.get("plugin") or {}).get("discovered_plugins") or [])
+                    if isinstance(item, dict)
+                ],
+                "probe_artifact": plugin_report.get("report_path"),
+            }
+        except Exception as exc:  # noqa: BLE001
+            report["status"] = "prepared_with_plugin_probe_error"
+            report["app_server_plugin_gate"] = {
+                **report["app_server_plugin_gate"],
+                "probe_status": "error",
+                "error": str(exc)[:500],
+            }
+        finally:
+            try:
+                self._runtime_config.prepare_profile(profile, require_secret=False)
+            except Exception as exc:  # noqa: BLE001
+                report.setdefault("warnings", []).append(f"runtime_config_restore_failed:{str(exc)[:300]}")
+        write_json(report_path, report)
+        self._record_event(
+            {
+                "type": "computer_use_browser_scenario_prepared",
+                "scenario_id": scenario_id,
+                "artifact_path": str(report_path),
+                "status": report.get("status"),
+            }
+        )
+        return report
 
     def _call_astrabridge_web_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if tool == "astrabridge_web_search_batch":
@@ -3275,7 +3390,7 @@ class RuntimeService:
         )
         return str(metadata.get("launch_descriptor") or "") or None
 
-    def _resolve_launch_target(self, runtime_status: dict[str, Any]) -> dict[str, Any]:
+    def _resolve_launch_target(self, runtime_status: dict[str, Any], *, enable_computer_use_plugins: bool = False) -> dict[str, Any]:
         binary_metadata = resolve_codex_binary_metadata(
             execution_host=self._execution_host(),
             wsl_distro=self._wsl_distro(),
@@ -3287,10 +3402,11 @@ class RuntimeService:
                 raise RuntimeError("Codex CLI/runtime was not detected. Install Codex or set ASTRABRIDGE_CODEX_BIN before sending.")
             return {
                 "codex_executable": codex_executable,
-                "launch_command": None,
+                "launch_command": [codex_executable, *app_server_command(allow_plugins=True)] if enable_computer_use_plugins else None,
                 "ws_url": None,
                 "env_updates": {},
                 "cwd": self._app_server_launch_cwd(),
+                "allow_plugins": bool(enable_computer_use_plugins),
             }
 
         wsl_executable = shutil.which("wsl.exe") or shutil.which("wsl")
@@ -3333,11 +3449,12 @@ class RuntimeService:
         clean_path = f"{home_wsl_abs.rstrip('/')}/.local/share/astrabridge/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         ws_port = self._reserve_loopback_port()
         ws_url = f"ws://127.0.0.1:{ws_port}"
+        plugin_flags = "" if enable_computer_use_plugins else " --disable plugins"
         command = (
             f"cd {shlex.quote(launcher_cwd_wsl)} && "
             f"exec env -i HOME={shlex.quote(home_wsl_abs)} USER=\"${{USER:-}}\" LOGNAME=\"${{LOGNAME:-}}\" "
             f"SHELL=/bin/bash PATH={shlex.quote(clean_path)} {env_passthrough}{codex_command} "
-            f"app-server --listen {shlex.quote(ws_url)} --disable plugins --disable plugin_sharing --disable remote_plugin"
+            f"app-server --listen {shlex.quote(ws_url)}{plugin_flags} --disable plugin_sharing --disable remote_plugin"
         )
         return {
             "codex_executable": wsl_executable,
@@ -3345,6 +3462,7 @@ class RuntimeService:
             "ws_url": ws_url,
             "env_updates": env_updates,
             "cwd": None,
+            "allow_plugins": bool(enable_computer_use_plugins),
         }
 
     def _app_server_launch_cwd(self) -> Path:
@@ -3854,6 +3972,7 @@ for host in candidates:
                 ws_url=launch_target.get("ws_url"),
                 env=environment,
                 cwd=launch_target.get("cwd"),
+                allow_plugins=bool(launch_target.get("allow_plugins")),
                 on_notification=on_notification,
                 on_server_request=on_server_request,
             )

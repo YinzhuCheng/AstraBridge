@@ -1405,6 +1405,42 @@ Object.assign(zhCN, {
   setup_tab_extensions: "扩展",
 });
 
+Object.assign(en, {
+  browser_workbench_title: "Browser workbench",
+  browser_workbench_summary: "Managed WebView2 windows for real sites and Computer Use.",
+  browser_workbench_open: "Open window",
+  browser_workbench_open_scenario: "Google News + YouTube",
+  browser_workbench_tile: "Tile",
+  browser_workbench_navigate: "Navigate",
+  browser_workbench_refresh: "Refresh",
+  browser_workbench_focus: "Focus",
+  browser_workbench_close: "Close",
+  browser_workbench_empty: "No managed browser windows yet.",
+  browser_workbench_cua_hint: "Computer Use should target windows titled AstraBridge Browser - News and AstraBridge Browser - YouTube.",
+  browser_workbench_status_open: "open",
+  browser_workbench_status_focused: "focused",
+  browser_workbench_status_fallback: "dev fallback",
+  browser_workbench_select_first: "Select a browser window first.",
+});
+
+Object.assign(zhCN, {
+  browser_workbench_title: "浏览器工作台",
+  browser_workbench_summary: "由 WebView2 管理真实网页窗口，并用于 Computer Use 定位。",
+  browser_workbench_open: "打开窗口",
+  browser_workbench_open_scenario: "新闻 + YouTube",
+  browser_workbench_tile: "并排",
+  browser_workbench_navigate: "导航选中",
+  browser_workbench_refresh: "刷新",
+  browser_workbench_focus: "聚焦",
+  browser_workbench_close: "关闭",
+  browser_workbench_empty: "还没有托管浏览器窗口。",
+  browser_workbench_cua_hint: "Computer Use 应定位标题为 AstraBridge Browser - News 和 AstraBridge Browser - YouTube 的窗口。",
+  browser_workbench_status_open: "已打开",
+  browser_workbench_status_focused: "已聚焦",
+  browser_workbench_status_fallback: "开发回退",
+  browser_workbench_select_first: "请先选择一个浏览器窗口。",
+});
+
 export const dictionaries: Record<LocaleCode, Dictionary> = {
   en,
   "zh-CN": zhCN,

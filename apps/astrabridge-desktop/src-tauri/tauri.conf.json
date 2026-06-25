@@ -1,4 +1,4 @@
-﻿{
+{
     "$schema":  "https://schema.tauri.app/config/2",
     "productName":  "AstraBridge",
     "version":  "0.1.0",
@@ -42,7 +42,7 @@
                                             }
                                },
                    "resources":  {
-                                     "../../astrabridge-sidecar/dist/astrabridge-sidecar.exe":  "astrabridge-sidecar/astrabridge-sidecar.exe"
+                                     "../../astrabridge-sidecar":  "astrabridge-sidecar"
                                  }
                }
 }

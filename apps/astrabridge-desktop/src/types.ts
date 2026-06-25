@@ -1617,6 +1617,39 @@ export type DogfoodBrowserSmoke = {
   error?: string;
 };
 
+export type BrowserWorkbenchSession = {
+  id: string;
+  role: string;
+  title: string;
+  url: string;
+  status: string;
+  error?: string | null;
+};
+
+export type BrowserWorkbenchCreateRequest = {
+  id?: string;
+  role?: string;
+  url: string;
+};
+
+export type BrowserWorkbenchNavigateRequest = {
+  id: string;
+  url: string;
+};
+
+export type ComputerUseBrowserScenarioReport = {
+  schema_version: string;
+  scenario_id: string;
+  scenario: string;
+  generated_at: string;
+  status: string;
+  artifact_path: string;
+  browser_targets: Array<Record<string, unknown>>;
+  app_server_plugin_gate?: Record<string, unknown>;
+  attempts?: Array<Record<string, unknown>>;
+  notes?: string[];
+};
+
 export type DogfoodMilestone = {
   label: string;
   provider: string;
