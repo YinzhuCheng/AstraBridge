@@ -136,6 +136,7 @@ class AppContext:
             profile_service=self.profiles,
             router_service=self.router,
             router_config_service=self.router_config,
+            key_injector=self.llm_manager.inject_profile_key,
         )
         self.project_tools = ProjectToolsService(
             self.projects,
@@ -1117,7 +1118,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/runtime/computer-use/browser-scenario":
                 profile = self._resolve_runtime_profile(payload.get("profile_id"))
-                self.send_json(self.context.runtime.computer_use_browser_scenario(profile))
+                max_wait_sec = float(payload.get("max_wait_sec") or 8.0)
+                max_wait_sec = max(0.0, min(max_wait_sec, 30.0))
+                self.send_json(
+                    self.context.runtime.computer_use_browser_scenario(
+                        profile,
+                        run_model=bool(payload.get("run_model", True)),
+                        include_yunwu=bool(payload.get("include_yunwu", True)),
+                        allow_fallback_sites=bool(payload.get("allow_fallback_sites", True)),
+                        max_wait_sec=max_wait_sec,
+                    )
+                )
                 return
             if path == "/api/runtime/skill-enablement":
                 profile = self._resolve_runtime_profile(payload.get("profile_id"))

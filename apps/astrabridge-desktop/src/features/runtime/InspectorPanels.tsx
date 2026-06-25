@@ -85,6 +85,9 @@ function browserRoleLabel(locale: Locale, role: string) {
 }
 
 function reportStatusLabel(locale: Locale, status: string) {
+  if (status === "model_runner_cua_observed") return t(locale, "browser_workbench_report_cua_observed");
+  if (status === "model_runner_attempted") return t(locale, "browser_workbench_report_attempted");
+  if (status === "model_runner_blocked") return t(locale, "browser_workbench_report_blocked");
   if (status === "prepared_for_computer_use") return t(locale, "browser_workbench_report_ready");
   if (status === "validated_with_limitations") return t(locale, "browser_workbench_report_limited");
   if (status === "prepared_with_plugin_probe_error") return t(locale, "browser_workbench_report_probe_error");
@@ -92,16 +95,44 @@ function reportStatusLabel(locale: Locale, status: string) {
   return status || "-";
 }
 
+function attemptDisplayName(locale: Locale, attemptId: string) {
+  if (attemptId === "current-model") return t(locale, "browser_workbench_attempt_current");
+  if (attemptId === "yunwu-gpt-5.5") return "yunwu/gpt-5.5";
+  return attemptId || "-";
+}
+
+function attemptStatusLabel(locale: Locale, status: string) {
+  if (status === "cua_event_observed") return t(locale, "browser_workbench_attempt_cua_observed");
+  if (status === "tool_event_observed") return t(locale, "browser_workbench_attempt_tool_observed");
+  if (status === "completed_without_cua_event") return t(locale, "browser_workbench_attempt_completed_no_cua");
+  if (status === "turn_started_no_cua_event_yet") return t(locale, "browser_workbench_attempt_started");
+  if (status === "blocked_by_non_cua_request") return t(locale, "browser_workbench_attempt_blocked_request");
+  if (status === "blocked") return t(locale, "browser_workbench_attempt_blocked");
+  if (status === "queued_for_app_model_runner") return t(locale, "browser_workbench_attempt_queued");
+  return status || "-";
+}
+
+function attemptBlockerLabel(locale: Locale, item: Record<string, unknown>) {
+  const keyInjection = item.key_injection && typeof item.key_injection === "object" ? item.key_injection as Record<string, unknown> : null;
+  const injectionReason = String(keyInjection?.reason ?? "");
+  const failureReason = String(item.failure_reason ?? "");
+  if (injectionReason === "not_managed") return t(locale, "browser_workbench_attempt_key_not_managed");
+  if (injectionReason === "no_key") return t(locale, "browser_workbench_attempt_key_missing");
+  if (failureReason.includes("runtime_secret_missing")) return t(locale, "browser_workbench_attempt_key_missing");
+  if (failureReason) return failureReason.slice(0, 120);
+  return "";
+}
+
 function reportModelStatus(locale: Locale, report: ComputerUseBrowserScenarioReport) {
   const attempts = report.attempts ?? [];
-  const yunwu = attempts.find((item) => String(item.attempt_id ?? "") === "yunwu-gpt-5.5");
-  if (yunwu && String(yunwu.status ?? "") === "requires_app_model_runner") {
-    return t(locale, "browser_workbench_model_runner_pending");
-  }
-  if (yunwu && String(yunwu.status ?? "") === "not_run_in_this_codex_validation") {
-    return t(locale, "browser_workbench_model_runner_pending");
-  }
-  return t(locale, "browser_workbench_report_ready_detail");
+  if (!attempts.length) return t(locale, "browser_workbench_report_ready_detail");
+  const parts = attempts.map((item) => {
+    const attemptId = String(item.attempt_id ?? "");
+    const status = String(item.status ?? "");
+    const blocker = status === "blocked" || status === "blocked_by_non_cua_request" ? attemptBlockerLabel(locale, item) : "";
+    return `${attemptDisplayName(locale, attemptId)}: ${attemptStatusLabel(locale, status)}${blocker ? ` (${blocker})` : ""}`;
+  });
+  return `${t(locale, "browser_workbench_model_runner_summary")} ${parts.join(" / ")}`;
 }
 
 function formatBytes(value: number | null | undefined) {
@@ -574,7 +605,12 @@ export function BrowserInspectorPanel({
         url: "https://www.youtube.com/",
       });
       await api.browserTileTwoUp([news.id, youtube.id]);
-      const report = await api.runtimeComputerUseBrowserScenario();
+      const report = await api.runtimeComputerUseBrowserScenario({
+        run_model: true,
+        include_yunwu: true,
+        allow_fallback_sites: true,
+        max_wait_sec: 8,
+      });
       setComputerUseReport(report);
       await refreshWorkbench();
     });

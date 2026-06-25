@@ -101,6 +101,7 @@ class RuntimeService:
         profile_service: ProfileService | None = None,
         router_service: Any | None = None,
         router_config_service: Any | None = None,
+        key_injector: Any | None = None,
     ) -> None:
         self._projects = project_service
         self._modals = modal_service
@@ -122,6 +123,7 @@ class RuntimeService:
         self._profiles = profile_service or ProfileService()
         self._router = router_service
         self._router_config = router_config_service
+        self._key_injector = key_injector
         self._project_tools = None
         self._native_turn_loop = None
         self._client: AppServerClient | None = None
@@ -2818,30 +2820,28 @@ class RuntimeService:
         }
         return self._dogfood_run.browser_smoke(payload)
 
-    def computer_use_browser_scenario(self, profile: dict[str, Any]) -> dict[str, Any]:
+    def computer_use_browser_scenario(
+        self,
+        profile: dict[str, Any],
+        *,
+        run_model: bool = True,
+        include_yunwu: bool = True,
+        allow_fallback_sites: bool = True,
+        max_wait_sec: float = 8.0,
+        run_plugin_probe: bool = True,
+    ) -> dict[str, Any]:
         scenario_id = new_id("CUA")
         generated_at = now_iso()
-        targets = [
-            {
-                "id": "ab-browser-news",
-                "role": "News",
-                "title": "AstraBridge Browser - News",
-                "url": "https://news.google.com/search?q=%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB&hl=zh-CN&gl=US&ceid=US:zh-Hans",
-            },
-            {
-                "id": "ab-browser-youtube",
-                "role": "YouTube",
-                "title": "AstraBridge Browser - YouTube",
-                "url": "https://www.youtube.com/",
-            },
-        ]
+        targets = self._computer_use_browser_targets(allow_fallback_sites=allow_fallback_sites)
         artifact_root = self._projects.require_shell_state_root() / "dogfood" / "computer-use"
         artifact_root.mkdir(parents=True, exist_ok=True)
         report_path = artifact_root / f"{scenario_id}.json"
+        attempts = self._computer_use_browser_attempts(profile, include_yunwu=include_yunwu)
+        report_attempts = [{key: value for key, value in attempt.items() if key != "profile"} for attempt in attempts]
         report: dict[str, Any] = {
             "schema_version": "astrabridge-computer-use-browser-scenario-v1",
             "scenario_id": scenario_id,
-            "scenario": "google-news-youtube-two-window",
+            "scenario": "news-video-two-window",
             "generated_at": generated_at,
             "status": "prepared_for_computer_use",
             "artifact_path": str(report_path),
@@ -2852,29 +2852,11 @@ class RuntimeService:
                 "Do not upload, comment, purchase, or bypass CAPTCHA.",
                 "Use only AstraBridge-owned windows titled AstraBridge Browser - <role>.",
             ],
-            "attempts": [
-                {
-                    "attempt_id": "current-model",
-                    "provider_id": profile.get("provider_id"),
-                    "model": profile.get("model"),
-                    "status": "ready_for_cua_validation",
-                    "expected_action": "Use Computer Use to confirm both AstraBridge browser pages are visible and record screenshots.",
-                },
-                {
-                    "attempt_id": "yunwu-gpt-5.5",
-                    "provider_id": "yunwu",
-                    "model": "gpt-5.5",
-                    "status": "requires_app_model_runner",
-                    "expected_action": "Run the same confirmation flow after AstraBridge wires model turns to the computer-use plugin runner.",
-                },
-            ],
+            "attempts": report_attempts,
             "model_comparison": {
-                "status": "not_executed_by_this_endpoint",
-                "reason": (
-                    "This endpoint prepares browser targets and plugin-gate diagnostics. "
-                    "It does not yet start a model turn that uses the computer-use plugin."
-                ),
-                "required_next_runtime": "app_mediated_computer_use_model_runner",
+                "status": "runner_not_started" if not run_model else "runner_starting",
+                "runner": "app_mediated_computer_use_model_runner",
+                "max_wait_sec": max_wait_sec,
             },
             "app_server_plugin_gate": {
                 "mode": "computer_use_plugins_allowed",
@@ -2885,8 +2867,8 @@ class RuntimeService:
             },
             "notes": [
                 "The UI-created WebView2 windows are the target surface for Computer Use.",
-                "Google Search may require CAPTCHA; this scenario uses Google News to reduce CAPTCHA risk without bypassing protections.",
-                "The model comparison result must be appended by a future app-mediated model runner, not inferred by this preparation endpoint.",
+                "Google News and YouTube are primary targets; fallback sites are allowed when the primary sites block, CAPTCHA, or fail to load.",
+                "The model-run comparison is based on actual app-server thread/turn startup and observed plugin/tool notifications, not inferred from preparation.",
             ],
         }
         try:
@@ -2898,28 +2880,58 @@ class RuntimeService:
             runtime_status["execution_host"] = self._execution_host()
             runtime_status["wsl_distro"] = self._wsl_distro()
             launch_target = self._resolve_launch_target(runtime_status, enable_computer_use_plugins=True)
-            plugin_report = probe_plugin_discovery(
-                codex_home=Path(str(runtime_status.get("codex_home") or "")).expanduser().resolve(),
-                client_factory=self._spawned_probe_client_factory(launch_target),
-                local_search_roots=self._kernel_probe_search_roots(),
-                artifact_root=artifact_root / "plugin-probes",
-                request_timeout=8.0,
-            )
-            report["app_server_plugin_gate"] = {
-                **report["app_server_plugin_gate"],
-                "probe_status": "ok",
-                "config_feature_state": ((plugin_report.get("plugin") or {}).get("config_feature_state") or "unknown"),
-                "list_status": ((plugin_report.get("plugin") or {}).get("list_status") or "unknown"),
-                "installed_status": ((plugin_report.get("plugin") or {}).get("installed_status") or "unknown"),
-                "discovered_plugins": [
-                    (item.get("plugin_id") or item.get("name") or "")
-                    for item in ((plugin_report.get("plugin") or {}).get("discovered_plugins") or [])
-                    if isinstance(item, dict)
-                ],
-                "probe_artifact": plugin_report.get("report_path"),
-            }
+            if run_plugin_probe:
+                try:
+                    plugin_report = probe_plugin_discovery(
+                        codex_home=Path(str(runtime_status.get("codex_home") or "")).expanduser().resolve(),
+                        client_factory=self._spawned_probe_client_factory(launch_target),
+                        local_search_roots=self._kernel_probe_search_roots(),
+                        artifact_root=artifact_root / "plugin-probes",
+                        request_timeout=8.0,
+                    )
+                    report["app_server_plugin_gate"] = {
+                        **report["app_server_plugin_gate"],
+                        "probe_status": "ok",
+                        "config_feature_state": ((plugin_report.get("plugin") or {}).get("config_feature_state") or "unknown"),
+                        "list_status": ((plugin_report.get("plugin") or {}).get("list_status") or "unknown"),
+                        "installed_status": ((plugin_report.get("plugin") or {}).get("installed_status") or "unknown"),
+                        "discovered_plugins": [
+                            (item.get("plugin_id") or item.get("name") or "")
+                            for item in ((plugin_report.get("plugin") or {}).get("discovered_plugins") or [])
+                            if isinstance(item, dict)
+                        ],
+                        "probe_artifact": plugin_report.get("report_path"),
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    report["app_server_plugin_gate"] = {
+                        **report["app_server_plugin_gate"],
+                        "probe_status": "error",
+                        "error": str(exc)[:500],
+                    }
+                    report.setdefault("warnings", []).append(f"plugin_probe_failed:{str(exc)[:300]}")
+            if run_model:
+                report["attempts"] = [
+                    self._run_computer_use_browser_model_attempt(
+                        attempt,
+                        targets=targets,
+                        artifact_root=artifact_root,
+                        scenario_id=scenario_id,
+                        max_wait_sec=max_wait_sec,
+                    )
+                    for attempt in attempts
+                ]
+                report["model_comparison"] = self._summarize_computer_use_model_attempts(report["attempts"], max_wait_sec=max_wait_sec)
+                report["status"] = str(report["model_comparison"].get("status") or "model_runner_attempted")
         except Exception as exc:  # noqa: BLE001
-            report["status"] = "prepared_with_plugin_probe_error"
+            if run_model:
+                report["status"] = "model_runner_blocked"
+                report["model_comparison"] = {
+                    "status": "model_runner_blocked",
+                    "reason": str(exc)[:500],
+                    "max_wait_sec": max_wait_sec,
+                }
+            else:
+                report["status"] = "prepared_with_plugin_probe_error"
             report["app_server_plugin_gate"] = {
                 **report["app_server_plugin_gate"],
                 "probe_status": "error",
@@ -2940,6 +2952,300 @@ class RuntimeService:
             }
         )
         return report
+
+    def _computer_use_browser_targets(self, *, allow_fallback_sites: bool) -> list[dict[str, Any]]:
+        targets: list[dict[str, Any]] = [
+            {
+                "id": "ab-browser-news",
+                "role": "News",
+                "title": "AstraBridge Browser - News",
+                "url": "https://news.google.com/search?q=%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB&hl=zh-CN&gl=US&ceid=US:zh-Hans",
+                "fallback_urls": [
+                    "https://www.bing.com/news/search?q=%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB",
+                    "https://www.reuters.com/",
+                ]
+                if allow_fallback_sites
+                else [],
+            },
+            {
+                "id": "ab-browser-youtube",
+                "role": "YouTube",
+                "title": "AstraBridge Browser - YouTube",
+                "url": "https://www.youtube.com/",
+                "fallback_urls": [
+                    "https://vimeo.com/watch",
+                    "https://www.dailymotion.com/",
+                ]
+                if allow_fallback_sites
+                else [],
+            },
+        ]
+        return targets
+
+    def _computer_use_browser_attempts(self, profile: dict[str, Any], *, include_yunwu: bool) -> list[dict[str, Any]]:
+        attempts = [
+            {
+                "attempt_id": "current-model",
+                "provider_id": profile.get("provider_id"),
+                "profile_id": profile.get("profile_id"),
+                "model": profile.get("model"),
+                "status": "queued_for_app_model_runner",
+                "expected_action": "Use Computer Use to confirm both AstraBridge browser pages are visible and record screenshots.",
+                "profile": dict(profile),
+            }
+        ]
+        if include_yunwu:
+            try:
+                yunwu_profile = self._profiles.resolve_runtime_profile("yunwu-default")
+            except Exception:
+                yunwu_profile = self._profiles.resolve_runtime_profile("yunwu")
+            yunwu_profile = {**dict(yunwu_profile), "model": "gpt-5.5", "reasoning_effort": "high"}
+            attempts.append(
+                {
+                    "attempt_id": "yunwu-gpt-5.5",
+                    "provider_id": "yunwu",
+                    "profile_id": yunwu_profile.get("profile_id"),
+                    "model": "gpt-5.5",
+                    "status": "queued_for_app_model_runner",
+                    "expected_action": "Run the same Computer Use confirmation flow through yunwu/gpt-5.5.",
+                    "profile": yunwu_profile,
+                }
+            )
+        return attempts
+
+    def _run_computer_use_browser_model_attempt(
+        self,
+        attempt: dict[str, Any],
+        *,
+        targets: list[dict[str, Any]],
+        artifact_root: Path,
+        scenario_id: str,
+        max_wait_sec: float,
+    ) -> dict[str, Any]:
+        attempt_id = str(attempt.get("attempt_id") or "attempt").strip() or "attempt"
+        events: list[dict[str, Any]] = []
+        blocked_requests: list[dict[str, Any]] = []
+        event_root = artifact_root / "model-runs"
+        event_root.mkdir(parents=True, exist_ok=True)
+        events_path = event_root / f"{scenario_id}-{attempt_id}-events.json"
+        profile = dict(attempt.get("profile") or {})
+        model = str(attempt.get("model") or profile.get("model") or "").strip() or None
+        started_at = now_iso()
+        client: AppServerClient | None = None
+
+        def record_event(method: str, params: Any) -> None:
+            events.append({"at": now_iso(), "method": method, "params": redact_sensitive(params)})
+
+        def handle_server_request(method: str, params: Any) -> Any:
+            record_event("runtime/server_request", {"method": method, "params": params})
+            if method == "item/tool/call":
+                return self._handle_dynamic_tool_call(params)
+            blocked_requests.append({"method": method, "params": redact_sensitive(params)})
+            if method == "item/tool/requestUserInput":
+                return {"answers": {}}
+            if method == "item/permissions/requestApproval":
+                return {"permissions": {}, "scope": "turn"}
+            if method == "mcpServer/elicitation/request":
+                return {"action": "decline", "content": None, "_meta": {"reason": "CUA dogfood runner declines elicitation."}}
+            if method in {"applyPatchApproval", "execCommandApproval"}:
+                return {"decision": "denied"}
+            if "requestApproval" in method or "approval" in method.lower():
+                return {"decision": "decline", "reason": "CUA dogfood runner does not approve shell or file actions."}
+            raise RuntimeError(f"Unsupported CUA dogfood server request: {method}")
+
+        result = {
+            key: value
+            for key, value in attempt.items()
+            if key != "profile"
+        }
+        result.update(
+            {
+                "status": "starting",
+                "started_at": started_at,
+                "events_path": str(events_path),
+                "max_wait_sec": max_wait_sec,
+            }
+        )
+        try:
+            result["key_injection"] = self._inject_profile_key_for_runtime(profile)
+            runtime_status = self._runtime_config.prepare_profile(
+                profile,
+                require_secret=True,
+                enable_computer_use_plugins=True,
+            )
+            runtime_status["execution_host"] = self._execution_host()
+            runtime_status["wsl_distro"] = self._wsl_distro()
+            launch_target = self._resolve_launch_target(runtime_status, enable_computer_use_plugins=True)
+            client = self._spawned_probe_client_factory(launch_target)(record_event, handle_server_request)
+            client.start()
+            thread_result = client.request(
+                "thread/start",
+                self._thread_start_params(profile=profile, model=model, permission_mode="ask"),
+                timeout=THREAD_START_TIMEOUT_SECONDS,
+            )
+            thread = dict(thread_result.get("thread") or {})
+            thread_id = str(thread.get("id") or "")
+            if not thread_id:
+                raise RuntimeError("thread/start did not return a thread id.")
+            prompt = self._computer_use_browser_prompt(targets)
+            turn_result = client.request(
+                "turn/start",
+                {
+                    "threadId": thread_id,
+                    "input": self._build_user_inputs(
+                        prompt,
+                        [],
+                        thread_id=thread_id,
+                        context_mode="no_context",
+                        profile_id=str(profile.get("profile_id") or ""),
+                        provider_id=str(profile.get("provider_id") or ""),
+                        model_id=str(model or ""),
+                    ),
+                    "cwd": self._runtime_workspace_root(),
+                    "approvalsReviewer": "user",
+                    "model": codex_model_id(profile, model),
+                    "effort": codex_reasoning_effort(profile.get("reasoning_effort")),
+                    **self._turn_permission_overrides("ask"),
+                },
+                timeout=max(8.0, min(TURN_START_TIMEOUT_SECONDS, float(max_wait_sec) + 8.0)),
+            )
+            turn = dict(turn_result.get("turn") or {})
+            turn_id = str(turn.get("id") or "")
+            deadline = time.monotonic() + max(0.0, float(max_wait_sec))
+            while time.monotonic() < deadline:
+                if self._computer_use_events_indicate_terminal(events, turn_id):
+                    break
+                time.sleep(0.25)
+            summary = self._classify_computer_use_attempt_events(events, blocked_requests)
+            result.update(
+                {
+                    **summary,
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "finished_at": now_iso(),
+                    "event_count": len(events),
+                    "blocked_requests": blocked_requests[:10],
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            result.update(
+                {
+                    "status": "blocked",
+                    "failure_reason": str(exc)[:800],
+                    "finished_at": now_iso(),
+                    "event_count": len(events),
+                    "blocked_requests": blocked_requests[:10],
+                }
+            )
+            record_event("runner/error", {"error": str(exc)[:800]})
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            write_json(events_path, {"attempt": result, "events": events})
+        return result
+
+    def _inject_profile_key_for_runtime(self, profile: dict[str, Any]) -> dict[str, Any]:
+        if self._key_injector is None:
+            return {"injected": False, "reason": "key_injector_unavailable"}
+        try:
+            result = self._key_injector(profile)
+            if isinstance(result, dict):
+                return redact_sensitive(result)
+            return {"injected": bool(result), "reason": "non_dict_result"}
+        except Exception as exc:  # noqa: BLE001
+            return {"injected": False, "reason": f"key_injector_failed:{str(exc)[:300]}"}
+
+    def _computer_use_browser_prompt(self, targets: list[dict[str, Any]]) -> str:
+        target_lines: list[str] = []
+        for target in targets:
+            fallback_urls = [str(item) for item in target.get("fallback_urls") or []]
+            fallback_text = f" Fallback URLs: {', '.join(fallback_urls)}." if fallback_urls else ""
+            target_lines.append(
+                f"- {target.get('role')}: window title `{target.get('title')}`, primary URL `{target.get('url')}`.{fallback_text}"
+            )
+        return (
+            "AstraBridge Computer Use dogfood validation.\n"
+            "Use the computer-use or browser-control plugin if it is available. Do not use shell commands or external system browsers.\n"
+            "Target only AstraBridge-owned WebView2 browser windows:\n"
+            + "\n".join(target_lines)
+            + "\n\nTasks:\n"
+            "1. Confirm whether both target windows are visible and controllable.\n"
+            "2. Confirm whether the news page and video page loaded. If Google News or YouTube is blocked, CAPTCHA-gated, or unusable, navigate the same AstraBridge window to one of its fallback URLs.\n"
+            "3. Capture or report screenshot evidence if the plugin supports it.\n"
+            "4. Return a compact JSON-style summary with windows_seen, fallback_used, screenshots, and blockers.\n\n"
+            "Safety boundaries: do not log in, do not bypass CAPTCHA, do not upload, comment, purchase, or submit forms except ordinary cookie consent."
+        )
+
+    def _computer_use_events_indicate_terminal(self, events: list[dict[str, Any]], turn_id: str) -> bool:
+        del turn_id
+        terminal_methods = {"turn/completed", "turn/failed", "turn/cancelled", "turn/errored"}
+        return any(str(event.get("method") or "") in terminal_methods for event in events)
+
+    def _classify_computer_use_attempt_events(
+        self,
+        events: list[dict[str, Any]],
+        blocked_requests: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        method_names = [str(event.get("method") or "") for event in events]
+        tool_events = [
+            event
+            for event in events
+            if any(marker in str(event.get("method") or "").lower() for marker in ("tool", "mcp", "plugin"))
+        ]
+        tool_text = json.dumps(tool_events, ensure_ascii=False).lower()
+        cua_event_detected = bool(tool_events) and any(
+            marker in tool_text
+            for marker in ("computer", "cua", "browser", "webview", "screenshot", "youtube", "news.google")
+        )
+        completed = any(method in {"turn/completed", "turn/failed", "turn/cancelled", "turn/errored"} for method in method_names)
+        if cua_event_detected:
+            status = "cua_event_observed"
+        elif tool_events:
+            status = "tool_event_observed"
+        elif completed:
+            status = "completed_without_cua_event"
+        elif blocked_requests:
+            status = "blocked_by_non_cua_request"
+        else:
+            status = "turn_started_no_cua_event_yet"
+        return {
+            "status": status,
+            "cua_event_detected": cua_event_detected,
+            "tool_event_detected": bool(tool_events),
+            "completed_event_detected": completed,
+            "event_methods": sorted(set(method_names)),
+        }
+
+    def _summarize_computer_use_model_attempts(self, attempts: list[dict[str, Any]], *, max_wait_sec: float) -> dict[str, Any]:
+        statuses = [str(attempt.get("status") or "") for attempt in attempts]
+        if any(status == "cua_event_observed" for status in statuses):
+            status = "model_runner_cua_observed"
+        elif any(status in {"tool_event_observed", "completed_without_cua_event", "turn_started_no_cua_event_yet"} for status in statuses):
+            status = "model_runner_attempted"
+        elif any(status == "blocked_by_non_cua_request" for status in statuses):
+            status = "model_runner_blocked"
+        else:
+            status = "model_runner_blocked"
+        return {
+            "status": status,
+            "max_wait_sec": max_wait_sec,
+            "attempt_statuses": [
+                {
+                    "attempt_id": attempt.get("attempt_id"),
+                    "provider_id": attempt.get("provider_id"),
+                    "model": attempt.get("model"),
+                    "status": attempt.get("status"),
+                    "thread_id": attempt.get("thread_id"),
+                    "turn_id": attempt.get("turn_id"),
+                    "events_path": attempt.get("events_path"),
+                    "failure_reason": attempt.get("failure_reason"),
+                }
+                for attempt in attempts
+            ],
+        }
 
     def _call_astrabridge_web_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if tool == "astrabridge_web_search_batch":

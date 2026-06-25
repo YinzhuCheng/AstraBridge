@@ -4228,6 +4228,10 @@ select {
 .browser-workbench-report em,
 .browser-workbench-report small {
   min-width: 0;
+}
+
+.browser-workbench-report span,
+.browser-workbench-report small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4243,6 +4247,7 @@ select {
   color: color-mix(in srgb, var(--muted) 76%, var(--text));
   font-size: 0.7rem;
   font-style: normal;
+  overflow-wrap: anywhere;
 }
 
 .browser-workbench-report small {

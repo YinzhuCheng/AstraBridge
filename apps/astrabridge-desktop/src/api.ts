@@ -517,7 +517,13 @@ export const api = {
     jsonRequest<CodexPluginInstallPlan>("/api/runtime/plugin-install-plan", payload),
   runtimePluginInstallApply: (payload: { profile_id?: string; plugin_id: string; source_catalog_id?: string }) =>
     jsonRequest<CodexPluginInstallExecution>("/api/runtime/plugin-install-apply", payload),
-  runtimeComputerUseBrowserScenario: (payload?: { profile_id?: string }) =>
+  runtimeComputerUseBrowserScenario: (payload?: {
+    profile_id?: string;
+    run_model?: boolean;
+    include_yunwu?: boolean;
+    allow_fallback_sites?: boolean;
+    max_wait_sec?: number;
+  }) =>
     jsonRequest<ComputerUseBrowserScenarioReport>("/api/runtime/computer-use/browser-scenario", payload ?? {}),
   wslDependencies: (distro?: string) => {
     const suffix = distro ? `?distro=${encodeURIComponent(distro)}` : "";

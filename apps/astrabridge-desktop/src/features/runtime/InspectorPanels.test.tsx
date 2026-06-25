@@ -129,14 +129,14 @@ describe("InspectorPanels", () => {
     vi.spyOn(api, "runtimeComputerUseBrowserScenario").mockResolvedValue({
       schema_version: "astrabridge-computer-use-browser-scenario-v1",
       scenario_id: "CUA_test",
-      scenario: "google-news-youtube-two-window",
+      scenario: "news-video-two-window",
       generated_at: "2026-06-26T00:00:00+08:00",
-      status: "prepared_for_computer_use",
+      status: "model_runner_cua_observed",
       artifact_path: "D:/AstraBridge/.astrabridge/dogfood/computer-use/CUA_test.json",
       browser_targets: [],
       attempts: [
-        { attempt_id: "current-model", status: "ready_for_cua_validation" },
-        { attempt_id: "yunwu-gpt-5.5", status: "requires_app_model_runner" },
+        { attempt_id: "current-model", status: "cua_event_observed" },
+        { attempt_id: "yunwu-gpt-5.5", status: "turn_started_no_cua_event_yet" },
       ],
     });
 
@@ -146,8 +146,15 @@ describe("InspectorPanels", () => {
     await waitFor(() => {
       expect(api.browserTileTwoUp).toHaveBeenCalledWith(["ab-browser-news", "ab-browser-youtube"]);
     });
-    expect(await screen.findByTestId("browser-cua-report")).toHaveTextContent("CUA 场景已准备");
-    expect(screen.getByTestId("browser-cua-report")).toHaveTextContent("yunwu/gpt-5.5 尚未实际运行");
+    expect(api.runtimeComputerUseBrowserScenario).toHaveBeenCalledWith({
+      run_model: true,
+      include_yunwu: true,
+      allow_fallback_sites: true,
+      max_wait_sec: 8,
+    });
+    expect(await screen.findByTestId("browser-cua-report")).toHaveTextContent("已观察到 CUA 事件");
+    expect(screen.getByTestId("browser-cua-report")).toHaveTextContent("当前模型: 已观察到 CUA 事件");
+    expect(screen.getByTestId("browser-cua-report")).toHaveTextContent("yunwu/gpt-5.5: 已启动，暂未观察到 CUA");
     expect(screen.getAllByTestId("browser-workbench-row")).toHaveLength(2);
     expect(screen.getByTestId("browser-workbench-detail")).toHaveTextContent("星桥 WebView2");
   });
