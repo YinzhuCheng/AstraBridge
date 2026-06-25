@@ -12,6 +12,38 @@ export type CollaborationMode = "default" | "plan";
 export type AppearancePreset = "codex" | "paper" | "slate" | "cobalt" | "sunrise";
 export type ExecutionHost = "windows" | "wsl";
 
+export type ProjectPluginSkillPresetPluginRef = {
+  plugin_id: string;
+  source_catalog_id?: string | null;
+  display_name?: string | null;
+};
+
+export type ProjectPluginSkillPresetSkillRef = {
+  record_id: string;
+  skill_name: string;
+  owner_plugin_id?: string | null;
+  source_catalog_id?: string | null;
+  display_name?: string | null;
+};
+
+export type ProjectPluginSkillPreset = {
+  preset_id: string;
+  display_name: string;
+  plugin_refs: ProjectPluginSkillPresetPluginRef[];
+  skill_refs: ProjectPluginSkillPresetSkillRef[];
+  created_at?: string;
+  updated_at?: string;
+  notes?: string[];
+};
+
+export type ProjectPluginSkillPresetsState = {
+  schema_version: string;
+  active_preset_id: string;
+  presets: ProjectPluginSkillPreset[];
+  updated_at?: string;
+  notes?: string[];
+};
+
 export type ProjectFile = {
   schema_version: string;
   project_id: string;
@@ -26,6 +58,7 @@ export type ProjectFile = {
   recent_threads: string[];
   current_task_id?: string | null;
   recent_tasks?: string[];
+  plugin_skill_presets?: ProjectPluginSkillPresetsState;
   ui_preferences: {
     locale?: LocaleCode;
     appearance?: AppearancePreset;
@@ -216,6 +249,365 @@ export type RuntimeEnvironment = {
   };
 };
 
+export type CodexKernelProtocolStatus =
+  | "supported"
+  | "declared"
+  | "unsupported"
+  | "disabled_by_app"
+  | "not_checked"
+  | "error"
+  | "unknown"
+  | string;
+
+export type CodexKernelCompatibilityStatus = "verified" | "probed" | "partial" | "blocked" | "unknown" | string;
+
+export type CodexKernelProbeCommandEvidence = {
+  command: string;
+  status: "ok" | "failed" | "skipped" | string;
+  summary?: string | null;
+};
+
+export type CodexKernelPluginRecord = {
+  plugin_id: string;
+  display_name: string | null;
+  version: string | null;
+  source_kind: "local_marketplace" | "remote_marketplace" | "installed_root" | "shared_remote" | "unknown" | string;
+  availability: "installed" | "available" | "unavailable" | "unknown" | string;
+};
+
+export type CodexKernelSkillRecord = {
+  skill_name: string;
+  display_name: string | null;
+  source_kind: "local_skill_root" | "plugin" | "project_root" | "remote_catalog" | "unknown" | string;
+  owner_plugin_id: string | null;
+  enablement: "enabled" | "disabled" | "unknown" | string;
+};
+
+export type CodexKernelProbeSnapshot = {
+  schema_version: string;
+  generated_at: string;
+  probe_run_id: string;
+  observed: {
+    binary: {
+      path: string | null;
+      path_source: "env_override" | "which" | "wsl_default" | "runtime_status" | "unknown" | string;
+      version_text: string | null;
+      version_semver: string | null;
+      version_parse_status: "ok" | "missing" | "unparseable" | "error" | "not_checked" | string;
+      launch_descriptor: string | null;
+    };
+    platform: {
+      execution_host: "windows" | "wsl" | "unknown" | string;
+      platform_family: string | null;
+      platform_os: string | null;
+      wsl_distro: string | null;
+    };
+    runtime_roots: {
+      isolated_codex_home: string | null;
+      codex_home_source: "ASTRABRIDGE_CODEX_HOME" | "astrabridge_default" | "resolver" | "runtime_status" | "unknown" | string;
+      project_runtime_root: string | null;
+      workspace_runtime_cwd: string | null;
+    };
+    app_server: {
+      transport: "stdio" | "websocket" | "unknown" | string;
+      launch_mode: "direct" | "wsl_exec" | "reused_client" | "unknown" | string;
+      available: boolean;
+      initialize_status: CodexKernelProtocolStatus;
+      thread_start_status: CodexKernelProtocolStatus;
+      thread_resume_status: CodexKernelProtocolStatus;
+      turn_start_status: CodexKernelProtocolStatus;
+      approval_events_status: CodexKernelProtocolStatus;
+      mcp_elicitation_status: CodexKernelProtocolStatus;
+      disconnect_status: "not_observed" | "clean" | "unexpected" | "error" | "unknown" | string;
+      error_shape_status: CodexKernelProtocolStatus;
+      last_checked_at: string | null;
+    };
+    protocol_features: {
+      source_kind: "runtime_only" | "generated_types_only" | "generated_types_and_runtime" | "unknown" | string;
+      client_methods: Record<string, CodexKernelProtocolStatus>;
+      server_notifications: Record<string, CodexKernelProtocolStatus>;
+      notes: string[];
+    };
+    mcp_features: {
+      config_render_status: CodexKernelProtocolStatus;
+      config_updated_at: string | null;
+      reload_status: CodexKernelProtocolStatus;
+      server_status_list_status: CodexKernelProtocolStatus;
+      expected_servers: string[];
+      visible_servers: string[];
+      expected_tools: string[];
+      visible_tools: string[];
+      notes: string[];
+    };
+    plugin_features: {
+      config_feature_state: "enabled" | "disabled_by_app" | "unknown" | string;
+      list_status: CodexKernelProtocolStatus;
+      installed_status: CodexKernelProtocolStatus;
+      read_status: CodexKernelProtocolStatus;
+      install_status: CodexKernelProtocolStatus;
+      uninstall_status: CodexKernelProtocolStatus;
+      share_status: CodexKernelProtocolStatus;
+      marketplace_status: CodexKernelProtocolStatus;
+      discovered_plugins: CodexKernelPluginRecord[];
+      notes: string[];
+    };
+    skill_features: {
+      list_status: CodexKernelProtocolStatus;
+      extra_roots_status: CodexKernelProtocolStatus;
+      config_write_status: CodexKernelProtocolStatus;
+      change_notification_status: CodexKernelProtocolStatus;
+      discovered_roots: string[];
+      discovered_skills: CodexKernelSkillRecord[];
+      notes: string[];
+    };
+  };
+  inferred: {
+    compatibility_status: CodexKernelCompatibilityStatus;
+    compatibility_summary: string | null;
+    kernel_upgrade_readiness: "ready" | "partial" | "blocked" | "unknown" | string;
+    plugin_integration_readiness: "ready" | "partial" | "blocked_by_app_config" | "declared_not_probed" | "unknown" | string;
+    skill_integration_readiness: "ready" | "partial" | "declared_not_probed" | "unknown" | string;
+    risk_flags: string[];
+    required_follow_up_checks: string[];
+  };
+  known_warnings: string[];
+  evidence: {
+    sources: string[];
+    commands: CodexKernelProbeCommandEvidence[];
+    artifacts: string[];
+  };
+};
+
+export type CodexRegistrySourceKind = "official" | "curated" | "local" | "project_local" | "manual";
+export type CodexRegistryInstallStatus =
+  | "installed"
+  | "available"
+  | "update_available"
+  | "incompatible"
+  | "malformed"
+  | "unavailable"
+  | "unknown";
+export type CodexRegistryEnablementStatus = "enabled" | "disabled" | "inherited" | "blocked" | "unknown";
+export type CodexRegistryCompatibilityStatus = "compatible" | "warning" | "incompatible" | "unknown";
+export type CodexRegistryIconProvenanceKind = "official" | "bundled_local" | "generated_fallback" | "none";
+export type CodexRegistryWarningSeverity = "info" | "warning" | "error";
+
+export type CodexRegistrySourceCatalog = {
+  schema_version: string;
+  source_catalog_id: string;
+  kind: CodexRegistrySourceKind | string;
+  display_name: string;
+  description?: string | null;
+  source_url?: string | null;
+  source_path?: string | null;
+  catalog_path?: string | null;
+  catalog_version?: string | null;
+  checksum_algorithm?: string | null;
+  checksum_value?: string | null;
+  writable: boolean;
+  notes?: string[];
+};
+
+export type CodexRegistryProvenance = {
+  schema_version: string;
+  source_path?: string | null;
+  source_url?: string | null;
+  manifest_path?: string | null;
+  relative_root?: string | null;
+  checksum_algorithm?: string | null;
+  checksum_value?: string | null;
+  last_verified_at?: string | null;
+  notes?: string[];
+};
+
+export type CodexRegistryIconMetadata = {
+  schema_version: string;
+  provenance_kind: CodexRegistryIconProvenanceKind | string;
+  label?: string | null;
+  asset_path?: string | null;
+  asset_url?: string | null;
+  mime_type?: string | null;
+  checksum_algorithm?: string | null;
+  checksum_value?: string | null;
+  validated: boolean;
+  notes?: string[];
+};
+
+export type CodexRegistryCompatibilityWarning = {
+  schema_version: string;
+  code: string;
+  severity: CodexRegistryWarningSeverity | string;
+  message: string;
+  field?: string | null;
+  documentation_url?: string | null;
+};
+
+export type CodexPluginRegistryRecord = {
+  schema_version: string;
+  record_id: string;
+  plugin_id: string;
+  source_catalog_id: string;
+  display_name: string;
+  install_status: CodexRegistryInstallStatus | string;
+  enablement_status: CodexRegistryEnablementStatus | string;
+  compatibility_status: CodexRegistryCompatibilityStatus | string;
+  version?: string | null;
+  installed_version?: string | null;
+  available_version?: string | null;
+  description?: string | null;
+  remote_plugin_id?: string | null;
+  install_root?: string | null;
+  keywords?: string[];
+  declared_app_ids?: string[];
+  declared_hook_keys?: string[];
+  declared_mcp_servers?: string[];
+  permission_hints?: string[];
+  provenance?: CodexRegistryProvenance | null;
+  icon?: CodexRegistryIconMetadata | null;
+  compatibility_warnings?: CodexRegistryCompatibilityWarning[];
+  notes?: string[];
+};
+
+export type CodexSkillRegistryRecord = {
+  schema_version: string;
+  record_id: string;
+  skill_name: string;
+  source_catalog_id: string;
+  display_name: string;
+  install_status: CodexRegistryInstallStatus | string;
+  enablement_status: CodexRegistryEnablementStatus | string;
+  compatibility_status: CodexRegistryCompatibilityStatus | string;
+  owner_plugin_id?: string | null;
+  description?: string | null;
+  short_description?: string | null;
+  owning_plugin_version?: string | null;
+  trigger_hints?: string[];
+  permission_hints?: string[];
+  provenance?: CodexRegistryProvenance | null;
+  icon?: CodexRegistryIconMetadata | null;
+  observed_enablement_status?: CodexRegistryEnablementStatus | string;
+  global_enablement_status?: CodexRegistryEnablementStatus | string;
+  project_enablement_status?: CodexRegistryEnablementStatus | string;
+  effective_enablement_status?: CodexRegistryEnablementStatus | string;
+  enablement_source?: string | null;
+  enablement_block_reason?: string | null;
+  project_override_supported?: boolean;
+  global_state_path?: string | null;
+  project_state_path?: string | null;
+  compatibility_warnings?: CodexRegistryCompatibilityWarning[];
+  notes?: string[];
+};
+
+export type CodexPluginSkillRegistrySnapshot = {
+  schema_version: string;
+  generated_at: string;
+  source_catalogs: CodexRegistrySourceCatalog[];
+  plugins: CodexPluginRegistryRecord[];
+  skills: CodexSkillRegistryRecord[];
+  notes?: string[];
+};
+
+export type CodexPluginInstallPlanFileEntry = {
+  relative_path: string;
+  path: string;
+  bytes?: number | null;
+};
+
+export type CodexPluginInstallPlan = {
+  schema_version: string;
+  generated_at: string;
+  action: "install" | "update" | "noop" | "unsupported" | string;
+  status: "ready" | "unsupported" | string;
+  reason: string;
+  plugin: {
+    record_id: string;
+    plugin_id: string;
+    display_name: string;
+    source_catalog_id: string;
+    install_status: CodexRegistryInstallStatus | string;
+    enablement_status: CodexRegistryEnablementStatus | string;
+    compatibility_status: CodexRegistryCompatibilityStatus | string;
+  };
+  source: {
+    source_catalog_id: string;
+    kind: CodexRegistrySourceKind | string;
+    display_name: string;
+    source_path?: string | null;
+    source_url?: string | null;
+    catalog_path?: string | null;
+    writable: boolean;
+  };
+  versions: {
+    current_version?: string | null;
+    target_version?: string | null;
+    installed_version?: string | null;
+    available_version?: string | null;
+  };
+  permission_hints: string[];
+  declared_app_ids?: string[];
+  mcp_changes: {
+    declared_servers: string[];
+  };
+  skill_changes: {
+    declared_skills: string[];
+    detected_installed_skills: string[];
+  };
+  files: {
+    source_root?: string | null;
+    target_root?: string | null;
+    source_file_count: number;
+    existing_target_file_count: number;
+    planned_write_count: number;
+    source_files: CodexPluginInstallPlanFileEntry[];
+    existing_target_files: CodexPluginInstallPlanFileEntry[];
+    planned_write_files: CodexPluginInstallPlanFileEntry[];
+  };
+  rollback_snapshot: {
+    status: string;
+    snapshot_id?: string | null;
+    snapshot_root?: string | null;
+    captured_file_count: number;
+    captured_files: CodexPluginInstallPlanFileEntry[];
+    notes?: string[];
+  };
+  warnings?: CodexRegistryCompatibilityWarning[];
+  errors?: CodexRegistryCompatibilityWarning[];
+  notes?: string[];
+};
+
+export type CodexPluginInstallExecution = {
+  schema_version: string;
+  execution_id: string;
+  executed_at: string;
+  status: "applied" | "noop" | "failed" | string;
+  action: "install" | "update" | "noop" | "unsupported" | string;
+  plugin: CodexPluginInstallPlan["plugin"];
+  plan: CodexPluginInstallPlan;
+  artifact_paths: {
+    report_root: string;
+    plan_path: string;
+    events_path: string;
+    result_path: string;
+  };
+  source: CodexPluginInstallPlan["source"];
+  target_root: string;
+  changes: {
+    written_file_count: number;
+    target_file_count: number;
+  };
+  rollback_snapshot: {
+    status: string;
+    snapshot_id?: string | null;
+    snapshot_root?: string | null;
+    captured_file_count?: number;
+    captured_files?: CodexPluginInstallPlanFileEntry[];
+    notes?: string[];
+  };
+  warnings?: CodexRegistryCompatibilityWarning[];
+  errors?: CodexRegistryCompatibilityWarning[];
+  notes?: string[];
+};
+
 export type IsolationAuditCheck = {
   name: string;
   ok: boolean;
@@ -340,6 +732,7 @@ export type RouterProvider = {
   provider_temperature_min?: number;
   provider_temperature_max?: number;
   temperature_adapter_policy?: string;
+  capability_summary?: Record<string, { available?: boolean; candidate_models?: string[]; input_modalities?: string[] }>;
   created_at?: string;
   updated_at?: string;
 };
@@ -719,8 +1112,346 @@ export type RouterConfigResponse = {
   providers: RouterProvider[];
   models: RouterModelEntry[];
   reasoning: ReasoningConfig;
+  capability_routes?: CapabilityRouteEntry[];
   latest_test?: RouterTestResult | null;
   enabled_model_count: number;
+};
+
+export type CapabilityRouteRecord = {
+  capability_id: string;
+  mode: "auto" | "pinned";
+  provider_id?: string | null;
+  model?: string | null;
+  updated_at?: string;
+};
+
+export type CapabilityRouteCandidate = {
+  capability_id: string;
+  adapter_id: string;
+  provider_id?: string | null;
+  model?: string | null;
+  lane_type: string;
+  transport_mode: string;
+  source: string;
+  catalog_present?: boolean;
+  default_for_provider?: boolean;
+  recommended?: boolean;
+  input_modalities?: string[];
+  catalog_input_modalities?: string[];
+  provider_default_model?: string | null;
+  provider_fallback_models?: string[];
+  eligibility_notes?: string[];
+  model_record?: Record<string, unknown>;
+};
+
+export type CapabilityRouteEntry = {
+  capability_id: string;
+  display_name: string;
+  lane_type: "model_backed" | "web_standalone" | string;
+  transport_mode: string;
+  route_mode: "auto" | "pinned" | string;
+  route_record: CapabilityRouteRecord;
+  resolution_status: "ok" | "standalone" | "no_capability_candidate" | string;
+  resolved_candidate?: CapabilityRouteCandidate | null;
+  candidates: CapabilityRouteCandidate[];
+  error?: string | null;
+  updated_at?: string;
+};
+
+export type CapabilitySchemaField = {
+  name: string;
+  value_type: string;
+  required?: boolean;
+  description?: string;
+  repeated?: boolean;
+};
+
+export type CapabilitySchema = {
+  fields: CapabilitySchemaField[];
+  required_fields?: string[];
+};
+
+export type CapabilityContract = {
+  schema_version: string;
+  capability_id: string;
+  display_name: string;
+  lane_type: "model_backed" | "web_standalone" | string;
+  transport_mode: "request_response" | "stream_sse" | "realtime_ws" | string;
+  input_schema: CapabilitySchema;
+  output_schema: CapabilitySchema;
+  artifact_policy: string;
+  provider_eligibility_rule: string;
+  default_timeout_sec: number;
+  smoke_status: string;
+  notes?: string[];
+};
+
+export type CapabilityAdapterContract = {
+  schema_version: string;
+  adapter_id: string;
+  capability_id: string;
+  provider_id: string;
+  model_match: string[];
+  supports_streaming: boolean;
+  supports_batch: boolean;
+  normalization_rules: string[];
+  request_builder: string;
+  response_parser: string;
+  artifact_persister: string;
+  smoke_case_id: string;
+};
+
+export type CapabilityAvailability = {
+  available: boolean;
+  candidate_count: number;
+  resolution_status: "ok" | "standalone" | "no_capability_candidate" | string;
+  error?: string | null;
+};
+
+export type CapabilitySmokeSummary = {
+  status: string;
+  case_ids: string[];
+  last_result?: Record<string, unknown> | null;
+  evidence_refs: Array<Record<string, unknown>>;
+};
+
+export type CapabilitySmokeResult = {
+  schema_version: "astrabridge-capability-smoke-result-v1" | string;
+  capability_id: string;
+  mode: "dry_run" | "provider" | string;
+  status: "pass" | "warn" | "fail" | "provider_not_run" | string;
+  provider_invoked: boolean;
+  provider_requested: boolean;
+  case_id: string;
+  route: {
+    route_mode?: string | null;
+    resolution_status?: string | null;
+    resolved_candidate?: CapabilityRouteCandidate | null;
+    error?: string | null;
+  };
+  sanitized_request: Record<string, unknown>;
+  sanitized_response: Record<string, unknown>;
+  artifact_refs: Array<Record<string, unknown>>;
+  evidence_refs: Array<Record<string, unknown>>;
+  created_at: string;
+};
+
+export type CapabilitySmokeResponse = {
+  smoke: CapabilitySmokeResult;
+};
+
+export type CapabilityArtifactSummary = {
+  policy: string;
+  recent_refs: Array<Record<string, unknown>>;
+};
+
+export type CapabilityArtifactRef = {
+  artifact_type: string;
+  path: string;
+  relative_path: string;
+  exists: boolean;
+  mime_type: string;
+};
+
+export type CapabilityArtifactEntry = {
+  artifact_id: string;
+  capability_id: string;
+  provider_id: string;
+  model: string;
+  saved_at: string;
+  summary_path: string;
+  relative_summary_path: string;
+  artifact_refs: CapabilityArtifactRef[];
+  preview: {
+    kind: "image" | "audio" | "text" | "json" | string;
+    text: string;
+    audio_path: string;
+    image_path: string;
+  };
+  metadata: Record<string, unknown>;
+};
+
+export type CapabilityArtifactsResponse = {
+  schema_version: "astrabridge-capability-artifacts-v1" | string;
+  workspace_root: string;
+  artifacts: CapabilityArtifactEntry[];
+  count: number;
+  total_count: number;
+};
+
+export type CapabilityMcpPresetStatus = {
+  server_name: "astrabridge_capabilities" | string;
+  configured: boolean;
+  enabled: boolean;
+  runtime_visible?: boolean | null;
+  tool_names: string[];
+  expected_tool_names?: string[];
+  missing_tool_names?: string[];
+  configured_tool_count?: number;
+  health_status?: "missing" | "disabled" | "partial" | "configured" | string;
+  approval_modes: Record<string, string | null | undefined>;
+};
+
+export type CapabilityManagementEntry = {
+  capability_id: string;
+  display_name: string;
+  lane_type: "model_backed" | "web_standalone" | string;
+  transport_mode: "request_response" | "stream_sse" | "realtime_ws" | string;
+  route: CapabilityRouteEntry;
+  availability: CapabilityAvailability;
+  contract: CapabilityContract;
+  adapters: CapabilityAdapterContract[];
+  smoke: CapabilitySmokeSummary;
+  artifacts: CapabilityArtifactSummary;
+};
+
+export type CapabilityManagementResponse = {
+  schema_version: "astrabridge-capability-management-v1" | string;
+  capabilities: CapabilityManagementEntry[];
+  routes: CapabilityRouteEntry[];
+  mcp_preset: CapabilityMcpPresetStatus;
+  updated_at: string;
+};
+
+export type AutomationPermissionMode = "read-only" | "workspace-write" | "full-access";
+export type AutomationKind = "standalone" | "thread";
+export type AutomationScheduleMode = "manual" | "interval" | "daily";
+export type AutomationExecutionHost = "windows" | "wsl" | "auto";
+export type AutomationWorkspaceMode = "current_workspace" | "dedicated_worktree";
+export type AutomationCleanupPolicy = "keep_on_finding" | "keep_on_failure" | "delete_on_no_signal" | "manual";
+export type AutomationNotifyOn = "finding" | "failure" | "every_run";
+export type AutomationInboxState = "unread" | "reviewed" | "archived" | "promoted";
+export type AutomationRunStatus = "queued" | "running" | "needs_review" | "completed" | "failed" | "skipped" | "cancelled";
+export type AutomationSignal = "finding" | "no_signal" | "unknown";
+
+export type AutomationSpec = {
+  schema_version: string;
+  automation_id: string;
+  project_id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  kind: AutomationKind;
+  prompt: string;
+  schedule: {
+    mode: AutomationScheduleMode;
+    expression: string;
+    timezone: string;
+    next_run_at: string;
+    catch_up_policy: "skip_missed" | "run_once";
+  };
+  runtime: {
+    profile_id?: string | null;
+    model?: string | null;
+    effort?: string | null;
+    permission_mode: AutomationPermissionMode;
+    collaboration_mode?: string | null;
+    execution_host: AutomationExecutionHost;
+    mcp_preset_ids: string[];
+    plugin_skill_preset_ids?: string[];
+    dangerous_opt_in?: boolean;
+    prompt_snapshot?: Record<string, unknown>;
+  };
+  workspace: {
+    mode: AutomationWorkspaceMode;
+    base_branch?: string | null;
+    worktree_root?: string | null;
+    cleanup_policy: AutomationCleanupPolicy;
+  };
+  triage: {
+    archive_no_signal: boolean;
+    notify_on: AutomationNotifyOn;
+    finding_keywords: string[];
+  };
+  limits: {
+    timeout_sec: number;
+    max_retries: number;
+    max_artifact_bytes: number;
+    max_parallel_runs: number;
+  };
+  created_at: string;
+  updated_at: string;
+  last_run_at?: string | null;
+  last_status?: string | null;
+  archived_at?: string | null;
+  archived_reason?: string | null;
+  inbox_summary?: {
+    unread: number;
+    reviewed: number;
+    archived: number;
+    promoted: number;
+  };
+};
+
+export type AutomationRun = {
+  schema_version?: string;
+  run_id: string;
+  automation_id: string;
+  project_id: string;
+  trigger: "schedule" | "manual" | "retry";
+  status: AutomationRunStatus;
+  due_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  thread_id?: string | null;
+  turn_id?: string | null;
+  worktree_path?: string | null;
+  runtime_profile_id?: string | null;
+  exit_code?: number | null;
+  signal: AutomationSignal;
+  summary: string;
+  artifact_refs: string[];
+  redacted_error?: string | null;
+  next_retry_at?: string | null;
+  stdout_excerpt?: string | null;
+  stderr_excerpt?: string | null;
+  diff_excerpt?: string | null;
+};
+
+export type AutomationInboxItem = {
+  schema_version?: string;
+  item_id: string;
+  run_id: string;
+  automation_id: string;
+  project_id: string;
+  state: AutomationInboxState;
+  disposition: "finding" | "no_signal" | "failure" | "approval_required";
+  severity: "info" | "warning" | "error";
+  title: string;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+  promotion_ref?: string | null;
+};
+
+export type AutomationListResponse = {
+  automations: AutomationSpec[];
+  count: number;
+};
+
+export type AutomationRunsResponse = {
+  runs: AutomationRun[];
+  count: number;
+};
+
+export type AutomationInboxResponse = {
+  items: AutomationInboxItem[];
+  count: number;
+};
+
+export type AutomationSchedulerStatus = {
+  running: boolean;
+  active_run_count: number;
+  next_wake_up_at?: string | null;
+  active_runs?: Array<{
+    run_id: string;
+    automation_id: string;
+    status: AutomationRunStatus;
+    due_at?: string | null;
+  }>;
+  last_failure?: AutomationRun | null;
+  next_due?: { automation_id?: string; name?: string; next_run_at?: string | null } | null;
+  inbox_summary?: { unread: number; reviewed: number; archived: number; promoted: number };
 };
 
 export type McpServerConfig = {
@@ -968,6 +1699,18 @@ export type RuntimeSupervisorState = {
   modal: {
     pending_count: number;
     current: RuntimeModal | null;
+  };
+  automations?: {
+    scheduler: AutomationSchedulerStatus;
+    active_runs: Array<{
+      run_id: string;
+      automation_id: string;
+      status: AutomationRunStatus;
+      due_at?: string | null;
+    }>;
+    last_failure?: AutomationRun | null;
+    next_due?: { automation_id?: string; name?: string; next_run_at?: string | null } | null;
+    inbox_summary: { unread: number; reviewed: number; archived: number; promoted: number };
   };
 };
 

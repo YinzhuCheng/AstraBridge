@@ -1,6 +1,6 @@
 # AstraBridge Demo Runbook
 
-Last updated: 2026-06-23
+Last updated: 2026-06-25
 
 ## Purpose
 
@@ -16,6 +16,9 @@ Expected focus:
 
 - project creation/open
 - provider catalog visibility
+- runtime kernel compatibility visibility
+- plugin/skill inventory and warning visibility
+- capability route, dry-run smoke, artifact preview, and MCP preset visibility
 - runtime workflow visibility
 - browser and dogfood automation
 - artifact locations
@@ -31,6 +34,7 @@ Expected focus:
 
 - safe provider readiness
 - model catalog and health state
+- redacted capability credential readiness
 - one real coding turn
 - checkpoint/compact/fork continuation
 
@@ -185,6 +189,172 @@ Expected result:
 - screenshot path
 - sanitized console or status summary
 
+## Runtime Kernel Workflow
+
+Use this when validating the current Codex kernel line or when comparing a candidate binary against the existing baseline.
+
+### Runtime panel check
+
+1. Open Setup -> Runtime.
+2. Confirm the runtime kernel panel shows:
+   - binary path
+   - version
+   - compatibility status
+   - isolated Codex home
+   - app-server status
+   - MCP status
+   - plugin status
+   - skill status
+3. Confirm warnings are readable without exposing raw secrets or account state.
+4. If the observed version or binary locator changed from the expected baseline, stop treating the run as "just a demo" and move to the upgrade workflow below.
+
+### Kernel upgrade and matrix workflow
+
+When the binary or lane changes:
+
+1. Follow [CODEX_KERNEL_UPGRADE_RUNBOOK.md](/D:/AstraBridge/docs/CODEX_KERNEL_UPGRADE_RUNBOOK.md).
+2. Preserve evidence under `PRIVATE\demo-runs\codex-kernel-upgrade-<timestamp>\` or `PRIVATE\demo-runs\codex-kernel-smoke-<timestamp>\`.
+3. Compare the result against [CODEX_KERNEL_COMPATIBILITY_MATRIX.md](/D:/AstraBridge/PLAN/CODEX_KERNEL_COMPATIBILITY_MATRIX.md).
+4. Do not mark a lane `verified` without exact probe and smoke evidence for the exact binary locator and execution lane.
+
+## Capability Management Workflow
+
+Use this when validating MCP-style capabilities from the desktop without raw JSON editing.
+
+### No-key capability check
+
+1. Open Setup -> Capabilities.
+2. Confirm each capability row shows lane type, route mode, resolved candidate or unavailable state, adapter count, smoke status, and artifact policy.
+3. Confirm `web.search` appears as a standalone lane and is not editable as a model-backed route.
+4. Confirm `astrabridge_capabilities` preset status is visible.
+5. Install or reapply the preset from the Capabilities tab.
+6. Select a runtime profile when available and confirm runtime visibility is shown without exposing secrets.
+7. Run dry-run smoke for model-backed capabilities:
+   - `image.generate`
+   - `vision.analyze`
+   - `speech.transcribe`
+   - `speech.synthesize`
+8. Confirm no provider-backed call is made by the dry-run path.
+9. Confirm the panel shows paid-provider and artifact-retention warnings for model-backed artifact-producing capabilities.
+10. Confirm credential states are redacted, for example configured, missing, env ref, session required, or disabled.
+
+### Artifact preview check
+
+1. Open Setup -> Capabilities.
+2. Confirm recent artifacts render from `<workspace>\.astrabridge\capabilities\`.
+3. Confirm image previews, audio playback controls, text summaries, timestamps, provider/model labels, and relative paths appear when fixtures or prior runs exist.
+4. Confirm raw authorization headers, cookies, bearer tokens, and provider secrets do not appear.
+
+### Automation handoff check
+
+1. Open Setup -> Automations.
+2. Create or edit an automation.
+3. Confirm MCP presets are selectable as chips rather than raw comma-separated text.
+4. Confirm `AstraBridge Capability Runtime` maps to stored `runtime.mcp_preset_ids: ["astrabridge_capabilities"]`.
+5. Confirm unknown existing preset ids remain preserved as custom chips.
+
+Provider-backed capability smoke is not part of the no-key demo. Only run it after the user explicitly approves the exact credential source for that run.
+
+## Extensions Workflow
+
+Use this when validating plugin/skill discovery, warnings, enablement, presets, and install-plan/apply behavior from the desktop.
+
+### Inventory and warning check
+
+1. Open Setup -> Extensions.
+2. Confirm plugin and skill inventory loads from the isolated runtime.
+3. Confirm source catalog, provenance, icon provenance, install status, enablement, compatibility warnings, and notes are visible.
+4. Confirm generated fallback icon, malformed manifest, blocked owner, or pending-approval warning states remain visible when such fixtures or local records are present.
+5. Confirm plugin-owned skills are not silently active just because the inventory exists.
+
+### Project preset and enablement check
+
+1. In Setup -> Extensions, add one plugin or skill to the project preset when a safe local fixture is available.
+2. Confirm the active project preset updates without creating project `.codex*` files.
+3. Confirm skill enablement actions stay explicit:
+   - enable globally
+   - disable globally
+   - enable for project
+   - disable for project
+   - use global setting
+4. Confirm blocked or pending-approval states remain visible instead of silently becoming enabled.
+
+### Install-plan and fixture rehearsal
+
+Use isolated roots before rehearsing install/apply or smoke:
+
+```powershell
+$env:ASTRABRIDGE_APPDATA='D:\AstraBridge\PRIVATE\demo-runs\current\AppData'
+$env:ASTRABRIDGE_CODEX_HOME='D:\AstraBridge\PRIVATE\demo-runs\current\CodexHome'
+```
+
+Inventory/UI smoke:
+
+```powershell
+cd D:\AstraBridge\apps\astrabridge-sidecar
+python -m astrabridge_sidecar.codex_plugin_skill_smoke
+```
+
+Install/update/rollback fixture smoke:
+
+```powershell
+cd D:\AstraBridge\apps\astrabridge-sidecar
+python -m astrabridge_sidecar.codex_plugin_install_smoke
+```
+
+Expected result:
+
+- smoke output points to `PRIVATE\demo-runs\plugin-skill-smoke-<timestamp>\` or `PRIVATE\demo-runs\plugin-install-smoke-<timestamp>\`
+- evidence is secret-safe and preserved by default
+- inventory smoke includes plugin probe, skill probe, registry snapshot, and structured UI assertions
+- install smoke includes install, update, already-current, malformed, rollback, and secret-scan cases
+
+### Desktop install/apply review
+
+When a safe local plugin record is present in Extensions:
+
+1. Open the plugin details.
+2. Preview the install plan before any mutation.
+3. Review declared MCP servers, apps, skills, planned writes, rollback snapshot metadata, and warnings.
+4. Only then run apply if the fixture and isolated roots are the intended target.
+5. Confirm result evidence stays under `PRIVATE\demo-runs\plugin-install-*`.
+
+## Automation Smoke Workflow
+
+Use this when validating the local automation layer without spending provider quota. This is the required Step 10 release-gate smoke.
+
+### Deterministic sidecar smoke
+
+```powershell
+cd D:\AstraBridge
+python .\scripts\run_automation_smoke.py
+```
+
+Expected result:
+
+- script prints a local summary path under `PRIVATE\demo-runs\automation-smoke-<timestamp>\`
+- two manual automations are created
+- one `run-now` ends as `no_signal` and produces an archived inbox item
+- one `run-now` ends as `finding` and produces a promoted inbox item
+- `.astrabridge\automations\automations.json`, `runs\index.json`, and `inbox\index.json` are created in the smoke workspace
+- runtime manifests are written under the isolated runtime root
+
+Saved evidence:
+
+- `PRIVATE\demo-runs\automation-smoke-<timestamp>\automation-smoke-report.json`
+- `PRIVATE\demo-runs\automation-smoke-<timestamp>\automation-smoke-summary.md`
+
+### Desktop operator check
+
+When the preview app is already up, also confirm the visible automation surface:
+
+1. Open Setup -> Automations.
+2. Confirm automation list, form, inbox, and runs panels render.
+3. Confirm scheduler summary is visible.
+4. Confirm a promoted inbox item leaves a visible `promotion_ref`.
+
+The deterministic script is the required reproducible gate. The desktop pass is the matching operator-visible check.
+
 ## Checkpoint And Recovery Workflow
 
 During the demo, confirm:
@@ -205,6 +375,9 @@ Typical artifact locations:
 - Captures: `<workspace>\.astrabridge\captures\`
 - Checkpoints: `<workspace>\.astrabridge\checkpoints\`
 - Demo artifacts: `D:\AstraBridge\PRIVATE\demo-runs\<timestamp>\`
+- Kernel upgrade/smoke artifacts: `D:\AstraBridge\PRIVATE\demo-runs\codex-kernel-*\`
+- Plugin/skill smoke artifacts: `D:\AstraBridge\PRIVATE\demo-runs\plugin-skill-smoke-*\`
+- Plugin install/apply artifacts: `D:\AstraBridge\PRIVATE\demo-runs\plugin-install-*\`
 - Private credential policy: [PRIVATE/README.md](/D:/AstraBridge/PRIVATE/README.md)
 
 Preferred local artifact root:
@@ -239,6 +412,20 @@ Preferred local artifact root:
 - run metadata refresh if the model list looks stale
 - inspect health summary rather than raw provider output
 
+### Runtime kernel panel looks degraded
+
+- inspect Setup -> Runtime before assuming the UI is wrong
+- capture `/api/runtime/kernel-probe` evidence or follow `docs/CODEX_KERNEL_UPGRADE_RUNBOOK.md`
+- compare the observed lane against `PLAN/CODEX_KERNEL_COMPATIBILITY_MATRIX.md`
+- preserve evidence instead of rewriting the matrix from memory
+
+### Extensions inventory or install flow looks wrong
+
+- run `python -m astrabridge_sidecar.codex_plugin_skill_smoke`
+- if install/apply is involved, run `python -m astrabridge_sidecar.codex_plugin_install_smoke`
+- confirm isolated `ASTRABRIDGE_CODEX_HOME` roots are active
+- inspect warnings, source catalog, and rollback metadata before assuming the plugin is trustworthy
+
 ### Checkpoint or fork flow looks wrong
 
 - confirm current task/thread pointers are still aligned
@@ -251,7 +438,11 @@ Preferred local artifact root:
 - Current project is valid and uses `.abproj` plus `.astrabridge/`
 - Provider panel loads and shows safe status
 - Generated catalog is visible
+- Runtime kernel panel shows a believable binary/version/compatibility snapshot
 - A coding turn completes end to end
+- Automation smoke completes and saves a sanitized report
+- Capability no-key smoke and artifact preview checks pass
+- Extensions inventory and plugin/skill smoke checks pass
 - Review renders
 - Checkpoint works
 - Compact works when applicable

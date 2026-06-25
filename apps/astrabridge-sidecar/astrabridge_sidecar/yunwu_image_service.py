@@ -69,6 +69,21 @@ class YunwuImageService:
     def __init__(self, base_url: str = "https://yunwu.ai/v1") -> None:
         self.base_url = base_url.rstrip("/")
 
+    def capability_generate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .capabilities.image_generate_adapter import YunwuImageGenerateAdapter
+
+        return YunwuImageGenerateAdapter(self).generate(payload)
+
+    def capability_edit(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .capabilities.image_generate_adapter import YunwuImageGenerateAdapter
+
+        return YunwuImageGenerateAdapter(self).edit_as_generation(payload)
+
+    def capability_transparent_asset(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .capabilities.image_generate_adapter import YunwuImageGenerateAdapter
+
+        return YunwuImageGenerateAdapter(self).transparent_asset(payload)
+
     def transparent_asset(
         self,
         *,

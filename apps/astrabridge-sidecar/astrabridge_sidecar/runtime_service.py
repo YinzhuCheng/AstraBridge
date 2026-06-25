@@ -19,8 +19,24 @@ from typing import Any
 from .app_server_client import AppServerClient, JsonRpcError
 from .coding_kernel import project_turn_to_coding_events
 from .common import WORKSPACE_STATE_DIRNAME, append_jsonl, new_id, now_iso, read_json, write_json
+from .codex_kernel_probe import discover_codex_binary_and_version, resolve_codex_binary_metadata
+from .codex_kernel_snapshot import build_codex_kernel_probe_snapshot, observe_protocol_features
+from .codex_mcp_probe import probe_mcp_compatibility
+from .codex_plugin_install_apply import execute_plugin_install
+from .codex_plugin_install_plan import build_plugin_install_plan
+from .codex_plugin_skill_registry import build_plugin_skill_registry_snapshot
+from .codex_plugin_probe import probe_plugin_discovery
+from .codex_skill_enablement import (
+    apply_skill_enablement_snapshot,
+    register_pending_skill_approval_rules,
+    update_skill_enablement_snapshot,
+)
+from .codex_skill_probe import probe_skill_discovery
 from .dogfood_run_service import MAX_BROWSER_SMOKE_ACTIONS
+from .astrabridge_capabilities_mcp_server import _tools as astrabridge_capability_dynamic_tools
 from .astrabridge_web_mcp_server import _tools as astrabridge_web_dynamic_tools
+from .capabilities.capability_routes import resolve_capability_route_entry
+from .capabilities.runtime import CapabilityRuntime
 from .mcp_config_service import McpConfigService
 from .modal_service import ModalService
 from .model_catalog import (
@@ -84,6 +100,7 @@ class RuntimeService:
         web_tool_service: Any | None = None,
         profile_service: ProfileService | None = None,
         router_service: Any | None = None,
+        router_config_service: Any | None = None,
     ) -> None:
         self._projects = project_service
         self._modals = modal_service
@@ -104,6 +121,7 @@ class RuntimeService:
         )
         self._profiles = profile_service or ProfileService()
         self._router = router_service
+        self._router_config = router_config_service
         self._project_tools = None
         self._native_turn_loop = None
         self._client: AppServerClient | None = None
@@ -112,6 +130,7 @@ class RuntimeService:
         self._hydrated_event_log_path: Path | None = None
         self._context_guard_continue_once: set[str] = set()
         self._yunwu_image = YunwuImageService()
+        self._capability_runtime = CapabilityRuntime(router_config=self._router_config) if self._router_config is not None else None
         self._lock = threading.RLock()
         self._thread_cache_lock = threading.RLock()
         self._runtime_operation_lock = threading.RLock()
@@ -122,6 +141,22 @@ class RuntimeService:
         self._runtime_pin_until_monotonic = 0.0
         self._runtime_pin_thread_id: str | None = None
         self._runtime_pin_turn_id: str | None = None
+        self._mcp_status_thread_signature: tuple[Any, ...] | None = None
+        self._mcp_status_thread_id: str | None = None
+
+    def resolve_capability_route(self, capability_id: str) -> dict[str, Any]:
+        configured_models = self._router_config.models() if self._router_config is not None else None
+        route_record = None
+        if self._router_config is not None:
+            route_record = self._router_config.capability_routes().get(str(capability_id or "").strip())
+        entry = resolve_capability_route_entry(
+            str(capability_id or "").strip(),
+            configured_models,
+            route_record=route_record,
+        )
+        if entry.get("resolved_candidate") is None:
+            raise RuntimeError(str(entry.get("error") or f"no_capability_candidate: capability `{capability_id}` has no eligible candidate."))
+        return entry
 
     def attach_router(self, router_service: Any) -> None:
         self._router = router_service
@@ -158,6 +193,207 @@ class RuntimeService:
     def restart(self) -> dict[str, Any]:
         self._close_client("manual_restart")
         return self.environment()
+
+    def kernel_probe_snapshot(self, profile: dict[str, Any]) -> dict[str, Any]:
+        runtime_status = self._prepare_runtime(profile, require_secret=False)
+        execution_host = self._execution_host()
+        wsl_distro = self._wsl_distro()
+        binary = discover_codex_binary_and_version(
+            execution_host=execution_host,
+            wsl_distro=wsl_distro,
+        )
+        protocol_features = observe_protocol_features()
+        runtime_roots = self._kernel_probe_runtime_roots(runtime_status)
+        app_server_snapshot, client_factory, warnings = self._kernel_probe_app_server_status(runtime_status)
+        codex_home = Path(str(runtime_status.get("codex_home") or "")).expanduser().resolve()
+        search_roots = self._kernel_probe_search_roots()
+        mcp_report = probe_mcp_compatibility(
+            codex_home=codex_home,
+            mcp_config=self._mcp_config.snapshot(),
+            client_factory=client_factory,
+            request_timeout=10.0,
+        )
+        plugin_report = probe_plugin_discovery(
+            codex_home=codex_home,
+            client_factory=client_factory,
+            local_search_roots=search_roots,
+            request_timeout=10.0,
+        )
+        skill_report = probe_skill_discovery(
+            codex_home=codex_home,
+            client_factory=client_factory,
+            local_search_roots=search_roots,
+            request_timeout=10.0,
+        )
+        snapshot = build_codex_kernel_probe_snapshot(
+            binary=binary,
+            execution_host=execution_host,
+            wsl_distro=wsl_distro,
+            runtime_status=runtime_status,
+            runtime_roots=runtime_roots,
+            app_server=app_server_snapshot,
+            protocol_features=protocol_features,
+            mcp_report=mcp_report,
+            plugin_report=plugin_report,
+            skill_report=skill_report,
+            extra_warnings=warnings,
+            evidence_sources=["apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py"],
+        )
+        self._record_event(
+            {
+                "type": "kernel_probe_snapshot_built",
+                "profile_id": profile.get("profile_id"),
+                "compatibility_status": snapshot.get("inferred", {}).get("compatibility_status"),
+                "warnings": len(snapshot.get("known_warnings") or []),
+            }
+        )
+        return snapshot
+
+    def _plugin_skill_registry_snapshot_payload(self, profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        runtime_status = self._prepare_runtime(profile, require_secret=False)
+        _app_server_snapshot, client_factory, warnings = self._kernel_probe_app_server_status(runtime_status)
+        codex_home = Path(str(runtime_status.get("codex_home") or "")).expanduser().resolve()
+        search_roots = self._kernel_probe_search_roots()
+        runtime_roots = self._kernel_probe_runtime_roots(runtime_status)
+        plugin_report = probe_plugin_discovery(
+            codex_home=codex_home,
+            client_factory=client_factory,
+            local_search_roots=search_roots,
+            request_timeout=10.0,
+        )
+        skill_report = probe_skill_discovery(
+            codex_home=codex_home,
+            client_factory=client_factory,
+            local_search_roots=search_roots,
+            request_timeout=10.0,
+        )
+        snapshot = build_plugin_skill_registry_snapshot(
+            plugin_report=plugin_report,
+            skill_report=skill_report,
+            runtime_roots=runtime_roots,
+            search_roots=search_roots,
+            extra_notes=[f"app_server_warning:{text}" for text in warnings if str(text or "").strip()],
+        )
+        workspace_root = None
+        try:
+            workspace_root = self._projects.require_workspace_root().resolve()
+        except Exception:  # noqa: BLE001
+            workspace_root = None
+        snapshot = apply_skill_enablement_snapshot(
+            registry_snapshot=snapshot,
+            codex_home=codex_home,
+            workspace_root=workspace_root,
+        )
+        return runtime_status, snapshot
+
+    def plugin_skill_registry_snapshot(self, profile: dict[str, Any]) -> dict[str, Any]:
+        _runtime_status, snapshot = self._plugin_skill_registry_snapshot_payload(profile)
+        self._record_event(
+            {
+                "type": "plugin_skill_registry_snapshot_built",
+                "profile_id": profile.get("profile_id"),
+                "plugin_count": len(snapshot.get("plugins") or []),
+                "skill_count": len(snapshot.get("skills") or []),
+            }
+        )
+        return snapshot
+
+    def plugin_install_plan(
+        self,
+        profile: dict[str, Any],
+        *,
+        plugin_id: str,
+        source_catalog_id: str | None = None,
+    ) -> dict[str, Any]:
+        runtime_status, snapshot = self._plugin_skill_registry_snapshot_payload(profile)
+        codex_home = Path(str(runtime_status.get("codex_home") or "")).expanduser().resolve()
+        plan = build_plugin_install_plan(
+            registry_snapshot=snapshot,
+            plugin_id=plugin_id,
+            source_catalog_id=source_catalog_id,
+            codex_home=codex_home,
+        )
+        self._record_event(
+            {
+                "type": "plugin_install_plan_built",
+                "profile_id": profile.get("profile_id"),
+                "plugin_id": plugin_id,
+                "source_catalog_id": source_catalog_id,
+                "action": plan.get("action"),
+                "status": plan.get("status"),
+            }
+        )
+        return plan
+
+    def plugin_install_apply(
+        self,
+        profile: dict[str, Any],
+        *,
+        plugin_id: str,
+        source_catalog_id: str | None = None,
+    ) -> dict[str, Any]:
+        runtime_status, snapshot = self._plugin_skill_registry_snapshot_payload(profile)
+        codex_home = Path(str(runtime_status.get("codex_home") or "")).expanduser().resolve()
+        workspace_root = self._projects.require_workspace_root().resolve()
+        result = execute_plugin_install(
+            registry_snapshot=snapshot,
+            plugin_id=plugin_id,
+            source_catalog_id=source_catalog_id,
+            codex_home=codex_home,
+            workspace_root=workspace_root,
+        )
+        if str(result.get("status") or "").strip() in {"applied", "noop"}:
+            register_pending_skill_approval_rules(
+                codex_home=codex_home,
+                plugin_id=str((result.get("plugin") or {}).get("plugin_id") or plugin_id),
+                source_catalog_id=str((result.get("plugin") or {}).get("source_catalog_id") or source_catalog_id or "").strip() or None,
+                skill_names=list((((result.get("plan") or {}).get("skill_changes") or {}).get("declared_skills") or [])),
+            )
+        self._record_event(
+            {
+                "type": "plugin_install_apply_finished",
+                "profile_id": profile.get("profile_id"),
+                "plugin_id": plugin_id,
+                "source_catalog_id": source_catalog_id,
+                "action": result.get("action"),
+                "status": result.get("status"),
+            }
+        )
+        return result
+
+    def skill_enablement_update(
+        self,
+        profile: dict[str, Any],
+        *,
+        record_id: str,
+        scope: str,
+        enablement_status: str,
+    ) -> dict[str, Any]:
+        runtime_status, snapshot = self._plugin_skill_registry_snapshot_payload(profile)
+        codex_home = Path(str(runtime_status.get("codex_home") or "")).expanduser().resolve()
+        workspace_root = None
+        try:
+            workspace_root = self._projects.require_workspace_root().resolve()
+        except Exception:  # noqa: BLE001
+            workspace_root = None
+        updated_snapshot = update_skill_enablement_snapshot(
+            registry_snapshot=snapshot,
+            codex_home=codex_home,
+            workspace_root=workspace_root,
+            record_id=record_id,
+            scope=scope,
+            enablement_status=enablement_status,
+        )
+        self._record_event(
+            {
+                "type": "skill_enablement_updated",
+                "profile_id": profile.get("profile_id"),
+                "record_id": record_id,
+                "scope": scope,
+                "enablement_status": enablement_status,
+            }
+        )
+        return updated_snapshot
 
     def restore_startup_runtime(self, profile: dict[str, Any] | None, *, thread_id: str | None = None) -> dict[str, Any]:
         if not profile:
@@ -1161,12 +1397,48 @@ class RuntimeService:
     def list_mcp_status(self, profile: dict[str, Any], *, thread_id: str | None = None, detail: str = "toolsAndAuthOnly") -> dict[str, Any]:
         runtime_status = self._prepare_runtime(profile, require_secret=False)
         client = self._ensure_client(runtime_status)
-        params = {"limit": 100, "detail": detail if detail in {"full", "toolsAndAuthOnly"} else "toolsAndAuthOnly"}
-        if thread_id:
-            params["threadId"] = thread_id
-        result = client.request("mcpServerStatus/list", params)
-        self._record_event({"type": "mcp_status_listed", "count": len(result.get("data") or []), "runtime": runtime_status})
-        return {"servers": list(result.get("data") or []), "next_cursor": result.get("nextCursor")}
+        effective_thread_id = str(thread_id or "").strip()
+        if not effective_thread_id:
+            effective_thread_id = self._ensure_mcp_status_thread(client, profile=profile, runtime_status=runtime_status)
+        params = {"detail": detail if detail in {"full", "toolsAndAuthOnly"} else "toolsAndAuthOnly"}
+        params["threadId"] = effective_thread_id
+        try:
+            result = client.request("mcpServerStatus/list", params)
+        except JsonRpcError as exc:
+            if thread_id or not self._is_thread_not_found_error(exc):
+                raise
+            self._clear_mcp_status_thread()
+            effective_thread_id = self._ensure_mcp_status_thread(client, profile=profile, runtime_status=runtime_status)
+            params["threadId"] = effective_thread_id
+            result = client.request("mcpServerStatus/list", params)
+        self._record_event({"type": "mcp_status_listed", "count": len(result.get("data") or []), "thread_id": effective_thread_id, "runtime": runtime_status})
+        return {"servers": list(result.get("data") or []), "next_cursor": result.get("nextCursor"), "thread_id": effective_thread_id}
+
+    def _ensure_mcp_status_thread(self, client: AppServerClient, *, profile: dict[str, Any], runtime_status: dict[str, Any]) -> str:
+        signature = self._runtime_config.runtime_signature(runtime_status)
+        with self._lock:
+            cached_thread_id = self._mcp_status_thread_id if self._mcp_status_thread_signature == signature else None
+        if cached_thread_id:
+            return cached_thread_id
+        result = client.request(
+            "thread/start",
+            self._thread_start_params(profile=profile, model=None, permission_mode="auto"),
+            timeout=THREAD_START_TIMEOUT_SECONDS,
+        )
+        thread = dict(result.get("thread") or {})
+        status_thread_id = str(thread.get("id") or "")
+        if not status_thread_id:
+            raise RuntimeError("thread/start did not return a thread id for MCP status.")
+        with self._lock:
+            self._mcp_status_thread_signature = signature
+            self._mcp_status_thread_id = status_thread_id
+        self._record_event({"type": "mcp_status_internal_thread_started", "thread_id": status_thread_id, "runtime": runtime_status})
+        return status_thread_id
+
+    def _clear_mcp_status_thread(self) -> None:
+        with self._lock:
+            self._mcp_status_thread_signature = None
+            self._mcp_status_thread_id = None
 
     def call_mcp_tool(
         self,
@@ -1386,7 +1658,7 @@ class RuntimeService:
         return self._resolve_thread_for_direct_mcp_call(client, source_thread_id=source_thread_id, profile=profile), None
 
     def _record_yunwu_image_usage_from_tool_result(self, *, server: str, tool: str, result: Any) -> dict[str, int]:
-        if server != "yunwu_image" and not tool.startswith("yunwu_image_"):
+        if server not in {"yunwu_image", "astrabridge_capabilities"} and not tool.startswith(("yunwu_image_", "astrabridge_capability_image_generate")):
             return {}
         self._refresh_asset_registry_after_yunwu_tool(tool=tool)
         actual_n = self._extract_yunwu_actual_n(result)
@@ -1968,6 +2240,12 @@ class RuntimeService:
     def record_supervisor_event(self, event: dict[str, Any]) -> None:
         self._record_event({"type": "runtime_supervisor", **event})
 
+    def record_external_event(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
+        clean_type = str(event_type or "").strip()
+        if not clean_type:
+            raise ValueError("event_type is required.")
+        self._record_event({"type": clean_type, **dict(payload or {})})
+
     def request_native_command_approval(
         self,
         *,
@@ -2396,6 +2674,8 @@ class RuntimeService:
                 self._client.close()
             finally:
                 self._client = None
+                self._mcp_status_thread_signature = None
+                self._mcp_status_thread_id = None
             self._record_event({"type": "runtime_stopped", "reason": reason})
 
     def _on_notification(self, method: str, params: Any) -> None:
@@ -2478,6 +2758,8 @@ class RuntimeService:
             return self._call_browser_smoke_dynamic_tool(arguments)
         if _is_astrabridge_web_tool(tool):
             return self._call_astrabridge_web_dynamic_tool(tool, arguments)
+        if tool.startswith("astrabridge_capability_"):
+            return self._call_astrabridge_capability_dynamic_tool(tool, arguments)
         return self._call_yunwu_dynamic_tool(tool, arguments)
 
     def _arguments_with_tool_context(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -2491,6 +2773,8 @@ class RuntimeService:
     def _summarize_dynamic_tool_result(self, tool: str, result: dict[str, Any]) -> dict[str, Any]:
         if tool.startswith("yunwu_image_"):
             return summarize_yunwu_image_result(result)
+        if tool.startswith("astrabridge_capability_"):
+            return result
         if _is_astrabridge_web_tool(tool):
             return result
         if tool in BROWSER_SMOKE_TOOL_ALIASES:
@@ -2516,6 +2800,8 @@ class RuntimeService:
             return "astrabridge_browser"
         if _is_astrabridge_web_tool(tool):
             return "astrabridge_web"
+        if tool.startswith("astrabridge_capability_"):
+            return "astrabridge_capabilities"
         if tool.startswith("yunwu_image_"):
             return "yunwu_image"
         return "astrabridge"
@@ -2548,6 +2834,22 @@ class RuntimeService:
         if tool == "astrabridge_web_fetch":
             return self._web_tools.fetch(arguments)
         raise ValueError(f"Unsupported AstraBridge web dynamic tool: {tool}")
+
+    def _call_astrabridge_capability_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self._capability_runtime is None:
+            raise ValueError("Capability runtime is not available.")
+        if tool == "astrabridge_capability_routes":
+            return self._capability_runtime.route_snapshot(str(arguments.get("capability_id") or "").strip() or None)
+        tool_map = {
+            "astrabridge_capability_image_generate": "image.generate",
+            "astrabridge_capability_vision_analyze": "vision.analyze",
+            "astrabridge_capability_speech_transcribe": "speech.transcribe",
+            "astrabridge_capability_speech_synthesize": "speech.synthesize",
+        }
+        capability_id = tool_map.get(tool)
+        if not capability_id:
+            raise ValueError(f"Unsupported AstraBridge capability dynamic tool: {tool}")
+        return self._capability_runtime.invoke(capability_id, arguments)
 
     def _call_yunwu_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         workspace_root = self._projects.require_workspace_root()
@@ -2966,15 +3268,21 @@ class RuntimeService:
         return f"/mnt/{drive}{tail}"
 
     def _launch_descriptor(self) -> str | None:
-        if self._execution_host() == "wsl":
-            distro = self._wsl_distro() or "default"
-            codex_binary = os.environ.get("ASTRABRIDGE_WSL_CODEX_BIN") or ASTRABRIDGE_WSL_BIN
-            return f"wsl::{distro}::{codex_binary}"
-        return os.environ.get("ASTRABRIDGE_CODEX_BIN") or shutil.which("codex")
+        metadata = resolve_codex_binary_metadata(
+            execution_host=self._execution_host(),
+            wsl_distro=self._wsl_distro(),
+            environ=os.environ,
+        )
+        return str(metadata.get("launch_descriptor") or "") or None
 
     def _resolve_launch_target(self, runtime_status: dict[str, Any]) -> dict[str, Any]:
+        binary_metadata = resolve_codex_binary_metadata(
+            execution_host=self._execution_host(),
+            wsl_distro=self._wsl_distro(),
+            environ=os.environ,
+        )
         if self._execution_host() != "wsl":
-            codex_executable = os.environ.get("ASTRABRIDGE_CODEX_BIN") or shutil.which("codex")
+            codex_executable = str(binary_metadata.get("path") or "").strip() or None
             if not codex_executable:
                 raise RuntimeError("Codex CLI/runtime was not detected. Install Codex or set ASTRABRIDGE_CODEX_BIN before sending.")
             return {
@@ -2991,7 +3299,7 @@ class RuntimeService:
         workspace_root = self._projects.require_workspace_root()
         launcher_cwd_wsl = self._windows_path_to_wsl(self._app_server_launch_cwd())
         codex_home_wsl = os.environ.get("ASTRABRIDGE_WSL_CODEX_HOME") or ASTRABRIDGE_WSL_CODEX_HOME
-        codex_binary = os.environ.get("ASTRABRIDGE_WSL_CODEX_BIN") or ASTRABRIDGE_WSL_BIN
+        codex_binary = str(binary_metadata.get("path") or "").strip() or ASTRABRIDGE_WSL_BIN
         requested_distro = self._wsl_distro()
         installed_distros = self._list_wsl_distros(wsl_executable)
         if requested_distro and requested_distro not in installed_distros:
@@ -3431,6 +3739,138 @@ for host in candidates:
                     names.add(text)
         return sorted(names)
 
+    def _kernel_probe_runtime_roots(self, runtime_status: dict[str, Any]) -> dict[str, Any]:
+        roots: dict[str, Any] = {}
+        if self._projects is not None and hasattr(self._projects, "current_runtime_roots"):
+            try:
+                roots = {key: str(value) for key, value in dict(self._projects.current_runtime_roots()).items()}
+            except Exception:  # noqa: BLE001
+                roots = {}
+        workspace_runtime_cwd = None
+        try:
+            workspace_runtime_cwd = str(self._app_server_launch_cwd().resolve())
+        except Exception:  # noqa: BLE001
+            workspace_runtime_cwd = None
+        return {
+            **roots,
+            "workspace_runtime_cwd": workspace_runtime_cwd,
+            "codex_home_root": str(runtime_status.get("codex_home") or roots.get("codex_home_root") or ""),
+        }
+
+    def _kernel_probe_search_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        if self._projects is not None and hasattr(self._projects, "require_shell_state_root"):
+            try:
+                shell_root = Path(self._projects.require_shell_state_root()).resolve()
+            except Exception:  # noqa: BLE001
+                shell_root = None
+            if shell_root is not None and shell_root not in roots:
+                roots.append(shell_root)
+        if self._projects is not None and hasattr(self._projects, "current_runtime_roots"):
+            try:
+                runtime_roots = dict(self._projects.current_runtime_roots())
+            except Exception:  # noqa: BLE001
+                runtime_roots = {}
+            candidate = runtime_roots.get("project_runtime_root")
+            if candidate:
+                project_runtime_root = Path(candidate).resolve()
+                if project_runtime_root not in roots:
+                    roots.append(project_runtime_root)
+        return roots
+
+    def _kernel_probe_app_server_status(
+        self,
+        runtime_status: dict[str, Any],
+    ) -> tuple[dict[str, Any], Any | None, list[str]]:
+        warnings: list[str] = []
+        execution_host = self._execution_host()
+        transport = "websocket" if execution_host == "wsl" else "stdio"
+        launch_mode = "wsl_exec" if execution_host == "wsl" else "direct"
+        client_factory = None
+        initialize_status = "not_checked"
+        available = False
+        disconnect_status = "unknown"
+        desired_signature = self._runtime_config.runtime_signature(runtime_status)
+        if self._client is not None and self._client.is_running() and self._runtime_signature == desired_signature:
+            launch_mode = "reused_client"
+            available = True
+            initialize_status = "supported"
+            disconnect_status = "not_observed"
+            client_factory = self._shared_probe_client_factory()
+        else:
+            try:
+                launch_target = self._resolve_launch_target(runtime_status)
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(str(exc)[:300])
+            else:
+                client_factory = self._spawned_probe_client_factory(launch_target)
+                probe_client = client_factory(lambda method, params: None, lambda method, params: {})
+                try:
+                    probe_client.start()
+                    available = True
+                    initialize_status = "supported"
+                    disconnect_status = "clean"
+                except TimeoutError:
+                    initialize_status = "error"
+                    disconnect_status = "error"
+                    warnings.append("kernel_probe_app_server_initialize_timed_out")
+                except JsonRpcError as exc:
+                    initialize_status = "unsupported" if int(exc.code or 0) == -32601 else "error"
+                    disconnect_status = "error"
+                    warnings.append(f"kernel_probe_app_server_initialize_jsonrpc:{exc.code}")
+                except Exception as exc:  # noqa: BLE001
+                    initialize_status = "error"
+                    disconnect_status = "error"
+                    warnings.append(str(exc)[:300])
+                finally:
+                    try:
+                        probe_client.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+        snapshot = {
+            "transport": transport,
+            "launch_mode": launch_mode,
+            "available": available,
+            "initialize_status": initialize_status,
+            "thread_start_status": "not_checked",
+            "thread_resume_status": "not_checked",
+            "turn_start_status": "not_checked",
+            "approval_events_status": "not_checked",
+            "mcp_elicitation_status": "not_checked",
+            "disconnect_status": disconnect_status,
+            "error_shape_status": "not_checked",
+            "last_checked_at": now_iso(),
+        }
+        return snapshot, client_factory, warnings
+
+    def _spawned_probe_client_factory(self, launch_target: dict[str, Any]) -> Any:
+        def factory(on_notification: Any, on_server_request: Any) -> AppServerClient:
+            env_updates = dict(launch_target.get("env_updates") or {})
+            environment = dict(os.environ)
+            environment.update(env_updates)
+            return AppServerClient(
+                codex_executable=launch_target.get("codex_executable"),
+                launch_command=launch_target.get("launch_command"),
+                ws_url=launch_target.get("ws_url"),
+                env=environment,
+                cwd=launch_target.get("cwd"),
+                on_notification=on_notification,
+                on_server_request=on_server_request,
+            )
+
+        return factory
+
+    def _shared_probe_client_factory(self) -> Any:
+        client = self._client
+
+        def factory(on_notification: Any, on_server_request: Any) -> "_ExistingProbeClient":
+            del on_notification, on_server_request
+            if client is None:
+                raise RuntimeError("codex_app_server_not_running")
+            return _ExistingProbeClient(client)
+
+        return factory
+
     def _wsl_env_passthrough_args(self, env_values: dict[str, str]) -> str:
         assignments: list[str] = []
         for name in env_values:
@@ -3582,6 +4022,22 @@ for host in candidates:
                     )
                     web_tool_names.add(name)
             dynamic_tools.extend(web_tools)
+        if self._mcp_server_enabled("astrabridge_capabilities"):
+            capability_tools: list[dict[str, Any]] = []
+            capability_tool_names: set[str] = set()
+            for tool in astrabridge_capability_dynamic_tools():
+                name = str(tool.get("name") or "").strip()
+                if not name or name in capability_tool_names:
+                    continue
+                capability_tools.append(
+                    {
+                        "name": name,
+                        "description": str(tool.get("description") or ""),
+                        "inputSchema": dict(tool.get("inputSchema") or {}),
+                    }
+                )
+                capability_tool_names.add(name)
+            dynamic_tools.extend(capability_tools)
         if self._mcp_server_enabled("yunwu_image"):
             dynamic_tools.extend(
                 {
@@ -4425,5 +4881,19 @@ class _RuntimeRequestClient:
             self._runtime._close_client(f"{method}_transport_retry")
             self._client = self._runtime._ensure_client(self._runtime_status)
             return self._client.request(method, params, timeout=timeout)
+
+
+class _ExistingProbeClient:
+    def __init__(self, client: AppServerClient) -> None:
+        self._client = client
+
+    def start(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def request(self, method: str, params: Any | None = None, timeout: float = 120.0) -> Any:
+        return self._client.request(method, params, timeout=timeout)
 
 

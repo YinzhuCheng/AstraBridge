@@ -29,6 +29,9 @@ Thumbs.db
 PRIVATE/**
 !PRIVATE/
 !PRIVATE/README.md
+apps/PRIVATE/**
+apps/astrabridge-desktop/.tmp-*.json
+astrabridge.zip
 
 # Local experiment and reference material: keep on disk, do not stage by accident
 output/

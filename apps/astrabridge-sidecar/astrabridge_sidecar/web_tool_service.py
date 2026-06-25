@@ -1,9 +1,62 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from .astrabridge_web_mcp_server import _fetch, _research_brief, _sanitize_tool_context, _search_batch
 from .common import new_id, now_iso, write_json
+
+
+@dataclass(frozen=True)
+class WebLaneToolDescriptor:
+    tool_name: str
+    operation: str
+    description: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "tool_name": self.tool_name,
+            "operation": self.operation,
+            "description": self.description,
+        }
+
+
+def web_lane_descriptor() -> dict[str, Any]:
+    tools = [
+        WebLaneToolDescriptor(
+            tool_name="astrabridge_web_search_batch",
+            operation="search_batch",
+            description="Run one or more public web searches and return structured results.",
+        ),
+        WebLaneToolDescriptor(
+            tool_name="astrabridge_web_research_brief",
+            operation="research_brief",
+            description="Search, fetch, and assemble a structured research brief with source packs.",
+        ),
+        WebLaneToolDescriptor(
+            tool_name="astrabridge_web_search",
+            operation="search",
+            description="Run a single-query public web search.",
+        ),
+        WebLaneToolDescriptor(
+            tool_name="astrabridge_web_fetch",
+            operation="fetch",
+            description="Fetch one public HTTP(S) page into a structured result envelope.",
+        ),
+    ]
+    return {
+        "lane_id": "astrabridge.web",
+        "lane_type": "web_standalone",
+        "capability_id": "web.search",
+        "model_routing_enabled": False,
+        "llm_interprets_results": True,
+        "notes": [
+            "Web lane tools are not selected through provider/model routing.",
+            "Search and fetch results are produced by the tool service; the caller LLM decides how to interpret them.",
+            "research_brief may aggregate fetches, but it remains part of the standalone web lane rather than a model-backed capability.",
+        ],
+        "tools": [tool.to_dict() for tool in tools],
+    }
 
 
 class AstraBridgeWebService:
@@ -16,6 +69,9 @@ class AstraBridgeWebService:
 
     def __init__(self, project_service) -> None:
         self._projects = project_service
+
+    def lane_descriptor(self) -> dict[str, Any]:
+        return web_lane_descriptor()
 
     def search_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = _search_batch(

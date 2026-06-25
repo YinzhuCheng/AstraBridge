@@ -3,6 +3,12 @@
 from pathlib import Path
 from typing import Any
 
+from .capabilities.capability_registry import default_capability_registry
+from .capabilities.capability_routes import (
+    provider_capability_summary,
+    resolve_capability_route_entry,
+    normalize_capability_route_record,
+)
 from .common import app_data_dir, now_iso, read_json, write_json
 from .model_catalog import current_generated_catalog, resolved_web_capability_fields
 from .providers import (
@@ -105,11 +111,23 @@ class RouterConfigService:
         providers = payload["providers"]
         models = payload["models"]
         latest_test = payload.get("latest_test")
+        capability_routes = self.capability_route_snapshot(models)
+        providers_with_capabilities = [
+            {
+                **provider,
+                "capability_summary": provider_capability_summary(
+                    str(provider.get("id") or provider.get("provider_id") or ""),
+                    capability_routes["routes"],
+                ),
+            }
+            for provider in providers
+        ]
         enabled_provider_ids = {str(item.get("id")) for item in providers if item.get("enabled", True)}
         return {
-            "providers": providers,
+            "providers": providers_with_capabilities,
             "models": models,
             "reasoning": payload["reasoning"],
+            "capability_routes": capability_routes["routes"],
             "latest_test": latest_test,
             "enabled_model_count": len([item for item in models if item.get("enabled", True) and item.get("provider") in enabled_provider_ids]),
         }
@@ -122,6 +140,92 @@ class RouterConfigService:
 
     def reasoning(self) -> dict[str, Any]:
         return dict(self._load()["reasoning"])
+
+    def capability_routes(self) -> dict[str, dict[str, Any]]:
+        raw = self._load().get("capability_routes") or {}
+        if not isinstance(raw, dict):
+            return {}
+        normalized: dict[str, dict[str, Any]] = {}
+        for capability_id, record in raw.items():
+            normalized[str(capability_id)] = normalize_capability_route_record(str(capability_id), record if isinstance(record, dict) else {})
+        return normalized
+
+    def capability_route_snapshot(self, configured_models: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        models = configured_models if configured_models is not None else self.models()
+        route_records = self.capability_routes()
+        registry = default_capability_registry()
+        route_entries = [
+            resolve_capability_route_entry(capability_id, models, route_record=route_records.get(capability_id), registry=registry)
+            for capability_id in sorted({*route_records.keys(), *registry.capability_ids()})
+        ]
+        updated_at = max((str(item.get("updated_at") or "") for item in route_entries), default=now_iso()) or now_iso()
+        return {"routes": route_entries, "updated_at": updated_at}
+
+    def capability_management_snapshot(
+        self,
+        *,
+        mcp_config: dict[str, Any] | None = None,
+        configured_models: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        routes = self.capability_route_snapshot(configured_models)
+        registry = default_capability_registry()
+        adapter_contracts = registry.adapter_contracts()
+        entries: list[dict[str, Any]] = []
+        for route in routes["routes"]:
+            capability_id = str(route.get("capability_id") or "").strip()
+            spec = registry.capability_spec(capability_id)
+            adapters = [item.to_dict() for item in adapter_contracts if item.capability_id == capability_id]
+            smoke_case_ids = [
+                str(item.get("smoke_case_id") or "").strip()
+                for item in adapters
+                if str(item.get("smoke_case_id") or "").strip()
+            ]
+            entries.append(
+                {
+                    "capability_id": capability_id,
+                    "display_name": spec.display_name,
+                    "lane_type": spec.lane_type,
+                    "transport_mode": spec.transport_mode,
+                    "route": route,
+                    "availability": {
+                        "available": route.get("resolved_candidate") is not None,
+                        "candidate_count": len(list(route.get("candidates") or [])),
+                        "resolution_status": route.get("resolution_status"),
+                        "error": route.get("error"),
+                    },
+                    "contract": spec.to_dict(),
+                    "adapters": adapters,
+                    "smoke": {
+                        "status": spec.smoke_status,
+                        "case_ids": smoke_case_ids,
+                        "last_result": None,
+                        "evidence_refs": [],
+                    },
+                    "artifacts": {
+                        "policy": spec.artifact_policy,
+                        "recent_refs": [],
+                    },
+                }
+            )
+        return {
+            "schema_version": "astrabridge-capability-management-v1",
+            "capabilities": entries,
+            "routes": routes["routes"],
+            "mcp_preset": _capability_mcp_preset_status(mcp_config),
+            "updated_at": routes["updated_at"],
+        }
+
+    def save_capability_route(self, route: dict[str, Any]) -> dict[str, Any]:
+        capability_id = str(route.get("capability_id") or "").strip()
+        if not capability_id:
+            raise ValueError("capability_id is required.")
+        payload = self._load()
+        capability_routes = dict(payload.get("capability_routes") or {})
+        normalized = normalize_capability_route_record(capability_id, {**route, "updated_at": now_iso()})
+        capability_routes[capability_id] = normalized
+        payload["capability_routes"] = capability_routes
+        write_json(self.store_path, payload)
+        return resolve_capability_route_entry(capability_id, payload["models"], route_record=normalized)
 
     def upsert_provider(self, provider: dict[str, Any]) -> dict[str, Any]:
         payload = self._load()
@@ -246,6 +350,7 @@ class RouterConfigService:
             "providers": [],
             "models": payload["models"],
             "reasoning": payload["reasoning"],
+            "capability_routes": payload.get("capability_routes") or {},
         }
         for provider in payload["providers"]:
             item = dict(provider)
@@ -258,6 +363,7 @@ class RouterConfigService:
         current["providers"] = [dict(item) for item in list(payload.get("providers") or [])]
         current["models"] = [dict(item) for item in list(payload.get("models") or [])]
         current["reasoning"] = dict(payload.get("reasoning") or current["reasoning"])
+        current["capability_routes"] = dict(payload.get("capability_routes") or current.get("capability_routes") or {})
         for provider in current["providers"]:
             provider["auth_key_ref"] = None
             self._sync_provider_profile(provider)
@@ -298,6 +404,7 @@ class RouterConfigService:
             "providers": sorted(providers, key=lambda item: str(item.get("id"))),
             "models": sorted(models, key=lambda item: str(item.get("id"))),
             "reasoning": reasoning,
+            "capability_routes": dict(payload.get("capability_routes") or {}),
             "latest_test": payload.get("latest_test"),
         }
         write_json(self.store_path, loaded)
@@ -558,6 +665,44 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
         "source_provenance": dict(model.get("source_provenance") or {}),
         "last_verified_at": model.get("last_verified_at"),
         "verification_notes": str(model.get("verification_notes") or ""),
+    }
+
+
+_CAPABILITY_MCP_EXPECTED_TOOLS = (
+    "astrabridge_capability_routes",
+    "astrabridge_capability_image_generate",
+    "astrabridge_capability_vision_analyze",
+    "astrabridge_capability_speech_transcribe",
+    "astrabridge_capability_speech_synthesize",
+)
+
+
+def _capability_mcp_preset_status(mcp_config: dict[str, Any] | None) -> dict[str, Any]:
+    servers = list((mcp_config or {}).get("servers") or [])
+    server = next((item for item in servers if str((item or {}).get("name") or "") == "astrabridge_capabilities"), None)
+    tools = dict((server or {}).get("tools") or {}) if isinstance(server, dict) else {}
+    tool_names = sorted(tools.keys())
+    missing_tool_names = [name for name in _CAPABILITY_MCP_EXPECTED_TOOLS if name not in tools]
+    configured = server is not None
+    enabled = bool((server or {}).get("enabled")) if isinstance(server, dict) else False
+    health_status = "missing"
+    if configured and not enabled:
+        health_status = "disabled"
+    elif configured and missing_tool_names:
+        health_status = "partial"
+    elif configured:
+        health_status = "configured"
+    return {
+        "server_name": "astrabridge_capabilities",
+        "configured": configured,
+        "enabled": enabled,
+        "runtime_visible": None,
+        "tool_names": tool_names,
+        "expected_tool_names": list(_CAPABILITY_MCP_EXPECTED_TOOLS),
+        "missing_tool_names": missing_tool_names,
+        "configured_tool_count": len(tool_names),
+        "health_status": health_status,
+        "approval_modes": {name: dict(config or {}).get("approval_mode") for name, config in tools.items()},
     }
 
 

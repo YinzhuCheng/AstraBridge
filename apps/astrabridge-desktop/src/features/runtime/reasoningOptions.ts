@@ -103,6 +103,9 @@ function providerInputModalities(provider: RouterProvider | null | undefined): s
   const modelDefaults = providerModelDefaults(provider);
   const topLevel = normalizedList(modelDefaults.input_modalities ?? provider?.input_modalities);
   if (topLevel.length > 0) return topLevel;
+  const visionSummary = provider?.capability_summary?.["vision.analyze"];
+  const summaryModalities = normalizedList(visionSummary?.input_modalities);
+  if (summaryModalities.length > 0) return summaryModalities;
   const capabilityModalities = normalizedList(providerCapabilityRecord(provider).input_modalities);
   if (capabilityModalities.length > 0) return capabilityModalities;
   if (providerCapabilityRecord(provider).supports_vision === true) return ["text", "image"];

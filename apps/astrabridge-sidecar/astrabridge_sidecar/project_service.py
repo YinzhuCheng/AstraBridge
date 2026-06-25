@@ -4,6 +4,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from .common import (
     slugify,
     write_json,
 )
+from .codex_plugin_skill_project_presets import normalize_project_plugin_skill_presets
 from .profile_service import ProfileService
 from .model_catalog import preferred_provider_model_record
 from .wsl_dependency_service import DEFAULT_WSL_DISTRO, ASTRABRIDGE_WSL_CODEX_HOME, ASTRABRIDGE_WSL_ROOT
@@ -97,6 +99,7 @@ class ProjectService:
             "current_task_id": None,
             "recent_tasks": [],
             "ui_preferences": ui_preferences,
+            "plugin_skill_presets": normalize_project_plugin_skill_presets(None),
             "created_at": now_iso(),
             "updated_at": now_iso(),
         }
@@ -124,6 +127,8 @@ class ProjectService:
         payload.setdefault("recent_threads", [])
         payload.setdefault("current_task_id", None)
         payload.setdefault("recent_tasks", [])
+        before_presets = deepcopy(payload.get("plugin_skill_presets"))
+        payload["plugin_skill_presets"] = normalize_project_plugin_skill_presets(payload.get("plugin_skill_presets"))
         before_runtime = {
             "default_profile_id": payload.get("default_profile_id"),
             "default_model": payload.get("default_model"),
@@ -142,7 +147,7 @@ class ProjectService:
             "default_model": payload.get("default_model"),
             "default_effort": payload.get("default_effort"),
         }
-        if payload["ui_preferences"] != before_preferences or missing_task_fields or runtime_changed:
+        if payload["ui_preferences"] != before_preferences or missing_task_fields or runtime_changed or payload["plugin_skill_presets"] != before_presets:
             payload["updated_at"] = now_iso()
             write_json(project_path, payload)
         self._remember_project(payload)
@@ -180,9 +185,11 @@ class ProjectService:
             "default_effort": payload.get("default_effort"),
         }
         before_preferences = dict(payload.get("ui_preferences") or {})
+        before_presets = deepcopy(payload.get("plugin_skill_presets"))
         payload.setdefault("recent_threads", [])
         payload.setdefault("current_task_id", None)
         payload.setdefault("recent_tasks", [])
+        payload["plugin_skill_presets"] = normalize_project_plugin_skill_presets(payload.get("plugin_skill_presets"))
         payload = self._normalize_project_runtime_defaults(payload)
         payload["ui_preferences"] = self._normalize_ui_preferences(before_preferences)
         runtime_changed = before_runtime != {
@@ -190,7 +197,7 @@ class ProjectService:
             "default_model": payload.get("default_model"),
             "default_effort": payload.get("default_effort"),
         }
-        if runtime_changed or payload["ui_preferences"] != before_preferences:
+        if runtime_changed or payload["ui_preferences"] != before_preferences or payload["plugin_skill_presets"] != before_presets:
             payload["updated_at"] = now_iso()
             write_json(path, payload)
         self.current_project = payload
@@ -294,6 +301,8 @@ class ProjectService:
         runtime_keys = {"default_profile_id", "default_model", "default_effort"}
         if "ui_preferences" in patch:
             patch["ui_preferences"] = self._normalize_ui_preferences(dict(patch.get("ui_preferences") or {}))
+        if "plugin_skill_presets" in patch:
+            patch["plugin_skill_presets"] = normalize_project_plugin_skill_presets(patch.get("plugin_skill_presets"))
         self.current_project.update(patch)
         if runtime_keys.intersection(patch.keys()):
             self.current_project = self._normalize_project_runtime_defaults(self.current_project)

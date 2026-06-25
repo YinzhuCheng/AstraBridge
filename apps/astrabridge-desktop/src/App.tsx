@@ -4,6 +4,9 @@ import { GitFork, Save } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
+import { AutomationsPanel, type AutomationMcpPresetOption, type AutomationPluginSkillPresetOption } from "./features/automations/AutomationsPanel";
+import { CapabilityRoutesPanel, type CapabilityProviderCredentialStatus } from "./features/capabilities/CapabilityRoutesPanel";
+import { PluginSkillInventoryPanel } from "./features/extensions/PluginSkillInventoryPanel";
 import { summarizeCodingEventInspector } from "./features/runtime/codingEventInspector";
 import {
   BrowserInspectorPanel,
@@ -15,6 +18,7 @@ import {
   WorkflowEvidencePanel,
 } from "./features/runtime/InspectorPanels";
 import { isolationAuditSummary, projectCaptureRoot, suggestedDogfoodScreenshotPath } from "./features/runtime/isolationAudit";
+import { RuntimeKernelStatusPanel } from "./features/runtime/RuntimeKernelStatusPanel";
 import { summarizeTaskInspectorEvidence } from "./features/runtime/taskInspectorEvidence";
 import { modelAuthorityState } from "./features/runtime/modelAuthorityNotice";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
@@ -31,6 +35,8 @@ import type {
   AppearancePreset,
   AssetRegistryEntry,
   AttachmentDraft,
+  CapabilityRouteEntry,
+  CapabilitySmokeResult,
   CollaborationMode,
   DogfoodRun,
   ExecutionHost,
@@ -1130,7 +1136,11 @@ function RouterControlCenter({
   fallbackCheckpoints: ProjectCheckpoint[];
 }) {
   const project = useAppStore((store) => store.project);
+  const setProject = useAppStore((store) => store.setProject);
+  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles, refetchInterval: 10000 });
   const routerConfig = useQuery({ queryKey: ["router-config"], queryFn: api.routerConfig, refetchInterval: 5000 });
+  const capabilityRoutes = useQuery({ queryKey: ["capability-routes"], queryFn: api.capabilityRoutes, refetchInterval: 5000 });
+  const capabilityManagement = useQuery({ queryKey: ["capability-management"], queryFn: api.capabilityManagement, refetchInterval: 5000 });
   const llmSession = useQuery({ queryKey: ["llm-manager-session"], queryFn: api.llmManagerSession, refetchInterval: 5000 });
   const llmKeys = useQuery({ queryKey: ["llm-manager-keys"], queryFn: api.llmManagerKeys, refetchInterval: 5000 });
   const llmCatalog = useQuery({ queryKey: ["llm-manager-catalog"], queryFn: api.llmManagerEffectiveCatalog, refetchInterval: 5000 });
@@ -1140,8 +1150,33 @@ function RouterControlCenter({
   const dogfoodRun = useQuery({ queryKey: ["dogfood-run"], queryFn: api.dogfoodRun, refetchInterval: 5000 });
   const dogfoodAssets = useQuery({ queryKey: ["dogfood-assets"], queryFn: api.dogfoodAssets, refetchInterval: 7000, retry: false });
   const projectSaves = useQuery({ queryKey: ["project-saves", project?.project_id], queryFn: api.projectSaves, refetchInterval: 7000 });
-  const setupTabs = ["login", "users", "keys", "providers", "models", "health", "mcp", "runtime", "saves", "dogfood", "reports"] as const;
+  const automations = useQuery({
+    queryKey: ["automations", project?.project_id],
+    queryFn: api.automations,
+    enabled: Boolean(project?.project_id),
+    refetchInterval: 7000,
+  });
+  const automationRuns = useQuery({
+    queryKey: ["automations-runs", project?.project_id],
+    queryFn: () => api.automationRuns(),
+    enabled: Boolean(project?.project_id),
+    refetchInterval: 7000,
+  });
+  const automationInbox = useQuery({
+    queryKey: ["automations-inbox", project?.project_id],
+    queryFn: () => api.automationInbox(null, true),
+    enabled: Boolean(project?.project_id),
+    refetchInterval: 7000,
+  });
+  const automationScheduler = useQuery({
+    queryKey: ["automations-scheduler", project?.project_id],
+    queryFn: api.automationSchedulerStatus,
+    enabled: Boolean(project?.project_id),
+    refetchInterval: 7000,
+  });
+  const setupTabs = ["login", "users", "keys", "providers", "models", "capabilities", "health", "mcp", "extensions", "runtime", "automations", "saves", "dogfood", "reports"] as const;
   const [tab, setTab] = useState<(typeof setupTabs)[number]>("login");
+  const capabilityArtifacts = useQuery({ queryKey: ["capability-artifacts"], queryFn: () => api.capabilityArtifacts(20), enabled: tab === "capabilities", refetchInterval: 10000, retry: false });
   const [providerDraft, setProviderDraft] = useState<RouterProvider | null>(null);
   const [modelDraft, setModelDraft] = useState<RouterModelEntry | null>(null);
   const [mcpDraft, setMcpDraft] = useState<McpServerConfig | null>(null);
@@ -1157,9 +1192,25 @@ function RouterControlCenter({
   const [managedKeyDraft, setManagedKeyDraft] = useState({ label: "", secret: "", env_key: "" });
   const [selectedKeyId, setSelectedKeyId] = useState("");
   const [selectedProviderId, setSelectedProviderId] = useState("");
-  const mcpStatus = useQuery({ queryKey: ["mcp-status", selectedProviderId], queryFn: () => api.mcpStatus({ profile_id: selectedProviderId ? `${selectedProviderId}-default` : undefined, detail: "toolsAndAuthOnly" }), enabled: tab === "mcp" && Boolean(selectedProviderId), refetchInterval: 7000, retry: false });
+  const [capabilityRouteDrafts, setCapabilityRouteDrafts] = useState<Record<string, { mode: "auto" | "pinned"; provider_id?: string | null; model?: string | null }>>({});
+  const [capabilitySmokeResults, setCapabilitySmokeResults] = useState<Record<string, CapabilitySmokeResult>>({});
+  const mcpStatus = useQuery({ queryKey: ["mcp-status", selectedProviderId], queryFn: () => api.mcpStatus({ profile_id: selectedProviderId ? `${selectedProviderId}-default` : undefined, detail: "toolsAndAuthOnly" }), enabled: (tab === "mcp" || tab === "capabilities") && Boolean(selectedProviderId), refetchInterval: 7000, retry: false });
   const [wslSetupDistro, setWslSetupDistro] = useState("Ubuntu-24.04");
   const wslDependencies = useQuery({ queryKey: ["wsl-dependencies", wslSetupDistro], queryFn: () => api.wslDependencies(wslSetupDistro), refetchInterval: 15000, retry: false });
+  const runtimeKernelProbe = useQuery({
+    queryKey: ["runtime-kernel-probe", project?.project_id],
+    queryFn: () => api.runtimeKernelProbe(),
+    enabled: tab === "runtime" && Boolean(project?.project_id),
+    refetchInterval: 15000,
+    retry: false,
+  });
+  const runtimePluginSkillRegistry = useQuery({
+    queryKey: ["runtime-plugin-skill-registry", project?.project_id],
+    queryFn: () => api.runtimePluginSkillRegistry(),
+    enabled: (tab === "extensions" || tab === "capabilities") && Boolean(project?.project_id),
+    refetchInterval: 15000,
+    retry: false,
+  });
   const [modelSearch, setModelSearch] = useState("");
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [testOutput, setTestOutput] = useState<string>("");
@@ -1206,6 +1257,20 @@ function RouterControlCenter({
     }
   }, [dogfoodScreenshotPath, suggestedScreenshotPath]);
 
+  useEffect(() => {
+    const next: Record<string, { mode: "auto" | "pinned"; provider_id?: string | null; model?: string | null }> = {};
+    for (const route of capabilityManagement.data?.routes ?? capabilityRoutes.data?.routes ?? routerConfig.data?.capability_routes ?? []) {
+      next[route.capability_id] = {
+        mode: route.route_record.mode,
+        provider_id: route.route_record.provider_id ?? null,
+        model: route.route_record.model ?? null,
+      };
+    }
+    if (Object.keys(next).length > 0) {
+      setCapabilityRouteDrafts(next);
+    }
+  }, [capabilityManagement.data?.routes, capabilityRoutes.data?.routes, routerConfig.data?.capability_routes]);
+
   const saveProvider = useMutation({
     mutationFn: api.saveProvider,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["router-config"] }),
@@ -1217,6 +1282,50 @@ function RouterControlCenter({
   const saveReasoning = useMutation({
     mutationFn: api.saveReasoningConfig,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["router-config"] }),
+  });
+  const saveCapabilityRoute = useMutation({
+    mutationFn: api.saveCapabilityRoute,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["router-config"] });
+      queryClient.invalidateQueries({ queryKey: ["capability-routes"] });
+      queryClient.invalidateQueries({ queryKey: ["capability-management"] });
+      queryClient.invalidateQueries({ queryKey: ["capability-artifacts"] });
+    },
+  });
+  const runCapabilitySmoke = useMutation({
+    mutationFn: api.capabilitySmoke,
+    onSuccess: (response) => {
+      setCapabilitySmokeResults((current) => ({
+        ...current,
+        [response.smoke.capability_id]: response.smoke,
+      }));
+      queryClient.invalidateQueries({ queryKey: ["capability-management"] });
+    },
+  });
+  const invalidateAutomationQueries = () => {
+    queryClient.invalidateQueries({ queryKey: ["automations", project?.project_id] });
+    queryClient.invalidateQueries({ queryKey: ["automations-runs", project?.project_id] });
+    queryClient.invalidateQueries({ queryKey: ["automations-inbox", project?.project_id] });
+    queryClient.invalidateQueries({ queryKey: ["automations-scheduler", project?.project_id] });
+    queryClient.invalidateQueries({ queryKey: ["runtime-supervisor"] });
+  };
+  const createAutomation = useMutation({ mutationFn: api.createAutomation, onSuccess: invalidateAutomationQueries });
+  const updateAutomation = useMutation({
+    mutationFn: ({ automationId, patch }: { automationId: string; patch: Record<string, unknown> }) => api.updateAutomation(automationId, patch),
+    onSuccess: invalidateAutomationQueries,
+  });
+  const deleteAutomation = useMutation({ mutationFn: (automationId: string) => api.deleteAutomation(automationId), onSuccess: invalidateAutomationQueries });
+  const pauseAutomation = useMutation({ mutationFn: (automationId: string) => api.pauseAutomation(automationId), onSuccess: invalidateAutomationQueries });
+  const resumeAutomation = useMutation({ mutationFn: (automationId: string) => api.resumeAutomation(automationId), onSuccess: invalidateAutomationQueries });
+  const runAutomationNow = useMutation({ mutationFn: (automationId: string) => api.runAutomationNow(automationId), onSuccess: invalidateAutomationQueries });
+  const cancelAutomationRun = useMutation({ mutationFn: (runId: string) => api.cancelAutomationRun(runId), onSuccess: invalidateAutomationQueries });
+  const updateAutomationInboxItem = useMutation({
+    mutationFn: ({ itemId, patch }: { itemId: string; patch: Record<string, unknown> }) => api.updateAutomationInboxItem(itemId, patch),
+    onSuccess: invalidateAutomationQueries,
+  });
+  const promoteAutomationInboxItem = useMutation({
+    mutationFn: ({ itemId, promotionRef }: { itemId: string; promotionRef: string }) => api.promoteAutomationInboxItem(itemId, promotionRef),
+    onSuccess: invalidateAutomationQueries,
   });
   const importSeed = useMutation({
     mutationFn: () => api.importMetadataSeed(true),
@@ -1291,6 +1400,16 @@ function RouterControlCenter({
       setMcpDraft(data.server);
       setMcpOutput("Yunwu Image Tool installed. It reads YUNWU_API_KEY from the runtime environment and uses approval prompts by default.");
       queryClient.invalidateQueries({ queryKey: ["mcp-config"] });
+    },
+  });
+  const applyAstraBridgeCapabilities = useMutation({
+    mutationFn: api.applyAstraBridgeCapabilitiesPreset,
+    onSuccess: (data) => {
+      setMcpDraft(data.server);
+      setMcpOutput("AstraBridge Capability Runtime installed. It exposes capability routes plus image, vision, speech transcribe, and speech synthesize tools through the current capability routing config.");
+      queryClient.invalidateQueries({ queryKey: ["mcp-config"] });
+      queryClient.invalidateQueries({ queryKey: ["capability-management"] });
+      queryClient.invalidateQueries({ queryKey: ["mcp-status", selectedProviderId] });
     },
   });
   const testYunwuImage = useMutation({
@@ -1572,6 +1691,61 @@ function RouterControlCenter({
     queryClient.invalidateQueries({ queryKey: ["router-config"] });
   }
 
+  const capabilityRouteEntries: CapabilityRouteEntry[] = capabilityManagement.data?.routes ?? capabilityRoutes.data?.routes ?? routerConfig.data?.capability_routes ?? [];
+  const capabilityMcpPreset = capabilityManagement.data?.mcp_preset ?? null;
+  const capabilityMcpRuntime = mcpStatus.data?.servers.find((server) => server.name === "astrabridge_capabilities") ?? null;
+  const capabilityMcpRuntimeVisible = capabilityMcpRuntime ? true : mcpStatus.data ? false : null;
+  const capabilityMcpRuntimeToolCount = capabilityMcpRuntime ? Object.keys(capabilityMcpRuntime.tools ?? {}).length : 0;
+  const managedKeyAvailability = new Map((llmCatalog.data?.providers ?? []).map((provider) => [provider.id, Boolean(provider.managed_key_available)]));
+  const capabilityProviderCredentials: Record<string, CapabilityProviderCredentialStatus> = Object.fromEntries(
+    (routerConfig.data?.providers ?? []).map((provider) => {
+      let status: CapabilityProviderCredentialStatus["status"] = "missing";
+      if (!provider.enabled) {
+        status = "disabled";
+      } else if (provider.auth_mode === "env_ref") {
+        status = "check_environment";
+      } else if (provider.auth_mode === "os_keychain" && (provider.auth_key_ref || managedKeyAvailability.get(provider.id))) {
+        status = "configured";
+      } else if (provider.auth_mode === "session_paste" || provider.auth_mode === "key_file") {
+        status = "session_required";
+      }
+      return [
+        provider.id,
+        {
+          provider_id: provider.id,
+          label: provider.display_name || provider.id,
+          enabled: provider.enabled,
+          auth_mode: provider.auth_mode,
+          env_key: provider.auth_mode === "env_ref" ? provider.env_key : null,
+          status,
+        },
+      ];
+    }),
+  );
+  const automationMcpPresetOptions: AutomationMcpPresetOption[] = [
+    {
+      preset_id: "astrabridge_capabilities",
+      label: "AstraBridge Capability Runtime",
+      description: "Capability routes for image generation, vision, speech transcription, and speech synthesis.",
+      configured: Boolean(capabilityMcpPreset?.configured),
+    },
+    ...(mcpConfig.data?.servers ?? [])
+      .filter((server) => server.name !== "astrabridge_capabilities")
+      .map((server) => ({
+        preset_id: server.name,
+        label: server.display_name || server.name,
+        description: server.trust_note || server.source_url || server.name,
+        configured: Boolean(server.enabled),
+      })),
+  ];
+  const automationPluginSkillPresetOptions: AutomationPluginSkillPresetOption[] = (project?.plugin_skill_presets?.presets ?? []).map((preset) => ({
+    preset_id: preset.preset_id,
+    label: preset.display_name || preset.preset_id,
+    plugin_count: (preset.plugin_refs ?? []).length,
+    skill_count: (preset.skill_refs ?? []).length,
+    active: preset.preset_id === project?.plugin_skill_presets?.active_preset_id,
+  }));
+
   const activeDogfood = dogfoodDraft ?? dogfoodRun.data?.run ?? null;
   const dogfoodBudgetRows = activeDogfood
     ? [
@@ -1751,6 +1925,48 @@ function RouterControlCenter({
             </>
           ) : null}
         </>
+      ) : null}
+
+      {tab === "capabilities" ? (
+        <div className="manager-panel">
+          <CapabilityRoutesPanel
+            locale={locale}
+            routes={capabilityRouteEntries}
+            managementEntries={capabilityManagement.data?.capabilities ?? []}
+            mcpPreset={capabilityMcpPreset}
+            pluginSkillRegistry={runtimePluginSkillRegistry.data ?? null}
+            pluginSkillRegistryLoading={runtimePluginSkillRegistry.isLoading || runtimePluginSkillRegistry.isFetching}
+            pluginSkillRegistryError={runtimePluginSkillRegistry.isError}
+            drafts={capabilityRouteDrafts}
+            setDrafts={setCapabilityRouteDrafts}
+            isLoading={capabilityManagement.isLoading}
+            isError={capabilityManagement.isError}
+            isSaving={saveCapabilityRoute.isPending}
+            smokeResults={capabilitySmokeResults}
+            smokePendingCapabilityId={(runCapabilitySmoke.variables as { capability_id?: string } | undefined)?.capability_id ?? null}
+            isSmokePending={runCapabilitySmoke.isPending}
+            artifacts={capabilityArtifacts.data?.artifacts ?? []}
+            artifactsLoading={capabilityArtifacts.isLoading}
+            artifactsError={capabilityArtifacts.isError}
+            providerCredentials={capabilityProviderCredentials}
+            mcpRuntimeVisible={capabilityMcpRuntimeVisible}
+            mcpRuntimeToolCount={capabilityMcpRuntimeToolCount}
+            mcpVisibilityLoading={mcpStatus.isLoading || mcpStatus.isFetching}
+            mcpVisibilityError={mcpStatus.isError}
+            isInstallingMcpPreset={applyAstraBridgeCapabilities.isPending}
+            toMediaSrc={localAssetUrl}
+            onInstallMcpPreset={() => applyAstraBridgeCapabilities.mutate()}
+            onSave={(route, draft) =>
+              saveCapabilityRoute.mutate({
+                capability_id: route.capability_id,
+                mode: draft.mode,
+                provider_id: draft.mode === "pinned" ? draft.provider_id ?? null : null,
+                model: draft.mode === "pinned" ? draft.model ?? null : null,
+              })
+            }
+            onRunSmoke={(capabilityId) => runCapabilitySmoke.mutate({ capability_id: capabilityId, mode: "dry_run" })}
+          />
+        </div>
       ) : null}
 
       {tab === "models" ? (
@@ -1945,6 +2161,7 @@ function RouterControlCenter({
             <div className="field-row">
               <button type="button" className="ghost-button" onClick={() => applyContext7.mutate()} disabled={applyContext7.isPending}>{t(locale, "manager_mcp_install_context7")}</button>
               <button type="button" className="ghost-button" onClick={() => applyYunwuImage.mutate()} disabled={applyYunwuImage.isPending}>{t(locale, "manager_mcp_install_yunwu")}</button>
+              <button type="button" className="ghost-button" onClick={() => applyAstraBridgeCapabilities.mutate()} disabled={applyAstraBridgeCapabilities.isPending}>{t(locale, "manager_mcp_install_capabilities")}</button>
               <button type="button" className="ghost-button" onClick={() => testYunwuImage.mutate()} disabled={testYunwuImage.isPending}>{t(locale, "manager_mcp_test_yunwu")}</button>
               <button type="button" className="primary-button" onClick={() => reloadMcp.mutate()} disabled={!selectedProviderId || reloadMcp.isPending}>{t(locale, "manager_mcp_reload")}</button>
             </div>
@@ -2066,6 +2283,18 @@ function RouterControlCenter({
         </div>
       ) : null}
 
+        {tab === "extensions" ? (
+          <PluginSkillInventoryPanel
+            locale={locale}
+            snapshot={runtimePluginSkillRegistry.data}
+            isLoading={runtimePluginSkillRegistry.isLoading || runtimePluginSkillRegistry.isFetching}
+            error={runtimePluginSkillRegistry.error}
+            project={project}
+            onProjectChanged={(nextProject) => setProject(nextProject)}
+            onRegistryChanged={() => runtimePluginSkillRegistry.refetch()}
+          />
+        ) : null}
+
       {tab === "runtime" ? (
         <div className="manager-panel">
           <div className="manager-hero">
@@ -2091,6 +2320,12 @@ function RouterControlCenter({
             </div>
           </div>
           {wslDependencies.error ? <p className="error-text">{String((wslDependencies.error as Error).message ?? wslDependencies.error)}</p> : null}
+          <RuntimeKernelStatusPanel
+            locale={locale}
+            snapshot={runtimeKernelProbe.data}
+            isLoading={runtimeKernelProbe.isLoading || runtimeKernelProbe.isFetching}
+            error={runtimeKernelProbe.error}
+          />
           {isolationAudit.error ? <p className="error-text">{String((isolationAudit.error as Error).message ?? isolationAudit.error)}</p> : null}
           {isolationAudit.data ? (
             <section className="metadata-section">
@@ -2154,6 +2389,42 @@ function RouterControlCenter({
           </div>
           {wslSetupOutput ? <pre className="json-preview compact-preview">{wslSetupOutput}</pre> : null}
         </div>
+      ) : null}
+
+      {tab === "automations" ? (
+        <AutomationsPanel
+          locale={locale}
+          projectId={project?.project_id ?? ""}
+          profiles={profiles.data?.profiles ?? []}
+          automations={automations.data?.automations ?? []}
+          runs={automationRuns.data?.runs ?? []}
+          inboxItems={automationInbox.data?.items ?? []}
+          scheduler={automationScheduler.data?.scheduler ?? null}
+          supervisorAutomations={null}
+          mcpPresetOptions={automationMcpPresetOptions}
+          pluginSkillPresetOptions={automationPluginSkillPresetOptions}
+          isBusy={
+            createAutomation.isPending ||
+            updateAutomation.isPending ||
+            deleteAutomation.isPending ||
+            pauseAutomation.isPending ||
+            resumeAutomation.isPending ||
+            runAutomationNow.isPending ||
+            cancelAutomationRun.isPending ||
+            updateAutomationInboxItem.isPending ||
+            promoteAutomationInboxItem.isPending
+          }
+          onCreate={(payload) => createAutomation.mutate(payload)}
+          onUpdate={(automationId, patch) => updateAutomation.mutate({ automationId, patch })}
+          onDelete={(automationId) => deleteAutomation.mutate(automationId)}
+          onPause={(automationId) => pauseAutomation.mutate(automationId)}
+          onResume={(automationId) => resumeAutomation.mutate(automationId)}
+          onRunNow={(automationId) => runAutomationNow.mutate(automationId)}
+          onCancelRun={(runId) => cancelAutomationRun.mutate(runId)}
+          onMarkReviewed={(itemId) => updateAutomationInboxItem.mutate({ itemId, patch: { state: "reviewed" } })}
+          onArchive={(itemId) => updateAutomationInboxItem.mutate({ itemId, patch: { state: "archived" } })}
+          onPromote={(itemId, promotionRef) => promoteAutomationInboxItem.mutate({ itemId, promotionRef })}
+        />
       ) : null}
 
       {tab === "saves" ? (

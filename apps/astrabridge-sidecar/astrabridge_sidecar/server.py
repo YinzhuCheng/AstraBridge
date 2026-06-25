@@ -11,9 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from .asset_registry_service import AssetRegistryService
+from .automations import AutomationService
 from .checkpoint_service import CheckpointService
 from .common import DEFAULT_PORT, public_error
 from .common import now_iso, read_json, write_json
+from .capabilities import capability_artifact_snapshot, capability_smoke_snapshot
+from .codex_plugin_skill_project_presets import mutate_project_plugin_skill_presets
 from .dogfood_run_service import DogfoodRunService
 from .image_prompt_strategy import build_rewrite_instruction, prompt_guides_payload
 from .isolation_audit_service import IsolationAuditService
@@ -131,6 +134,7 @@ class AppContext:
             dogfood_run=self.dogfood,
             profile_service=self.profiles,
             router_service=self.router,
+            router_config_service=self.router_config,
         )
         self.project_tools = ProjectToolsService(
             self.projects,
@@ -142,10 +146,25 @@ class AppContext:
             task_conversation=self.task_conversation,
         )
         self.runtime.attach_project_tools(self.project_tools)
-        self.supervisor = RuntimeSupervisorService(self.projects, self.runtime, self.modals, self.dogfood)
+        self.automations = AutomationService(
+            self.projects,
+            runtime_service=self.runtime,
+            profile_service=self.profiles,
+            runtime_config=self.runtime_config,
+            event_recorder=self._record_automation_event,
+        )
+        self.supervisor = RuntimeSupervisorService(self.projects, self.runtime, self.modals, self.dogfood, automation_service=self.automations)
         self.wsl_dependencies = WslDependencyService()
         self.admin_token = __import__("secrets").token_urlsafe(24)
+        if self.projects.current_project:
+            self.automations.start()
         self._restore_startup_state()
+
+    def _record_automation_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        if hasattr(self.runtime, "record_external_event"):
+            self.runtime.record_external_event(event_type, payload)
+            return
+        self.runtime.record_supervisor_event({"event": event_type, **payload})
 
     def _restore_startup_state(self) -> None:
         project = self.projects.current_project or {}
@@ -361,6 +380,24 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/router/config":
                 self.send_json(self.context.router_config.snapshot())
                 return
+            if path == "/api/runtime/capability-routes":
+                self.send_json(self.context.router_config.capability_route_snapshot())
+                return
+            if path == "/api/runtime/capability-management":
+                self.send_json(
+                    self.context.router_config.capability_management_snapshot(
+                        mcp_config=self.context.mcp_config.snapshot(),
+                    )
+                )
+                return
+            if path == "/api/runtime/capability-artifacts":
+                self.send_json(
+                    capability_artifact_snapshot(
+                        self.context.projects.require_workspace_root(),
+                        limit=int(query.get("limit", ["20"])[0] or 20),
+                    )
+                )
+                return
             if path == "/api/llm-manager/session":
                 self.send_json(self.context.llm_manager.session())
                 return
@@ -402,11 +439,43 @@ class Handler(BaseHTTPRequestHandler):
                 runtime["router"] = self.context.router.status()
                 self.send_json(runtime)
                 return
+            if path == "/api/runtime/kernel-probe":
+                profile = self._resolve_runtime_profile(query.get("profile_id", [None])[0])
+                self.send_json(self.context.runtime.kernel_probe_snapshot(profile))
+                return
+            if path == "/api/runtime/plugin-skill-registry":
+                profile = self._resolve_runtime_profile(query.get("profile_id", [None])[0])
+                self.send_json(self.context.runtime.plugin_skill_registry_snapshot(profile))
+                return
             if path == "/api/runtime/dependencies/wsl":
                 self.send_json(self.context.wsl_dependencies.status(self._optional_query_string(query, "distro")))
                 return
             if path == "/api/router/status":
                 self.send_json(self.context.router.status())
+                return
+            if path == "/api/automations":
+                self.send_json(self.context.automations.list_automations())
+                return
+            if path == "/api/automations/runs":
+                self.send_json(self.context.automations.list_runs(self._optional_query_string(query, "automation_id")))
+                return
+            if path == "/api/automations/run":
+                run_id = self._optional_query_string(query, "run_id")
+                if not run_id:
+                    raise ValueError("run_id is required.")
+                self.send_json(self.context.automations.get_run(run_id))
+                return
+            if path == "/api/automations/inbox":
+                include_archived = str(query.get("include_archived", ["true"])[0]).strip().lower() != "false"
+                self.send_json(
+                    self.context.automations.list_inbox_items(
+                        self._optional_query_string(query, "automation_id"),
+                        include_archived=include_archived,
+                    )
+                )
+                return
+            if path == "/api/automations/scheduler/status":
+                self.send_json({"scheduler": self.context.automations.scheduler_status()})
                 return
             if path == "/api/router/events":
                 limit = int(query.get("limit", ["50"])[0])
@@ -524,6 +593,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.context.tasks.ensure_default_task(title=project.get("name") or "New task")
                 project = self.context.projects.current_project
                 self.context.runtime.restart()
+                self.context.automations.start()
                 self.send_json({"project": project})
                 return
             if path in {"/api/projects/open", "/api/project/open"}:
@@ -538,11 +608,69 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 project = self.context.projects.current_project
                 self.context.runtime.restart()
+                self.context.automations.start()
                 self.send_json({"project": project})
                 return
             if path == "/api/projects/close":
+                self.context.automations.stop()
                 self.context.runtime.restart()
                 self.send_json(self.context.projects.close_project())
+                return
+            if path == "/api/automations/create":
+                self.send_json(self.context.automations.create_automation(payload))
+                return
+            if path == "/api/automations/update":
+                automation_id = str(payload.get("automation_id") or "").strip()
+                if not automation_id:
+                    raise ValueError("automation_id is required.")
+                patch = {key: value for key, value in payload.items() if key != "automation_id"}
+                self.send_json(self.context.automations.update_automation(automation_id, patch))
+                return
+            if path == "/api/automations/delete":
+                automation_id = str(payload.get("automation_id") or "").strip()
+                if not automation_id:
+                    raise ValueError("automation_id is required.")
+                self.send_json(self.context.automations.delete_automation(automation_id, reason=str(payload.get("reason") or "deleted")))
+                return
+            if path == "/api/automations/pause":
+                automation_id = str(payload.get("automation_id") or "").strip()
+                if not automation_id:
+                    raise ValueError("automation_id is required.")
+                self.send_json(self.context.automations.pause_automation(automation_id))
+                return
+            if path == "/api/automations/resume":
+                automation_id = str(payload.get("automation_id") or "").strip()
+                if not automation_id:
+                    raise ValueError("automation_id is required.")
+                self.send_json(self.context.automations.resume_automation(automation_id))
+                return
+            if path == "/api/automations/run-now":
+                automation_id = str(payload.get("automation_id") or "").strip()
+                if not automation_id:
+                    raise ValueError("automation_id is required.")
+                self.send_json(self.context.automations.run_now(automation_id))
+                return
+            if path == "/api/automations/runs/cancel":
+                run_id = str(payload.get("run_id") or "").strip()
+                if not run_id:
+                    raise ValueError("run_id is required.")
+                self.send_json(self.context.automations.cancel_run(run_id))
+                return
+            if path == "/api/automations/inbox/update":
+                item_id = str(payload.get("item_id") or "").strip()
+                if not item_id:
+                    raise ValueError("item_id is required.")
+                patch = {key: value for key, value in payload.items() if key != "item_id"}
+                self.send_json(self.context.automations.update_inbox_item(item_id, patch))
+                return
+            if path == "/api/automations/inbox/promote":
+                item_id = str(payload.get("item_id") or "").strip()
+                if not item_id:
+                    raise ValueError("item_id is required.")
+                promotion_ref = str(payload.get("promotion_ref") or "").strip()
+                if not promotion_ref:
+                    raise ValueError("promotion_ref is required.")
+                self.send_json(self.context.automations.promote_inbox_item(item_id, promotion_ref))
                 return
             if path == "/api/projects/preferences":
                 current = self.context.projects.current_project or {}
@@ -551,6 +679,17 @@ class Handler(BaseHTTPRequestHandler):
                     **dict(payload.get("ui_preferences") or {}),
                 }
                 self.send_json({"project": self.context.projects.update_project({"ui_preferences": merged})})
+                return
+            if path == "/api/projects/plugin-skill-presets":
+                current = self.context.projects.current_project or {}
+                next_state = mutate_project_plugin_skill_presets(
+                    current.get("plugin_skill_presets"),
+                    operation=str(payload.get("operation") or "").strip(),
+                    preset_id=self._optional_string(payload, "preset_id"),
+                    plugin_ref=payload.get("plugin_ref") if isinstance(payload.get("plugin_ref"), dict) else None,
+                    skill_ref=payload.get("skill_ref") if isinstance(payload.get("skill_ref"), dict) else None,
+                )
+                self.send_json({"project": self.context.projects.update_project({"plugin_skill_presets": next_state})})
                 return
             if path == "/api/project/saves/create":
                 response = self.context.checkpoints.create(payload)
@@ -703,6 +842,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/router/mcp/preset/astrabridge-web":
                 self.send_json(self.context.mcp_config.apply_astrabridge_web_preset())
+                return
+            if path == "/api/router/mcp/preset/astrabridge-capabilities":
+                self.send_json(self.context.mcp_config.apply_astrabridge_capabilities_preset())
                 return
             if path == "/api/router/image/yunwu/test":
                 self.send_json(self.context.yunwu_image.test_connectivity(api_key=self._ephemeral_key(payload)))
@@ -906,6 +1048,61 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/router/import-config":
                 self.send_json(self.context.router_config.import_sanitized(payload))
+                return
+            if path == "/api/runtime/capability-routes/save":
+                self.send_json({"route": self.context.router_config.save_capability_route(payload)})
+                return
+            if path == "/api/runtime/capability-smoke":
+                route_record = self.context.router_config.capability_routes().get(str(payload.get("capability_id") or "").strip())
+                self.send_json(
+                    {
+                        "smoke": capability_smoke_snapshot(
+                            payload,
+                            configured_models=self.context.router_config.models(),
+                            route_record=route_record,
+                        )
+                    }
+                )
+                return
+            if path == "/api/runtime/plugin-install-plan":
+                profile = self._resolve_runtime_profile(payload.get("profile_id"))
+                plugin_id = str(payload.get("plugin_id") or "").strip()
+                if not plugin_id:
+                    raise ValueError("plugin_id is required.")
+                self.send_json(
+                    self.context.runtime.plugin_install_plan(
+                        profile,
+                        plugin_id=plugin_id,
+                        source_catalog_id=self._optional_string(payload, "source_catalog_id"),
+                    )
+                )
+                return
+            if path == "/api/runtime/plugin-install-apply":
+                profile = self._resolve_runtime_profile(payload.get("profile_id"))
+                plugin_id = str(payload.get("plugin_id") or "").strip()
+                if not plugin_id:
+                    raise ValueError("plugin_id is required.")
+                self.send_json(
+                    self.context.runtime.plugin_install_apply(
+                        profile,
+                        plugin_id=plugin_id,
+                        source_catalog_id=self._optional_string(payload, "source_catalog_id"),
+                    )
+                )
+                return
+            if path == "/api/runtime/skill-enablement":
+                profile = self._resolve_runtime_profile(payload.get("profile_id"))
+                record_id = str(payload.get("record_id") or "").strip()
+                if not record_id:
+                    raise ValueError("record_id is required.")
+                self.send_json(
+                    self.context.runtime.skill_enablement_update(
+                        profile,
+                        record_id=record_id,
+                        scope=str(payload.get("scope") or "").strip(),
+                        enablement_status=str(payload.get("enablement_status") or "").strip(),
+                    )
+                )
                 return
             if path == "/api/router/token/rotate":
                 self.send_json(self.context.router.rotate_token())

@@ -13,11 +13,12 @@ from .security import redact_sensitive
 class RuntimeSupervisorService:
     """Compact, sanitized runtime state for the desktop inspector and guards."""
 
-    def __init__(self, project_service, runtime_service, modal_service, dogfood_service) -> None:
+    def __init__(self, project_service, runtime_service, modal_service, dogfood_service, automation_service: Any | None = None) -> None:
         self._projects = project_service
         self._runtime = runtime_service
         self._modals = modal_service
         self._dogfood = dogfood_service
+        self._automations = automation_service
         self._auto_paused_turns: set[str] = set()
         self._guard_events_seen: set[str] = set()
 
@@ -99,8 +100,29 @@ class RuntimeSupervisorService:
                     "pending_count": len(pending_modals),
                     "current": pending_modals[0] if pending_modals else None,
                 },
+                "automations": self._automation_summary(),
             }
         )
+
+    def _automation_summary(self) -> dict[str, Any]:
+        if self._automations is None:
+            return {
+                "scheduler": {"running": False, "active_run_count": 0, "next_wake_up_at": None},
+                "active_runs": [],
+                "last_failure": None,
+                "next_due": None,
+                "inbox_summary": {"unread": 0, "reviewed": 0, "archived": 0, "promoted": 0},
+            }
+        try:
+            return dict(self._automations.status_summary())
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "scheduler": {"running": False, "active_run_count": 0, "next_wake_up_at": None},
+                "active_runs": [],
+                "last_failure": {"summary": "automation_status_unavailable", "redacted_error": str(exc)[:240]},
+                "next_due": None,
+                "inbox_summary": {"unread": 0, "reviewed": 0, "archived": 0, "promoted": 0},
+            }
 
     def _active_task_thread_id(self) -> str:
         tasks = getattr(self._runtime, "_tasks", None)

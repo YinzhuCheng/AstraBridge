@@ -113,6 +113,81 @@ def astrabridge_web_preset() -> dict[str, Any]:
         "source_url": "https://duckduckgo.com/",
     }
 
+
+def astrabridge_capabilities_preset() -> dict[str, Any]:
+    sidecar_root = str(Path(__file__).resolve().parents[1])
+    server_script = str(Path(__file__).resolve().with_name("astrabridge_capabilities_mcp_server.py"))
+    return {
+        "name": "astrabridge_capabilities",
+        "display_name": "AstraBridge Capability Runtime",
+        "enabled": True,
+        "transport": "stdio",
+        "command": sys.executable,
+        "args": ["-u", server_script],
+        "cwd": sidecar_root,
+        "env": {"PYTHONPATH": sidecar_root},
+        "env_vars": [
+            "YUNWU_API_KEY",
+            "DASHSCOPE_API_KEY",
+            "MOONSHOT_API_KEY",
+            "ASTRABRIDGE_WORKSPACE_ROOT",
+            "ASTRABRIDGE_ASSET_ROOT",
+            "ASTRABRIDGE_WORKSPACE_ROOT_WSL",
+            "ASTRABRIDGE_ASSET_ROOT_WSL",
+        ],
+        "url": "",
+        "bearer_token_env_var": None,
+        "http_headers": {},
+        "env_http_headers": {},
+        "startup_timeout_sec": 20,
+        "tool_timeout_sec": 300,
+        "required": False,
+        "default_tools_approval_mode": "prompt",
+        "enabled_tools": [],
+        "disabled_tools": [],
+        "tools": {
+            "astrabridge_capability_routes": {"approval_mode": "auto"},
+            "astrabridge_capability_image_generate": {"approval_mode": "prompt"},
+            "astrabridge_capability_vision_analyze": {"approval_mode": "prompt"},
+            "astrabridge_capability_speech_transcribe": {"approval_mode": "prompt"},
+            "astrabridge_capability_speech_synthesize": {"approval_mode": "prompt"},
+        },
+        "trust_note": "App-owned capability runtime surface for image generation, vision analysis, speech transcription, and speech synthesis. Capability routing honors AstraBridge route config and reads provider secrets only from configured environment variables.",
+        "source_url": "https://github.com/modelcontextprotocol",
+    }
+
+
+def astrabridge_probe_fixture_preset() -> dict[str, Any]:
+    sidecar_root = str(Path(__file__).resolve().parents[1])
+    server_script = str(Path(__file__).resolve().with_name("codex_mcp_probe_fixture_server.py"))
+    return {
+        "name": "astrabridge_probe_fixture",
+        "display_name": "AstraBridge MCP Probe Fixture",
+        "enabled": True,
+        "transport": "stdio",
+        "command": sys.executable,
+        "args": ["-u", server_script],
+        "cwd": sidecar_root,
+        "env": {"PYTHONPATH": sidecar_root},
+        "env_vars": [],
+        "url": "",
+        "bearer_token_env_var": None,
+        "http_headers": {},
+        "env_http_headers": {},
+        "startup_timeout_sec": 10,
+        "tool_timeout_sec": 10,
+        "required": False,
+        "default_tools_approval_mode": "auto",
+        "enabled_tools": [],
+        "disabled_tools": [],
+        "tools": {
+            "astrabridge_probe_ping": {"approval_mode": "auto"},
+        },
+        "trust_note": "No-key MCP fixture used only by AstraBridge kernel compatibility smoke to prove Codex can see an app-owned stdio MCP server.",
+        "source_url": "https://github.com/modelcontextprotocol",
+    }
+
+
 class McpConfigService:
     def __init__(self, store_path: Path | None = None) -> None:
         self.store_path = store_path or (app_data_dir() / "mcp_servers.json")
@@ -138,6 +213,10 @@ class McpConfigService:
 
     def apply_astrabridge_web_preset(self) -> dict[str, Any]:
         server = self.upsert_server(astrabridge_web_preset())
+        return {"server": server, "config": self.snapshot()}
+
+    def apply_astrabridge_capabilities_preset(self) -> dict[str, Any]:
+        server = self.upsert_server(astrabridge_capabilities_preset())
         return {"server": server, "config": self.snapshot()}
 
     def upsert_server(self, server: dict[str, Any]) -> dict[str, Any]:

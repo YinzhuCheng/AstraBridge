@@ -1,9 +1,25 @@
 ﻿import { invoke, isTauri } from "@tauri-apps/api/core";
 import type {
   AppearancePreset,
+  AutomationInboxItem,
+  AutomationInboxResponse,
+  AutomationListResponse,
+  AutomationRun,
+  AutomationRunsResponse,
+  AutomationSchedulerStatus,
+  AutomationSpec,
   AssetRegistryResponse,
   AttachmentDraft,
+  CapabilityArtifactsResponse,
   CollaborationMode,
+  CapabilityManagementResponse,
+  CapabilityRouteEntry,
+  CapabilityRouteRecord,
+  CapabilitySmokeResponse,
+  CodexPluginInstallExecution,
+  CodexKernelProbeSnapshot,
+  CodexPluginInstallPlan,
+  CodexPluginSkillRegistrySnapshot,
   ContextMode,
   DogfoodRun,
   DogfoodRunResponse,
@@ -179,6 +195,22 @@ export const api = {
     right_sidebar_width?: number;
     right_sidebar_open?: boolean;
   }) => jsonRequest<{ project: ProjectFile }>("/api/projects/preferences", { ui_preferences: payload }),
+  updateProjectPluginSkillPresets: (payload: {
+    operation: "add_plugin" | "remove_plugin" | "add_skill" | "remove_skill" | "reset";
+    preset_id?: string;
+    plugin_ref?: {
+      plugin_id: string;
+      source_catalog_id?: string | null;
+      display_name?: string | null;
+    };
+    skill_ref?: {
+      record_id: string;
+      skill_name: string;
+      owner_plugin_id?: string | null;
+      source_catalog_id?: string | null;
+      display_name?: string | null;
+    };
+  }) => jsonRequest<{ project: ProjectFile }>("/api/projects/plugin-skill-presets", payload),
   projectSaves: () => request<ProjectSavesResponse>("/api/project/saves"),
   projectReviewStatus: () => request<ProjectReviewStatus>("/api/project/review/status"),
   projectReviewDiff: (path?: string) => {
@@ -215,6 +247,40 @@ export const api = {
   rebuildProjectContext: (threadId?: string) => jsonRequest<ProjectContextPackResponse>("/api/project/context/rebuild", { thread_id: threadId }),
   profiles: () => request<{ profiles: Profile[] }>("/api/profiles"),
   routerConfig: () => request<RouterConfigResponse>("/api/router/config"),
+  automations: () => request<AutomationListResponse>("/api/automations"),
+  createAutomation: (payload: Record<string, unknown>) => jsonRequest<{ automation: AutomationSpec }>("/api/automations/create", payload),
+  updateAutomation: (automationId: string, patch: Record<string, unknown>) =>
+    jsonRequest<{ automation: AutomationSpec }>("/api/automations/update", { automation_id: automationId, ...patch }),
+  deleteAutomation: (automationId: string, reason?: string) =>
+    jsonRequest<{ automation: AutomationSpec }>("/api/automations/delete", { automation_id: automationId, reason }),
+  pauseAutomation: (automationId: string) => jsonRequest<{ automation: AutomationSpec }>("/api/automations/pause", { automation_id: automationId }),
+  resumeAutomation: (automationId: string) => jsonRequest<{ automation: AutomationSpec }>("/api/automations/resume", { automation_id: automationId }),
+  runAutomationNow: (automationId: string) => jsonRequest<{ run: AutomationRun; inbox_item?: AutomationInboxItem | null; scheduler: AutomationSchedulerStatus }>("/api/automations/run-now", { automation_id: automationId }),
+  automationRuns: (automationId?: string | null) => {
+    const params = new URLSearchParams();
+    if (automationId) params.set("automation_id", automationId);
+    const suffix = params.toString();
+    return request<AutomationRunsResponse>(`/api/automations/runs${suffix ? `?${suffix}` : ""}`);
+  },
+  automationRun: (runId: string) => request<{ run: AutomationRun }>(`/api/automations/run?run_id=${encodeURIComponent(runId)}`),
+  cancelAutomationRun: (runId: string) => jsonRequest<{ run: AutomationRun }>("/api/automations/runs/cancel", { run_id: runId }),
+  automationInbox: (automationId?: string | null, includeArchived = true) => {
+    const params = new URLSearchParams();
+    if (automationId) params.set("automation_id", automationId);
+    params.set("include_archived", includeArchived ? "true" : "false");
+    return request<AutomationInboxResponse>(`/api/automations/inbox?${params.toString()}`);
+  },
+  updateAutomationInboxItem: (itemId: string, patch: Record<string, unknown>) =>
+    jsonRequest<{ item: AutomationInboxItem }>("/api/automations/inbox/update", { item_id: itemId, ...patch }),
+  promoteAutomationInboxItem: (itemId: string, promotionRef: string) =>
+    jsonRequest<{ item: AutomationInboxItem }>("/api/automations/inbox/promote", { item_id: itemId, promotion_ref: promotionRef }),
+  automationSchedulerStatus: () => request<{ scheduler: AutomationSchedulerStatus }>("/api/automations/scheduler/status"),
+  capabilityRoutes: () => request<{ routes: CapabilityRouteEntry[]; updated_at: string }>("/api/runtime/capability-routes"),
+  capabilityManagement: () => request<CapabilityManagementResponse>("/api/runtime/capability-management"),
+  capabilityArtifacts: (limit = 20) => request<CapabilityArtifactsResponse>(`/api/runtime/capability-artifacts?limit=${encodeURIComponent(String(limit))}`),
+  capabilitySmoke: (payload: { capability_id: string; mode?: "dry_run" | "provider"; allow_provider?: boolean }) =>
+    jsonRequest<CapabilitySmokeResponse>("/api/runtime/capability-smoke", payload),
+  saveCapabilityRoute: (payload: CapabilityRouteRecord) => jsonRequest<{ route: CapabilityRouteEntry }>("/api/runtime/capability-routes/save", payload),
   llmManagerSession: () => request<LlmManagerSession>("/api/llm-manager/session"),
   llmManagerLogin: (payload: { username?: string; password?: string; mode?: "managed_user" | "anonymous" }) =>
     jsonRequest<{ session: LlmManagerSession }>("/api/llm-manager/login", payload),
@@ -273,6 +339,7 @@ export const api = {
   deleteMcpServer: (name: string) => jsonRequest<{ deleted: string; config: McpConfigResponse }>("/api/router/mcp/config/delete", { name }),
   applyContext7Preset: () => jsonRequest<{ server: McpServerConfig; config: McpConfigResponse }>("/api/router/mcp/preset/context7", {}),
   applyYunwuImagePreset: () => jsonRequest<{ server: McpServerConfig; config: McpConfigResponse }>("/api/router/mcp/preset/yunwu-image", {}),
+  applyAstraBridgeCapabilitiesPreset: () => jsonRequest<{ server: McpServerConfig; config: McpConfigResponse }>("/api/router/mcp/preset/astrabridge-capabilities", {}),
   testYunwuImage: (payload?: { session_key?: string; key_file_path?: string }) =>
     jsonRequest<YunwuImageSmokeResponse>("/api/router/image/yunwu/test", payload ?? {}),
   generateYunwuImage: (payload: { prompt: string; model?: string; size?: string; n?: number; purpose?: string; session_key?: string; key_file_path?: string }) =>
@@ -313,6 +380,26 @@ export const api = {
   callMcpTool: (payload: { profile_id?: string; thread_id: string; server: string; tool: string; arguments?: Record<string, unknown> }) =>
     jsonRequest<{ result: Record<string, unknown> }>("/api/runtime/mcp/tool-call", payload),
   runtimeEnvironment: () => request<RuntimeEnvironment>("/api/runtime/environment"),
+  runtimeKernelProbe: (profileId?: string) =>
+    request<CodexKernelProbeSnapshot>(
+      `/api/runtime/kernel-probe${profileId ? `?profile_id=${encodeURIComponent(profileId)}` : ""}`,
+      { timeoutMs: 90000 },
+    ),
+  runtimePluginSkillRegistry: (profileId?: string) =>
+      request<CodexPluginSkillRegistrySnapshot>(
+        `/api/runtime/plugin-skill-registry${profileId ? `?profile_id=${encodeURIComponent(profileId)}` : ""}`,
+        { timeoutMs: 90000 },
+      ),
+  runtimeSkillEnablementUpdate: (payload: {
+    profile_id?: string;
+    record_id: string;
+    scope: "global" | "project";
+    enablement_status: "enabled" | "disabled" | "inherited";
+  }) => jsonRequest<CodexPluginSkillRegistrySnapshot>("/api/runtime/skill-enablement", payload),
+  runtimePluginInstallPlan: (payload: { profile_id?: string; plugin_id: string; source_catalog_id?: string }) =>
+    jsonRequest<CodexPluginInstallPlan>("/api/runtime/plugin-install-plan", payload),
+  runtimePluginInstallApply: (payload: { profile_id?: string; plugin_id: string; source_catalog_id?: string }) =>
+    jsonRequest<CodexPluginInstallExecution>("/api/runtime/plugin-install-apply", payload),
   wslDependencies: (distro?: string) => {
     const suffix = distro ? `?distro=${encodeURIComponent(distro)}` : "";
     return request<WslDependencyStatus>(`/api/runtime/dependencies/wsl${suffix}`, { timeoutMs: 45000 });

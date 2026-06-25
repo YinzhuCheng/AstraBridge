@@ -41,3 +41,16 @@ For each user-facing execution round under the active execution plan:
 ## Round Completion Log
 
 - 2026-06-23: Rebased repository execution rules onto `PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md`; the active execution flow remains one numbered step per turn.
+
+## Capability Runtime Follow-on Plan
+
+When the user explicitly asks to implement or advance the capability runtime, use:
+
+- [PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md](D:/AstraBridge/PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md)
+
+Execution rule for the capability runtime follow-on plan:
+
+1. Start from the next incomplete numbered step in that plan unless the user explicitly redirects to another numbered step.
+2. Complete exactly one full numbered step per round; do not stop on partial progress inside that step.
+3. After completing that step, update that plan's current progress and completion record before stopping.
+4. Keep web search as a standalone web lane rather than a model-backed capability unless the user explicitly asks to merge them.

@@ -1,6 +1,6 @@
 # AstraBridge Release Checklist
 
-Last updated: 2026-06-23
+Last updated: 2026-06-25
 
 This checklist is the product-ready gate for a local AstraBridge preview build. It is written as an operator checklist, not just a developer reminder list.
 
@@ -93,6 +93,30 @@ http://127.0.0.1:<port>/?sidecar=http://127.0.0.1:8826
 - Run compact when recommended or available in-context.
 - Fork the thread and continue one follow-up turn.
 - Reload the page and confirm visible thread state still matches persisted state.
+- Open Setup -> Runtime and confirm:
+  - the kernel status panel shows binary path, version, compatibility status, isolated Codex home, app-server status, MCP status, plugin status, and skill status
+  - warnings are actionable and secret-safe
+  - if the binary locator or observed version changed, the operator preserved evidence and followed `docs/CODEX_KERNEL_UPGRADE_RUNBOOK.md` instead of treating the change as an untracked local tweak
+- Run `python .\scripts\run_automation_smoke.py` and confirm:
+  - one manual automation yields `no_signal` plus archived inbox item
+  - one manual automation yields `finding` plus promoted inbox item
+  - sanitized evidence is written under `PRIVATE\demo-runs\automation-smoke-<timestamp>\`
+- Open Setup -> Capabilities and confirm:
+  - model-backed capabilities show route mode, resolved candidate, credential state, safety warnings, smoke status, and artifact policy
+  - `web.search` is shown as a standalone lane and is not treated as a model-backed route
+  - `astrabridge_capabilities` preset health and runtime visibility are visible
+  - install/reapply preset is idempotent
+  - dry-run smoke runs without provider credentials
+  - recent capability artifacts render from `.astrabridge\capabilities\` when fixtures or prior outputs exist
+- Run `python -m astrabridge_sidecar.codex_plugin_skill_smoke` and confirm:
+  - the smoke report passes
+  - sanitized evidence is written under `PRIVATE\demo-runs\plugin-skill-smoke-<timestamp>\`
+  - evidence includes plugin probe, skill probe, registry snapshot, and structured UI assertions
+- Open Setup -> Extensions and confirm:
+  - source catalog, provenance, icon provenance, declared MCP/apps/skills, and effective enablement are visible
+  - user-visible warnings stay visible for generated fallback icons, malformed manifests, blocked owners, or pending approval states when such fixtures are present
+  - plugin-owned skills are not silently auto-enabled by inventory alone
+  - install-plan preview shows planned writes, rollback metadata, and declared side effects before apply
 
 ## Browser And Dogfood Gate
 
@@ -133,6 +157,23 @@ http://127.0.0.1:<port>/?sidecar=http://127.0.0.1:8826
 - No project `.codex*` file is created during normal AstraBridge use.
 - OpenAI official account login is unavailable as a product path.
 - Runtime config writes only under isolated AstraBridge state.
+- Capability artifact previews read only from workspace-local `.astrabridge\capabilities\` or local demo evidence paths.
+- Capability dry-run smoke does not require keys or call providers.
+- Provider-backed capability smoke is explicit and user-approved.
+- Capability credential states are redacted and never reveal raw values.
+- Plugin and skill discovery treats manifests, catalogs, and `SKILL.md` files as untrusted metadata until reviewed.
+- Remote or curated catalogs do not auto-install, auto-update, or silently bypass approval.
+- Plugin install/apply writes stay inside isolated AstraBridge runtime roots only:
+  - `ASTRABRIDGE_CODEX_HOME\plugins\`
+  - `ASTRABRIDGE_CODEX_HOME\plugin-staging\`
+  - `ASTRABRIDGE_CODEX_HOME\plugin-rollbacks\`
+- Generated fallback or unvalidated plugin/skill icons remain visibly marked as untrusted branding.
+- Plugin-declared MCP servers, apps, hooks, and skills are disclosed before apply because they may introduce side effects.
+- Skill enablement requires explicit approval flow and does not bypass sandbox, approval, or secret policy.
+- Plugin/skill smoke evidence remains under `PRIVATE\demo-runs\plugin-skill-smoke-*\` and contains only sanitized metadata plus structured UI assertions.
+- Automation defaults do not silently bypass sandbox or approval policy.
+- Any `full-access` automation is an explicit opt-in and uses dedicated worktree isolation.
+- Automation retry/backoff and daily run limits are bounded and test-covered.
 - No plaintext secrets appear in:
   - git-tracked files
   - project state
@@ -158,6 +199,7 @@ Expected result:
 
 - redacted examples may appear in docs
 - real secret material must not appear
+- changed-file scan for plugin/skill trust-review edits should also return no real secret material
 
 ## Legacy Scan Gate
 
@@ -213,6 +255,7 @@ The following docs must be aligned with the current product path:
 - [ASSET_SOURCES.md](/D:/AstraBridge/docs/ASSET_SOURCES.md)
 - [DEMO_RUNBOOK.md](/D:/AstraBridge/docs/DEMO_RUNBOOK.md)
 - [SECURITY_AND_ISOLATION.md](/D:/AstraBridge/docs/SECURITY_AND_ISOLATION.md)
+- [CODEX_KERNEL_UPGRADE_RUNBOOK.md](/D:/AstraBridge/docs/CODEX_KERNEL_UPGRADE_RUNBOOK.md)
 
 Required content coverage:
 
@@ -221,7 +264,12 @@ Required content coverage:
 - provider key workflow
 - no-key demo mode
 - key-backed health mode
+- capability route and MCP preset management
+- capability dry-run smoke and artifact preview policy
+- runtime kernel compatibility workflow and compatibility-matrix update path
+- plugin/skill inventory, smoke, and install-plan/apply review path
 - browser smoke workflow
+- automation smoke workflow
 - checkpoint/restore workflow
 - compact/fork recovery workflow
 - known limitations

@@ -280,4 +280,36 @@ describe("reasoning options", () => {
       provider_temperature_max: 1,
     });
   });
+
+  it("prefers capability-aware vision summary over static supports_vision fallback", () => {
+    const provider = {
+      id: "qwen",
+      display_name: "Qwen",
+      enabled: true,
+      adapter_type: "chat",
+      base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      default_model: "qwen3.7-plus",
+      request_timeout_ms: 300000,
+      stream_idle_timeout_ms: 300000,
+      env_key: "DASHSCOPE_API_KEY",
+      auth_mode: "env_ref",
+      proxy_mode: "direct",
+      proxy_url: "",
+      capability_summary: {
+        "vision.analyze": {
+          available: true,
+          candidate_models: ["qwen3.7-plus"],
+          input_modalities: ["text", "image"],
+        },
+      },
+    } satisfies RouterProvider;
+
+    expect(providerModelDraftDefaults(provider)).toMatchObject({
+      input_modalities: ["text", "image"],
+      modality_limits: {
+        text: true,
+        image_input: true,
+      },
+    });
+  });
 });
