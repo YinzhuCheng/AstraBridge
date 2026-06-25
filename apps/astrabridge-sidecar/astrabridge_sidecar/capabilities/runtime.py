@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ..common import normalize_path_for_host
@@ -25,12 +26,14 @@ class CapabilityRuntime:
         self,
         *,
         router_config: "RouterConfigService" | None = None,
+        key_injector: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         if router_config is None:
             from ..router_config_service import RouterConfigService
 
             router_config = RouterConfigService(ProfileService())
         self._router_config = router_config
+        self._key_injector = key_injector
         self._registry = default_capability_registry()
         self._image = YunwuImageGenerateAdapter()
         self._speech_transcribe = QwenSpeechTranscribeAdapter()
@@ -54,6 +57,8 @@ class CapabilityRuntime:
             normalized["provider_id"] = candidate["provider_id"]
         if candidate.get("model") and not normalized.get("model"):
             normalized["model"] = candidate["model"]
+        if self._key_injector and candidate.get("provider_id"):
+            self._key_injector(candidate)
         result = self._dispatch(capability_id, normalized, candidate)
         if isinstance(result, dict):
             result["route"] = {

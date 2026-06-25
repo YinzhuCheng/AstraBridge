@@ -42,6 +42,7 @@ class CapabilityMcpServerTests(unittest.TestCase):
         self.assertEqual(preset["transport"], "stdio")
         self.assertIn("astrabridge_capability_routes", preset["tools"])
         self.assertIn("DASHSCOPE_API_KEY", preset["env_vars"])
+        self.assertIn("KIMI_API_KEY", preset["env_vars"])
         self.assertIn("MOONSHOT_API_KEY", preset["env_vars"])
         self.assertIn("YUNWU_API_KEY", preset["env_vars"])
 

@@ -1908,6 +1908,16 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.capability-smoke-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.capability-smoke-actions > button {
+  flex: 1 1 10rem;
+}
+
 .capability-smoke-panel .ghost-button {
   justify-self: start;
   position: relative;

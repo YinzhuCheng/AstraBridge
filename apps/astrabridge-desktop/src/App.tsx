@@ -2005,6 +2005,7 @@ function RouterControlCenter({
               })
             }
             onRunSmoke={(capabilityId) => runCapabilitySmoke.mutate({ capability_id: capabilityId, mode: "dry_run" })}
+            onRunProviderSmoke={(capabilityId) => runCapabilitySmoke.mutate({ capability_id: capabilityId, mode: "provider", allow_provider: true })}
           />
         </div>
       ) : null}

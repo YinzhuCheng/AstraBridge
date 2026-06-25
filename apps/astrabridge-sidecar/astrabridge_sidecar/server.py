@@ -16,6 +16,7 @@ from .checkpoint_service import CheckpointService
 from .common import DEFAULT_PORT, public_error
 from .common import now_iso, read_json, write_json
 from .capabilities import capability_artifact_snapshot, capability_smoke_snapshot
+from .capabilities.runtime import CapabilityRuntime
 from .codex_plugin_skill_project_presets import mutate_project_plugin_skill_presets
 from .dogfood_run_service import DogfoodRunService
 from .image_prompt_strategy import build_rewrite_instruction, prompt_guides_payload
@@ -1060,6 +1061,10 @@ class Handler(BaseHTTPRequestHandler):
                             payload,
                             configured_models=self.context.router_config.models(),
                             route_record=route_record,
+                            runtime=CapabilityRuntime(
+                                router_config=self.context.router_config,
+                                key_injector=self.context.llm_manager.inject_profile_key,
+                            ),
                         )
                     }
                 )

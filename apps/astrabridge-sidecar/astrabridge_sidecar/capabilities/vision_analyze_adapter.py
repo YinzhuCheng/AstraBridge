@@ -61,6 +61,7 @@ class ChatVisionAnalyzeAdapter:
         default_model: str,
         api_key: str | None = None,
         env_key: str | None = None,
+        env_key_aliases: tuple[str, ...] = (),
         post_fn: Callable[..., Any] | None = None,
     ) -> None:
         self._provider_id = provider_id
@@ -68,14 +69,19 @@ class ChatVisionAnalyzeAdapter:
         self._default_model = default_model
         self._api_key = _clean_text(api_key)
         self._env_key = env_key or ""
+        self._env_keys = tuple(key for key in (self._env_key, *env_key_aliases) if key)
         self._post = post_fn or requests.post
 
     def analyze(self, payload: dict[str, Any]) -> dict[str, Any]:
         api_key = _clean_text(payload.get("api_key")) or self._api_key
-        if not api_key and self._env_key:
-            api_key = _clean_text(os.environ.get(self._env_key))
         if not api_key:
-            raise ValueError(f"{self._provider_id} vision adapter requires an api_key or {self._env_key}.")
+            for env_key in self._env_keys:
+                api_key = _clean_text(os.environ.get(env_key))
+                if api_key:
+                    break
+        if not api_key:
+            env_hint = " or ".join(self._env_keys) if self._env_keys else "a configured environment variable"
+            raise ValueError(f"{self._provider_id} vision adapter requires an api_key or {env_hint}.")
         request_body = self.build_request(payload)
         response = self._post(
             f"{self._base_url}/chat/completions",
@@ -255,6 +261,7 @@ class KimiVisionAnalyzeAdapter(ChatVisionAnalyzeAdapter):
             base_url="https://api.moonshot.cn/v1",
             default_model="kimi-k2.6",
             api_key=api_key,
-            env_key="MOONSHOT_API_KEY",
+            env_key="KIMI_API_KEY",
+            env_key_aliases=("MOONSHOT_API_KEY",),
             post_fn=post_fn,
         )

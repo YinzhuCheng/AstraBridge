@@ -124,6 +124,35 @@ const CAPABILITY_STATUS_KEYS: Record<string, string> = {
   provider_not_run: "manager_capability_status_provider_not_run",
 };
 
+const CAPABILITY_SMOKE_MODE_KEYS: Record<string, string> = {
+  dry_run: "manager_capability_smoke_mode_dry_run",
+  provider: "manager_capability_smoke_mode_provider",
+};
+
+function smokeProviderError(result: CapabilitySmokeResult | undefined): string {
+  const value = result?.sanitized_response?.provider_error;
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function smokeElapsedMs(result: CapabilitySmokeResult | undefined): number | null {
+  const value = result?.sanitized_response?.elapsed_ms;
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : null;
+}
+
+function smokeSummary(locale: LocaleCode, result: CapabilitySmokeResult | null): string {
+  if (!result) {
+    return t(locale, "manager_capability_not_run");
+  }
+  const mode = localizedEnum(locale, result.mode, CAPABILITY_SMOKE_MODE_KEYS);
+  const status = localizedEnum(locale, result.status, CAPABILITY_STATUS_KEYS);
+  const elapsed = smokeElapsedMs(result);
+  const parts = [`${mode} · ${status}`, result.case_id];
+  if (elapsed !== null) {
+    parts.push(`${t(locale, "manager_capability_elapsed")} ${elapsed} ms`);
+  }
+  return parts.join(" / ");
+}
+
 const CAPABILITY_ARTIFACT_POLICY_KEYS: Record<string, string> = {
   none: "manager_capability_artifact_policy_none",
   unknown: "manager_capability_artifact_policy_unknown",
@@ -172,6 +201,7 @@ type CapabilityRoutesPanelProps = {
   onInstallMcpPreset: () => void;
   onSave: (route: CapabilityRouteEntry, draft: CapabilityRouteDraft) => void;
   onRunSmoke: (capabilityId: string) => void;
+  onRunProviderSmoke: (capabilityId: string) => void;
 };
 
 function localizedCapabilityName(locale: LocaleCode, route: Pick<CapabilityRouteEntry, "capability_id" | "display_name">) {
@@ -219,6 +249,7 @@ export function CapabilityRoutesPanel({
   onInstallMcpPreset,
   onSave,
   onRunSmoke,
+  onRunProviderSmoke,
 }: CapabilityRoutesPanelProps) {
   const managementById = new Map(managementEntries.map((entry) => [entry.capability_id, entry]));
   const pluginRegistryById = new Map(pluginSkillRegistry?.plugins.map((item) => [item.plugin_id, item]) ?? []);
@@ -312,9 +343,22 @@ export function CapabilityRoutesPanel({
             const artifactPolicyLabel = localizedEnum(locale, management?.artifacts.policy ?? "unknown", CAPABILITY_ARTIFACT_POLICY_KEYS);
             const visibleCandidates = route.candidates.slice(0, 4);
             const smokeResult = smokeResults[route.capability_id] ?? null;
+            const providerError = smokeProviderError(smokeResult ?? undefined);
             const smokePending = isSmokePending && smokePendingCapabilityId === route.capability_id;
             const recentArtifacts = artifactsByCapability.get(route.capability_id) ?? [];
             const selectedProviderCredential = draft.provider_id ? providerCredentials[draft.provider_id] : null;
+            const resolvedProviderCredential = route.resolved_candidate?.provider_id
+              ? providerCredentials[route.resolved_candidate.provider_id]
+              : null;
+            const providerSmokeDisabled = Boolean(
+              smokePending ||
+                !route.resolved_candidate?.provider_id ||
+                !resolvedProviderCredential ||
+                !resolvedProviderCredential.enabled ||
+                resolvedProviderCredential.status === "missing" ||
+                resolvedProviderCredential.status === "session_required" ||
+                resolvedProviderCredential.status === "disabled",
+            );
             const toolingGuides = CAPABILITY_RUNTIME_TOOLING_GUIDANCE[route.capability_id] ?? [];
             const resolvedToolingGuides = toolingGuides.map((guide) =>
               resolveCapabilityRuntimeToolingGuide(guide, pluginRegistryById, skillRegistryByName),
@@ -521,18 +565,32 @@ export function CapabilityRoutesPanel({
                     <div className="capability-smoke-result">
                       <span>{t(locale, "manager_capability_fixture_cases")}: {(management?.smoke.case_ids ?? []).join(", ") || "dry_run"}</span>
                       <span>
-                        {t(locale, "manager_capability_last_smoke")}: {smokeResult ? `${smokeResult.status} / ${smokeResult.case_id}` : t(locale, "manager_capability_not_run")}
+                        {t(locale, "manager_capability_last_smoke")}: {smokeSummary(locale, smokeResult)}
                       </span>
                       {smokeResult?.route.error ? <span className="error-text">{smokeResult.route.error}</span> : null}
+                      {providerError ? <span className="error-text">{providerError}</span> : null}
                     </div>
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      disabled={smokePending}
-                      onClick={() => onRunSmoke(route.capability_id)}
-                    >
-                      {smokePending ? t(locale, "manager_capability_smoke_running") : t(locale, "manager_capability_run_dry_smoke")}
-                    </button>
+                    <div className="capability-smoke-actions">
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        data-testid={`capability-dry-smoke-${route.capability_id}`}
+                        disabled={smokePending}
+                        onClick={() => onRunSmoke(route.capability_id)}
+                      >
+                        {smokePending ? t(locale, "manager_capability_smoke_running") : t(locale, "manager_capability_run_dry_smoke")}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        data-testid={`capability-provider-smoke-${route.capability_id}`}
+                        disabled={providerSmokeDisabled}
+                        onClick={() => onRunProviderSmoke(route.capability_id)}
+                        title={providerSmokeDisabled ? t(locale, "manager_capability_provider_smoke_disabled") : t(locale, "manager_capability_provider_smoke_warning")}
+                      >
+                        {smokePending ? t(locale, "manager_capability_smoke_running") : t(locale, "manager_capability_run_provider_smoke")}
+                      </button>
+                    </div>
                   </div>
                 ) : null}
 

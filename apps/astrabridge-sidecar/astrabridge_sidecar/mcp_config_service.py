@@ -129,6 +129,7 @@ def astrabridge_capabilities_preset() -> dict[str, Any]:
         "env_vars": [
             "YUNWU_API_KEY",
             "DASHSCOPE_API_KEY",
+            "KIMI_API_KEY",
             "MOONSHOT_API_KEY",
             "ASTRABRIDGE_WORKSPACE_ROOT",
             "ASTRABRIDGE_ASSET_ROOT",

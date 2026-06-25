@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { useState } from "react";
+import { type ComponentProps, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -161,12 +161,15 @@ type RenderPanelOptions = {
   pluginSkillRegistryError?: boolean;
   onSave?: ReturnType<typeof vi.fn>;
   onRunSmoke?: ReturnType<typeof vi.fn>;
+  onRunProviderSmoke?: ReturnType<typeof vi.fn>;
   onInstallMcpPreset?: ReturnType<typeof vi.fn>;
+  smokeResults?: ComponentProps<typeof CapabilityRoutesPanel>["smokeResults"];
 };
 
 function renderPanel(options: RenderPanelOptions = {}) {
   const onSave = options.onSave ?? vi.fn();
   const onRunSmoke = options.onRunSmoke ?? vi.fn();
+  const onRunProviderSmoke = options.onRunProviderSmoke ?? vi.fn();
   const onInstallMcpPreset = options.onInstallMcpPreset ?? vi.fn();
   const routes = options.routes ?? [visionRoute];
   const managementEntries = options.managementEntries ?? [visionManagementEntry];
@@ -204,7 +207,7 @@ function renderPanel(options: RenderPanelOptions = {}) {
         isLoading={false}
         isError={false}
         isSaving={false}
-        smokeResults={{}}
+        smokeResults={options.smokeResults ?? {}}
         smokePendingCapabilityId={null}
         isSmokePending={false}
         artifacts={[
@@ -256,12 +259,13 @@ function renderPanel(options: RenderPanelOptions = {}) {
         onInstallMcpPreset={onInstallMcpPreset}
         onSave={onSave}
         onRunSmoke={onRunSmoke}
+        onRunProviderSmoke={onRunProviderSmoke}
       />
     );
   }
 
   render(<Harness />);
-  return { onSave, onRunSmoke, onInstallMcpPreset };
+  return { onSave, onRunSmoke, onRunProviderSmoke, onInstallMcpPreset };
 }
 
 describe("CapabilityRoutesPanel", () => {
@@ -329,6 +333,47 @@ describe("CapabilityRoutesPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run dry smoke" }));
 
     expect(onRunSmoke).toHaveBeenCalledWith("vision.analyze");
+  });
+
+  it("runs explicit provider smoke only from a configured resolved route", () => {
+    const onRunProviderSmoke = vi.fn();
+    renderPanel({ onRunProviderSmoke });
+
+    fireEvent.click(screen.getByRole("button", { name: "Run provider smoke" }));
+
+    expect(onRunProviderSmoke).toHaveBeenCalledWith("vision.analyze");
+  });
+
+  it("shows provider smoke errors without hiding the smoke status", () => {
+    renderPanel({
+      smokeResults: {
+        "vision.analyze": {
+          schema_version: "astrabridge-capability-smoke-result-v1",
+          capability_id: "vision.analyze",
+          mode: "provider",
+          status: "fail",
+          provider_invoked: false,
+          provider_requested: true,
+          case_id: "dry_run_vision_analyze",
+          route: {
+            route_mode: "auto",
+            resolution_status: "ok",
+            resolved_candidate: visionRoute.resolved_candidate,
+            error: null,
+          },
+          sanitized_request: {},
+          sanitized_response: {
+            provider_error: "qwen vision adapter requires an api_key or DASHSCOPE_API_KEY.",
+          },
+          artifact_refs: [],
+          evidence_refs: [],
+          created_at: "2026-06-25T01:00:00Z",
+        },
+      },
+    });
+
+    expect(screen.getByText("Last smoke: provider · fail / dry_run_vision_analyze")).toBeInTheDocument();
+    expect(screen.getByText("qwen vision adapter requires an api_key or DASHSCOPE_API_KEY.")).toBeInTheDocument();
   });
 
   it("shows plugin and skill visibility guidance without rerouting standalone web search", () => {

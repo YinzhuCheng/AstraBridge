@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -183,6 +184,41 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
         self.assertEqual(result["finish_reason"], "stop")
         self.assertEqual(result["annotations"][0]["type"], "reasoning_content")
         self.assertEqual(result["usage"]["total_tokens"], 1395)
+
+    def test_kimi_analyze_accepts_kimi_api_key_env(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_post(url: str, *, headers: dict[str, str], json: dict[str, object], timeout: int) -> _FakeResponse:
+            captured["headers"] = headers
+            return _FakeResponse(
+                {
+                    "id": "chatcmpl-kimi-env",
+                    "object": "chat.completion",
+                    "created": 1782305183,
+                    "model": "kimi-k2.6",
+                    "choices": [{"message": {"role": "assistant", "content": "red square"}, "finish_reason": "stop"}],
+                    "usage": {"total_tokens": 9},
+                }
+            )
+
+        original = os.environ.get("KIMI_API_KEY")
+        try:
+            os.environ["KIMI_API_KEY"] = "unitfake"
+            result = KimiVisionAnalyzeAdapter(post_fn=fake_post).analyze(
+                {
+                    "prompt": "Describe the image.",
+                    "image_inputs": [{"mime_type": "image/png", "data": _TINY_PNG_BASE64}],
+                }
+            )
+        finally:
+            if original is None:
+                os.environ.pop("KIMI_API_KEY", None)
+            else:
+                os.environ["KIMI_API_KEY"] = original
+
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer unitfake")
+        self.assertEqual(result["provider_id"], "kimi")
+        self.assertEqual(result["text"], "red square")
 
 
 if __name__ == "__main__":
