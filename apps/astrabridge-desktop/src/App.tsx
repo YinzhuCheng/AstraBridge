@@ -312,6 +312,20 @@ function fallbackRouteLabel(locale: "en" | "zh-CN") {
   return locale === "zh-CN" ? "当前路由" : "Current route";
 }
 
+function localizedAuthorityNotice(locale: "en" | "zh-CN", notice: string) {
+  const known: Record<string, string> = {
+    "Parallel tool calls are disabled for this model unless a parallel smoke test passes.": "authority_warning_parallel_disabled",
+    "This model should stay in propose-first mode for apply or execute actions.": "authority_warning_propose_first",
+    "This model should stay in review or explain mode because structured tool use is not verified.": "authority_warning_review_only",
+    "This model is not eligible for AstraBridge agent mode.": "authority_warning_agent_disabled",
+    "Model authority is unknown. Keep approvals and verification on until this model is classified.": "authority_warning_unknown",
+    "Image attachments are not verified for this model; send them as file context only or choose an image-capable model.": "authority_warning_image_unverified",
+    "MCP tool use is unverified for this model. Keep MCP tools approval-gated until a smoke test passes.": "authority_warning_mcp_unverified",
+  };
+  const key = known[notice];
+  return key ? t(locale, key) : notice;
+}
+
 function safeParseObject(text: string) {
   try {
     const parsed = JSON.parse(text || "{}");
@@ -1137,6 +1151,9 @@ function RouterControlCenter({
 }) {
   const project = useAppStore((store) => store.project);
   const setProject = useAppStore((store) => store.setProject);
+  const setLocale = useAppStore((store) => store.setLocale);
+  const appearance = useAppStore((store) => store.appearance);
+  const setAppearance = useAppStore((store) => store.setAppearance);
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles, refetchInterval: 10000 });
   const routerConfig = useQuery({ queryKey: ["router-config"], queryFn: api.routerConfig, refetchInterval: 5000 });
   const capabilityRoutes = useQuery({ queryKey: ["capability-routes"], queryFn: api.capabilityRoutes, refetchInterval: 5000 });
@@ -1783,6 +1800,29 @@ function RouterControlCenter({
             </button>
           ))}
         </div>
+        <section className="settings-nav-preferences" aria-label={t(locale, "user_settings")}>
+          <div className="settings-strip-section">
+            <strong>{t(locale, "locale")}</strong>
+            <div className="segmented">
+              <button type="button" className={locale === "zh-CN" ? "segmented-active" : ""} onClick={() => setLocale("zh-CN")}>
+                {t(locale, "locale_zh")}
+              </button>
+              <button type="button" className={locale === "en" ? "segmented-active" : ""} onClick={() => setLocale("en")}>
+                {t(locale, "locale_en")}
+              </button>
+            </div>
+          </div>
+          <div className="settings-strip-section">
+            <strong>{t(locale, "appearance")}</strong>
+            <div className="segmented segmented-wrap">
+              {(["codex", "paper", "slate", "cobalt", "sunrise"] as AppearancePreset[]).map((item) => (
+                <button key={item} type="button" className={appearance === item ? "segmented-active" : ""} onClick={() => setAppearance(item)}>
+                  {t(locale, `appearance_${item}`)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
       </aside>
       <div className="settings-content">
 
@@ -1951,7 +1991,7 @@ function RouterControlCenter({
             providerCredentials={capabilityProviderCredentials}
             mcpRuntimeVisible={capabilityMcpRuntimeVisible}
             mcpRuntimeToolCount={capabilityMcpRuntimeToolCount}
-            mcpVisibilityLoading={mcpStatus.isLoading || mcpStatus.isFetching}
+            mcpVisibilityLoading={mcpStatus.isLoading}
             mcpVisibilityError={mcpStatus.isError}
             isInstallingMcpPreset={applyAstraBridgeCapabilities.isPending}
             toMediaSrc={localAssetUrl}
@@ -3105,9 +3145,7 @@ function AppShell() {
   const queryClient = useQueryClient();
   const project = useAppStore((store) => store.project)!;
   const locale = useAppStore((store) => store.locale);
-  const setLocale = useAppStore((store) => store.setLocale);
   const appearance = useAppStore((store) => store.appearance);
-  const setAppearance = useAppStore((store) => store.setAppearance);
   const setProject = useAppStore((store) => store.setProject);
   const eventCursor = useAppStore((store) => store.eventCursor);
   const setEventCursor = useAppStore((store) => store.setEventCursor);
@@ -3718,12 +3756,16 @@ function AppShell() {
   const imageAttachmentUnsupported = attachments.some((attachment) => attachment.kind === "image") && !(activeModelEntry?.input_modalities ?? ["text"]).includes("image");
   const mcpEnabled = (mcpConfig.data?.servers ?? []).some((server) => server.enabled);
   const mcpUnverified = mcpEnabled && activeModelEntry && !activeModelEntry.supports_mcp_tools;
-  const authorityWarnings = activeModelAuthority?.notices ?? [];
+  const rawAuthorityWarnings = activeModelAuthority?.notices ?? [];
+  const authorityWarnings = rawAuthorityWarnings.map((notice) => localizedAuthorityNotice(locale, notice));
   const capabilityWarnings = [
     ...authorityWarnings,
     ...(imageAttachmentUnsupported ? [t(locale, "capability_warning_image")] : []),
     ...(mcpUnverified ? [t(locale, "capability_warning_mcp")] : []),
-    ...((activeModelEntry?.ui_warnings ?? []).filter((warning) => !authorityWarnings.includes(warning)).slice(0, 2)),
+    ...((activeModelEntry?.ui_warnings ?? [])
+      .filter((warning) => !rawAuthorityWarnings.includes(warning))
+      .slice(0, 2)
+      .map((warning) => localizedAuthorityNotice(locale, warning))),
   ];
   const runtimeRecoveryActions = runtimeErrorNoticeActions(supervisor.data?.runtime_error ?? null);
   const runtimeRecoveryPendingAction = restartRuntime.isPending
@@ -4706,29 +4748,6 @@ function AppShell() {
               queryClient={queryClient}
               fallbackCheckpoints={fallbackSetupCheckpoints}
             />
-            <section className="settings-strip">
-              <div className="settings-strip-section">
-                <strong>{t(locale, "locale")}</strong>
-                <div className="segmented">
-                  <button type="button" className={locale === "zh-CN" ? "segmented-active" : ""} onClick={() => setLocale("zh-CN")}>
-                    {t(locale, "locale_zh")}
-                  </button>
-                  <button type="button" className={locale === "en" ? "segmented-active" : ""} onClick={() => setLocale("en")}>
-                    {t(locale, "locale_en")}
-                  </button>
-                </div>
-              </div>
-              <div className="settings-strip-section">
-                <strong>{t(locale, "appearance")}</strong>
-                <div className="segmented segmented-wrap">
-                  {(["codex", "paper", "slate", "cobalt", "sunrise"] as AppearancePreset[]).map((item) => (
-                    <button key={item} type="button" className={appearance === item ? "segmented-active" : ""} onClick={() => setAppearance(item)}>
-                      {t(locale, `appearance_${item}`)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </section>
           </div>
         ) : (
           <>

@@ -95,6 +95,54 @@ const CAPABILITY_RUNTIME_TOOLING_GUIDANCE: Record<string, CapabilityRuntimeTooli
   ],
 };
 
+const CAPABILITY_DISPLAY_NAME_KEYS: Record<string, string> = {
+  "image.generate": "manager_capability_name_image_generate",
+  "speech.synthesize": "manager_capability_name_speech_synthesize",
+  "speech.transcribe": "manager_capability_name_speech_transcribe",
+  "vision.analyze": "manager_capability_name_vision_analyze",
+  "web.search": "manager_capability_name_web_search",
+};
+
+const CAPABILITY_LANE_KEYS: Record<string, string> = {
+  model_backed: "manager_capability_lane_model_backed",
+  web_standalone: "manager_capability_lane_web_standalone",
+};
+
+const CAPABILITY_TRANSPORT_KEYS: Record<string, string> = {
+  request_response: "manager_capability_transport_request_response",
+  stream_sse: "manager_capability_transport_stream_sse",
+  realtime_ws: "manager_capability_transport_realtime_ws",
+};
+
+const CAPABILITY_STATUS_KEYS: Record<string, string> = {
+  ok: "manager_capability_status_ok",
+  standalone: "manager_capability_status_standalone",
+  unknown: "manager_capability_status_unknown",
+  untested: "manager_capability_status_untested",
+  pass: "manager_capability_status_pass",
+  fail: "manager_capability_status_fail",
+  provider_not_run: "manager_capability_status_provider_not_run",
+};
+
+const CAPABILITY_ARTIFACT_POLICY_KEYS: Record<string, string> = {
+  none: "manager_capability_artifact_policy_none",
+  unknown: "manager_capability_artifact_policy_unknown",
+  no_local_artifacts: "manager_capability_artifact_policy_none",
+  persist_research_record: "manager_capability_artifact_policy_research_record",
+  persist_generated_assets: "manager_capability_artifact_policy_generated_assets",
+  persist_optional_visual_artifacts: "manager_capability_artifact_policy_visual_artifacts",
+  persist_audio_request_and_transcript: "manager_capability_artifact_policy_audio_request",
+  persist_audio_output_and_text_sidecar: "manager_capability_artifact_policy_audio_output",
+  persist_optional_audio_artifacts: "manager_capability_artifact_policy_audio_output",
+};
+
+const CAPABILITY_MODALITY_KEYS: Record<string, string> = {
+  text: "manager_capability_modality_text",
+  image: "manager_capability_modality_image",
+  audio: "manager_capability_modality_audio",
+  video: "manager_capability_modality_video",
+};
+
 type CapabilityRoutesPanelProps = {
   locale: LocaleCode;
   routes: CapabilityRouteEntry[];
@@ -125,6 +173,22 @@ type CapabilityRoutesPanelProps = {
   onSave: (route: CapabilityRouteEntry, draft: CapabilityRouteDraft) => void;
   onRunSmoke: (capabilityId: string) => void;
 };
+
+function localizedCapabilityName(locale: LocaleCode, route: Pick<CapabilityRouteEntry, "capability_id" | "display_name">) {
+  const key = CAPABILITY_DISPLAY_NAME_KEYS[route.capability_id];
+  return key ? t(locale, key) : route.display_name;
+}
+
+function localizedEnum(locale: LocaleCode, value: string | null | undefined, keys: Record<string, string>) {
+  const normalized = value || "unknown";
+  const key = keys[normalized];
+  return key ? t(locale, key) : normalized;
+}
+
+function localizedModalities(locale: LocaleCode, modalities: string[] | null | undefined) {
+  const values = modalities && modalities.length > 0 ? modalities : ["text"];
+  return values.map((value) => localizedEnum(locale, value, CAPABILITY_MODALITY_KEYS)).join(", ");
+}
 
 export function CapabilityRoutesPanel({
   locale,
@@ -173,7 +237,9 @@ export function CapabilityRoutesPanel({
   const runtimeLabel = mcpVisibilityLoading
     ? t(locale, "manager_capability_mcp_runtime_checking")
     : mcpVisibilityError
-      ? t(locale, "manager_capability_mcp_runtime_error")
+      ? mcpPreset?.configured && configuredToolCount > 0
+        ? t(locale, "manager_capability_mcp_runtime_pending")
+        : t(locale, "manager_capability_mcp_runtime_error")
       : mcpRuntimeVisible === true
         ? t(locale, "manager_capability_mcp_runtime_visible")
         : mcpRuntimeVisible === false
@@ -238,7 +304,12 @@ export function CapabilityRoutesPanel({
               (draft.model ?? null) !== (route.route_record.model ?? null);
             const resolvedLabel = route.resolved_candidate?.provider_id
               ? `${route.resolved_candidate.provider_id}/${route.resolved_candidate.model ?? ""}`
-              : route.resolution_status;
+              : localizedEnum(locale, route.resolution_status, CAPABILITY_STATUS_KEYS);
+            const routeDisplayName = localizedCapabilityName(locale, route);
+            const laneLabel = localizedEnum(locale, route.lane_type, CAPABILITY_LANE_KEYS);
+            const transportLabel = localizedEnum(locale, route.transport_mode, CAPABILITY_TRANSPORT_KEYS);
+            const smokeStatusLabel = localizedEnum(locale, management?.smoke.status ?? "unknown", CAPABILITY_STATUS_KEYS);
+            const artifactPolicyLabel = localizedEnum(locale, management?.artifacts.policy ?? "unknown", CAPABILITY_ARTIFACT_POLICY_KEYS);
             const visibleCandidates = route.candidates.slice(0, 4);
             const smokeResult = smokeResults[route.capability_id] ?? null;
             const smokePending = isSmokePending && smokePendingCapabilityId === route.capability_id;
@@ -272,8 +343,8 @@ export function CapabilityRoutesPanel({
               <section className="manager-row capability-route-row" key={route.capability_id} aria-labelledby={`capability-${route.capability_id}`}>
                 <div className="capability-route-header">
                   <div>
-                    <strong id={`capability-${route.capability_id}`}>{route.display_name}</strong>
-                    <div className="muted compact-copy">{route.capability_id} · {route.lane_type} · {route.transport_mode}</div>
+                    <strong id={`capability-${route.capability_id}`}>{routeDisplayName}</strong>
+                    <div className="muted compact-copy">{route.capability_id} / {laneLabel} / {transportLabel}</div>
                   </div>
                   <div className="capability-route-badges">
                     <span className={`session-badge ${route.resolved_candidate ? "capability-ok" : "capability-warn"}`}>
@@ -286,11 +357,11 @@ export function CapabilityRoutesPanel({
                 <div className="capability-route-meta">
                   <span>{t(locale, "manager_capability_candidates")}: {management?.availability.candidate_count ?? route.candidates.length}</span>
                   <span>{t(locale, "manager_capability_adapters")}: {management?.adapters.length ?? 0}</span>
-                  <span>{t(locale, "manager_capability_smoke")}: {management?.smoke.status ?? "unknown"}</span>
-                  <span>{t(locale, "manager_capability_artifacts")}: {management?.artifacts.policy ?? "unknown"}</span>
+                  <span>{t(locale, "manager_capability_smoke")}: {smokeStatusLabel}</span>
+                  <span>{t(locale, "manager_capability_artifacts")}: {artifactPolicyLabel}</span>
                 </div>
 
-                <div className="capability-safety-panel" aria-label={`${route.display_name} ${t(locale, "manager_capability_safety_panel")}`}>
+                <div className="capability-safety-panel" aria-label={`${routeDisplayName} ${t(locale, "manager_capability_safety_panel")}`}>
                   {hasPaidProviderRisk ? <span className="status-tag status-tag-warning">{t(locale, "manager_capability_paid_warning")}</span> : null}
                   {hasLargeArtifactRisk ? <span className="status-tag status-tag-warning">{t(locale, "manager_capability_large_artifact_warning")}</span> : null}
                   {route.resolution_status !== "ok" && !isStandalone ? <span className="status-tag status-tag-warning">{t(locale, "manager_capability_provider_error")}: {route.resolution_status}</span> : null}
@@ -318,7 +389,7 @@ export function CapabilityRoutesPanel({
                 </div>
 
                 {toolingGuides.length > 0 || isStandalone ? (
-                  <div className="capability-runtime-guidance-panel" aria-label={`${route.display_name} ${t(locale, "manager_capability_plugin_skill_panel")}`}>
+                  <div className="capability-runtime-guidance-panel" aria-label={`${routeDisplayName} ${t(locale, "manager_capability_plugin_skill_panel")}`}>
                     <div>
                       <strong>{t(locale, "manager_capability_plugin_skill_title")}</strong>
                       <p className="muted compact-copy">{t(locale, "manager_capability_plugin_skill_summary")}</p>
@@ -435,14 +506,14 @@ export function CapabilityRoutesPanel({
                     visibleCandidates.map((candidate) => (
                       <span className="capability-candidate-pill" key={`${candidate.adapter_id}-${candidate.provider_id ?? "standalone"}-${candidate.model ?? "none"}`}>
                         <strong>{candidate.provider_id ? `${candidate.provider_id}/${candidate.model ?? ""}` : candidate.source}</strong>
-                        <small>{candidate.adapter_id} · {(candidate.input_modalities ?? []).join(", ") || "text"}</small>
+                        <small>{candidate.adapter_id} / {localizedModalities(locale, candidate.input_modalities)}</small>
                       </span>
                     ))
                   )}
                 </div>
 
                 {!isStandalone ? (
-                  <div className="capability-smoke-panel" aria-label={`${route.display_name} ${t(locale, "manager_capability_smoke_panel")}`}>
+                  <div className="capability-smoke-panel" aria-label={`${routeDisplayName} ${t(locale, "manager_capability_smoke_panel")}`}>
                     <div>
                       <strong>{t(locale, "manager_capability_dry_run_smoke")}</strong>
                       <p className="muted compact-copy">{t(locale, "manager_capability_dry_run_summary")}</p>
@@ -465,7 +536,7 @@ export function CapabilityRoutesPanel({
                   </div>
                 ) : null}
 
-                <div className="capability-artifacts-panel" aria-label={`${route.display_name} ${t(locale, "manager_capability_artifact_panel")}`}>
+                <div className="capability-artifacts-panel" aria-label={`${routeDisplayName} ${t(locale, "manager_capability_artifact_panel")}`}>
                   <div className="capability-artifacts-header">
                     <div>
                       <strong>{t(locale, "manager_capability_recent_artifacts")}</strong>

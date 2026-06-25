@@ -1489,6 +1489,9 @@ textarea {
   display: grid;
   gap: var(--space-3);
   min-width: 0;
+  max-height: calc(100vh - 8rem);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
   padding: 0.15rem 0;
 }
 
@@ -1512,6 +1515,34 @@ textarea {
 .settings-nav-list {
   display: grid;
   gap: 0.08rem;
+}
+
+.settings-nav-preferences {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.settings-nav-preferences .settings-strip-section {
+  padding: var(--space-2);
+}
+
+.settings-nav-preferences .segmented,
+.settings-nav-preferences .segmented > button {
+  min-width: 0;
+}
+
+.settings-nav-preferences .segmented > button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+  padding-inline: 0.45rem;
+}
+
+.settings-nav-preferences .segmented-wrap > button {
+  flex: 1 1 calc(50% - 1px);
 }
 
 .settings-nav-item {
@@ -1607,7 +1638,8 @@ textarea {
   display: grid;
   gap: 0.45rem;
   max-height: 36vh;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding-right: 0.2rem;
 }
 
@@ -1667,6 +1699,21 @@ textarea {
 
 .capability-status-strip {
   max-width: 48rem;
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+.capability-status-strip .session-badge,
+.capability-route-row .session-badge,
+.capability-route-row .status-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  min-width: 0;
+  white-space: normal;
+  text-align: center;
+  overflow-wrap: anywhere;
 }
 
 .capability-mcp-warning {
@@ -1682,6 +1729,7 @@ textarea {
   display: grid;
   align-items: stretch;
   gap: 0.7rem;
+  min-width: 0;
   padding: 0.75rem 0.8rem;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -1695,12 +1743,13 @@ textarea {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+  flex-wrap: wrap;
   gap: var(--space-3);
 }
 
 .capability-route-meta {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 7.5rem), 1fr));
   gap: 0.45rem;
   color: var(--muted);
   font-size: 0.78rem;
@@ -1743,9 +1792,9 @@ textarea {
 
 .capability-runtime-guidance-item {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(14rem, auto);
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.65rem;
-  align-items: center;
+  align-items: flex-start;
   padding: 0.45rem 0.5rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -1763,6 +1812,7 @@ textarea {
 
 .capability-route-controls {
   margin-top: 0;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
 }
 
 .capability-candidate-list {
@@ -1774,7 +1824,8 @@ textarea {
 .capability-candidate-pill {
   display: grid;
   gap: 0.12rem;
-  max-width: min(100%, 22rem);
+  max-width: 100%;
+  min-width: min(100%, 12rem);
   padding: 0.38rem 0.52rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -1788,8 +1839,8 @@ textarea {
 
 .capability-smoke-panel {
   display: grid;
-  grid-template-columns: minmax(12rem, 1.1fr) minmax(14rem, 1.6fr) auto;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: flex-start;
   gap: 0.7rem;
   padding: 0.65rem;
   border: 1px solid var(--border);
@@ -1817,10 +1868,10 @@ textarea {
 }
 
 .capability-smoke-panel .ghost-button {
-  justify-self: end;
+  justify-self: start;
   position: relative;
   z-index: 2;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .capability-artifacts-panel {
@@ -2425,6 +2476,7 @@ textarea {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 1rem;
   padding: 0.8rem;
   border: 1px solid var(--stroke);
@@ -2434,6 +2486,10 @@ textarea {
 
 .metadata-actions-compact {
   align-items: center;
+}
+
+.metadata-actions-compact > * {
+  min-width: 0;
 }
 
 .metadata-detail-header h3,
