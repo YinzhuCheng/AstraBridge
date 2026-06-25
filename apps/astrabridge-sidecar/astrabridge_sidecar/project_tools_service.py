@@ -24,13 +24,19 @@ from .security import classify_command, redact_sensitive, resolve_under
 
 TEXT_EXTENSIONS = {
     ".css",
+    ".diff",
     ".html",
     ".js",
     ".json",
+    ".jsonl",
     ".jsx",
+    ".log",
     ".md",
+    ".mdx",
     ".mjs",
+    ".patch",
     ".py",
+    ".rst",
     ".toml",
     ".ts",
     ".tsx",
@@ -38,14 +44,18 @@ TEXT_EXTENSIONS = {
     ".yaml",
     ".yml",
 }
+MARKDOWN_EXTENSIONS = {".md", ".markdown", ".mdx"}
+JSON_EXTENSIONS = {".json", ".jsonl"}
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
+PDF_EXTENSIONS = {".pdf"}
+AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".wav", ".webm"}
+VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".ogv", ".webm"}
 SKIP_DIRS = {
     ".git",
     ".hg",
     ".svn",
     ".agents",
     ".codex",
-    ".astrabridge",
     ".cache",
     ".pytest_cache",
     ".ruff_cache",
@@ -55,10 +65,11 @@ SKIP_DIRS = {
     "node_modules",
     "target",
 }
-MANAGED_STATE_PREVIEW_ALLOWLIST = {"saves", "runtime_events.jsonl", "approvals.jsonl"}
+MANAGED_STATE_PREVIEW_ALLOWLIST = {"artifacts", "capabilities", "captures", "exports", "reports", "reviews", "saves"}
 SECRET_NAME_PARTS = ("secret", "token", "apikey", "api_key", "authorization", "cookie", "password", ".env")
 MAX_TEXT_BYTES = 1_000_000
 MAX_IMAGE_BYTES = 2_500_000
+MAX_MEDIA_BYTES = 50_000_000
 MAX_TREE_ITEMS = 500
 RELEASE_DEMO_COMMAND = "python scorecard.py --checks checks.json"
 RELEASE_DEMO_REVIEW_ARTIFACT = f"{WORKSPACE_STATE_DIRNAME}/reviews/release-workflow-demo.diff"
@@ -128,8 +139,6 @@ class ProjectToolsService:
             for name in sorted(files):
                 rel = rel_dir / name
                 rel_text = rel.as_posix()
-                if rel_text == WORKSPACE_STATE_DIRNAME or rel_text.startswith(f"{WORKSPACE_STATE_DIRNAME}/"):
-                    continue
                 if self._skip_file(rel):
                     continue
                 if query_text and query_text not in rel_text.lower():
@@ -149,8 +158,8 @@ class ProjectToolsService:
                     }
                 )
                 if len(items) >= limit:
-                    return {"workspace_root": str(root), "filter_version": "skip-astrabridge-v1", "items": items, "truncated": True, "updated_at": now_iso()}
-        return {"workspace_root": str(root), "filter_version": "skip-astrabridge-v1", "items": items, "truncated": False, "updated_at": now_iso()}
+                    return {"workspace_root": str(root), "filter_version": "preview-artifacts-v2", "items": items, "truncated": True, "updated_at": now_iso()}
+        return {"workspace_root": str(root), "filter_version": "preview-artifacts-v2", "items": items, "truncated": False, "updated_at": now_iso()}
 
     def read_file(self, rel_path: str) -> dict[str, Any]:
         root = self._workspace_root()
@@ -164,9 +173,10 @@ class ProjectToolsService:
             "size": stat.st_size,
             "updated_at": stat.st_mtime,
         }
-        if kind == "text":
+        if kind in {"text", "markdown", "json"}:
             if stat.st_size > MAX_TEXT_BYTES:
                 return {**payload, "kind": "too_large", "message": f"Text preview is limited to {MAX_TEXT_BYTES} bytes."}
+            payload["mime_type"] = mimetypes.guess_type(path.name)[0] or "text/plain"
             payload["content"] = path.read_text(encoding="utf-8-sig", errors="replace")
             return payload
         if kind == "image":
@@ -176,7 +186,26 @@ class ProjectToolsService:
             payload["mime_type"] = mime
             payload["data_url"] = f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
             return payload
+        if kind in {"pdf", "audio", "video"}:
+            if stat.st_size > MAX_MEDIA_BYTES:
+                return {**payload, "kind": "too_large", "message": f"Media preview is limited to {MAX_MEDIA_BYTES} bytes."}
+            payload["mime_type"] = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            return payload
         return {**payload, "message": "Binary preview is not supported yet."}
+
+    def file_media(self, rel_path: str) -> dict[str, Any]:
+        root = self._workspace_root()
+        path = self._safe_rel_path(root, rel_path, allow_managed_state=True)
+        stat = path.stat()
+        if stat.st_size > MAX_MEDIA_BYTES:
+            raise ValueError(f"Media preview is limited to {MAX_MEDIA_BYTES} bytes.")
+        return {
+            "path": path,
+            "name": path.name,
+            "mime_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            "size": stat.st_size,
+            "updated_at": stat.st_mtime,
+        }
 
     def terminal_history(self, limit: int = 30) -> dict[str, Any]:
         root = self._workspace_root()
@@ -1253,13 +1282,9 @@ class ProjectToolsService:
         rel = candidate.relative_to(root)
         if self._looks_secret(rel):
             raise ValueError("Refusing to preview secret-like file names.")
-        if rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME and self._skip_file(rel):
-            raise ValueError("This .astrabridge file is intentionally summarized elsewhere and is not exposed as raw preview.")
-        if not allow_managed_state and rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME:
-            raise ValueError("Raw .astrabridge files are not exposed through the file preview.")
-        if allow_managed_state and rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME:
-            if len(rel.parts) < 2 or rel.parts[1] not in MANAGED_STATE_PREVIEW_ALLOWLIST:
-                raise ValueError("Only selected AstraBridge state files can be previewed.")
+        if rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME:
+            if not allow_managed_state or not self._is_managed_state_preview_path(rel):
+                raise ValueError("Only selected AstraBridge artifact files can be previewed.")
         if not candidate.is_file():
             raise ValueError("File does not exist or is not a regular file.")
         return candidate
@@ -1267,6 +1292,10 @@ class ProjectToolsService:
     def _skip_dir(self, rel: Path) -> bool:
         if not rel.parts:
             return False
+        if rel.parts[0] == WORKSPACE_STATE_DIRNAME:
+            if self._looks_secret(rel):
+                return True
+            return len(rel.parts) > 1 and rel.parts[1] not in MANAGED_STATE_PREVIEW_ALLOWLIST
         name = rel.name
         if name in SKIP_DIRS:
             return True
@@ -1276,8 +1305,11 @@ class ProjectToolsService:
         if self._looks_secret(rel):
             return True
         if rel.parts and rel.parts[0] == WORKSPACE_STATE_DIRNAME:
-            return True
+            return not self._is_managed_state_preview_path(rel)
         return False
+
+    def _is_managed_state_preview_path(self, rel: Path) -> bool:
+        return len(rel.parts) >= 3 and rel.parts[0] == WORKSPACE_STATE_DIRNAME and rel.parts[1] in MANAGED_STATE_PREVIEW_ALLOWLIST
 
     def _looks_secret(self, rel: Path) -> bool:
         text = rel.as_posix().lower()
@@ -1285,8 +1317,18 @@ class ProjectToolsService:
 
     def _file_kind(self, path: Path) -> str:
         suffix = path.suffix.lower()
+        if suffix in MARKDOWN_EXTENSIONS:
+            return "markdown"
+        if suffix in JSON_EXTENSIONS:
+            return "json"
         if suffix in IMAGE_EXTENSIONS:
             return "image"
+        if suffix in PDF_EXTENSIONS:
+            return "pdf"
+        if suffix in AUDIO_EXTENSIONS:
+            return "audio"
+        if suffix in VIDEO_EXTENSIONS:
+            return "video"
         if suffix in TEXT_EXTENSIONS:
             return "text"
         return "binary"

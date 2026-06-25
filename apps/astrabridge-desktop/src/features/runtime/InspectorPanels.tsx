@@ -1,5 +1,6 @@
 import { Files, GitCompare, Globe2, ListChecks, Terminal } from "lucide-react";
-import type { ReactNode } from "react";
+import { useMemo, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { t } from "../i18n/catalog";
 import type {
   ProjectFile,
@@ -25,6 +26,138 @@ type BrowserSmokeSummary = {
   request_failures?: Array<{ url?: string; method?: string; resource_type?: string; error_text?: string }>;
   screenshot_path?: string;
 } | null;
+
+function normalizeBrowserUrl(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "about:blank";
+  if (/^(https?:|file:|about:)/i.test(trimmed)) return trimmed;
+  if (/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(\/|$)/i.test(trimmed)) {
+    return `http://${trimmed}`;
+  }
+  return `https://${trimmed}`;
+}
+
+function formatBytes(value: number | null | undefined) {
+  const size = Number(value || 0);
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(size >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+}
+
+function fileKindLabel(locale: Locale, kind: string | null | undefined) {
+  const labels: Record<string, { en: string; zh: string }> = {
+    markdown: { en: "Markdown", zh: "Markdown" },
+    json: { en: "JSON", zh: "JSON" },
+    text: { en: "Text", zh: "文本" },
+    image: { en: "Image", zh: "图片" },
+    pdf: { en: "PDF", zh: "PDF" },
+    audio: { en: "Audio", zh: "音频" },
+    video: { en: "Video", zh: "视频" },
+    binary: { en: "Binary", zh: "二进制" },
+    too_large: { en: "Too large", zh: "过大" },
+  };
+  const fallback = kind || "-";
+  const entry = labels[fallback];
+  return entry ? (locale === "zh-CN" ? entry.zh : entry.en) : fallback;
+}
+
+function renderMarkdownPreview(content: string) {
+  const blocks: ReactNode[] = [];
+  const lines = content.split(/\r?\n/);
+  let codeLines: string[] = [];
+  let listLines: string[] = [];
+  let paragraph: string[] = [];
+  let inCode = false;
+
+  function flushParagraph(key: string) {
+    if (!paragraph.length) return;
+    blocks.push(<p key={key}>{paragraph.join(" ")}</p>);
+    paragraph = [];
+  }
+
+  function flushList(key: string) {
+    if (!listLines.length) return;
+    blocks.push(
+      <ul key={key}>
+        {listLines.map((line, index) => (
+          <li key={`${key}-${index}`}>{line}</li>
+        ))}
+      </ul>,
+    );
+    listLines = [];
+  }
+
+  lines.forEach((line, index) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```")) {
+      if (inCode) {
+        blocks.push(
+          <pre className="markdown-code" key={`code-${index}`}>
+            {codeLines.join("\n")}
+          </pre>,
+        );
+        codeLines = [];
+        inCode = false;
+      } else {
+        flushParagraph(`p-${index}`);
+        flushList(`ul-${index}`);
+        inCode = true;
+      }
+      return;
+    }
+    if (inCode) {
+      codeLines.push(line);
+      return;
+    }
+    if (!trimmed) {
+      flushParagraph(`p-${index}`);
+      flushList(`ul-${index}`);
+      return;
+    }
+    const heading = /^(#{1,3})\s+(.+)$/.exec(trimmed);
+    if (heading) {
+      flushParagraph(`p-${index}`);
+      flushList(`ul-${index}`);
+      const level = heading[1].length;
+      const text = heading[2];
+      blocks.push(level === 1 ? <h3 key={`h-${index}`}>{text}</h3> : level === 2 ? <h4 key={`h-${index}`}>{text}</h4> : <h5 key={`h-${index}`}>{text}</h5>);
+      return;
+    }
+    const bullet = /^[-*]\s+(.+)$/.exec(trimmed);
+    if (bullet) {
+      flushParagraph(`p-${index}`);
+      listLines.push(bullet[1]);
+      return;
+    }
+    if (trimmed.startsWith(">")) {
+      flushParagraph(`p-${index}`);
+      flushList(`ul-${index}`);
+      blocks.push(<blockquote key={`q-${index}`}>{trimmed.replace(/^>\s?/, "")}</blockquote>);
+      return;
+    }
+    paragraph.push(trimmed);
+  });
+  if (inCode) {
+    blocks.push(
+      <pre className="markdown-code" key="code-tail">
+        {codeLines.join("\n")}
+      </pre>,
+    );
+  }
+  flushParagraph("p-tail");
+  flushList("ul-tail");
+  return blocks.length ? blocks : <p className="muted compact-copy">{content}</p>;
+}
+
+function prettyText(kind: string | undefined, content: string | undefined) {
+  if (!content) return "";
+  if (kind !== "json") return content;
+  try {
+    return JSON.stringify(JSON.parse(content), null, 2);
+  } catch {
+    return content;
+  }
+}
 
 function InspectorTabButton({
   tab,
@@ -285,12 +418,54 @@ export function BrowserInspectorPanel({
   onRunNativeKernelSmoke: () => void;
 }) {
   const browser = latestSmoke ?? supervisor?.browser;
+  const defaultUrl = useMemo(() => browser?.url || (typeof window === "undefined" ? "about:blank" : window.location.origin), [browser?.url]);
+  const [address, setAddress] = useState(defaultUrl);
+  const [frameUrl, setFrameUrl] = useState(defaultUrl);
+
+  function handleBrowse(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const normalized = normalizeBrowserUrl(address);
+    setAddress(normalized);
+    setFrameUrl(normalized);
+  }
+
+  function openInNewWindow() {
+    if (typeof window === "undefined") return;
+    window.open(frameUrl, "_blank", "noopener,noreferrer");
+  }
+
   return (
     <section className="inspector-tool-panel" data-testid="browser-panel">
       <div className="section-header">
         <h2>{t(locale, "browser_title")}</h2>
         <span className={`status-tag ${browser?.status === "pass" ? "status-ok" : ""}`}>{browser?.status ? statusLabel(browser.status) : t(locale, "inspector_not_run")}</span>
       </div>
+      <form className="browser-address-bar" onSubmit={handleBrowse}>
+        <input
+          className="inspector-search"
+          data-testid="browser-address-input"
+          value={address}
+          onChange={(event) => setAddress(event.target.value)}
+          placeholder={t(locale, "browser_url_placeholder")}
+          aria-label={t(locale, "browser_url_placeholder")}
+        />
+        <button type="submit" className="ghost-button inspector-inline-action" data-testid="browser-go-button">
+          {t(locale, "browser_go")}
+        </button>
+        <button type="button" className="ghost-button inspector-inline-action" onClick={openInNewWindow}>
+          {t(locale, "browser_open_external")}
+        </button>
+      </form>
+      <div className="browser-frame-shell">
+        <iframe
+          data-testid="browser-preview-frame"
+          src={frameUrl}
+          title={t(locale, "browser_preview")}
+          referrerPolicy="no-referrer"
+          sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
+        />
+      </div>
+      <p className="muted compact-copy">{t(locale, "browser_frame_hint")}</p>
       {browser ? (
         <div className="tool-list">
           <div className="tool-row">
@@ -353,6 +528,8 @@ export function FilesInspectorPanel({
   project,
   tree,
   preview,
+  mediaUrl,
+  previewLoading,
   fallback,
   query,
   selectedPath,
@@ -363,6 +540,8 @@ export function FilesInspectorPanel({
   project: ProjectFile;
   tree?: ProjectFilesTree;
   preview?: ProjectFilePreview;
+  mediaUrl?: string;
+  previewLoading?: boolean;
   fallback?: CodingEventInspectorSummary;
   query: string;
   selectedPath?: string;
@@ -371,6 +550,8 @@ export function FilesInspectorPanel({
 }) {
   const items = (tree?.items?.length ? tree.items : fallback?.recentFiles) ?? [];
   const fallbackDetail = selectedPath ? fallback?.detailByPath[selectedPath] : "";
+  const selectedText = prettyText(preview?.kind, preview?.content);
+  const canOpenRaw = Boolean(mediaUrl && preview && preview.kind !== "too_large");
   return (
     <section className="inspector-tool-panel" data-testid="files-panel">
       <div className="section-header">
@@ -379,7 +560,7 @@ export function FilesInspectorPanel({
       </div>
       <input className="inspector-search" value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder={t(locale, "files_filter")} aria-label={t(locale, "files_filter")} />
       <div className="inspector-list inspector-file-list" role="list" aria-label={t(locale, "files_title")}>
-        {items.slice(0, 18).map((item) => (
+        {items.slice(0, 80).map((item) => (
           <button
             type="button"
             data-testid="project-file-row"
@@ -388,31 +569,48 @@ export function FilesInspectorPanel({
             key={item.path}
           >
             <span>{item.path}</span>
-            <small>{item.kind}</small>
+            <small>{fileKindLabel(locale, item.kind)}</small>
           </button>
         ))}
         {!items.length ? <p className="muted compact-copy">{t(locale, "files_empty")}</p> : null}
       </div>
+      {previewLoading && selectedPath ? <p className="muted compact-copy">{t(locale, "files_loading")}</p> : null}
       {preview ? (
         <div className="file-preview">
-          <div className="tool-row">
-            <span>{preview.path}</span>
-            <strong>{Math.round((preview.size || 0) / 1024)} KB</strong>
+          <div className="file-preview-header">
+            <div>
+              <span>{preview.path}</span>
+              <small>{fileKindLabel(locale, preview.kind)} · {formatBytes(preview.size)}</small>
+            </div>
+            {canOpenRaw ? (
+              <a className="ghost-button inspector-inline-action" href={mediaUrl} target="_blank" rel="noreferrer">
+                {t(locale, "files_open_raw")}
+              </a>
+            ) : null}
           </div>
-          {preview.kind === "image" && preview.data_url ? <img src={preview.data_url} alt={preview.name} /> : null}
-          {preview.kind === "text" ? <pre className="tool-preview">{preview.content}</pre> : null}
-          {preview.kind !== "text" && preview.kind !== "image" ? <p className="muted compact-copy">{preview.message ?? t(locale, "files_unsupported")}</p> : null}
+          {preview.kind === "image" && (preview.data_url || mediaUrl) ? <img src={preview.data_url ?? mediaUrl} alt={preview.name} /> : null}
+          {preview.kind === "markdown" ? <div className="markdown-preview">{renderMarkdownPreview(preview.content ?? "")}</div> : null}
+          {preview.kind === "json" || preview.kind === "text" ? <pre className="tool-preview file-text-preview">{selectedText}</pre> : null}
+          {preview.kind === "pdf" && mediaUrl ? <iframe className="file-preview-frame" title={preview.name} src={`${mediaUrl}#zoom=page-fit`} /> : null}
+          {preview.kind === "audio" && mediaUrl ? <audio className="file-media-control" controls src={mediaUrl} /> : null}
+          {preview.kind === "video" && mediaUrl ? <video className="file-media-control" controls src={mediaUrl} /> : null}
+          {!["text", "markdown", "json", "image", "pdf", "audio", "video"].includes(preview.kind) ? <p className="muted compact-copy">{preview.message ?? t(locale, "files_unsupported")}</p> : null}
         </div>
       ) : fallbackDetail ? (
         <div className="file-preview">
-          <div className="tool-row">
-            <span>{selectedPath}</span>
-            <strong>{t(locale, "files_event_summary")}</strong>
+          <div className="file-preview-header">
+            <div>
+              <span>{selectedPath}</span>
+              <small>{t(locale, "files_event_summary")}</small>
+            </div>
           </div>
           <pre className="tool-preview">{fallbackDetail}</pre>
         </div>
       ) : (
-        <pre className="tool-preview">{project.workspace_root}</pre>
+        <div className="empty-preview">
+          <strong>{t(locale, "files_workspace")}</strong>
+          <span>{project.workspace_root}</span>
+        </div>
       )}
     </section>
   );

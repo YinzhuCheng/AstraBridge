@@ -128,7 +128,10 @@ async function request<T>(path: string, init?: RequestWithTimeout): Promise<T> {
   const isMutation = (init?.method ?? "GET").toUpperCase() !== "GET";
   const timeoutMs = init?.timeoutMs ?? (isMutation ? 65000 : 15000);
   const cacheMode = init?.cache ?? (isMutation ? "no-store" : "no-store");
-  const headers: Record<string, string> = { "Content-Type": "application/json", ...((init?.headers ?? {}) as Record<string, string>) };
+  const headers: Record<string, string> = { ...((init?.headers ?? {}) as Record<string, string>) };
+  if (isMutation || init?.body) {
+    headers["Content-Type"] = headers["Content-Type"] ?? "application/json";
+  }
   if (isMutation) {
     if (!adminTokenPromise) {
       adminTokenPromise = fetch(`${base}/api/admin/session`)
@@ -225,6 +228,7 @@ export const api = {
     return request<ProjectFilesTree>(`/api/project/files/tree?${params.toString()}`);
   },
   projectFileRead: (path: string) => request<ProjectFilePreview>(`/api/project/files/read?path=${encodeURIComponent(path)}`),
+  projectFileMediaUrl: async (path: string) => `${await sidecarBaseUrl()}/api/project/files/media?path=${encodeURIComponent(path)}`,
   projectTerminalHistory: () => request<ProjectTerminalHistory>("/api/project/terminal/history?limit=30"),
   projectTasks: () => request<ProjectTasksResponse>("/api/project/tasks"),
   taskConversation: (taskId?: string | null) => {

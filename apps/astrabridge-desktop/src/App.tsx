@@ -3594,6 +3594,12 @@ function AppShell() {
     queryFn: () => api.projectFileRead(inspectorFilePath),
     enabled: inspectorTab === "files" && Boolean(inspectorFilePath),
   });
+  const inspectorFileMediaUrl = useQuery({
+    queryKey: ["project-file-media-url", inspectorFilePath],
+    queryFn: () => api.projectFileMediaUrl(inspectorFilePath),
+    enabled: inspectorTab === "files" && Boolean(inspectorFilePath),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
   const settingsDraftTarget = selectedThreadId ?? "__new__";
   const latestComposerSettingsRef = useRef(activeSettings);
   const lastSavedThreadSettingsRef = useRef("");
@@ -5140,6 +5146,8 @@ function AppShell() {
               project={project}
               tree={inspectorFiles.data}
               preview={inspectorFilePreview.data}
+              mediaUrl={inspectorFileMediaUrl.data}
+              previewLoading={inspectorFilePreview.isFetching}
               fallback={taskInspectorEvidence}
               query={inspectorFileQuery}
               selectedPath={inspectorFilePath}

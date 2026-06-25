@@ -1775,7 +1775,7 @@ export type NativeKernelDemoResponse = {
 export type ProjectFileTreeItem = {
   path: string;
   name: string;
-  kind: "text" | "image" | "binary" | string;
+  kind: "text" | "markdown" | "json" | "image" | "pdf" | "audio" | "video" | "binary" | string;
   size: number;
   updated_at: number;
 };
@@ -1790,7 +1790,7 @@ export type ProjectFilesTree = {
 export type ProjectFilePreview = {
   path: string;
   name: string;
-  kind: "text" | "image" | "binary" | "too_large" | string;
+  kind: "text" | "markdown" | "json" | "image" | "pdf" | "audio" | "video" | "binary" | "too_large" | string;
   size: number;
   updated_at: number;
   content?: string;

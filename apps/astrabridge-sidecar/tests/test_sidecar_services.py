@@ -300,6 +300,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
             state = workspace / ".astrabridge"
             state.mkdir()
             (state / "runtime_events.jsonl").write_text("{}\n", encoding="utf-8")
+            artifact_dir = state / "capabilities" / "preview-smoke"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "summary.md").write_text("# Capability report\n", encoding="utf-8")
+            (artifact_dir / "sample.pdf").write_bytes(b"%PDF-1.4\n% preview\n")
             project_file = root / "demo.abproj"
             projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
             projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="existing")
@@ -310,7 +314,12 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("README.md", paths)
             self.assertNotIn(".env", paths)
             self.assertNotIn(".astrabridge/runtime_events.jsonl", paths)
+            self.assertIn(".astrabridge/capabilities/preview-smoke/summary.md", paths)
+            self.assertIn(".astrabridge/capabilities/preview-smoke/sample.pdf", paths)
             self.assertEqual(tools.read_file("README.md")["content"], "# Demo\n")
+            self.assertEqual(tools.read_file(".astrabridge/capabilities/preview-smoke/summary.md")["kind"], "markdown")
+            self.assertEqual(tools.read_file(".astrabridge/capabilities/preview-smoke/sample.pdf")["mime_type"], "application/pdf")
+            self.assertEqual(tools.file_media(".astrabridge/capabilities/preview-smoke/sample.pdf")["name"], "sample.pdf")
             with self.assertRaises(ValueError):
                 tools.read_file("../outside.txt")
             with self.assertRaises(ValueError):

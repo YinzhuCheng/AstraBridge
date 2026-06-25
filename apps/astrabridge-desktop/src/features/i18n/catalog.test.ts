@@ -22,6 +22,6 @@ describe("i18n catalog", () => {
     expect(t("en", "manager_login_summary")).toContain("Managed login");
     expect(t("zh-CN", "manager_login_summary")).toContain("托管登录");
     expect(t("zh-CN", "manager_login_summary")).not.toBe("manager_login_summary");
-    expect(t("zh-CN", "browser_prepare_native")).toContain("native kernel");
+    expect(t("zh-CN", "browser_prepare_native")).toContain("原生内核");
   });
 });

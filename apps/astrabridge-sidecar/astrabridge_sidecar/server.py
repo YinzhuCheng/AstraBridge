@@ -243,6 +243,22 @@ class Handler(BaseHTTPRequestHandler):
     def send_json(self, payload: Any, status: int = 200) -> None:
         self._send(status, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
 
+    def _send_file(self, path: Path, *, content_type: str, filename: str) -> None:
+        body = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition", f"inline; filename*=UTF-8''{urllib.parse.quote(filename)}")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        origin = self.headers.get("Origin")
+        if origin in ALLOWED_ORIGINS or (origin and origin.startswith(("http://127.0.0.1:", "http://localhost:"))):
+            self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token, X-Admin-Session-Token")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send_event_stream(self, *, after: int = 0, limit: int | None = None, seconds: float = 60.0) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -357,6 +373,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/project/files/read":
                 self.send_json(self.context.project_tools.read_file(str(query.get("path", [""])[0])))
+                return
+            if path == "/api/project/files/media":
+                media = self.context.project_tools.file_media(str(query.get("path", [""])[0]))
+                self._send_file(media["path"], content_type=str(media["mime_type"]), filename=str(media["name"]))
                 return
             if path == "/api/project/terminal/history":
                 limit_values = query.get("limit", [])
