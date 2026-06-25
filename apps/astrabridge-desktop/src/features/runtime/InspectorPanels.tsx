@@ -60,6 +60,17 @@ function roleFromUrl(url: string) {
   }
 }
 
+function isSelfPreviewUrl(value: string) {
+  if (typeof window === "undefined") return false;
+  try {
+    const target = new URL(value);
+    const current = new URL(window.location.href);
+    return target.origin === current.origin;
+  } catch {
+    return false;
+  }
+}
+
 function workbenchStatusLabel(locale: Locale, status: string) {
   if (status === "open") return t(locale, "browser_workbench_status_open");
   if (status === "focused") return t(locale, "browser_workbench_status_focused");
@@ -71,6 +82,26 @@ function browserRoleLabel(locale: Locale, role: string) {
   const normalized = role.trim().toLowerCase();
   if (locale === "zh-CN" && normalized === "news") return "新闻";
   return role || "Browser";
+}
+
+function reportStatusLabel(locale: Locale, status: string) {
+  if (status === "prepared_for_computer_use") return t(locale, "browser_workbench_report_ready");
+  if (status === "validated_with_limitations") return t(locale, "browser_workbench_report_limited");
+  if (status === "prepared_with_plugin_probe_error") return t(locale, "browser_workbench_report_probe_error");
+  if (status === "prepared") return t(locale, "browser_workbench_report_ready");
+  return status || "-";
+}
+
+function reportModelStatus(locale: Locale, report: ComputerUseBrowserScenarioReport) {
+  const attempts = report.attempts ?? [];
+  const yunwu = attempts.find((item) => String(item.attempt_id ?? "") === "yunwu-gpt-5.5");
+  if (yunwu && String(yunwu.status ?? "") === "requires_app_model_runner") {
+    return t(locale, "browser_workbench_model_runner_pending");
+  }
+  if (yunwu && String(yunwu.status ?? "") === "not_run_in_this_codex_validation") {
+    return t(locale, "browser_workbench_model_runner_pending");
+  }
+  return t(locale, "browser_workbench_report_ready_detail");
 }
 
 function formatBytes(value: number | null | undefined) {
@@ -454,14 +485,16 @@ export function BrowserInspectorPanel({
   onRunNativeKernelSmoke: () => void;
 }) {
   const browser = latestSmoke ?? supervisor?.browser;
-  const defaultUrl = useMemo(() => browser?.url || (typeof window === "undefined" ? "about:blank" : window.location.origin), [browser?.url]);
-  const [address, setAddress] = useState(defaultUrl);
+  const defaultUrl = useMemo(() => browser?.url || "about:blank", [browser?.url]);
+  const [address, setAddress] = useState(defaultUrl === "about:blank" ? "" : defaultUrl);
   const [frameUrl, setFrameUrl] = useState(defaultUrl);
   const [sessions, setSessions] = useState<BrowserWorkbenchSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [isWorkbenchBusy, setIsWorkbenchBusy] = useState(false);
   const [workbenchError, setWorkbenchError] = useState("");
   const [computerUseReport, setComputerUseReport] = useState<ComputerUseBrowserScenarioReport | null>(null);
+  const selectedSession = sessions.find((item) => item.id === selectedSessionId) ?? sessions[0] ?? null;
+  const showDevPreview = frameUrl !== "about:blank" && !isSelfPreviewUrl(frameUrl);
 
   useEffect(() => {
     let cancelled = false;
@@ -533,7 +566,7 @@ export function BrowserInspectorPanel({
       const news = await api.browserCreate({
         id: "news",
         role: "News",
-        url: "https://www.google.com/search?q=%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB&tbm=nws",
+        url: "https://news.google.com/search?q=%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB&hl=zh-CN&gl=US&ceid=US:zh-Hans",
       });
       const youtube = await api.browserCreate({
         id: "youtube",
@@ -570,16 +603,13 @@ export function BrowserInspectorPanel({
     });
   }
 
-  function openInNewWindow() {
-    if (typeof window === "undefined") return;
-    window.open(frameUrl, "_blank", "noopener,noreferrer");
-  }
-
   return (
     <section className="inspector-tool-panel" data-testid="browser-panel">
       <div className="section-header">
         <h2>{t(locale, "browser_title")}</h2>
-        <span className={`status-tag ${browser?.status === "pass" ? "status-ok" : ""}`}>{browser?.status ? statusLabel(browser.status) : t(locale, "inspector_not_run")}</span>
+        <span className={`status-tag ${browser?.status === "pass" ? "status-ok" : ""}`}>
+          {browser?.status ? `${t(locale, "browser_recent_smoke")}: ${statusLabel(browser.status)}` : t(locale, "inspector_not_run")}
+        </span>
       </div>
       <form className="browser-address-bar" onSubmit={handleBrowse}>
         <input
@@ -597,9 +627,6 @@ export function BrowserInspectorPanel({
           <ExternalLink size={13} aria-hidden="true" />
           <span>{t(locale, "browser_workbench_open")}</span>
         </button>
-        <button type="button" className="ghost-button inspector-inline-action" onClick={openInNewWindow}>
-          {t(locale, "browser_open_external")}
-        </button>
       </form>
       <div className="browser-workbench" data-testid="browser-workbench">
         <div className="browser-workbench-header">
@@ -609,6 +636,7 @@ export function BrowserInspectorPanel({
           </div>
           <span className="status-tag">{sessions.length}</span>
         </div>
+        <p className="muted compact-copy browser-workbench-surface-note">{t(locale, "browser_workbench_surface_note")}</p>
         <div className="browser-workbench-actions">
           <button type="button" className="ghost-button inspector-inline-action" data-testid="browser-open-scenario-button" disabled={isWorkbenchBusy} onClick={openNewsYoutubeScenario}>
             <Grid2X2 size={13} aria-hidden="true" />
@@ -626,16 +654,18 @@ export function BrowserInspectorPanel({
           </button>
         </div>
         {sessions.length ? (
-          <div className="browser-workbench-list" role="list" aria-label={t(locale, "browser_workbench_title")}>
+          <div className="browser-workbench-tabs" role="tablist" aria-label={t(locale, "browser_workbench_title")}>
             {sessions.map((session) => (
-              <div className={`browser-workbench-row ${selectedSessionId === session.id ? "active" : ""}`} data-testid="browser-workbench-row" key={session.id}>
-                <button type="button" className="browser-workbench-main" onClick={() => setSelectedSessionId(session.id)}>
+              <div className={`browser-workbench-tab ${selectedSessionId === session.id ? "active" : ""}`} data-testid="browser-workbench-row" key={session.id}>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={selectedSessionId === session.id}
+                  className="browser-workbench-main"
+                  onClick={() => setSelectedSessionId(session.id)}
+                >
                   <span>{browserRoleLabel(locale, session.role)}</span>
-                  <small>{session.url || session.title}</small>
-                </button>
-                <span className="status-tag">{workbenchStatusLabel(locale, session.status)}</span>
-                <button type="button" className="ghost-button inspector-inline-action" disabled={isWorkbenchBusy} onClick={() => focusBrowser(session.id)}>
-                  {t(locale, "browser_workbench_focus")}
+                  <small>{workbenchStatusLabel(locale, session.status)}</small>
                 </button>
                 <button type="button" className="ghost-button inspector-inline-action icon-button" disabled={isWorkbenchBusy} onClick={() => closeBrowser(session.id)} title={t(locale, "browser_workbench_close")}>
                   <X size={13} aria-hidden="true" />
@@ -646,24 +676,53 @@ export function BrowserInspectorPanel({
         ) : (
           <p className="muted compact-copy">{t(locale, "browser_workbench_empty")}</p>
         )}
+        {selectedSession ? (
+          <div className="browser-workbench-detail" data-testid="browser-workbench-detail">
+            <div className="tool-row">
+              <span>{t(locale, "browser_workbench_selected_tab")}</span>
+              <strong>{browserRoleLabel(locale, selectedSession.role)}</strong>
+            </div>
+            <div className="tool-row">
+              <span>{t(locale, "browser_workbench_surface")}</span>
+              <strong>{t(locale, "browser_workbench_surface_window")}</strong>
+            </div>
+            <div className="tool-row">
+              <span>URL</span>
+              <strong>{selectedSession.url || "-"}</strong>
+            </div>
+            <div className="browser-workbench-detail-actions">
+              <button type="button" className="ghost-button inspector-inline-action" disabled={isWorkbenchBusy} onClick={() => focusBrowser(selectedSession.id)}>
+                {t(locale, "browser_workbench_focus")}
+              </button>
+              <button type="button" className="ghost-button inspector-inline-action" disabled={isWorkbenchBusy} onClick={navigateSelectedBrowser}>
+                {t(locale, "browser_workbench_navigate")}
+              </button>
+            </div>
+          </div>
+        ) : null}
         {workbenchError ? <p className="muted compact-copy browser-workbench-error">{workbenchError}</p> : null}
         {computerUseReport ? (
           <div className="browser-workbench-report" data-testid="browser-cua-report">
-            <span>{computerUseReport.status}</span>
+            <span>{reportStatusLabel(locale, computerUseReport.status)}</span>
+            <em>{reportModelStatus(locale, computerUseReport)}</em>
             <small title={computerUseReport.artifact_path}>{computerUseReport.artifact_path}</small>
           </div>
         ) : null}
         <p className="muted compact-copy">{t(locale, "browser_workbench_cua_hint")}</p>
       </div>
-      <div className="browser-frame-shell">
-        <iframe
-          data-testid="browser-preview-frame"
-          src={frameUrl}
-          title={t(locale, "browser_preview")}
-          referrerPolicy="no-referrer"
-          sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
-        />
-      </div>
+      {!showDevPreview ? (
+        <p className="muted compact-copy browser-frame-empty">{t(locale, "browser_preview_empty")}</p>
+      ) : (
+        <div className="browser-frame-shell">
+          <iframe
+            data-testid="browser-preview-frame"
+            src={frameUrl}
+            title={t(locale, "browser_preview")}
+            referrerPolicy="no-referrer"
+            sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
+          />
+        </div>
+      )}
       <p className="muted compact-copy">{t(locale, "browser_frame_hint")}</p>
       {browser ? (
         <div className="tool-list">

@@ -111,7 +111,7 @@ describe("InspectorPanels", () => {
       id: "ab-browser-news",
       role: "News",
       title: "AstraBridge Browser - News",
-      url: "https://www.google.com/search?q=%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB&tbm=nws",
+      url: "https://news.google.com/search?q=%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB&hl=zh-CN&gl=US&ceid=US:zh-Hans",
       status: "open",
       error: null,
     };
@@ -131,9 +131,13 @@ describe("InspectorPanels", () => {
       scenario_id: "CUA_test",
       scenario: "google-news-youtube-two-window",
       generated_at: "2026-06-26T00:00:00+08:00",
-      status: "prepared",
+      status: "prepared_for_computer_use",
       artifact_path: "D:/AstraBridge/.astrabridge/dogfood/computer-use/CUA_test.json",
       browser_targets: [],
+      attempts: [
+        { attempt_id: "current-model", status: "ready_for_cua_validation" },
+        { attempt_id: "yunwu-gpt-5.5", status: "requires_app_model_runner" },
+      ],
     });
 
     renderBrowserPanel();
@@ -142,7 +146,9 @@ describe("InspectorPanels", () => {
     await waitFor(() => {
       expect(api.browserTileTwoUp).toHaveBeenCalledWith(["ab-browser-news", "ab-browser-youtube"]);
     });
-    expect(await screen.findByTestId("browser-cua-report")).toHaveTextContent("prepared");
+    expect(await screen.findByTestId("browser-cua-report")).toHaveTextContent("CUA 场景已准备");
+    expect(screen.getByTestId("browser-cua-report")).toHaveTextContent("yunwu/gpt-5.5 尚未实际运行");
     expect(screen.getAllByTestId("browser-workbench-row")).toHaveLength(2);
+    expect(screen.getByTestId("browser-workbench-detail")).toHaveTextContent("星桥 WebView2");
   });
 });

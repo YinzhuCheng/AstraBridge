@@ -1647,6 +1647,7 @@ export type ComputerUseBrowserScenarioReport = {
   browser_targets: Array<Record<string, unknown>>;
   app_server_plugin_gate?: Record<string, unknown>;
   attempts?: Array<Record<string, unknown>>;
+  model_comparison?: Record<string, unknown>;
   notes?: string[];
 };
 

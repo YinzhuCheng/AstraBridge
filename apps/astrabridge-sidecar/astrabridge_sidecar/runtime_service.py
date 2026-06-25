@@ -2826,7 +2826,7 @@ class RuntimeService:
                 "id": "ab-browser-news",
                 "role": "News",
                 "title": "AstraBridge Browser - News",
-                "url": "https://www.google.com/search?q=%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB&tbm=nws",
+                "url": "https://news.google.com/search?q=%E5%AE%9E%E6%97%B6%E6%96%B0%E9%97%BB&hl=zh-CN&gl=US&ceid=US:zh-Hans",
             },
             {
                 "id": "ab-browser-youtube",
@@ -2843,7 +2843,7 @@ class RuntimeService:
             "scenario_id": scenario_id,
             "scenario": "google-news-youtube-two-window",
             "generated_at": generated_at,
-            "status": "prepared",
+            "status": "prepared_for_computer_use",
             "artifact_path": str(report_path),
             "browser_targets": targets,
             "safety_boundaries": [
@@ -2857,17 +2857,25 @@ class RuntimeService:
                     "attempt_id": "current-model",
                     "provider_id": profile.get("provider_id"),
                     "model": profile.get("model"),
-                    "status": "pending_computer_use_validation",
-                    "expected_action": "Confirm both AstraBridge browser windows are visible and record screenshots.",
+                    "status": "ready_for_cua_validation",
+                    "expected_action": "Use Computer Use to confirm both AstraBridge browser pages are visible and record screenshots.",
                 },
                 {
                     "attempt_id": "yunwu-gpt-5.5",
                     "provider_id": "yunwu",
                     "model": "gpt-5.5",
-                    "status": "pending_computer_use_validation",
-                    "expected_action": "Run the same confirmation flow for comparison.",
+                    "status": "requires_app_model_runner",
+                    "expected_action": "Run the same confirmation flow after AstraBridge wires model turns to the computer-use plugin runner.",
                 },
             ],
+            "model_comparison": {
+                "status": "not_executed_by_this_endpoint",
+                "reason": (
+                    "This endpoint prepares browser targets and plugin-gate diagnostics. "
+                    "It does not yet start a model turn that uses the computer-use plugin."
+                ),
+                "required_next_runtime": "app_mediated_computer_use_model_runner",
+            },
             "app_server_plugin_gate": {
                 "mode": "computer_use_plugins_allowed",
                 "plugins": "enabled_for_this_probe_only",
@@ -2877,7 +2885,8 @@ class RuntimeService:
             },
             "notes": [
                 "The UI-created WebView2 windows are the target surface for Computer Use.",
-                "The model comparison result must be appended after actual Computer Use validation.",
+                "Google Search may require CAPTCHA; this scenario uses Google News to reduce CAPTCHA risk without bypassing protections.",
+                "The model comparison result must be appended by a future app-mediated model runner, not inferred by this preparation endpoint.",
             ],
         }
         try:

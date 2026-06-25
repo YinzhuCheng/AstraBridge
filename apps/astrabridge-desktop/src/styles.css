@@ -4040,7 +4040,8 @@ select {
 }
 
 .browser-workbench-actions .inspector-inline-action,
-.browser-workbench-row .inspector-inline-action {
+.browser-workbench-tab .inspector-inline-action,
+.browser-workbench-detail-actions .inspector-inline-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4051,22 +4052,32 @@ select {
 }
 
 .browser-workbench-actions .icon-button,
-.browser-workbench-row .icon-button {
+.browser-workbench-tab .icon-button {
   width: 2rem;
   min-width: 2rem;
   padding: 0;
 }
 
-.browser-workbench-list {
-  display: grid;
-  gap: 0.36rem;
-  min-width: 0;
+.browser-workbench-surface-note {
+  margin: 0;
+  border-left: 2px solid rgba(46, 92, 184, 0.24);
+  padding-left: 0.48rem;
 }
 
-.browser-workbench-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(3rem, auto) auto;
+.browser-workbench-tabs {
+  display: flex;
   gap: 0.36rem;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 0.08rem;
+  scrollbar-width: thin;
+}
+
+.browser-workbench-tab {
+  display: grid;
+  grid-template-columns: minmax(6.5rem, 1fr) auto;
+  flex: 0 0 min(13rem, 78%);
+  gap: 0.25rem;
   align-items: center;
   min-width: 0;
   border: 1px solid rgba(32, 35, 40, 0.08);
@@ -4075,7 +4086,7 @@ select {
   padding: 0.38rem;
 }
 
-.browser-workbench-row.active {
+.browser-workbench-tab.active {
   border-color: rgba(46, 92, 184, 0.18);
   background: rgba(46, 92, 184, 0.06);
 }
@@ -4109,6 +4120,33 @@ select {
   font-size: 0.7rem;
 }
 
+.browser-workbench-detail {
+  display: grid;
+  gap: 0.28rem;
+  min-width: 0;
+  border: 1px solid rgba(32, 35, 40, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.6);
+  padding: 0.5rem;
+}
+
+.browser-workbench-detail .tool-row {
+  grid-template-columns: minmax(4.5rem, auto) minmax(0, 1fr);
+}
+
+.browser-workbench-detail .tool-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.browser-workbench-detail-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.36rem;
+  margin-top: 0.2rem;
+}
+
 .browser-workbench-error {
   color: var(--danger);
 }
@@ -4124,6 +4162,7 @@ select {
 }
 
 .browser-workbench-report span,
+.browser-workbench-report em,
 .browser-workbench-report small {
   min-width: 0;
   overflow: hidden;
@@ -4135,6 +4174,12 @@ select {
   color: var(--success);
   font-size: 0.75rem;
   font-weight: 620;
+}
+
+.browser-workbench-report em {
+  color: color-mix(in srgb, var(--muted) 76%, var(--text));
+  font-size: 0.7rem;
+  font-style: normal;
 }
 
 .browser-workbench-report small {
@@ -4149,6 +4194,14 @@ select {
   border: 1px solid rgba(32, 35, 40, 0.1);
   border-radius: 8px;
   background: #fff;
+}
+
+.browser-frame-empty {
+  margin: 0;
+  border: 1px dashed rgba(32, 35, 40, 0.12);
+  border-radius: 8px;
+  padding: 0.58rem 0.65rem;
+  background: rgba(255, 255, 255, 0.42);
 }
 
 .browser-frame-shell iframe {
