@@ -98,6 +98,8 @@ class AutomationRunnerTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["exit_code"], 0)
+            self.assertEqual(result["usage_signal"]["status"], "not_available")
+            self.assertEqual(result["usage_signal"]["reason"], "standalone_codex_cli_usage_not_reported")
             self.assertIn("[REDACTED]", result["summary"])
             self.assertEqual(captured["command"], ["codex", "exec", "Audit repo", "--sandbox", "workspace-write", "--model", "deepseek-v4-pro"])
             self.assertEqual(captured["kwargs"]["cwd"], session.execution_root)

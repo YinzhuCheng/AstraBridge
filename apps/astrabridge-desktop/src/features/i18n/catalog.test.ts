@@ -24,4 +24,24 @@ describe("i18n catalog", () => {
     expect(t("zh-CN", "manager_login_summary")).not.toBe("manager_login_summary");
     expect(t("zh-CN", "browser_prepare_native")).toContain("原生内核");
   });
+
+  it("uses multimodal route wording for the capability routing surface", () => {
+    expect(t("en", "setup_tab_capabilities")).toBe("Multimodal routes");
+    expect(t("en", "manager_capabilities_title")).toBe("Multimodal routes");
+    expect(t("zh-CN", "setup_tab_capabilities")).toBe("多模态能力路由");
+    expect(t("zh-CN", "manager_capabilities_title")).toBe("多模态能力路由");
+  });
+
+  it("localizes the compact sidebar groups and API manager scope", () => {
+    expect(t("en", "sidebar_more_capabilities")).toBe("More capabilities");
+    expect(t("zh-CN", "sidebar_more_capabilities")).toBe("更多能力");
+    expect(t("zh-CN", "sidebar_group_settings")).toBe("设置");
+    expect(t("zh-CN", "sidebar_group_developer")).toBe("开发者功能");
+    expect(t("zh-CN", "setup_tab_dogfood")).toBe("狗粮台账");
+    expect(t("zh-CN", "provider_settings_subtitle")).toContain("模型目录");
+    expect(t("zh-CN", "provider_settings_subtitle")).not.toContain("MCP");
+    expect(t("zh-CN", "provider_settings_subtitle")).not.toContain("健康检查");
+    expect(t("zh-CN", "manager_nav_summary")).toBe("登录、用户、API 密钥、提供方和模型。");
+    expect(t("zh-CN", "manager_nav_summary")).not.toContain("运行时");
+  });
 });

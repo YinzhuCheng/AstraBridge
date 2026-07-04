@@ -1,8 +1,8 @@
 ﻿# Brand
 
 - English: AstraBridge
-- Chinese: 鏄熸ˉ
-- Full display: AstraBridge 鏄熸ˉ
+- Chinese: 星桥
+- Full display: AstraBridge 星桥
 
 The icon direction is a deep-blue night sky with a bridge made from two star trails and a small prism node in the center, expressing multi-provider connection and local workflow continuity.
 

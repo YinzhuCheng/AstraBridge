@@ -7,6 +7,7 @@ from typing import Any
 
 from .app_server_client import JsonRpcError
 from .codex_app_server_probe import ProbeClientFactory
+from .codex_plugin_fixture_catalog import is_managed_plugin_fixture_path
 from .common import app_runtime_dir, new_id, now_iso, write_json
 from .security import redact_sensitive
 
@@ -268,6 +269,8 @@ def _scan_local_skill_manifests(search_roots: list[Path], plugin_roots: list[dic
     for root in search_roots:
         for skill_path in sorted(root.rglob("SKILL.md")):
             resolved = skill_path.resolve()
+            if is_managed_plugin_fixture_path(resolved):
+                continue
             if resolved in seen_paths:
                 continue
             seen_paths.add(resolved)

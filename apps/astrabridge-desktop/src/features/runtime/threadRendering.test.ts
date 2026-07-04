@@ -1,9 +1,34 @@
 ﻿import { describe, expect, it } from "vitest";
 
-import { hasPersistedRenderableTurnContent, itemActivityFromPayload, renderBlocksForItem, summarizeTurnBlocks } from "./threadRendering";
+import {
+  describeConversationRenderState,
+  hasPersistedRenderableTurnContent,
+  hasRenderableThreadContent,
+  itemActivityFromPayload,
+  renderBlocksForItem,
+  summarizeTurnBlocks,
+} from "./threadRendering";
 import type { ShellThread } from "../../types";
+import { normalizeRuntimeActivity, runtimeActivityStatusLabel } from "./runtimeActivity";
 
 describe("thread rendering helpers", () => {
+  it("normalizes command execution blocks into activity entries", () => {
+    const [block] = renderBlocksForItem({
+      type: "commandExecution",
+      id: "cmd-1",
+      command: "Get-Content -LiteralPath README.md",
+      status: "completed",
+      aggregatedOutput: "README contents",
+      exitCode: 0,
+    } as never);
+
+    const entry = normalizeRuntimeActivity(block);
+
+    expect(entry).toMatchObject({ kind: "command", status: "completed", toolName: "shell_command" });
+    expect(entry?.preview).toContain("Get-Content");
+    expect(runtimeActivityStatusLabel(entry!, "zh-CN")).toBe("已运行");
+  });
+
   it("renders verified dynamic tool evidence into the tool block", () => {
     const blocks = renderBlocksForItem({
       type: "dynamicToolCall",
@@ -34,6 +59,64 @@ describe("thread rendering helpers", () => {
     expect(blocks[0].detail).toContain("browser smoke app pass");
     expect(blocks[0].detail).toContain("D:/workspace/.astrabridge/captures/app.png");
   });
+
+  it("classifies browser, web, and multimodal tools for the activity surface", () => {
+    const browser = normalizeRuntimeActivity(renderBlocksForItem({
+      type: "dynamicToolCall",
+      id: "browser-1",
+      namespace: "astrabridge_browser",
+      tool: "astrabridge_browser_smoke",
+      arguments: { url: "http://127.0.0.1:4174" },
+      status: "completed",
+      contentItems: null,
+      success: true,
+      durationMs: 1234,
+      verifiedEvidence: {
+        verified: true,
+        label: "tool-event verified",
+        summary: ["browser smoke app pass", "screenshot: output/browser.png"],
+      },
+    } as never)[0]);
+    const web = normalizeRuntimeActivity(renderBlocksForItem({
+      type: "dynamicToolCall",
+      id: "web-1",
+      namespace: "astrabridge_web",
+      tool: "astrabridge_web_search_batch",
+      arguments: { q: "agent benchmark" },
+      status: "completed",
+      contentItems: null,
+      success: true,
+      durationMs: 120,
+      verifiedEvidence: {
+        verified: true,
+        label: "tool-event verified",
+        summary: ["sources: 3", "https://example.com"],
+      },
+    } as never)[0]);
+    const multimodal = normalizeRuntimeActivity(renderBlocksForItem({
+      type: "dynamicToolCall",
+      id: "image-1",
+      namespace: "yunwu_image",
+      tool: "yunwu_image_generate",
+      arguments: { prompt: "diagram" },
+      status: "completed",
+      contentItems: null,
+      success: true,
+      durationMs: 120,
+      verifiedEvidence: {
+        verified: true,
+        label: "tool-event verified",
+        summary: ["images: 2/2", "asset: asset-1"],
+      },
+    } as never)[0]);
+
+    expect(browser?.kind).toBe("browser");
+    expect(web?.kind).toBe("web");
+    expect(web?.preview).toBe("sources: 3");
+    expect(multimodal?.kind).toBe("multimodal");
+    expect(multimodal?.preview).toBe("images: 2/2");
+  });
+
 
   it("renders MCP tool results from text content before falling back to raw JSON", () => {
     const [block] = renderBlocksForItem({
@@ -142,7 +225,11 @@ describe("thread rendering helpers", () => {
     expect(block.deleted).toBe(1);
     expect(block.detail).toContain("src/App.tsx");
     expect(block.detail).toContain("src/new.ts");
-    expect(block.detail).toContain("鏂板");
+    expect(block.detail).toContain("新增");
+    expect(normalizeRuntimeActivity(block)).toMatchObject({
+      kind: "file_edit",
+      diff: { added: 3, deleted: 1, files: 2 },
+    });
   });
 
   it("surfaces suspect turn completion quality as a follow-up warning block", () => {
@@ -310,6 +397,44 @@ describe("thread rendering helpers", () => {
     ).toBe(true);
   });
 
+  it("detects renderable thread content even before every aggregate turn is completed", () => {
+    expect(
+      hasRenderableThreadContent({
+        turns: [
+          {
+            id: "turn-empty",
+            items: [{ type: "userMessage", id: "user-1", content: [{ type: "text", text: "hi" }] } as never],
+            coding_events: [],
+          },
+        ],
+      } as unknown as Pick<ShellThread, "turns">),
+    ).toBe(false);
+
+    expect(
+      hasRenderableThreadContent({
+        turns: [
+          {
+            id: "turn-agent",
+            items: [{ type: "agentMessage", id: "assistant-1", text: "done", phase: null, memoryCitation: null } as never],
+            coding_events: [],
+          },
+        ],
+      } as unknown as Pick<ShellThread, "turns">),
+    ).toBe(true);
+
+    expect(
+      hasRenderableThreadContent({
+        turns: [
+          {
+            id: "turn-handoff",
+            items: [],
+            coding_events: [{ event_id: "handoff-1", event_type: "provider_handoff", payload: { to_thread_id: "thread-deepseek" } }],
+          },
+        ],
+      } as unknown as Pick<ShellThread, "turns">),
+    ).toBe(true);
+  });
+
   it("falls back to coding events when a completed turn has no renderable items", () => {
     const blocks = summarizeTurnBlocks({
       turns: [
@@ -414,8 +539,8 @@ describe("thread rendering helpers", () => {
     expect(block.sourceThreadId).toBe("thread-kimi");
     if (block.role !== "activity") throw new Error("expected activity block");
     expect(block.activity.kind).toBe("fork");
-    expect(block.activity.preview).toContain("kimi");
-    expect(block.activity.preview).toContain("kimi-k2.6");
+    expect(block.activity.label).toBe("模型通道已切换");
+    expect(block.activity.preview).toBe("提供方 kimi · 模型 kimi-k2.6");
     expect(block.activity.detail).toContain("thread-kimi");
     expect(block.activity.detail).toContain("reused existing lane");
     expect(block.activity.detail).toContain("projection: task_context_fresh_thread");
@@ -441,6 +566,88 @@ describe("thread rendering helpers", () => {
         ],
       } as never),
     ).toBe(true);
+  });
+
+  it("classifies empty, terminal, and failed conversation states", () => {
+    expect(describeConversationRenderState({ activeThread: { turns: [] }, blocks: [] })).toMatchObject({
+      kind: "empty",
+      emptyKind: "new_thread",
+    });
+
+    expect(
+      describeConversationRenderState({
+        activeThread: { turns: [{ id: "turn-completed", status: "completed", completedAt: 3, items: [], coding_events: [] }] },
+        blocks: [],
+      }),
+    ).toMatchObject({
+      kind: "empty",
+      emptyKind: "terminal_empty",
+    });
+
+    expect(
+      describeConversationRenderState({
+        activeThread: {
+          turns: [
+            {
+              id: "turn-failed",
+              status: "failed",
+              error: { message: "provider timeout", additionalDetails: null },
+              items: [],
+              coding_events: [],
+            },
+          ],
+        },
+        blocks: [],
+      }),
+    ).toMatchObject({
+      kind: "diagnostic",
+      diagnosticKind: "turn_failed",
+      tone: "danger",
+      detail: "provider timeout",
+    });
+  });
+
+  it("classifies interrupted, cancelled, render mismatch, and stale runtime states", () => {
+    expect(
+      describeConversationRenderState({
+        activeThread: { turns: [{ id: "turn-interrupted", status: "interrupted", items: [], coding_events: [] }] },
+        blocks: [],
+      }),
+    ).toMatchObject({ kind: "diagnostic", diagnosticKind: "turn_interrupted", tone: "warning" });
+
+    expect(
+      describeConversationRenderState({
+        activeThread: { turns: [{ id: "turn-cancelled", status: "cancelled", items: [], coding_events: [] }] },
+        blocks: [],
+      }),
+    ).toMatchObject({ kind: "diagnostic", diagnosticKind: "turn_cancelled", tone: "warning" });
+
+    expect(
+      describeConversationRenderState({
+        activeThread: {
+          turns: [
+            {
+              id: "turn-agent",
+              status: "completed",
+              completedAt: 3,
+              items: [{ type: "agentMessage", id: "assistant-1", text: "done", phase: null, memoryCitation: null } as never],
+              coding_events: [],
+            },
+          ],
+        },
+        blocks: [],
+      }),
+    ).toMatchObject({ kind: "diagnostic", diagnosticKind: "render_mismatch", tone: "warning" });
+
+    expect(
+      describeConversationRenderState({
+        activeThread: {
+          status: { type: "idle", stale_error_type: "systemError", stale_error_normalized: true },
+          turns: [{ id: "turn-clean", status: "completed", completedAt: 3, items: [], coding_events: [] }],
+        },
+        blocks: [],
+      }),
+    ).toMatchObject({ kind: "diagnostic", diagnosticKind: "stale_runtime_error", tone: "info" });
   });
 });
 

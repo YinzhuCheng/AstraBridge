@@ -12,6 +12,7 @@ from typing import Any
 
 from .asset_registry_service import AssetRegistryService
 from .automations import AutomationService
+from .browser_workbench_service import BrowserWorkbenchService
 from .checkpoint_service import CheckpointService
 from .common import DEFAULT_PORT, public_error
 from .common import now_iso, read_json, write_json
@@ -37,19 +38,56 @@ from .router_service import RouterService
 from .runtime_supervisor_service import RuntimeSupervisorService
 from .runtime_service import RuntimeService
 from .secret_service import SecretService
+from .sidecar_provenance import build_sidecar_provenance
 from .task_conversation_service import TaskConversationService
 from .task_service import TaskService
+from .title_suggestion_service import TitleSuggestionService
 from .web_tool_service import AstraBridgeWebService
 from .wsl_dependency_service import WslDependencyService
 from .yunwu_image_service import YunwuImageService
 
 
 ALLOWED_ORIGINS = {
-    "http://127.0.0.1:5173",
-    "http://localhost:5173",
+    "http://127.0.0.1:4181",
+    "http://localhost:4181",
     "http://tauri.localhost",
     "tauri://localhost",
 }
+
+
+def configured_allowed_origins() -> set[str]:
+    raw = os.environ.get("ASTRABRIDGE_ALLOWED_ORIGINS", "")
+    configured = {
+        item.strip().rstrip("/")
+        for item in raw.replace(";", ",").split(",")
+        if item.strip()
+    }
+    return {*ALLOWED_ORIGINS, *configured}
+
+
+def allow_any_loopback_origin() -> bool:
+    return os.environ.get("ASTRABRIDGE_ALLOW_ANY_LOOPBACK_ORIGIN") == "1"
+
+
+def is_loopback_origin(origin: str | None) -> bool:
+    if not origin:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(origin)
+    except Exception:
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    return parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+
+
+def is_allowed_origin(origin: str | None) -> bool:
+    if not origin:
+        return False
+    normalized = origin.rstrip("/")
+    if normalized in configured_allowed_origins():
+        return True
+    return allow_any_loopback_origin() and is_loopback_origin(normalized)
 
 
 def turn_text_from_payload(payload: dict[str, Any]) -> str:
@@ -82,6 +120,7 @@ def sse_frame(*, event: str | None = None, data: Any | None = None, comment: str
 
 class AppContext:
     def __init__(self, seed_root: Path) -> None:
+        self.seed_root = seed_root.expanduser().resolve()
         self.projects = ProjectService()
         self.profiles = ProfileService()
         self.secrets = SecretService()
@@ -101,9 +140,11 @@ class AppContext:
         self.llm_manager = LlmApiManagerService(self.router_config, self.router)
         self.modals = ModalService(self.projects.require_shell_state_root)
         self.tasks = TaskService(self.projects)
+        self.title_suggestions = TitleSuggestionService(self.projects, self.tasks, self.router)
         self.assets = AssetRegistryService(self.projects, self.tasks)
         self.yunwu_image = YunwuImageService()
         self.web_tools = AstraBridgeWebService(self.projects)
+        self.browser_workbench = BrowserWorkbenchService(self.projects)
         self.dogfood = DogfoodRunService(self.projects)
         self.checkpoints = CheckpointService(self.projects)
         self.task_conversation = TaskConversationService(self.projects, self.tasks)
@@ -233,7 +274,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         origin = self.headers.get("Origin")
-        if origin in ALLOWED_ORIGINS or (origin and origin.startswith(("http://127.0.0.1:", "http://localhost:"))):
+        if is_allowed_origin(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token, X-Admin-Session-Token")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
@@ -252,7 +293,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", f"inline; filename*=UTF-8''{urllib.parse.quote(filename)}")
         self.send_header("X-Content-Type-Options", "nosniff")
         origin = self.headers.get("Origin")
-        if origin in ALLOWED_ORIGINS or (origin and origin.startswith(("http://127.0.0.1:", "http://localhost:"))):
+        if is_allowed_origin(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token, X-Admin-Session-Token")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
@@ -264,7 +305,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         origin = self.headers.get("Origin")
-        if origin in ALLOWED_ORIGINS or (origin and origin.startswith(("http://127.0.0.1:", "http://localhost:"))):
+        if is_allowed_origin(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token, X-Admin-Session-Token")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
@@ -313,6 +354,22 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8-sig") or "{}")
 
+    def _sidecar_provenance(self) -> dict[str, Any]:
+        listen_host = "127.0.0.1"
+        listen_port: int | None = None
+        address = getattr(getattr(self, "server", None), "server_address", None)
+        if isinstance(address, tuple) and len(address) >= 2:
+            listen_host = str(address[0] or listen_host)
+            try:
+                listen_port = int(address[1])
+            except (TypeError, ValueError):
+                listen_port = None
+        return build_sidecar_provenance(
+            listen_host=listen_host,
+            listen_port=listen_port,
+            seed_root=getattr(self.context, "seed_root", None),
+        )
+
     def _payload_thread_id(self, payload: dict[str, Any]) -> str:
         raw = payload.get("thread_id")
         thread_id = str(raw or "").strip()
@@ -343,6 +400,7 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "service": "astrabridge-sidecar",
+                        "sidecar": self._sidecar_provenance(),
                         "runtime": self.context.runtime.environment(),
                         "router": self.context.router.status(),
                     }
@@ -357,6 +415,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/projects/recent":
                 self.send_json(self.context.projects.list_recent())
+                return
+            if path == "/api/projects/sidebar":
+                self.send_json(self.context.projects.sidebar_snapshot())
                 return
             if path == "/api/project/saves":
                 self.send_json(self.context.checkpoints.list_saves())
@@ -378,6 +439,16 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/project/files/media":
                 media = self.context.project_tools.file_media(str(query.get("path", [""])[0]))
                 self._send_file(media["path"], content_type=str(media["mime_type"]), filename=str(media["name"]))
+                return
+            if path == "/api/browser/workbench/sessions":
+                self.send_json(self.context.browser_workbench.list_sessions())
+                return
+            if path == "/api/browser/workbench/frame":
+                session_id = self._optional_query_string(query, "id")
+                if not session_id:
+                    raise ValueError("id is required.")
+                frame = self.context.browser_workbench.frame_path(session_id)
+                self._send_file(frame, content_type="image/png", filename=frame.name)
                 return
             if path == "/api/project/terminal/history":
                 limit_values = query.get("limit", [])
@@ -459,6 +530,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/runtime/environment":
                 runtime = self.context.runtime.environment()
                 runtime["router"] = self.context.router.status()
+                runtime["sidecar"] = self._sidecar_provenance()
                 self.send_json(runtime)
                 return
             if path == "/api/runtime/kernel-probe":
@@ -507,12 +579,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(disabled_status())
                 return
             if path == "/api/audit/isolation":
+                sidecar_provenance = self._sidecar_provenance()
                 self.send_json(
                     self.context.audit.snapshot(
                         current_project=self.context.projects.current_project,
                         runtime_environment=self.context.runtime.environment(),
                         router_status=self.context.router.status(),
                         official_codex_status=disabled_status(),
+                        sidecar_provenance=sidecar_provenance,
                         sidecar_port=int(self.server.server_address[1]) if isinstance(self.server.server_address, tuple) else None,
                     )
                 )
@@ -638,6 +712,33 @@ class Handler(BaseHTTPRequestHandler):
                 self.context.runtime.restart()
                 self.send_json(self.context.projects.close_project())
                 return
+            if path == "/api/project/title/suggest":
+                self.send_json(self.context.title_suggestions.suggest_project_title(force=bool(payload.get("force"))))
+                return
+            if path == "/api/project/attachments/stage":
+                self.send_json(self.context.runtime.stage_uploaded_attachments(payload))
+                return
+            if path == "/api/browser/workbench/create":
+                self.send_json(self.context.browser_workbench.create_session(payload))
+                return
+            if path == "/api/browser/workbench/navigate":
+                self.send_json(self.context.browser_workbench.navigate(payload))
+                return
+            if path == "/api/browser/workbench/action":
+                self.send_json(self.context.browser_workbench.action(payload))
+                return
+            if path == "/api/browser/workbench/layout":
+                self.send_json(self.context.browser_workbench.layout(payload))
+                return
+            if path == "/api/browser/workbench/focus":
+                self.send_json(self.context.browser_workbench.focus(str(payload.get("id") or "")))
+                return
+            if path == "/api/browser/workbench/close":
+                self.send_json(self.context.browser_workbench.close(str(payload.get("id") or "")))
+                return
+            if path == "/api/browser/workbench/tile-two-up":
+                self.send_json(self.context.browser_workbench.tile_two_up(list(payload.get("ids") or [])))
+                return
             if path == "/api/automations/create":
                 self.send_json(self.context.automations.create_automation(payload))
                 return
@@ -762,6 +863,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/project/tasks/title":
                 task = self.context.tasks.update_current_task_title(str(payload.get("title") or ""))
                 self.send_json({"task": task, "project": self.context.projects.current_project})
+                return
+            if path == "/api/project/tasks/title/suggest":
+                self.send_json(self.context.title_suggestions.suggest_current_task_title(force=bool(payload.get("force"))))
                 return
             if path == "/api/profiles":
                 self.send_json({"profile": self.context.profiles.upsert_profile(payload)})
@@ -1074,6 +1178,22 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/runtime/capability-routes/save":
                 self.send_json({"route": self.context.router_config.save_capability_route(payload)})
                 return
+            if path == "/api/runtime/capability-invoke":
+                capability_id = str(payload.get("capability_id") or "").strip()
+                if not capability_id:
+                    raise ValueError("capability_id is required.")
+                capability_payload = payload.get("payload")
+                if not isinstance(capability_payload, dict):
+                    capability_payload = {}
+                self.send_json(
+                    {
+                        "result": CapabilityRuntime(
+                            router_config=self.context.router_config,
+                            key_injector=self.context.llm_manager.inject_profile_key,
+                        ).invoke(capability_id, capability_payload)
+                    }
+                )
+                return
             if path == "/api/runtime/capability-smoke":
                 route_record = self.context.router_config.capability_routes().get(str(payload.get("capability_id") or "").strip())
                 self.send_json(
@@ -1141,6 +1261,15 @@ class Handler(BaseHTTPRequestHandler):
                         record_id=record_id,
                         scope=str(payload.get("scope") or "").strip(),
                         enablement_status=str(payload.get("enablement_status") or "").strip(),
+                    )
+                )
+                return
+            if path == "/api/runtime/skill-scenario/plugin-creator-fixture":
+                profile = self._resolve_runtime_profile(payload.get("profile_id"))
+                self.send_json(
+                    self.context.runtime.skill_plugin_creator_fixture_scenario(
+                        profile,
+                        skill_name=str(payload.get("skill_name") or "plugin-creator").strip() or "plugin-creator",
                     )
                 )
                 return
@@ -1241,7 +1370,7 @@ class Handler(BaseHTTPRequestHandler):
                 thread_id = self._optional_string(payload, "thread_id")
                 project = self.context.projects.switch_thread(thread_id)
                 task = self.context.tasks.restore_active_provider_thread(thread_id) if thread_id else self.context.tasks.current_task()
-                self.send_json({"project": project, "task": task})
+                self.send_json({"project": self.context.projects.current_project or project, "task": task})
                 return
             if path == "/api/runtime/thread-settings":
                 settings = self.context.runtime.update_thread_defaults(
@@ -1263,6 +1392,7 @@ class Handler(BaseHTTPRequestHandler):
                         thread_id=self._payload_thread_id(payload),
                         objective=str(payload.get("objective") or ""),
                         token_budget=int(token_budget) if token_budget not in {None, ""} else None,
+                        status=self._optional_string(payload, "status"),
                     )
                 )
                 return

@@ -15,6 +15,7 @@ SECRET_RE = re.compile(
     r"(?i)(authorization\s*:|bearer\s+[a-z0-9._-]{12,}|api[_-]?key|secret[_-]?key|cookie\s*:|token\s*[:=]|ssh-rsa|BEGIN\s+(RSA|OPENSSH|EC|DSA)\s+PRIVATE\s+KEY)"
 )
 SECRET_QUERY_RE = re.compile(r"(?i)([?&](?:api[_-]?key|token|access[_-]?token|auth|authorization|sig|signature|key)=)([^&#\s]+)")
+DESKTOP_KEY_PATH_RE = re.compile(r"(?i)(?:[A-Z]:\\Users\\[^\\]+\\Desktop\\key\.txt|/Users/[^/]+/Desktop/key\.txt)")
 SECRET_PATH_PARTS = {
     ".aws",
     ".azure",
@@ -83,7 +84,7 @@ def scan_text_for_secrets(path: Path) -> None:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return
-    if SECRET_RE.search(text):
+    if SECRET_RE.search(text) or DESKTOP_KEY_PATH_RE.search(text):
         raise SecurityError(f"Secret-like content detected in {path}")
 
 
@@ -369,6 +370,8 @@ def redact_sensitive(value: Any) -> Any:
         if value.startswith("data:image/"):
             return "[REDACTED_IMAGE_DATA_URL]"
         return re.sub(r"data:image/[^\"'\s<>]+", "[REDACTED_IMAGE_DATA_URL]", value)
+    if isinstance(value, str) and DESKTOP_KEY_PATH_RE.search(value):
+        return DESKTOP_KEY_PATH_RE.sub("[REDACTED_DESKTOP_SECRET_PATH]", value)
     if isinstance(value, str) and SECRET_QUERY_RE.search(value):
         return SECRET_QUERY_RE.sub(r"\1[REDACTED]", value)
     if isinstance(value, str) and SECRET_RE.search(value):

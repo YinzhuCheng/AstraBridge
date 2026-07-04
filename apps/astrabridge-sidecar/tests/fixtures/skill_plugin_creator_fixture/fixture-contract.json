@@ -1,0 +1,92 @@
+{
+  "schema_version": "astrabridge-skill-scenario-contract-v1",
+  "capability": "skills",
+  "scenario_id": "skills_plugin_creator_fixture_scaffold",
+  "skill": {
+    "skill_name": "plugin-creator",
+    "display_name": "Plugin Creator",
+    "skill_locator": "${CODEX_HOME:-~/.codex}/skills/.system/plugin-creator",
+    "selection_reason": "Local-only scaffold with script-backed validation; no network access, provider quota, or secret inputs required."
+  },
+  "input": {
+    "brief_path_rel": "input/plugin-creator-brief.md",
+    "fixture_kind": "markdown",
+    "sensitive": false,
+    "requires_network": false,
+    "requires_paid_provider": false
+  },
+  "output": {
+    "run_root_rel": "PRIVATE/demo-runs/skills-plugin-creator-scenario",
+    "plugin_parent_rel": "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins",
+    "plugin_name": "astrabridge-skills-dogfood-sample",
+    "plugin_root_rel": "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample",
+    "manifest_path_rel": "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/.codex-plugin/plugin.json",
+    "marketplace_path_rel": "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/.agents/plugins/marketplace.json",
+    "required_paths_rel": [
+      "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/skills",
+      "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/scripts",
+      "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/assets",
+      "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/.mcp.json",
+      "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/.app.json"
+    ]
+  },
+  "execution_contract": {
+    "allowed_operations": [
+      "read the tracked markdown brief",
+      "create a local plugin scaffold under the controlled run root",
+      "create or update a repo-local marketplace file under the controlled run root",
+      "run the local plugin validation script against the generated plugin"
+    ],
+    "forbidden_operations": [
+      "write outside PRIVATE/demo-runs/skills-plugin-creator-scenario",
+      "write ~/.codex or project .codex* runtime state",
+      "install from remote marketplaces",
+      "use network access",
+      "read or persist secrets, tokens, cookies, or authorization headers"
+    ]
+  },
+  "ui_evidence": {
+    "expected_trigger_path": "能力 -> 技能 -> Plugin Creator",
+    "expected_screenshots": [
+      {
+        "name": "step12-skills-plugin-creator-entry.png",
+        "kind": "entry",
+        "assertion": "技能详情页显示 Plugin Creator、fixture brief 路径与预期输出根。"
+      },
+      {
+        "name": "step12-skills-plugin-creator-running.png",
+        "kind": "running",
+        "assertion": "任务进入运行态并显示 run id、执行中状态或等价的执行证据。"
+      },
+      {
+        "name": "step12-skills-plugin-creator-pass.png",
+        "kind": "success",
+        "assertion": "任务完成后显示 plugin root、manifest、marketplace 与验证结果。"
+      },
+      {
+        "name": "step12-skills-plugin-creator-output-preview.png",
+        "kind": "detail",
+        "assertion": "文件预览成功打开生成的 plugin.json 或 marketplace.json。"
+      }
+    ]
+  },
+  "verification": {
+    "required_manifest_fields": [
+      "name",
+      "version",
+      "description",
+      "interface.displayName",
+      "interface.shortDescription",
+      "interface.defaultPrompt|interface.default_prompt"
+    ],
+    "commands": [
+      "python ${CODEX_HOME:-~/.codex}/skills/.system/plugin-creator/scripts/validate_plugin.py PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample"
+    ],
+    "pass_assertions": [
+      "The generated plugin name stays `astrabridge-skills-dogfood-sample`.",
+      "The plugin root contains skills, scripts, assets, .mcp.json, and .app.json.",
+      "The marketplace file exists under the controlled run root and references `./plugins/astrabridge-skills-dogfood-sample`.",
+      "The validation command exits with code 0."
+    ]
+  }
+}

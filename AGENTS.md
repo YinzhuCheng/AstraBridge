@@ -11,27 +11,28 @@ AstraBridge is an independent product with its own runtime and project-state bou
 - Do not read Desktop key files or other plaintext secret sources unless the user explicitly authorizes that exact action for the current task.
 - Preserve diagnostics and validation reports, but redact secrets before saving anything durable.
 
-## Current Execution Focus
+## Current Repository Execution State
 
-The active execution source of truth is:
+The repository normalization pass is complete and is preserved as a historical execution record:
 
 - [PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md](D:/AstraBridge/PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md)
 
-Do not delete, replace, or rewrite the active plan structure unless the user explicitly asks for that. If the active plan file is changed accidentally, restore its prior execution state before doing other work.
+Do not delete, replace, or rewrite that completed plan structure unless the user explicitly asks for that. If the record file is changed accidentally, restore its prior execution state before doing other work.
 
-Current repository-wide objective:
+Current repository-wide product boundary:
 
-- Normalize the repo around the current AstraBridge product architecture.
-- Remove or rewrite obsolete legacy plan guidance, product-path compatibility language, and stale repository entry points.
+- Current projects use `.abproj` plus workspace-local `.astrabridge/` state.
+- Legacy `.lcr*`, `.codexproj`, `.codex-shell`, and official-login paths are guardrails or historical evidence only.
+- Compatibility shims are documented in `docs/archive/LEGACY_COMPATIBILITY_SHIMS.md` and must not become new implementation entry points.
 - Keep `PRIVATE/**`, validation artifacts, demo runs, caches, logs, and raw experiment traces unless the user explicitly names cleanup targets.
 
 ## Execution Loop Rule
 
-For each user-facing execution round under the active execution plan:
+For each user-facing execution round under a numbered plan that explicitly owns the requested work:
 
 1. Start from the earliest unchecked numbered step unless the user explicitly redirects to another numbered step.
 2. Complete exactly one full numbered step such as `1.2` or `3.1` before stopping; do not stop on partial progress inside that step.
-3. After completing that step, update `PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md`:
+3. After completing that step, update that plan file:
    - mark the step as `[x]` in the execution status table
    - append a dated entry in the completion record
    - state the next step entry point
@@ -40,7 +41,8 @@ For each user-facing execution round under the active execution plan:
 
 ## Round Completion Log
 
-- 2026-06-23: Rebased repository execution rules onto `PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md`; the active execution flow remains one numbered step per turn.
+- 2026-06-23: Rebased repository execution rules onto `PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md`; the normalization execution flow used one numbered step per turn.
+- 2026-06-27: Repository normalization plan is complete; future work should start from the plan that matches the requested product area, not from the completed normalization record.
 
 ## Capability Runtime Follow-on Plan
 

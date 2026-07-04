@@ -14,6 +14,8 @@ import type {
   CodexSkillRegistryRecord,
   LocaleCode,
   ProjectFile,
+  ProjectFilePreview,
+  SkillPluginCreatorScenarioExecution,
 } from "../../types";
 
 type InventoryKind = "all" | "plugins" | "skills";
@@ -55,19 +57,57 @@ type InventoryItem =
       skill: CodexSkillRegistryRecord;
     };
 
+type PluginCreatorScenarioSpec = {
+  triggerPath: string;
+  fixtureContractPath: string;
+  briefPath: string;
+  runRoot: string;
+  pluginRoot: string;
+  manifestPath: string;
+  marketplacePath: string;
+  suggestedReportPath: string;
+  referenceReportPath: string;
+  referenceScreenshotPath: string;
+};
+
+const PLUGIN_CREATOR_SCENARIO_SPEC: PluginCreatorScenarioSpec = {
+  triggerPath: "能力 -> 技能 -> Plugin Creator",
+  fixtureContractPath: "apps/astrabridge-sidecar/tests/fixtures/skill_plugin_creator_fixture/fixture-contract.json",
+  briefPath: "apps/astrabridge-sidecar/tests/fixtures/skill_plugin_creator_fixture/input/plugin-creator-brief.md",
+  runRoot: "PRIVATE/demo-runs/skills-plugin-creator-scenario/",
+  pluginRoot: "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/",
+  manifestPath: "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/.codex-plugin/plugin.json",
+  marketplacePath: "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/.agents/plugins/marketplace.json",
+  suggestedReportPath: "apps/astrabridge-desktop/output/playwright/real-scenario-dogfood/step12-skills-plugin-creator-pass.json",
+  referenceReportPath: "apps/astrabridge-desktop/output/playwright/real-scenario-dogfood/step10-skills-plugin-creator-report-partial.json",
+  referenceScreenshotPath: "apps/astrabridge-desktop/output/playwright/real-scenario-dogfood/step10-skills-plugin-creator-reference.png",
+};
+
 const LABELS = {
   en: {
     title: "Extensions",
     loading: "Loading plugin and skill inventory...",
     unavailable: "Plugin and skill inventory is unavailable.",
-    summary: "Inspect discovered Codex plugins and skills across AstraBridge-managed runtime roots. Plugin install stays explicit, and skill enablement can be managed globally or overridden per project.",
+    summary: "Inspect discovered Codex plugins and skills across AstraBridge-managed runtime roots. Plugin install stays explicit, and selected skills can expose controlled task evidence alongside enablement controls.",
+    summaryPlugins: "Review plugin inventory, source boundaries, and explicit install status inside AstraBridge-managed runtime roots. Installation stays isolated and always requires an explicit preview first.",
+    summarySkills: "Inspect discovered skills, owning plugins, effective enablement state, and any controlled task evidence exposed for real-scenario dogfooding.",
     pluginList: "Plugin list",
     skillList: "Skill list",
     pluginsCount: "Plugins",
     skillsCount: "Skills",
     sourcesCount: "Sources",
+    installedCount: "Installed",
+    availableCount: "Ready to install",
+    attentionCount: "Needs attention",
     generatedAt: "Generated",
+    registryRefresh: "Refresh registry",
+    registryRefreshPending: "Refreshing...",
+    registryRefreshingHint: "Refreshing inventory while keeping the last verified snapshot visible.",
+    pluginDiscovery: "Plugin discovery",
+    skillDiscovery: "Skill discovery",
     inventory: "Inventory",
+    inventoryPlugins: "Plugins",
+    inventorySkills: "Skills",
     details: "Details",
     search: "Search inventory",
     type: "Type",
@@ -79,7 +119,24 @@ const LABELS = {
     available: "available",
     attention: "attention",
     disabled: "disabled",
+    enabled: "enabled",
+    blocked: "blocked",
+    warning: "warning",
+    compatible: "compatible",
+    unknown: "unknown",
+    supported: "supported",
+    inherited: "inherited",
+    ready: "ready",
+    planned: "planned",
+    applied: "applied",
+    install: "install",
+    update: "update",
+    noop: "up to date",
+    unsupported: "unsupported",
+    updateAvailable: "update available",
     noMatches: "No plugins or skills match the current filters.",
+    noPluginMatches: "No plugins match the current filters.",
+    noSkillMatches: "No skills match the current filters.",
     noSelection: "Select a plugin or skill to inspect its metadata.",
     unsupportedKernel: "Kernel does not expose plugin or skill inventory on this runtime yet.",
     unsupportedHint: "Upgrade or probe a runtime that supports plugin and skill listing before expecting inventory here.",
@@ -105,6 +162,11 @@ const LABELS = {
     iconProvenance: "Icon provenance",
     iconValidated: "Icon validated",
     asset: "Asset",
+    sourceKindLocal: "local",
+    sourceKindProjectLocal: "project local",
+    sourceKindManual: "manual",
+    sourceKindOfficial: "official",
+    sourceKindCurated: "curated",
     none: "none",
     manifestPath: "Manifest path",
     sourcePath: "Source path",
@@ -122,6 +184,14 @@ const LABELS = {
     generatedFallback: "generated fallback",
     planTitle: "Install plan",
     planSummary: "Preview install or update scope before any file mutation happens.",
+    planWorkflow: "Operation guidance",
+    planWorkflowBoundary: "All plugin writes stay inside AstraBridge-managed isolated runtime roots and evidence directories.",
+    planWorkflowIdle: "Preview the plan first. AstraBridge only writes a plugin into its isolated runtime after you explicitly apply the prepared plan.",
+    planWorkflowInstall: "This plugin is ready to install from an AstraBridge-managed local source. Applying the plan copies files into the isolated runtime and records rollback evidence.",
+    planWorkflowUpdate: "This plugin has an update path. Applying the plan replaces the isolated runtime copy and captures rollback evidence before mutation.",
+    planWorkflowNoop: "This plugin is already current in the isolated runtime. Re-preview the plan when you need to inspect source, target, or rollback metadata.",
+    planWorkflowUnsupported: "This plugin is visible for inspection, but the current source cannot be applied directly. Mirror it into an AstraBridge-managed local catalog before expecting install actions here.",
+    planWorkflowApplied: "The latest execution result is shown below. Report paths stay inside AstraBridge-managed evidence roots.",
     planAction: "Action",
     planReason: "Reason",
     planSourceRoot: "Source root",
@@ -167,20 +237,79 @@ const LABELS = {
     useGlobalSetting: "Use global setting",
     globalStatePath: "Global state path",
     projectStatePath: "Project state path",
+    enablementReason: "Effective state reason",
+    waitingApproval: "Waiting for approval",
+    waitingApprovalHint: "This skill came from a newly installed plugin and remains disabled until you explicitly approve it.",
+    blockedByOwner: "Owning plugin unavailable",
+    blockedByOwnerHint: "AstraBridge cannot enable this skill until its owning plugin becomes available again.",
+    disabledByProject: "Disabled by project override",
+    disabledByProjectHint: "The current project preset keeps this skill disabled for this workspace.",
+    disabledByGlobal: "Disabled by global default",
+    disabledByGlobalHint: "The global runtime rule keeps this skill disabled until you enable it again.",
     skillUpdatePending: "Updating...",
+    contributions: "Contributions",
+    pass: "pass",
+    failed: "failed",
+    timeout: "timeout",
+    skillScenarioTitle: "Controlled task",
+    skillScenarioBadge: "fixture scenario",
+    skillScenarioRun: "Run controlled task",
+    skillScenarioRunning: "Running...",
+    skillScenarioSummary: "Plugin Creator is wired to a fixed fixture task for AstraBridge's real-scenario dogfood flow.",
+    skillScenarioBoundary: "This task only reads the fixed fixture brief and writes under PRIVATE/demo-runs/skills-plugin-creator-scenario/. It does not touch official Codex state.",
+    skillScenarioNotRun: "No controlled task has been started from this panel yet. You can still inspect the fixed inputs, expected outputs, and the backend reference report from step 10.",
+    skillScenarioLatestRunHint: "The latest execution result below is the evidence surface that step 12 will reuse for full in-app acceptance.",
+    skillScenarioTriggerPath: "Trigger path",
+    skillScenarioFixtureContract: "Fixture contract",
+    skillScenarioBriefPath: "Fixed brief path",
+    skillScenarioSuggestedReport: "Suggested report",
+    skillScenarioReferenceReport: "Reference report",
+    skillScenarioReferenceScreenshot: "Reference screenshot",
+    skillScenarioRunRoot: "Run root",
+    skillScenarioPluginRoot: "Plugin root",
+    skillScenarioManifest: "Manifest path",
+    skillScenarioMarketplace: "Marketplace path",
+    skillScenarioLatestRun: "Latest execution",
+    skillScenarioStatus: "Scenario status",
+    skillScenarioExecutionId: "Execution ID",
+    skillScenarioExecutionRoot: "Execution root",
+    skillScenarioResultPath: "Result path",
+    skillScenarioEventsPath: "Events path",
+    skillScenarioReportSeedPath: "Report seed",
+    skillScenarioFailureReason: "Failure reason",
+    skillScenarioPreviewTitle: "Artifact preview",
+    skillScenarioPreviewEmpty: "Run the controlled task first, then preview the generated manifest or marketplace output here.",
+    skillScenarioPreviewLoading: "Loading preview...",
+    skillScenarioPreviewManifest: "Preview manifest",
+    skillScenarioPreviewMarketplace: "Preview marketplace",
+    skillScenarioPreviewPath: "Preview path",
+    skillScenarioPreviewKind: "Preview kind",
+    skillScenarioPreviewSize: "Bytes",
   },
   "zh-CN": {
     title: "扩展",
     loading: "正在加载插件与技能清单...",
     unavailable: "插件与技能清单暂不可用。",
-    summary: "查看 AstraBridge 托管运行时根目录中发现的 Codex 插件与技能。本阶段只读，不提供安装、更新或启用变更。",
+    summary: "查看 AstraBridge 托管运行时根目录中发现的 Codex 插件与技能。插件安装保持显式操作，部分技能会额外展示受控任务证据与启用控制。",
+    summaryPlugins: "查看插件清单、来源边界和显式安装状态。安装始终先预览计划，再写入 AstraBridge 托管的隔离运行时。",
+    summarySkills: "查看技能清单、所属插件、实际启用状态，以及真实场景狗粮验收使用的受控任务证据。",
     pluginList: "插件列表",
     skillList: "技能列表",
     pluginsCount: "插件",
     skillsCount: "技能",
     sourcesCount: "来源",
+    installedCount: "已安装",
+    availableCount: "待安装",
+    attentionCount: "需关注",
     generatedAt: "生成时间",
+    registryRefresh: "刷新清单",
+    registryRefreshPending: "刷新中...",
+    registryRefreshingHint: "正在刷新清单，并保留上一份已验证快照可见。",
+    pluginDiscovery: "插件发现",
+    skillDiscovery: "技能发现",
     inventory: "清单",
+    inventoryPlugins: "插件",
+    inventorySkills: "技能",
     details: "详情",
     search: "搜索清单",
     type: "类型",
@@ -192,7 +321,24 @@ const LABELS = {
     available: "可用",
     attention: "需关注",
     disabled: "已禁用",
+    enabled: "已启用",
+    blocked: "已阻止",
+    warning: "警告",
+    compatible: "兼容",
+    unknown: "未知",
+    supported: "已支持",
+    inherited: "继承",
+    ready: "就绪",
+    planned: "已计划",
+    applied: "已执行",
+    install: "安装",
+    update: "更新",
+    noop: "已是最新",
+    unsupported: "不支持",
+    updateAvailable: "可更新",
     noMatches: "当前筛选条件下没有匹配的插件或技能。",
+    noPluginMatches: "当前筛选条件下没有匹配的插件。",
+    noSkillMatches: "当前筛选条件下没有匹配的技能。",
     noSelection: "选择一个插件或技能以查看元数据。",
     unsupportedKernel: "当前运行时内核还不能暴露插件或技能清单。",
     unsupportedHint: "先升级或探测支持插件与技能列表能力的运行时，再在这里查看清单。",
@@ -233,8 +379,21 @@ const LABELS = {
     iconProvenance: "图标来源",
     iconValidated: "图标已验证",
     asset: "资源",
+    sourceKindLocal: "本地",
+    sourceKindProjectLocal: "项目本地",
+    sourceKindManual: "手动来源",
+    sourceKindOfficial: "官方",
+    sourceKindCurated: "精选来源",
     planTitle: "安装计划",
     planSummary: "在发生任何文件变更前预览安装或更新范围。",
+    planWorkflow: "操作说明",
+    planWorkflowBoundary: "所有插件写入都只会落在 AstraBridge 托管的隔离运行时目录和证据目录中。",
+    planWorkflowIdle: "请先预览计划。只有在你明确点击执行后，AstraBridge 才会把插件写入隔离运行时。",
+    planWorkflowInstall: "该插件已经具备安装条件。执行计划后会把文件复制进隔离运行时，并记录可回滚证据。",
+    planWorkflowUpdate: "该插件存在更新路径。执行计划前会先捕获回滚快照，再替换隔离运行时中的版本。",
+    planWorkflowNoop: "该插件已经是隔离运行时中的最新版本。需要检查来源、目标目录或回滚信息时，可以重新预览计划。",
+    planWorkflowUnsupported: "当前只能查看该插件，不能直接执行安装。请先把来源镜像到 AstraBridge 托管的本地目录。",
+    planWorkflowApplied: "最近一次执行结果显示在下方，报告路径仍保留在 AstraBridge 的证据目录中。",
     planAction: "动作",
     planReason: "原因",
     planSourceRoot: "来源根目录",
@@ -281,8 +440,48 @@ const LABELS = {
     globalStatePath: "全局状态路径",
     projectStatePath: "项目状态路径",
     skillUpdatePending: "正在更新...",
+    contributions: "贡献能力",
+    pass: "通过",
+    failed: "失败",
+    timeout: "超时",
+    skillScenarioTitle: "受控任务",
+    skillScenarioBadge: "固定场景",
+    skillScenarioRun: "运行受控任务",
+    skillScenarioRunning: "正在运行...",
+    skillScenarioSummary: "Plugin Creator 已绑定到 AstraBridge 真实场景狗粮验收使用的固定 fixture 任务。",
+    skillScenarioBoundary: "该任务只会读取固定 brief，并且只写入 PRIVATE/demo-runs/skills-plugin-creator-scenario/ 下的证据目录，不会触碰官方 Codex 状态。",
+    skillScenarioNotRun: "当前界面还没有触发过这个受控任务。你仍然可以先检查固定输入、预期输出，以及步骤 10 留下的后端参考报告。",
+    skillScenarioLatestRunHint: "下方最近一次执行结果会作为步骤 12 完整 in-app 验收复用的证据面。",
+    skillScenarioTriggerPath: "触发路径",
+    skillScenarioFixtureContract: "契约文件",
+    skillScenarioBriefPath: "固定 brief 路径",
+    skillScenarioSuggestedReport: "建议报告路径",
+    skillScenarioReferenceReport: "参考报告路径",
+    skillScenarioReferenceScreenshot: "参考截图路径",
+    skillScenarioRunRoot: "运行根目录",
+    skillScenarioPluginRoot: "插件根目录",
+    skillScenarioManifest: "Manifest 路径",
+    skillScenarioMarketplace: "Marketplace 路径",
+    skillScenarioLatestRun: "最近一次执行",
+    skillScenarioStatus: "场景状态",
+    skillScenarioExecutionId: "执行 ID",
+    skillScenarioExecutionRoot: "执行目录",
+    skillScenarioResultPath: "结果路径",
+    skillScenarioEventsPath: "事件路径",
+    skillScenarioReportSeedPath: "报告种子",
+    skillScenarioFailureReason: "失败原因",
+    skillScenarioPreviewTitle: "产物预览",
+    skillScenarioPreviewEmpty: "先运行受控任务，再在这里预览生成的 manifest 或 marketplace 产物。",
+    skillScenarioPreviewLoading: "正在加载预览...",
+    skillScenarioPreviewManifest: "预览 Manifest",
+    skillScenarioPreviewMarketplace: "预览 Marketplace",
+    skillScenarioPreviewPath: "预览路径",
+    skillScenarioPreviewKind: "预览类型",
+    skillScenarioPreviewSize: "字节数",
   },
 } as const;
+
+type InventoryCopy = Record<keyof typeof LABELS.en, string>;
 
 export function PluginSkillInventoryPanel({
   locale,
@@ -319,6 +518,16 @@ export function PluginSkillInventoryPanel({
   const [skillActionErrorRecordId, setSkillActionErrorRecordId] = useState<string | null>(null);
   const [skillActionError, setSkillActionError] = useState("");
   const [skillPendingActionKey, setSkillPendingActionKey] = useState<string | null>(null);
+  const [skillScenarioResults, setSkillScenarioResults] = useState<Record<string, SkillPluginCreatorScenarioExecution>>({});
+  const [skillScenarioErrorRecordId, setSkillScenarioErrorRecordId] = useState<string | null>(null);
+  const [skillScenarioError, setSkillScenarioError] = useState("");
+  const [skillScenarioPendingRecordId, setSkillScenarioPendingRecordId] = useState<string | null>(null);
+  const [artifactPreviewPath, setArtifactPreviewPath] = useState("");
+  const [artifactPreview, setArtifactPreview] = useState<ProjectFilePreview | null>(null);
+  const [artifactPreviewPending, setArtifactPreviewPending] = useState(false);
+  const [artifactPreviewError, setArtifactPreviewError] = useState("");
+  const [registryRefreshPending, setRegistryRefreshPending] = useState(false);
+  const [registryRefreshError, setRegistryRefreshError] = useState("");
 
   const sourceCatalogById = useMemo(() => {
     return new Map((snapshot?.source_catalogs ?? []).map((entry) => [entry.source_catalog_id, entry]));
@@ -333,6 +542,8 @@ export function PluginSkillInventoryPanel({
   const noteMap = useMemo(() => _noteMap(snapshot?.notes ?? []), [snapshot?.notes]);
   const pluginListStatus = noteMap.plugin_list_status ?? "unknown";
   const skillListStatus = noteMap.skill_list_status ?? "unknown";
+  const pluginRecordIds = useMemo(() => new Set((snapshot?.plugins ?? []).map((plugin) => plugin.record_id)), [snapshot?.plugins]);
+  const skillRecordIds = useMemo(() => new Set((snapshot?.skills ?? []).map((skill) => skill.record_id)), [snapshot?.skills]);
 
   const filteredItems = useMemo(() => {
     const normalizedSearch = search.trim().toLowerCase();
@@ -342,7 +553,7 @@ export function PluginSkillInventoryPanel({
       if (status === "installed" && item.installStatus !== "installed") return false;
       if (status === "available" && !["available", "update_available"].includes(item.installStatus)) return false;
       if (status === "attention" && !item.attention) return false;
-      if (status === "disabled" && item.enablementStatus !== "disabled") return false;
+      if (status === "disabled" && !["disabled", "blocked"].includes(item.enablementStatus)) return false;
       if (!normalizedSearch) return true;
       return item.searchText.includes(normalizedSearch);
     });
@@ -363,18 +574,31 @@ export function PluginSkillInventoryPanel({
   }, [filteredItems, selectedId]);
 
   useEffect(() => {
-    setPluginPlans({});
-    setPlanErrors({});
-    setPlanPendingRecordId(null);
-    setApplyResults({});
-    setApplyErrors({});
-    setApplyPendingRecordId(null);
-    setPresetPending(false);
-    setPresetError("");
-    setSkillActionErrorRecordId(null);
-    setSkillActionError("");
-    setSkillPendingActionKey(null);
-  }, [snapshot?.generated_at]);
+    setPluginPlans((current) => _filterRecordMap(current, pluginRecordIds));
+    setPlanErrors((current) => _filterRecordMap(current, pluginRecordIds));
+    setPlanPendingRecordId((current) => (current && pluginRecordIds.has(current) ? current : null));
+    setApplyResults((current) => _filterRecordMap(current, pluginRecordIds));
+    setApplyErrors((current) => _filterRecordMap(current, pluginRecordIds));
+    setApplyPendingRecordId((current) => (current && pluginRecordIds.has(current) ? current : null));
+    setSkillActionErrorRecordId((current) => (current && skillRecordIds.has(current) ? current : null));
+    setSkillPendingActionKey((current) => {
+      if (!current) return null;
+      const separatorIndex = current.indexOf(":");
+      if (separatorIndex <= 0) return null;
+      const recordId = current.slice(0, separatorIndex);
+      return skillRecordIds.has(recordId) ? current : null;
+    });
+    setSkillScenarioResults((current) => _filterRecordMap(current, skillRecordIds));
+    setSkillScenarioErrorRecordId((current) => (current && skillRecordIds.has(current) ? current : null));
+    setSkillScenarioPendingRecordId((current) => (current && skillRecordIds.has(current) ? current : null));
+  }, [pluginRecordIds, skillRecordIds]);
+
+  useEffect(() => {
+    setArtifactPreviewPath("");
+    setArtifactPreview(null);
+    setArtifactPreviewPending(false);
+    setArtifactPreviewError("");
+  }, [selectedId, skillScenarioResults]);
 
   const activeProjectPreset = _activeProjectPreset(project);
 
@@ -407,7 +631,31 @@ export function PluginSkillInventoryPanel({
   const selectedApplyResult = selected?.kind === "plugin" ? applyResults[selected.plugin.record_id] ?? null : null;
   const selectedApplyError = selected?.kind === "plugin" ? applyErrors[selected.plugin.record_id] ?? "" : "";
   const selectedSkillActionError = selected?.kind === "skill" && skillActionErrorRecordId === selected.skill.record_id ? skillActionError : "";
+  const selectedSkillScenarioResult = selected?.kind === "skill" ? skillScenarioResults[selected.skill.record_id] ?? null : null;
+  const selectedSkillScenarioError = selected?.kind === "skill" && skillScenarioErrorRecordId === selected.skill.record_id ? skillScenarioError : "";
+  const selectedSkillScenarioSpec = selected?.kind === "skill" ? _pluginCreatorScenarioSpec(selected.skill) : null;
   const unsupported = items.length === 0 && (pluginListStatus === "unsupported" || skillListStatus === "unsupported");
+  const installedPluginCount = (snapshot.plugins ?? []).filter((plugin) => plugin.install_status === "installed").length;
+  const availablePluginCount = (snapshot.plugins ?? []).filter((plugin) => ["available", "update_available"].includes(String(plugin.install_status || ""))).length;
+  const attentionPluginCount = (snapshot.plugins ?? []).filter((plugin) => _needsAttention(
+    String(plugin.install_status || "unknown"),
+    String(plugin.enablement_status || "unknown"),
+    String(plugin.compatibility_status || "unknown"),
+    plugin.compatibility_warnings ?? [],
+  )).length;
+  const inventoryTitle = kind === "plugins" ? copy.inventoryPlugins : kind === "skills" ? copy.inventorySkills : copy.inventory;
+  const inventorySummary = kind === "plugins" ? copy.summaryPlugins : kind === "skills" ? copy.summarySkills : copy.summary;
+  const noMatchesText = kind === "plugins" ? copy.noPluginMatches : kind === "skills" ? copy.noSkillMatches : copy.noMatches;
+  const selectedWorkflowMessage = selected?.kind === "plugin" ? _pluginWorkflowMessage(selected.plugin, selected.source, selectedPlan, copy) : "";
+  const selectedContributionCount = selected
+    ? selected.kind === "plugin"
+      ? (selected.plugin.declared_mcp_servers?.length ?? 0)
+        + (selected.plugin.declared_app_ids?.length ?? 0)
+        + (selected.plugin.declared_hook_keys?.length ?? 0)
+      : (selected.skill.trigger_hints?.length ?? 0) + (selected.skill.permission_hints?.length ?? 0)
+    : 0;
+  const selectedEnablementStatus = selected?.kind === "skill" ? _skillEffectiveStatus(selected.skill) : selected?.enablementStatus ?? "unknown";
+  const selectedSkillEnablementNotice = selected?.kind === "skill" ? _skillEnablementNotice(selected.skill, copy) : null;
 
   async function handlePreviewPlan(plugin: CodexPluginRegistryRecord) {
     setPlanPendingRecordId(plugin.record_id);
@@ -491,20 +739,108 @@ export function PluginSkillInventoryPanel({
     }
   }
 
+  async function handleRefreshRegistry() {
+    if (!onRegistryChanged || registryRefreshPending) return;
+    setRegistryRefreshPending(true);
+    setRegistryRefreshError("");
+    try {
+      await onRegistryChanged();
+    } catch (refreshError) {
+      setRegistryRefreshError(String((refreshError as Error)?.message ?? refreshError ?? "Failed to refresh registry."));
+    } finally {
+      setRegistryRefreshPending(false);
+    }
+  }
+
+  async function handleRunSkillScenario(skill: CodexSkillRegistryRecord) {
+    setSkillScenarioPendingRecordId(skill.record_id);
+    setSkillScenarioErrorRecordId(null);
+    setSkillScenarioError("");
+    try {
+      const result = await api.runtimeSkillPluginCreatorFixtureScenario({
+        skill_name: skill.skill_name,
+      });
+      setSkillScenarioResults((current) => ({ ...current, [skill.record_id]: result }));
+    } catch (scenarioError) {
+      setSkillScenarioErrorRecordId(skill.record_id);
+      setSkillScenarioError(String((scenarioError as Error)?.message ?? scenarioError ?? "Failed to run controlled skill scenario."));
+    } finally {
+      setSkillScenarioPendingRecordId((current) => (current === skill.record_id ? null : current));
+    }
+  }
+
+  async function handleLoadArtifactPreview(path: string) {
+    const normalizedPath = path.trim();
+    if (!normalizedPath) return;
+    setArtifactPreviewPath(normalizedPath);
+    setArtifactPreviewPending(true);
+    setArtifactPreviewError("");
+    try {
+      const preview = await api.projectFileRead(normalizedPath);
+      setArtifactPreview(preview);
+    } catch (previewError) {
+      setArtifactPreview(null);
+      setArtifactPreviewError(String((previewError as Error)?.message ?? previewError ?? "Failed to load file preview."));
+    } finally {
+      setArtifactPreviewPending(false);
+    }
+  }
+
   return (
-    <div className="manager-panel" data-testid="plugin-skill-inventory-panel">
+    <div className="manager-panel extensions-panel" data-testid="plugin-skill-inventory-panel">
       <div className="metadata-actions metadata-actions-compact">
-        <div>
+        <div className="extensions-summary-copy">
           <span className="eyebrow">{copy.title}</span>
-          <h3>{copy.inventory}</h3>
-          <p className="muted">{copy.summary}</p>
+          <h3>{inventoryTitle}</h3>
+          <p className="muted">{inventorySummary}</p>
+          {isLoading ? <p className="muted">{copy.registryRefreshingHint}</p> : null}
+          {registryRefreshError ? <p className="error-text">{registryRefreshError}</p> : null}
         </div>
-        <div className="mcp-health-row">
-          <span>{copy.pluginsCount}: {snapshot.plugins.length}</span>
-          <span>{copy.skillsCount}: {snapshot.skills.length}</span>
-          <span>{copy.sourcesCount}: {snapshot.source_catalogs.length}</span>
-          <span>{copy.pluginList}: {_formatStatus(pluginListStatus)}</span>
-          <span>{copy.skillList}: {_formatStatus(skillListStatus)}</span>
+        <div className="extensions-summary-actions">
+          <button
+            type="button"
+            className="ghost-button compact-button"
+            disabled={!onRegistryChanged || registryRefreshPending}
+            onClick={() => void handleRefreshRegistry()}
+          >
+            {registryRefreshPending ? copy.registryRefreshPending : copy.registryRefresh}
+          </button>
+        </div>
+        <div className="extensions-summary-bar">
+          <div className="extensions-inline-actions extensions-summary-capabilities">
+            <span className={`status-tag ${pluginListStatus === "supported" ? "capability-ok" : "capability-warn"}`}>
+              {copy.pluginDiscovery}: {_statusLabel(pluginListStatus, copy)}
+            </span>
+            <span className={`status-tag ${skillListStatus === "supported" ? "capability-ok" : "capability-warn"}`}>
+              {copy.skillDiscovery}: {_statusLabel(skillListStatus, copy)}
+            </span>
+          </div>
+          <div className="extensions-summary-grid" aria-label={copy.inventory} data-testid="extensions-summary-grid">
+            <span className="extensions-summary-stat" data-testid="extensions-summary-plugins">
+              <span>{copy.pluginsCount}</span>
+              <strong>{snapshot.plugins.length}</strong>
+            </span>
+            <span className="extensions-summary-stat" data-testid="extensions-summary-installed">
+              <span>{copy.installedCount}</span>
+              <strong>{installedPluginCount}</strong>
+            </span>
+            <span className="extensions-summary-stat" data-testid="extensions-summary-available">
+              <span>{copy.availableCount}</span>
+              <strong>{availablePluginCount}</strong>
+            </span>
+            <span className="extensions-summary-stat" data-testid="extensions-summary-attention">
+              <span>{copy.attentionCount}</span>
+              <strong>{attentionPluginCount}</strong>
+            </span>
+            <span className="extensions-summary-stat" data-testid="extensions-summary-sources">
+              <span>{copy.sourcesCount}</span>
+              <strong>{snapshot.source_catalogs.length}</strong>
+            </span>
+            <span className="extensions-summary-stat" data-testid="extensions-summary-skills-status">
+              <span>{copy.skillList}</span>
+              <strong>{_statusLabel(skillListStatus, copy)}</strong>
+            </span>
+          </div>
         </div>
       </div>
 
@@ -519,8 +855,8 @@ export function PluginSkillInventoryPanel({
           <p>{copy.unsupportedKernel}</p>
           <p className="muted">{copy.unsupportedHint}</p>
           <div className="mcp-health-row">
-            <span>{copy.pluginList}: {_formatStatus(pluginListStatus)}</span>
-            <span>{copy.skillList}: {_formatStatus(skillListStatus)}</span>
+            <span>{copy.pluginList}: {_statusLabel(pluginListStatus, copy)}</span>
+            <span>{copy.skillList}: {_statusLabel(skillListStatus, copy)}</span>
           </div>
         </section>
       ) : null}
@@ -609,18 +945,23 @@ export function PluginSkillInventoryPanel({
                       <span className={`status-tag ${item.attention ? "capability-warn" : "capability-ok"}`}>{item.kind === "plugin" ? copy.plugin : copy.skill}</span>
                     </div>
                     <span className="metadata-row-id">{item.subtitle}</span>
-                    <span className="metadata-row-id">{item.source?.display_name ?? copy.none}</span>
+                    <span className="extensions-row-meta">
+                      {item.kind === "plugin"
+                        ? _pluginRowMeta(item.plugin, item.source, copy)
+                        : _skillRowMeta(item.skill, item.source, copy)}
+                    </span>
+                    {item.description ? <span className="extensions-row-description">{item.description}</span> : null}
                     <span className="extensions-row-badges">
-                      <span>{_formatStatus(item.installStatus)}</span>
-                      <span>{_formatStatus(item.enablementStatus)}</span>
-                      <span>{_formatStatus(item.compatibilityStatus)}</span>
-                      <span>{_iconProvenanceLabel(item.icon?.provenance_kind, copy)}</span>
+                      <span>{_statusLabel(item.installStatus, copy)}</span>
+                      {item.enablementStatus !== "enabled" ? <span>{_statusLabel(item.enablementStatus, copy)}</span> : null}
+                      {item.compatibilityStatus !== "compatible" ? <span>{_statusLabel(item.compatibilityStatus, copy)}</span> : null}
+                      <span>{_sourceKindLabel(item.source?.kind, copy)}</span>
                     </span>
                   </div>
                 </div>
               </button>
             ))}
-            {!filteredItems.length ? <div className="metadata-section"><p className="muted">{copy.noMatches}</p></div> : null}
+            {!filteredItems.length ? <div className="metadata-section"><p className="muted">{noMatchesText}</p></div> : null}
           </div>
         </div>
 
@@ -637,9 +978,9 @@ export function PluginSkillInventoryPanel({
                   </div>
                 </div>
                 <div className="extensions-row-badges">
-                  <span className="status-tag">{_formatStatus(selected.installStatus)}</span>
-                  <span className="status-tag">{_formatStatus(selected.enablementStatus)}</span>
-                  <span className={`status-tag ${selected.attention ? "capability-warn" : "capability-ok"}`}>{_formatStatus(selected.compatibilityStatus)}</span>
+                  <span className="status-tag">{_statusLabel(selected.installStatus, copy)}</span>
+                  <span className="status-tag">{_statusLabel(selectedEnablementStatus, copy)}</span>
+                  <span className={`status-tag ${selected.attention ? "capability-warn" : "capability-ok"}`}>{_statusLabel(selected.compatibilityStatus, copy)}</span>
                 </div>
               </div>
 
@@ -647,10 +988,10 @@ export function PluginSkillInventoryPanel({
                 <h4>{copy.details}</h4>
                 <div className="extensions-detail-grid">
                   <div><span>{copy.source}</span><strong>{selected.source?.display_name ?? copy.none}</strong></div>
-                  <div><span>{copy.sourceCatalog}</span><strong>{selected.source?.kind ?? copy.none}</strong></div>
-                  <div><span>{copy.installStatus}</span><strong>{_formatStatus(selected.installStatus)}</strong></div>
-                  <div><span>{copy.enablement}</span><strong>{_formatStatus(selected.enablementStatus)}</strong></div>
-                  <div><span>{copy.compatibility}</span><strong>{_formatStatus(selected.compatibilityStatus)}</strong></div>
+                  <div><span>{copy.sourceCatalog}</span><strong>{_sourceKindLabel(selected.source?.kind, copy)}</strong></div>
+                  <div><span>{copy.installStatus}</span><strong>{_statusLabel(selected.installStatus, copy)}</strong></div>
+                  <div><span>{copy.enablement}</span><strong>{_statusLabel(selectedEnablementStatus, copy)}</strong></div>
+                  <div><span>{copy.compatibility}</span><strong>{_statusLabel(selected.compatibilityStatus, copy)}</strong></div>
                   <div><span>{copy.generatedAt}</span><strong>{snapshot.generated_at}</strong></div>
                   {selected.kind === "plugin" ? (
                     <>
@@ -664,6 +1005,73 @@ export function PluginSkillInventoryPanel({
                     </>
                   )}
                 </div>
+              </section>
+
+              <section className="metadata-section">
+                <div className="section-header">
+                  <h4>{copy.contributions}</h4>
+                  <span className="status-tag">{selectedContributionCount}</span>
+                </div>
+                {selected.kind === "plugin" ? (
+                  <>
+                    <div className="extensions-detail-grid">
+                      <div><span>{copy.declaredMcp}</span><strong>{selected.plugin.declared_mcp_servers?.length ?? 0}</strong></div>
+                      <div><span>{copy.apps}</span><strong>{selected.plugin.declared_app_ids?.length ?? 0}</strong></div>
+                      <div><span>{copy.declaredHooks}</span><strong>{selected.plugin.declared_hook_keys?.length ?? 0}</strong></div>
+                      <div><span>{copy.permissions}</span><strong>{selected.plugin.permission_hints?.length ?? 0}</strong></div>
+                    </div>
+                    <div className="extensions-contribution-grid">
+                      <div>
+                        <h4>{copy.declaredMcp}</h4>
+                        <div className="extensions-tag-list">
+                          {_detailTags(selected.plugin.declared_mcp_servers, copy.none)}
+                        </div>
+                      </div>
+                      <div>
+                        <h4>{copy.apps}</h4>
+                        <div className="extensions-tag-list">
+                          {_detailTags(selected.plugin.declared_app_ids, copy.none)}
+                        </div>
+                      </div>
+                      <div>
+                        <h4>{copy.declaredHooks}</h4>
+                        <div className="extensions-tag-list">
+                          {_detailTags(selected.plugin.declared_hook_keys, copy.none)}
+                        </div>
+                      </div>
+                      <div>
+                        <h4>{copy.permissions}</h4>
+                        <div className="extensions-tag-list">
+                          {_detailTags(selected.plugin.permission_hints, copy.none)}
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="extensions-detail-grid">
+                      <div><span>{copy.owningPlugin}</span><strong>{selected.skill.owner_plugin_id || copy.none}</strong></div>
+                      <div><span>{copy.triggerHints}</span><strong>{selected.skill.trigger_hints?.length ?? 0}</strong></div>
+                      <div><span>{copy.permissions}</span><strong>{selected.skill.permission_hints?.length ?? 0}</strong></div>
+                      <div><span>{copy.enablementSourceLabel}</span><strong>{_statusLabel(selected.skill.enablement_source || "unknown", copy)}</strong></div>
+                      <div><span>{copy.enablementReason}</span><strong>{_skillEnablementReasonLabel(selected.skill, copy)}</strong></div>
+                    </div>
+                    <div className="extensions-contribution-grid">
+                      <div>
+                        <h4>{copy.triggerHints}</h4>
+                        <div className="extensions-tag-list">
+                          {_detailTags(selected.skill.trigger_hints, copy.none)}
+                        </div>
+                      </div>
+                      <div>
+                        <h4>{copy.permissions}</h4>
+                        <div className="extensions-tag-list">
+                          {_detailTags(selected.skill.permission_hints, copy.none)}
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
               </section>
 
               {selected.kind === "plugin" ? (
@@ -690,6 +1098,12 @@ export function PluginSkillInventoryPanel({
                     </div>
                   </div>
                   <p className="muted">{copy.planSummary}</p>
+                  <div className="extensions-operation-callout">
+                    <strong>{copy.planWorkflow}</strong>
+                    <p>{copy.planWorkflowBoundary}</p>
+                    <p>{selectedWorkflowMessage}</p>
+                    {selectedApplyResult ? <p>{copy.planWorkflowApplied}</p> : null}
+                  </div>
                   {selectedPlanError ? <p className="error-text">{selectedPlanError}</p> : null}
                   {selectedApplyError ? <p className="error-text">{selectedApplyError}</p> : null}
                   {!selectedPlan ? (
@@ -697,17 +1111,17 @@ export function PluginSkillInventoryPanel({
                   ) : (
                     <>
                       <div className="extensions-detail-grid">
-                        <div><span>{copy.planAction}</span><strong>{_formatStatus(selectedPlan.action)}</strong></div>
+                        <div><span>{copy.planAction}</span><strong>{_statusLabel(selectedPlan.action, copy)}</strong></div>
                         <div><span>{copy.planReason}</span><strong>{_formatStatus(selectedPlan.reason)}</strong></div>
                         <div><span>{copy.currentVersion}</span><strong>{selectedPlan.versions.current_version || copy.none}</strong></div>
                         <div><span>{copy.targetVersion}</span><strong>{selectedPlan.versions.target_version || copy.none}</strong></div>
                         <div><span>{copy.source}</span><strong>{selectedPlan.source.display_name || copy.none}</strong></div>
-                        <div><span>{copy.sourceCatalog}</span><strong>{selectedPlan.source.kind || copy.none}</strong></div>
+                        <div><span>{copy.sourceCatalog}</span><strong>{_sourceKindLabel(selectedPlan.source.kind, copy)}</strong></div>
                         <div><span>{copy.planSourceRoot}</span><strong>{selectedPlan.files.source_root || selectedPlan.source.source_path || copy.none}</strong></div>
                         <div><span>{copy.planTargetRoot}</span><strong>{selectedPlan.files.target_root || copy.none}</strong></div>
                         <div><span>{copy.sourceUrl}</span><strong>{selectedPlan.source.source_url || copy.none}</strong></div>
                         <div><span>{copy.planRollback}</span><strong>{selectedPlan.rollback_snapshot.snapshot_id || copy.none}</strong></div>
-                        <div><span>{copy.rollbackStatus}</span><strong>{_formatStatus(selectedPlan.rollback_snapshot.status)}</strong></div>
+                        <div><span>{copy.rollbackStatus}</span><strong>{_statusLabel(selectedPlan.rollback_snapshot.status, copy)}</strong></div>
                         <div><span>{copy.generatedAt}</span><strong>{selectedPlan.generated_at}</strong></div>
                       </div>
 
@@ -784,9 +1198,9 @@ export function PluginSkillInventoryPanel({
                         <div className="extensions-execution-summary">
                           <h4>{copy.applyResult}</h4>
                           <div className="extensions-detail-grid">
-                            <div><span>{copy.executionStatus}</span><strong>{_formatStatus(selectedApplyResult.status)}</strong></div>
-                            <div><span>{copy.planAction}</span><strong>{_formatStatus(selectedApplyResult.action)}</strong></div>
-                            <div><span>{copy.rollbackStatus}</span><strong>{_formatStatus(selectedApplyResult.rollback_snapshot.status)}</strong></div>
+                            <div><span>{copy.executionStatus}</span><strong>{_statusLabel(selectedApplyResult.status, copy)}</strong></div>
+                            <div><span>{copy.planAction}</span><strong>{_statusLabel(selectedApplyResult.action, copy)}</strong></div>
+                            <div><span>{copy.rollbackStatus}</span><strong>{_statusLabel(selectedApplyResult.rollback_snapshot.status, copy)}</strong></div>
                             <div><span>{copy.reportPath}</span><strong>{selectedApplyResult.artifact_paths.result_path || copy.none}</strong></div>
                           </div>
                           {(selectedApplyResult.errors ?? []).length ? (
@@ -958,13 +1372,20 @@ export function PluginSkillInventoryPanel({
                     </div>
                   </div>
                   <div className="extensions-detail-grid">
-                    <div><span>{copy.effectiveEnablement}</span><strong>{_formatStatus(_skillEffectiveStatus(selected.skill))}</strong></div>
-                    <div><span>{copy.observedEnablement}</span><strong>{_formatStatus(selected.skill.observed_enablement_status || selected.skill.enablement_status)}</strong></div>
-                    <div><span>{copy.globalDefault}</span><strong>{_formatStatus(_skillGlobalStatus(selected.skill))}</strong></div>
-                    <div><span>{copy.projectOverride}</span><strong>{_formatStatus(selected.skill.project_enablement_status || "unknown")}</strong></div>
-                    <div><span>{copy.enablementSourceLabel}</span><strong>{_formatStatus(selected.skill.enablement_source || "unknown")}</strong></div>
+                    <div><span>{copy.effectiveEnablement}</span><strong>{_statusLabel(_skillEffectiveStatus(selected.skill), copy)}</strong></div>
+                    <div><span>{copy.observedEnablement}</span><strong>{_statusLabel(selected.skill.observed_enablement_status || selected.skill.enablement_status, copy)}</strong></div>
+                    <div><span>{copy.globalDefault}</span><strong>{_statusLabel(_skillGlobalStatus(selected.skill), copy)}</strong></div>
+                    <div><span>{copy.projectOverride}</span><strong>{_statusLabel(selected.skill.project_enablement_status || "unknown", copy)}</strong></div>
+                    <div><span>{copy.enablementSourceLabel}</span><strong>{_statusLabel(selected.skill.enablement_source || "unknown", copy)}</strong></div>
+                    <div><span>{copy.enablementReason}</span><strong>{_skillEnablementReasonLabel(selected.skill, copy)}</strong></div>
                     <div><span>{copy.owningPlugin}</span><strong>{selected.skill.owner_plugin_id || copy.none}</strong></div>
                   </div>
+                  {selectedSkillEnablementNotice ? (
+                    <div className="extensions-operation-callout">
+                      <strong>{selectedSkillEnablementNotice.title}</strong>
+                      <p>{selectedSkillEnablementNotice.detail}</p>
+                    </div>
+                  ) : null}
                   {selectedSkillActionError ? <p className="error-text">{selectedSkillActionError}</p> : null}
                   {selected.skill.project_override_supported !== false ? (
                     <div className="extensions-inline-actions">
@@ -1015,10 +1436,110 @@ export function PluginSkillInventoryPanel({
                 </section>
               )}
 
+              {selected.kind === "skill" && selectedSkillScenarioSpec ? (
+                <section className="metadata-section" data-testid="plugin-creator-skill-scenario-panel">
+                  <div className="section-header">
+                    <h4>{copy.skillScenarioTitle}</h4>
+                    <div className="extensions-inline-actions">
+                      <span className="status-tag capability-ok">{copy.skillScenarioBadge}</span>
+                      <button
+                        type="button"
+                        className="primary-button compact-button"
+                        disabled={skillScenarioPendingRecordId === selected.skill.record_id}
+                        onClick={() => void handleRunSkillScenario(selected.skill)}
+                      >
+                        {skillScenarioPendingRecordId === selected.skill.record_id ? copy.skillScenarioRunning : copy.skillScenarioRun}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="extensions-operation-callout">
+                    <strong>{copy.skillScenarioSummary}</strong>
+                    <p>{copy.skillScenarioBoundary}</p>
+                    <p>{selectedSkillScenarioResult ? copy.skillScenarioLatestRunHint : copy.skillScenarioNotRun}</p>
+                  </div>
+                  {selectedSkillScenarioError ? <p className="error-text">{selectedSkillScenarioError}</p> : null}
+                  <div className="extensions-detail-grid">
+                    <div><span>{copy.skillScenarioTriggerPath}</span><strong>{selectedSkillScenarioSpec.triggerPath}</strong></div>
+                    <div><span>{copy.skillScenarioFixtureContract}</span><strong className="extensions-value-code">{selectedSkillScenarioResult?.input.fixture_contract_path || selectedSkillScenarioSpec.fixtureContractPath}</strong></div>
+                    <div><span>{copy.skillScenarioBriefPath}</span><strong className="extensions-value-code">{selectedSkillScenarioResult?.input.brief_path || selectedSkillScenarioSpec.briefPath}</strong></div>
+                    <div><span>{copy.skillScenarioSuggestedReport}</span><strong className="extensions-value-code">{selectedSkillScenarioResult?.report_seed?.suggested_report_path || selectedSkillScenarioSpec.suggestedReportPath}</strong></div>
+                    <div><span>{copy.skillScenarioReferenceReport}</span><strong className="extensions-value-code">{selectedSkillScenarioSpec.referenceReportPath}</strong></div>
+                    <div><span>{copy.skillScenarioReferenceScreenshot}</span><strong className="extensions-value-code">{selectedSkillScenarioSpec.referenceScreenshotPath}</strong></div>
+                  </div>
+                  <div className="extensions-path-list">
+                    <div><span>{copy.skillScenarioRunRoot}</span><strong className="extensions-value-code">{selectedSkillScenarioResult?.output.run_root || selectedSkillScenarioSpec.runRoot}</strong></div>
+                    <div><span>{copy.skillScenarioPluginRoot}</span><strong className="extensions-value-code">{selectedSkillScenarioResult?.output.plugin_root || selectedSkillScenarioSpec.pluginRoot}</strong></div>
+                    <div><span>{copy.skillScenarioManifest}</span><strong className="extensions-value-code">{selectedSkillScenarioResult?.output.manifest_path || selectedSkillScenarioSpec.manifestPath}</strong></div>
+                    <div><span>{copy.skillScenarioMarketplace}</span><strong className="extensions-value-code">{selectedSkillScenarioResult?.output.marketplace_path || selectedSkillScenarioSpec.marketplacePath}</strong></div>
+                  </div>
+
+                  {selectedSkillScenarioResult ? (
+                    <div className="extensions-execution-summary">
+                      <h4>{copy.skillScenarioLatestRun}</h4>
+                      <div className="extensions-detail-grid">
+                        <div><span>{copy.skillScenarioStatus}</span><strong>{_statusLabel(selectedSkillScenarioResult.status, copy)}</strong></div>
+                        <div><span>{copy.skillScenarioExecutionId}</span><strong>{selectedSkillScenarioResult.execution_id}</strong></div>
+                        <div><span>{copy.generatedAt}</span><strong>{selectedSkillScenarioResult.completed_at || selectedSkillScenarioResult.started_at}</strong></div>
+                        <div><span>{copy.executionStatus}</span><strong>{selectedSkillScenarioResult.checks.filter((check) => check.passed).length}/{selectedSkillScenarioResult.checks.length}</strong></div>
+                      </div>
+                      <div className="extensions-path-list">
+                        <div><span>{copy.skillScenarioExecutionRoot}</span><strong className="extensions-value-code">{selectedSkillScenarioResult.output.execution_root}</strong></div>
+                        <div><span>{copy.skillScenarioResultPath}</span><strong className="extensions-value-code">{selectedSkillScenarioResult.artifact_paths.result_path}</strong></div>
+                        <div><span>{copy.skillScenarioEventsPath}</span><strong className="extensions-value-code">{selectedSkillScenarioResult.artifact_paths.events_path}</strong></div>
+                        <div><span>{copy.skillScenarioReportSeedPath}</span><strong className="extensions-value-code">{selectedSkillScenarioResult.artifact_paths.report_seed_path}</strong></div>
+                      </div>
+                      {selectedSkillScenarioResult.failure_reason ? (
+                        <div className="extensions-warning-list">
+                          <div className="extensions-warning-item">
+                            <strong>{copy.skillScenarioFailureReason}</strong>
+                            <span>{selectedSkillScenarioResult.failure_reason}</span>
+                          </div>
+                        </div>
+                      ) : null}
+                      <div className="section-header">
+                        <h4>{copy.skillScenarioPreviewTitle}</h4>
+                        <div className="extensions-inline-actions">
+                          <button
+                            type="button"
+                            className="ghost-button compact-button"
+                            disabled={artifactPreviewPending}
+                            onClick={() => void handleLoadArtifactPreview(selectedSkillScenarioResult.output.manifest_path)}
+                          >
+                            {copy.skillScenarioPreviewManifest}
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost-button compact-button"
+                            disabled={artifactPreviewPending}
+                            onClick={() => void handleLoadArtifactPreview(selectedSkillScenarioResult.output.marketplace_path)}
+                          >
+                            {copy.skillScenarioPreviewMarketplace}
+                          </button>
+                        </div>
+                      </div>
+                      {artifactPreviewError ? <p className="error-text">{artifactPreviewError}</p> : null}
+                      {artifactPreviewPending ? <p className="muted">{copy.skillScenarioPreviewLoading}</p> : null}
+                      {!artifactPreviewPending && !artifactPreview && !artifactPreviewError ? <p className="muted">{copy.skillScenarioPreviewEmpty}</p> : null}
+                      {artifactPreview ? (
+                        <div className="extensions-artifact-preview" data-testid="plugin-creator-artifact-preview">
+                          <div className="extensions-detail-grid">
+                            <div><span>{copy.skillScenarioPreviewPath}</span><strong className="extensions-value-code">{artifactPreviewPath}</strong></div>
+                            <div><span>{copy.skillScenarioPreviewKind}</span><strong>{artifactPreview.kind}</strong></div>
+                            <div><span>{copy.skillScenarioPreviewSize}</span><strong>{artifactPreview.size}</strong></div>
+                            <div><span>{copy.generatedAt}</span><strong>{new Date(artifactPreview.updated_at).toLocaleString()}</strong></div>
+                          </div>
+                          <ArtifactPreviewContent preview={artifactPreview} />
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
+
               <section className="metadata-section">
                 <h4>{copy.provenance}</h4>
                 <div className="extensions-detail-grid">
-                  {_provenanceRows(selected.kind === "plugin" ? selected.plugin.provenance : selected.skill.provenance, copy.none).map((row) => (
+                  {_provenanceRows(selected.kind === "plugin" ? selected.plugin.provenance : selected.skill.provenance, copy).map((row) => (
                     <div key={row.label}>
                       <span>{row.label}</span>
                       <strong>{row.value}</strong>
@@ -1083,6 +1604,19 @@ function ExtensionIconPreview({
   );
 }
 
+function ArtifactPreviewContent({ preview }: { preview: ProjectFilePreview }) {
+  if (preview.kind === "json") {
+    return <pre className="extensions-artifact-code">{_formatJsonPreview(preview.content)}</pre>;
+  }
+  if (preview.kind === "markdown" || preview.kind === "text") {
+    return <pre className="extensions-artifact-code">{preview.content || ""}</pre>;
+  }
+  if (preview.message) {
+    return <p className="muted">{preview.message}</p>;
+  }
+  return <p className="muted">{preview.kind}</p>;
+}
+
 function _pluginItem(plugin: CodexPluginRegistryRecord, source: CodexRegistrySourceCatalog | null): InventoryItem {
   const warnings = plugin.compatibility_warnings ?? [];
   const notes = plugin.notes ?? [];
@@ -1116,10 +1650,21 @@ function _pluginItem(plugin: CodexPluginRegistryRecord, source: CodexRegistrySou
   };
 }
 
+function _formatJsonPreview(content: string | undefined) {
+  const text = String(content || "").trim();
+  if (!text) return "";
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
 function _skillItem(skill: CodexSkillRegistryRecord, source: CodexRegistrySourceCatalog | null): InventoryItem {
   const warnings = skill.compatibility_warnings ?? [];
   const notes = skill.notes ?? [];
   const description = skill.short_description?.trim() || skill.description?.trim() || "";
+  const effectiveEnablementStatus = _skillEffectiveStatus(skill);
   return {
     id: skill.record_id,
     kind: "skill",
@@ -1139,11 +1684,11 @@ function _skillItem(skill: CodexSkillRegistryRecord, source: CodexRegistrySource
     ].join(" ").toLowerCase(),
     source,
     installStatus: String(skill.install_status || "unknown"),
-    enablementStatus: String(skill.enablement_status || "unknown"),
+    enablementStatus: effectiveEnablementStatus,
     compatibilityStatus: String(skill.compatibility_status || "unknown"),
     warnings,
     notes,
-    attention: _needsAttention(String(skill.install_status || "unknown"), String(skill.enablement_status || "unknown"), String(skill.compatibility_status || "unknown"), warnings),
+    attention: _needsAttention(String(skill.install_status || "unknown"), effectiveEnablementStatus, String(skill.compatibility_status || "unknown"), warnings),
     icon: skill.icon ?? null,
     skill,
   };
@@ -1164,6 +1709,179 @@ function _noteMap(notes: string[]) {
 function _formatStatus(value: string | null | undefined) {
   const text = String(value || "unknown").trim() || "unknown";
   return text.replace(/[_/]+/g, " ");
+}
+
+function _statusLabel(
+  value: string | null | undefined,
+  copy: {
+    installed: string;
+    available: string;
+    attention: string;
+    disabled: string;
+    enabled: string;
+    blocked: string;
+    warning: string;
+    compatible: string;
+    unknown: string;
+    supported: string;
+    inherited: string;
+    ready: string;
+    planned: string;
+    applied: string;
+    install: string;
+    update: string;
+    noop: string;
+    unsupported: string;
+    updateAvailable: string;
+    pass: string;
+    failed: string;
+    timeout: string;
+    yes: string;
+    no: string;
+    none: string;
+  },
+) {
+  const text = String(value || "unknown").trim() || "unknown";
+  if (text === "installed") return copy.installed;
+  if (text === "available") return copy.available;
+  if (text === "update_available") return copy.updateAvailable;
+  if (text === "attention") return copy.attention;
+  if (text === "disabled") return copy.disabled;
+  if (text === "enabled") return copy.enabled;
+  if (text === "blocked") return copy.blocked;
+  if (text === "warning") return copy.warning;
+  if (text === "compatible") return copy.compatible;
+  if (text === "unknown") return copy.unknown;
+  if (text === "supported") return copy.supported;
+  if (text === "inherited") return copy.inherited;
+  if (text === "ready") return copy.ready;
+  if (text === "planned") return copy.planned;
+  if (text === "applied") return copy.applied;
+  if (text === "install") return copy.install;
+  if (text === "update") return copy.update;
+  if (text === "noop") return copy.noop;
+  if (text === "unsupported") return copy.unsupported;
+  if (text === "pass") return copy.pass;
+  if (text === "failed" || text === "fail") return copy.failed;
+  if (text === "timeout") return copy.timeout;
+  if (text === "yes") return copy.yes;
+  if (text === "no") return copy.no;
+  if (text === "none") return copy.none;
+  return _formatStatus(text);
+}
+
+function _pluginCreatorScenarioSpec(skill: CodexSkillRegistryRecord): PluginCreatorScenarioSpec | null {
+  return String(skill.skill_name || "").trim() === "plugin-creator" ? PLUGIN_CREATOR_SCENARIO_SPEC : null;
+}
+
+function _sourceKindLabel(
+  value: string | null | undefined,
+  copy: {
+    sourceKindLocal: string;
+    sourceKindProjectLocal: string;
+    sourceKindManual: string;
+    sourceKindOfficial: string;
+    sourceKindCurated: string;
+    none: string;
+  },
+) {
+  if (!value) return copy.none;
+  if (value === "local") return copy.sourceKindLocal;
+  if (value === "project_local") return copy.sourceKindProjectLocal;
+  if (value === "manual") return copy.sourceKindManual;
+  if (value === "official") return copy.sourceKindOfficial;
+  if (value === "curated") return copy.sourceKindCurated;
+  return _formatStatus(value);
+}
+
+function _pluginRowMeta(
+  plugin: CodexPluginRegistryRecord,
+  source: CodexRegistrySourceCatalog | null,
+  copy: {
+    versions: string;
+    source: string;
+    none: string;
+  },
+) {
+  return `${copy.versions}: ${_pluginVersions(plugin) || copy.none} · ${copy.source}: ${source?.display_name || copy.none}`;
+}
+
+function _skillRowMeta(
+  skill: CodexSkillRegistryRecord,
+  source: CodexRegistrySourceCatalog | null,
+  copy: {
+    owningPlugin: string;
+    source: string;
+    none: string;
+  },
+) {
+  return `${copy.owningPlugin}: ${skill.owner_plugin_id || copy.none} · ${copy.source}: ${source?.display_name || copy.none}`;
+}
+
+function _skillEnablementReasonLabel(skill: CodexSkillRegistryRecord, copy: InventoryCopy) {
+  const notes = new Set(skill.notes ?? []);
+  if (notes.has("enablement_pending_user_approval")) return copy.waitingApproval;
+  if (_skillEffectiveStatus(skill) === "blocked") {
+    return skill.enablement_block_reason ? _formatStatus(skill.enablement_block_reason) : copy.blockedByOwner;
+  }
+  if (String(skill.project_enablement_status || "unknown") === "disabled") return copy.disabledByProject;
+  if (_skillGlobalStatus(skill) === "disabled") return copy.disabledByGlobal;
+  return _statusLabel(skill.enablement_source || "unknown", copy);
+}
+
+function _skillEnablementNotice(skill: CodexSkillRegistryRecord, copy: InventoryCopy) {
+  const notes = new Set(skill.notes ?? []);
+  if (notes.has("enablement_pending_user_approval")) {
+    return {
+      title: copy.waitingApproval,
+      detail: copy.waitingApprovalHint,
+    };
+  }
+  if (_skillEffectiveStatus(skill) === "blocked") {
+    const blockReason = skill.enablement_block_reason ? _formatStatus(skill.enablement_block_reason) : "";
+    return {
+      title: copy.blockedByOwner,
+      detail: blockReason ? `${copy.blockedByOwnerHint} (${blockReason})` : copy.blockedByOwnerHint,
+    };
+  }
+  if (String(skill.project_enablement_status || "unknown") === "disabled") {
+    return {
+      title: copy.disabledByProject,
+      detail: copy.disabledByProjectHint,
+    };
+  }
+  if (_skillGlobalStatus(skill) === "disabled") {
+    return {
+      title: copy.disabledByGlobal,
+      detail: copy.disabledByGlobalHint,
+    };
+  }
+  return null;
+}
+
+function _pluginWorkflowMessage(
+  plugin: CodexPluginRegistryRecord,
+  source: CodexRegistrySourceCatalog | null,
+  plan: CodexPluginInstallPlan | null,
+  copy: {
+    planWorkflowIdle: string;
+    planWorkflowInstall: string;
+    planWorkflowUpdate: string;
+    planWorkflowNoop: string;
+    planWorkflowUnsupported: string;
+  },
+) {
+  const action = String(plan?.action || "").trim();
+  if (action === "install") return copy.planWorkflowInstall;
+  if (action === "update") return copy.planWorkflowUpdate;
+  if (action === "noop") return copy.planWorkflowNoop;
+  if (action === "unsupported") return copy.planWorkflowUnsupported;
+  const installStatus = String(plugin.install_status || "unknown");
+  if (installStatus === "update_available") return copy.planWorkflowUpdate;
+  if (installStatus === "installed") return copy.planWorkflowNoop;
+  if (["local", "project_local", "manual"].includes(String(source?.kind || ""))) return copy.planWorkflowInstall;
+  if (installStatus === "available") return copy.planWorkflowIdle;
+  return copy.planWorkflowUnsupported;
 }
 
 function _needsAttention(
@@ -1203,6 +1921,11 @@ function _renderPlanFileEntries(entries: CodexPluginInstallPlanFileEntry[] | und
       ))}
     </div>
   );
+}
+
+function _filterRecordMap<T>(value: Record<string, T>, allowedRecordIds: Set<string>) {
+  const entries = Object.entries(value).filter(([recordId]) => allowedRecordIds.has(recordId));
+  return entries.length === Object.keys(value).length ? value : Object.fromEntries(entries);
 }
 
 function _iconSrc(icon: CodexRegistryIconMetadata | null | undefined) {
@@ -1288,14 +2011,21 @@ function _pluginVersions(plugin: CodexPluginRegistryRecord) {
 
 function _provenanceRows(
   provenance: { source_path?: string | null; source_url?: string | null; manifest_path?: string | null; relative_root?: string | null; checksum_algorithm?: string | null; checksum_value?: string | null } | null | undefined,
-  emptyLabel: string,
+  copy: {
+    manifestPath: string;
+    sourcePath: string;
+    sourceUrl: string;
+    relativeRoot: string;
+    checksum: string;
+    none: string;
+  },
 ) {
-  const checksum = provenance?.checksum_algorithm && provenance?.checksum_value ? `${provenance.checksum_algorithm}:${provenance.checksum_value}` : emptyLabel;
+  const checksum = provenance?.checksum_algorithm && provenance?.checksum_value ? `${provenance.checksum_algorithm}:${provenance.checksum_value}` : copy.none;
   return [
-    { label: LABELS.en.manifestPath, value: provenance?.manifest_path || emptyLabel },
-    { label: LABELS.en.sourcePath, value: provenance?.source_path || emptyLabel },
-    { label: LABELS.en.sourceUrl, value: provenance?.source_url || emptyLabel },
-    { label: LABELS.en.relativeRoot, value: provenance?.relative_root || emptyLabel },
-    { label: LABELS.en.checksum, value: checksum },
+    { label: copy.manifestPath, value: provenance?.manifest_path || copy.none },
+    { label: copy.sourcePath, value: provenance?.source_path || copy.none },
+    { label: copy.sourceUrl, value: provenance?.source_url || copy.none },
+    { label: copy.relativeRoot, value: provenance?.relative_root || copy.none },
+    { label: copy.checksum, value: checksum },
   ];
 }

@@ -83,6 +83,45 @@ class CapabilityArtifactTests(unittest.TestCase):
             self.assertEqual(by_capability["image.generate"]["preview"]["image_path"], str(image_path.resolve()))
             self.assertTrue(by_capability["image.generate"]["artifact_refs"][0]["exists"])
 
+    def test_lists_generated_asset_manifest_even_when_registry_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            generated_dir = root / ".astrabridge" / "assets" / "generated"
+            generated_dir.mkdir(parents=True)
+            image_path = generated_dir / "yunwu-asset.png"
+            image_path.write_bytes(b"png")
+            write_json(
+                generated_dir / "asset_manifest.json",
+                {
+                    "assets": [
+                        {
+                            "asset_id": "yunwu-asset",
+                            "provider": "yunwu",
+                            "tool": "yunwu_image_edit",
+                            "model": "gpt-image-2",
+                            "generated_at": "2026-06-27T00:48:07+08:00",
+                            "purpose": "agent_bench_step14_transparent_asset",
+                            "local_path": str(image_path),
+                            "quality": "low",
+                            "transparency_status": "passed",
+                            "validation_warnings": [],
+                        }
+                    ]
+                },
+            )
+            assets_dir = root / ".astrabridge" / "assets"
+            write_json(assets_dir / "asset_registry.json", {"assets": []})
+
+            snapshot = capability_artifact_snapshot(str(root))
+
+            self.assertEqual(snapshot["total_count"], 1)
+            artifact = snapshot["artifacts"][0]
+            self.assertEqual(artifact["capability_id"], "image.generate")
+            self.assertEqual(artifact["artifact_id"], "yunwu-asset")
+            self.assertEqual(artifact["preview"]["image_path"], str(image_path.resolve()))
+            self.assertEqual(artifact["relative_summary_path"], ".astrabridge\\assets\\generated\\asset_manifest.json")
+            self.assertEqual(artifact["metadata"]["transparency_status"], "passed")
+
     def test_ignores_paths_outside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -27,6 +27,7 @@ export type TaskWorkflowFacts = {
   recoveredCommandCount: number;
   backend: "app_server" | "native_kernel";
   checkpointRefs: TaskWorkflowCheckpointRef[];
+  commandRefs: CodingEventInspectorSummary["commandRefs"];
   diagnosticRefs: TaskWorkflowRef[];
 };
 
@@ -225,6 +226,7 @@ export function summarizeTaskWorkflowFacts(
     recoveredCommandCount: recoveredCommands.size,
     backend: executionThread?.shellSettings?.execution_backend === "native_kernel" ? "native_kernel" : "app_server",
     checkpointRefs,
+    commandRefs,
     diagnosticRefs,
   };
 }

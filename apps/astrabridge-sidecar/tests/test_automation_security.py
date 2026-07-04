@@ -40,6 +40,15 @@ class AutomationSecurityTests(unittest.TestCase):
         self.assertIn("token=[REDACTED]", redacted["url"])
         self.assertEqual(redacted["nested"]["DASHSCOPE_API_KEY"], "[REDACTED]")
 
+    def test_redact_sensitive_covers_desktop_key_path_strings(self) -> None:
+        payload = {
+            "note": r"C:\Users\cyz19\Desktop\key.txt should never be persisted",
+        }
+
+        redacted = redact_sensitive(payload)
+
+        self.assertEqual(redacted["note"], "[REDACTED_DESKTOP_SECRET_PATH] should never be persisted")
+
     def test_runner_filters_env_and_requires_explicit_full_access_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             projects = self._make_project(Path(temp))

@@ -8,7 +8,7 @@ Last updated: 2026-06-25
 - Positioning: a local provider-neutral coding-agent workbench built around Codex CLI/app-server runtime patterns
 - Non-goals:
   - being the official Codex App
-  - depending on official OpenAI account login
+  - not depending on official OpenAI account login
   - using legacy `.lcrproj`, `.lcr`, `.codexproj`, or `.codex-shell` as normal product paths
 
 ## Current Product Facts
@@ -69,7 +69,7 @@ Last updated: 2026-06-25
 
 - Browser smoke is part of the current demo/validation path
 - Expected URL shape:
-  - `http://127.0.0.1:4181/?sidecar=http://127.0.0.1:8826&smoke=1`
+  - `http://127.0.0.1:4181/?astrabridge_launch=dogfood&sidecar=http://127.0.0.1:8826&smoke=1`
 - Artifacts belong under `PRIVATE/demo-runs/**` or other local-only paths
 
 ### Automations
@@ -175,15 +175,15 @@ Completed before or during the current repository normalization pass:
   - install-plan preview and controlled apply with rollback evidence
   - skill enablement, project presets, automation preset handoff, plugin/skill smoke, and security/release docs
 
-## What Still Needs Work
+## Current Follow-Up Areas
 
-Current mainline work still in scope:
+The repository normalization and Codex kernel/plugin/skill integration plans are complete. Current follow-up work should be framed as product hardening or focused feature execution, not as unfinished migration cleanup.
 
-- audit remaining legacy naming and stale product-path references
-- remove or isolate obsolete legacy compatibility code and tests
-- tighten repo structure and component/service boundaries
-- expand validation and browser smoke coverage where it improves current product reliability
-- complete the final end-to-end kernel plus plugin/skill UI closeout step in [CODEX_KERNEL_PLUGIN_SKILL_INTEGRATION_PLAN.md](/D:/AstraBridge/PLAN/CODEX_KERNEL_PLUGIN_SKILL_INTEGRATION_PLAN.md)
+- Keep user-visible navigation aligned with the current project/task model; provider threads and lanes are internal execution details.
+- Continue UI hardening with screenshot-based QA where product surfaces are being changed.
+- Keep compatibility shims small and explicitly documented; do not put new implementation logic behind legacy `lcr_*` entry points.
+- Expand validation and browser smoke coverage where it improves current product reliability.
+- Preserve secret-safe evidence and diagnostics by default.
 
 ## Active Operator Entry Points
 
@@ -199,7 +199,8 @@ Current mainline work still in scope:
 - [Capability UI Management Plan](/D:/AstraBridge/PLAN/CAPABILITY_UI_MANAGEMENT_IMPLEMENTATION_PLAN.md)
 - [Codex Kernel Compatibility Matrix](/D:/AstraBridge/PLAN/CODEX_KERNEL_COMPATIBILITY_MATRIX.md)
 - [Codex Kernel / Plugin / Skill Execution Plan](/D:/AstraBridge/PLAN/CODEX_KERNEL_PLUGIN_SKILL_INTEGRATION_PLAN.md)
-- [Active Execution Plan](/D:/AstraBridge/PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md)
+- [Completed Repository Normalization Record](/D:/AstraBridge/PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md)
+- [Legacy Compatibility Shim Archive](/D:/AstraBridge/docs/archive/LEGACY_COMPATIBILITY_SHIMS.md)
 - [Repository Rules](/D:/AstraBridge/AGENTS.md)
 
 ## Future Agent Guidance
@@ -213,12 +214,13 @@ When a follow-up agent touches kernel or extension work, do not improvise the wo
 
 ## Execution Rule
 
-When continuing repository normalization work, follow the active plan directly:
+When continuing a numbered execution plan, follow the plan that explicitly owns the requested work:
 
-- use `PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md` as the only active execution source of truth
-- complete exactly one full numbered step per turn
-- after finishing a step, update the plan status table, completion record, and next-step entry point
+- if the user asks for capability runtime work, use [CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md](/D:/AstraBridge/PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md)
+- if the user asks for UI hardening, dogfood, or other tracked follow-up work, use the matching current plan under `PLAN/`
+- the repository normalization plan is complete and should not be reopened unless the user explicitly asks to revise that historical record
+- complete one full numbered step per turn when a plan declares that cadence, then update that plan's progress and completion record
 
 ## Historical Note
 
-Older stabilization and migration plans may remain useful as historical evidence, but they are not current execution entry points and must not override the active execution plan.
+Older stabilization and migration plans may remain useful as historical evidence, but they are not current execution entry points and must not override the plan that explicitly owns the requested product area.

@@ -7,6 +7,7 @@ from typing import Any
 
 from ..common import now_iso, write_json
 from ..security import redact_sensitive
+from ..usage_signal import usage_not_available
 from .specs import AutomationRun, assert_transition_run_status
 
 
@@ -153,7 +154,9 @@ class AutomationTriageService:
             return {"status": status, "signal": "no_signal", "disposition": "no_signal", "severity": "info"}
         if self._approval_required(text):
             return {"status": "needs_review", "signal": "unknown", "disposition": "approval_required", "severity": "warning"}
-        if status == "failed" or status == "cancelled":
+        if status == "cancelled":
+            return {"status": "cancelled", "signal": "unknown", "disposition": "failure", "severity": "warning"}
+        if status == "failed":
             return {"status": "failed", "signal": "unknown", "disposition": "failure", "severity": "error"}
         if status == "needs_review" or self._has_finding_signal(automation, text):
             return {"status": "needs_review" if status == "needs_review" else "completed", "signal": "finding", "disposition": "finding", "severity": "warning"}
@@ -202,6 +205,18 @@ class AutomationTriageService:
             "exit_code": result.get("exit_code"),
             "thread_id": result.get("thread_id") or run.get("thread_id"),
             "turn_id": result.get("turn_id"),
+            "watchdog": {
+                "reason": result.get("watchdog_reason") or run.get("watchdog_reason"),
+                "summary": result.get("watchdog_summary") or run.get("watchdog_summary"),
+                "recovered_by": result.get("recovered_by") or run.get("recovered_by"),
+                "recovered_at": result.get("recovered_at") or run.get("recovered_at"),
+            },
+            "usage_signal": result.get("usage_signal")
+            or usage_not_available(
+                source="automation_runtime",
+                reason="automation_result_usage_not_reported",
+                request_kind="automation_finalization",
+            ),
             "workspace": workspace,
             "cleanup": redact_sensitive(cleanup_result or {}),
         }

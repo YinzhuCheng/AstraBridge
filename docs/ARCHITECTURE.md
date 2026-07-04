@@ -23,7 +23,7 @@ AstraBridge currently has four practical layers:
 
 Desktop is responsible for:
 
-- project/task/thread interaction
+- project/task navigation and task-level conversation display
 - provider/model selection
 - runtime kernel status visibility
 - plugin/skill inventory, install-plan preview/apply, enablement, and project preset surfaces
@@ -206,12 +206,34 @@ Preserved evidence roots:
 
 ## Project Model
 
-- Project: workspace boundary plus `.abproj`
-- Task/Chat: user-visible objective in a project
-- Provider Thread: internal runtime thread for one provider/model handoff
-- Fork: branch exploration within a task
-- Save/Load: heavier file-state checkpoint
-- Automation: repeatable scheduled or manual runtime entry bound to the current project
+- Project: workspace boundary plus `.abproj`.
+- Task: user-visible work unit inside a project. A project contains many tasks.
+- Conversation view: center-pane task transcript and activity surface. Chinese UI may call the composer/input control `对话框`, but `会话` must not be used as a task synonym.
+- Execution lane: internal provider/model/runtime line inside a task, backed by a Codex runtime `thread_id`.
+- Provider handoff: switching the active execution lane while staying in the same task.
+- Branch task: a user-visible task created from an existing task's context.
+- Save/Load: heavier file-state checkpoint.
+- Automation: repeatable scheduled or manual runtime entry bound to the current project.
+
+User navigation should present `Project -> Task`. Provider threads, Codex kernel thread ids, and handoff lanes remain internal runtime details. When multiple provider lanes exist for one task, the main conversation should merge them into the task-level conversation and show lane changes as activity rows rather than as separate left-sidebar conversations.
+
+Codex CLI/app-server terminology must be adapted at the product boundary:
+
+- Codex `new thread` maps to AstraBridge `new task`.
+- Codex `fork thread` or `branch thread` maps to AstraBridge `branch task`.
+- Codex `thread_id` remains an internal execution-lane identifier.
+- Codex thread status/events are surfaced as task activity, diagnostics, or developer evidence.
+
+## Legacy Compatibility Shims
+
+Compatibility shims may exist only to keep older private imports or preserved evidence runnable. They must not become the implementation source of truth.
+
+- Canonical web MCP implementation: `apps/astrabridge-sidecar/astrabridge_sidecar/astrabridge_web_mcp_server.py`
+- Compatibility shim: `apps/astrabridge-sidecar/astrabridge_sidecar/lcr_web_mcp_server.py`
+- Canonical web service: `apps/astrabridge-sidecar/astrabridge_sidecar/web_tool_service.py`
+- Compatibility service alias: `apps/astrabridge-sidecar/astrabridge_sidecar/lcr_web_service.py`
+
+When touching web-lane code or tests, import canonical `astrabridge_web_*` modules. Treat `lcr_*` modules as archived compatibility entry points only.
 
 ## Non-goals
 
@@ -219,5 +241,5 @@ The architecture deliberately does not treat these as normal product paths:
 
 - official Codex `~/.codex/config.toml`
 - project `.codex*`
-- official OpenAI account login
+- official OpenAI account login as a normal product path is not supported
 - official Codex App private automation APIs

@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from "react";
+import { useState, type Dispatch, type SetStateAction } from "react";
 
 import { t } from "../i18n/catalog";
 import type {
@@ -122,6 +122,11 @@ const CAPABILITY_STATUS_KEYS: Record<string, string> = {
   pass: "manager_capability_status_pass",
   fail: "manager_capability_status_fail",
   provider_not_run: "manager_capability_status_provider_not_run",
+  skipped: "manager_capability_status_skipped",
+  no_capability_candidate: "manager_capability_status_no_candidate",
+  missing: "manager_capability_status_missing",
+  session_required: "manager_capability_status_session_required",
+  disabled: "manager_capability_status_disabled",
 };
 
 const CAPABILITY_SMOKE_MODE_KEYS: Record<string, string> = {
@@ -146,7 +151,8 @@ function smokeSummary(locale: LocaleCode, result: CapabilitySmokeResult | null):
   const mode = localizedEnum(locale, result.mode, CAPABILITY_SMOKE_MODE_KEYS);
   const status = localizedEnum(locale, result.status, CAPABILITY_STATUS_KEYS);
   const elapsed = smokeElapsedMs(result);
-  const parts = [`${mode} · ${status}`, result.case_id];
+  const providerState = result.provider_invoked ? t(locale, "manager_capability_provider_invoked_yes") : t(locale, "manager_capability_provider_invoked_no");
+  const parts = [`${mode} · ${status}`, result.case_id, providerState];
   if (elapsed !== null) {
     parts.push(`${t(locale, "manager_capability_elapsed")} ${elapsed} ms`);
   }
@@ -215,6 +221,33 @@ function localizedEnum(locale: LocaleCode, value: string | null | undefined, key
   return key ? t(locale, key) : normalized;
 }
 
+function providerSmokeSkipReason(
+  locale: LocaleCode,
+  route: CapabilityRouteEntry,
+  credential: CapabilityProviderCredentialStatus | null,
+  authorized: boolean,
+): string {
+  if (!route.resolved_candidate?.provider_id) {
+    return t(locale, "manager_capability_provider_smoke_skip_no_route");
+  }
+  if (!credential) {
+    return t(locale, "manager_capability_provider_smoke_skip_no_credential");
+  }
+  if (!credential.enabled || credential.status === "disabled") {
+    return t(locale, "manager_capability_provider_smoke_skip_disabled");
+  }
+  if (credential.status === "missing") {
+    return t(locale, "manager_capability_provider_smoke_skip_missing");
+  }
+  if (credential.status === "session_required") {
+    return t(locale, "manager_capability_provider_smoke_skip_session");
+  }
+  if (!authorized) {
+    return t(locale, "manager_capability_provider_smoke_skip_unauthorized");
+  }
+  return "";
+}
+
 function localizedModalities(locale: LocaleCode, modalities: string[] | null | undefined) {
   const values = modalities && modalities.length > 0 ? modalities : ["text"];
   return values.map((value) => localizedEnum(locale, value, CAPABILITY_MODALITY_KEYS)).join(", ");
@@ -251,9 +284,12 @@ export function CapabilityRoutesPanel({
   onRunSmoke,
   onRunProviderSmoke,
 }: CapabilityRoutesPanelProps) {
+  const [providerSmokeAuthorizations, setProviderSmokeAuthorizations] = useState<Record<string, boolean>>({});
   const managementById = new Map(managementEntries.map((entry) => [entry.capability_id, entry]));
   const pluginRegistryById = new Map(pluginSkillRegistry?.plugins.map((item) => [item.plugin_id, item]) ?? []);
   const skillRegistryByName = new Map(pluginSkillRegistry?.skills.map((item) => [item.skill_name, item]) ?? []);
+  const showPluginSkillLoading = pluginSkillRegistryLoading && !pluginSkillRegistry;
+  const showPluginSkillError = pluginSkillRegistryError && !pluginSkillRegistry;
   const configuredToolCount = mcpPreset?.configured_tool_count ?? mcpPreset?.tool_names.length ?? 0;
   const expectedToolCount = mcpPreset?.expected_tool_names?.length ?? configuredToolCount;
   const missingToolCount = mcpPreset?.missing_tool_names?.length ?? 0;
@@ -350,8 +386,10 @@ export function CapabilityRoutesPanel({
             const resolvedProviderCredential = route.resolved_candidate?.provider_id
               ? providerCredentials[route.resolved_candidate.provider_id]
               : null;
+            const providerSmokeAuthorized = Boolean(providerSmokeAuthorizations[route.capability_id]);
             const providerSmokeDisabled = Boolean(
               smokePending ||
+                !providerSmokeAuthorized ||
                 !route.resolved_candidate?.provider_id ||
                 !resolvedProviderCredential ||
                 !resolvedProviderCredential.enabled ||
@@ -359,6 +397,10 @@ export function CapabilityRoutesPanel({
                 resolvedProviderCredential.status === "session_required" ||
                 resolvedProviderCredential.status === "disabled",
             );
+            const providerSmokeSkipText =
+              !smokePending && providerSmokeDisabled && !isStandalone
+                ? providerSmokeSkipReason(locale, route, resolvedProviderCredential, providerSmokeAuthorized)
+                : "";
             const toolingGuides = CAPABILITY_RUNTIME_TOOLING_GUIDANCE[route.capability_id] ?? [];
             const resolvedToolingGuides = toolingGuides.map((guide) =>
               resolveCapabilityRuntimeToolingGuide(guide, pluginRegistryById, skillRegistryByName),
@@ -450,9 +492,9 @@ export function CapabilityRoutesPanel({
                           </div>
                         </article>
                       </div>
-                    ) : pluginSkillRegistryLoading ? (
+                    ) : showPluginSkillLoading ? (
                       <p className="muted compact-copy">{t(locale, "manager_capability_plugin_skill_loading")}</p>
-                    ) : pluginSkillRegistryError ? (
+                    ) : showPluginSkillError ? (
                       <p className="error-text">{t(locale, "manager_capability_plugin_skill_error")}</p>
                     ) : (
                       <div className="capability-runtime-guidance-list">
@@ -570,6 +612,25 @@ export function CapabilityRoutesPanel({
                       {smokeResult?.route.error ? <span className="error-text">{smokeResult.route.error}</span> : null}
                       {providerError ? <span className="error-text">{providerError}</span> : null}
                     </div>
+                    {providerSmokeSkipText ? (
+                      <div className="capability-smoke-skip" data-testid={`capability-provider-smoke-skip-${route.capability_id}`}>
+                        <strong>{t(locale, "manager_capability_provider_smoke_skipped")}</strong>
+                        <span>{providerSmokeSkipText}</span>
+                      </div>
+                    ) : null}
+                    <label className="capability-provider-smoke-authorization">
+                      <input
+                        type="checkbox"
+                        checked={providerSmokeAuthorized}
+                        onChange={(event) =>
+                          setProviderSmokeAuthorizations((current) => ({
+                            ...current,
+                            [route.capability_id]: event.target.checked,
+                          }))
+                        }
+                      />
+                      <span>{t(locale, "manager_capability_provider_smoke_authorize")}</span>
+                    </label>
                     <div className="capability-smoke-actions">
                       <button
                         type="button"
@@ -614,13 +675,14 @@ export function CapabilityRoutesPanel({
                       {recentArtifacts.slice(0, 2).map((artifact) => {
                         const imageSrc = artifact.preview.image_path ? toMediaSrc(artifact.preview.image_path) : "";
                         const audioSrc = artifact.preview.audio_path ? toMediaSrc(artifact.preview.audio_path) : "";
+                        const hasMediaPreview = Boolean(imageSrc || audioSrc);
                         return (
                           <article className="capability-artifact-item" key={`${artifact.capability_id}-${artifact.artifact_id}`}>
                             <div className="capability-artifact-preview">
                               {artifact.preview.kind === "image" && imageSrc ? <img src={imageSrc} alt="" /> : null}
                               {artifact.preview.kind === "audio" && audioSrc ? <audio controls src={audioSrc} /> : null}
-                              {artifact.preview.text ? <p>{artifact.preview.text}</p> : null}
-                              {!imageSrc && !audioSrc && !artifact.preview.text ? <span>{artifact.preview.kind}</span> : null}
+                              {!hasMediaPreview && artifact.preview.text ? <p>{artifact.preview.text}</p> : null}
+                              {!hasMediaPreview && !artifact.preview.text ? <span>{artifact.preview.kind}</span> : null}
                             </div>
                             <div className="capability-artifact-meta">
                               <strong>{artifact.artifact_id}</strong>

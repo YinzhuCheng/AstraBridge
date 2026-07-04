@@ -5,6 +5,7 @@ from typing import Any
 
 from .astrabridge_web_mcp_server import _fetch, _research_brief, _sanitize_tool_context, _search_batch
 from .common import new_id, now_iso, write_json
+from .usage_signal import usage_not_available
 
 
 @dataclass(frozen=True)
@@ -104,12 +105,18 @@ class AstraBridgeWebService:
     def _persist(self, prefix: str, result: dict[str, Any], *, tool_context: Any | None = None) -> dict[str, Any]:
         record_id = new_id(prefix)
         sanitized_context = _sanitize_tool_context(tool_context)
+        usage_signal = usage_not_available(
+            source="web_lane",
+            reason="standalone_web_lane_no_provider_tokens",
+            request_kind=prefix,
+        )
         record = {
             "schema_version": "astrabridge-web-research-record-v1",
             "record_id": record_id,
             "created_at": now_iso(),
             "tool_event_verified": True,
             "tool_context": sanitized_context,
+            "usage_signal": usage_signal,
             "result": result,
         }
         path = self._projects.require_shell_state_root() / "research" / f"{record_id}.json"
@@ -120,6 +127,7 @@ class AstraBridgeWebService:
             "tool_event_verified": True,
             "tool_context": sanitized_context,
             "path": str(path),
+            "usage_signal": usage_signal,
             "result": result,
         }
 

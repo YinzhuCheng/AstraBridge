@@ -36,6 +36,10 @@ struct BrowserSession {
     url: String,
     status: String,
     error: Option<String>,
+    preview_mode: String,
+    supervision_status: Option<String>,
+    supervision_session_id: Option<String>,
+    supervision_error: Option<String>,
 }
 
 impl Drop for SidecarProcess {
@@ -375,12 +379,16 @@ fn validate_browser_url(raw: &str) -> Result<Url, String> {
 
 fn browser_session(id: String, role: String, url: &Url) -> BrowserSession {
     BrowserSession {
-        id,
+        id: id.clone(),
         title: browser_title(&role),
         role,
         url: url.to_string(),
         status: "open".to_string(),
         error: None,
+        preview_mode: "native".to_string(),
+        supervision_status: Some("starting".to_string()),
+        supervision_session_id: Some(id),
+        supervision_error: None,
     }
 }
 
@@ -519,19 +527,36 @@ async fn browser_list(
 }
 
 #[tauri::command]
-async fn browser_focus(app: AppHandle, id: String) -> Result<BrowserSession, String> {
+async fn browser_focus(
+    app: AppHandle,
+    registry: State<'_, BrowserRegistry>,
+    id: String,
+) -> Result<BrowserSession, String> {
     let window = get_browser_window(&app, &id)?;
     window
         .set_focus()
         .map_err(|error| format!("Could not focus browser window: {error}"))?;
-    Ok(BrowserSession {
-        id: id.clone(),
-        role: id.trim_start_matches(BROWSER_LABEL_PREFIX).to_string(),
-        title: window.title().unwrap_or_else(|_| browser_title(&id)),
-        url: "".to_string(),
-        status: "focused".to_string(),
-        error: None,
-    })
+    let mut session = {
+        let sessions = registry
+            .0
+            .lock()
+            .map_err(|_| "Browser registry lock failed.".to_string())?;
+        sessions.get(&id).cloned().unwrap_or_else(|| BrowserSession {
+            id: id.clone(),
+            role: id.trim_start_matches(BROWSER_LABEL_PREFIX).to_string(),
+            title: window.title().unwrap_or_else(|_| browser_title(&id)),
+            url: "".to_string(),
+            status: "focused".to_string(),
+            error: None,
+            preview_mode: "native".to_string(),
+            supervision_status: Some("starting".to_string()),
+            supervision_session_id: Some(id.clone()),
+            supervision_error: None,
+        })
+    };
+    session.title = window.title().unwrap_or_else(|_| browser_title(&id));
+    session.status = "focused".to_string();
+    save_browser_session(&registry, session)
 }
 
 #[tauri::command]

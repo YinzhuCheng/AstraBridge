@@ -3,6 +3,7 @@ import { type ComponentProps, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  CapabilityArtifactEntry,
   CapabilityManagementEntry,
   CapabilityRouteCandidate,
   CapabilityRouteEntry,
@@ -78,6 +79,20 @@ function buildStandaloneRoute(): CapabilityRouteEntry {
         eligibility_notes: [],
       },
     ],
+  };
+}
+
+function buildNoCandidateRoute(capabilityId: string, displayName: string): CapabilityRouteEntry {
+  return {
+    capability_id: capabilityId,
+    display_name: displayName,
+    lane_type: "model_backed",
+    transport_mode: "request_response",
+    route_mode: "auto",
+    route_record: { capability_id: capabilityId, mode: "auto", provider_id: null, model: null },
+    resolution_status: "no_capability_candidate",
+    resolved_candidate: null,
+    candidates: [],
   };
 }
 
@@ -164,6 +179,9 @@ type RenderPanelOptions = {
   onRunProviderSmoke?: ReturnType<typeof vi.fn>;
   onInstallMcpPreset?: ReturnType<typeof vi.fn>;
   smokeResults?: ComponentProps<typeof CapabilityRoutesPanel>["smokeResults"];
+  providerCredentials?: ComponentProps<typeof CapabilityRoutesPanel>["providerCredentials"];
+  artifacts?: CapabilityArtifactEntry[];
+  toMediaSrc?: (path: string) => string;
 };
 
 function renderPanel(options: RenderPanelOptions = {}) {
@@ -210,7 +228,7 @@ function renderPanel(options: RenderPanelOptions = {}) {
         smokeResults={options.smokeResults ?? {}}
         smokePendingCapabilityId={null}
         isSmokePending={false}
-        artifacts={[
+        artifacts={options.artifacts ?? [
           {
             artifact_id: "vision-run",
             capability_id: "vision.analyze",
@@ -234,28 +252,30 @@ function renderPanel(options: RenderPanelOptions = {}) {
         ]}
         artifactsLoading={false}
         artifactsError={false}
-        providerCredentials={{
-          qwen: {
-            provider_id: "qwen",
-            label: "Qwen",
-            enabled: true,
-            auth_mode: "os_keychain",
-            status: "configured",
-          },
-          kimi: {
-            provider_id: "kimi",
-            label: "Kimi",
-            enabled: true,
-            auth_mode: "os_keychain",
-            status: "missing",
-          },
-        }}
+        providerCredentials={
+          options.providerCredentials ?? {
+            qwen: {
+              provider_id: "qwen",
+              label: "Qwen",
+              enabled: true,
+              auth_mode: "os_keychain",
+              status: "configured",
+            },
+            kimi: {
+              provider_id: "kimi",
+              label: "Kimi",
+              enabled: true,
+              auth_mode: "os_keychain",
+              status: "missing",
+            },
+          }
+        }
         mcpRuntimeVisible={true}
         mcpRuntimeToolCount={5}
         mcpVisibilityLoading={false}
         mcpVisibilityError={false}
         isInstallingMcpPreset={false}
-        toMediaSrc={(path) => `file://${path}`}
+        toMediaSrc={options.toMediaSrc ?? ((path) => `file://${path}`)}
         onInstallMcpPreset={onInstallMcpPreset}
         onSave={onSave}
         onRunSmoke={onRunSmoke}
@@ -274,6 +294,8 @@ describe("CapabilityRoutesPanel", () => {
   it("renders route details and saves a pinned candidate", () => {
     const { onSave } = renderPanel();
 
+    expect(screen.getByText("Multimodal routes")).toBeInTheDocument();
+    expect(screen.getByText("Choose auto routing or pin a provider/model for each multimodal capability. Web stays standalone.")).toBeInTheDocument();
     expect(screen.getByText("Vision Analysis")).toBeInTheDocument();
     expect(screen.getByText("Candidates: 2")).toBeInTheDocument();
     expect(screen.getByText("Adapters: 1")).toBeInTheDocument();
@@ -310,6 +332,52 @@ describe("CapabilityRoutesPanel", () => {
     expect(onInstallMcpPreset).toHaveBeenCalledTimes(1);
   });
 
+  it("renders image artifact previews without spilling text into the image frame", () => {
+    const imageRoute = buildModelRoute("image.generate", "Image Generation", [
+      buildModelCandidate("image.generate", "image.generate.yunwu.v1", "yunwu", "gpt-image-2"),
+    ]);
+    renderPanel({
+      routes: [imageRoute],
+      managementEntries: [buildManagementEntry(imageRoute)],
+      artifacts: [
+        {
+          artifact_id: "asset-1",
+          capability_id: "image.generate",
+          provider_id: "yunwu",
+          model: "gpt-image-2",
+          saved_at: "2026-06-27T01:00:00+08:00",
+          summary_path: "D:/AstraBridge/workspace/.astrabridge/assets/generated/asset_manifest.json",
+          relative_summary_path: ".astrabridge/assets/generated/asset_manifest.json",
+          artifact_refs: [
+            {
+              artifact_type: "image",
+              path: "D:/AstraBridge/workspace/.astrabridge/assets/generated/asset-1.png",
+              relative_path: ".astrabridge/assets/generated/asset-1.png",
+              exists: true,
+              mime_type: "image/png",
+            },
+          ],
+          preview: {
+            kind: "image",
+            text: "agent_bench_step14_transparent_asset",
+            audio_path: "",
+            image_path: "D:/AstraBridge/workspace/.astrabridge/assets/generated/asset-1.png",
+          },
+          metadata: { transparency_status: "passed" },
+        },
+      ],
+      toMediaSrc: (path) => `media://${path}`,
+    });
+
+    const preview = document.querySelector(".capability-artifact-preview");
+    const image = preview?.querySelector("img");
+
+    expect(image).not.toBeNull();
+    expect(image).toHaveAttribute("src", "media://D:/AstraBridge/workspace/.astrabridge/assets/generated/asset-1.png");
+    expect(preview?.querySelector("p")).toBeNull();
+    expect(screen.getByText("asset-1")).toBeInTheDocument();
+  });
+
   it("resets unsaved route changes", () => {
     const { onSave } = renderPanel();
 
@@ -339,6 +407,9 @@ describe("CapabilityRoutesPanel", () => {
     const onRunProviderSmoke = vi.fn();
     renderPanel({ onRunProviderSmoke });
 
+    expect(screen.getByTestId("capability-provider-smoke-vision.analyze")).toBeDisabled();
+    expect(screen.getByTestId("capability-provider-smoke-skip-vision.analyze")).toHaveTextContent("Explicit authorization is required");
+    fireEvent.click(screen.getByLabelText("Allow this one real provider smoke run"));
     fireEvent.click(screen.getByRole("button", { name: "Run provider smoke" }));
 
     expect(onRunProviderSmoke).toHaveBeenCalledWith("vision.analyze");
@@ -372,8 +443,103 @@ describe("CapabilityRoutesPanel", () => {
       },
     });
 
-    expect(screen.getByText("Last smoke: provider · fail / dry_run_vision_analyze")).toBeInTheDocument();
+    expect(screen.getByText("Last smoke: provider · fail / dry_run_vision_analyze / provider not called")).toBeInTheDocument();
     expect(screen.getByText("qwen vision adapter requires an api_key or DASHSCOPE_API_KEY.")).toBeInTheDocument();
+  });
+
+  it("shows multimodal dry-run pass states for vision and speech capabilities", () => {
+    const speechRoute = buildModelRoute("speech.transcribe", "Speech Transcription", [
+      buildModelCandidate("speech.transcribe", "speech.transcribe.qwen-asr.v1", "qwen", "qwen3-asr-flash"),
+    ]);
+
+    renderPanel({
+      routes: [visionRoute, speechRoute],
+      managementEntries: [visionRoute, speechRoute].map(buildManagementEntry),
+      smokeResults: {
+        "vision.analyze": {
+          schema_version: "astrabridge-capability-smoke-result-v1",
+          capability_id: "vision.analyze",
+          mode: "dry_run",
+          status: "pass",
+          provider_invoked: false,
+          provider_requested: false,
+          case_id: "dry_run_vision_analyze",
+          route: { route_mode: "auto", resolution_status: "ok", resolved_candidate: visionRoute.resolved_candidate, error: null },
+          sanitized_request: { fixture: "astrabridge-title-card" },
+          sanitized_response: { elapsed_ms: 12 },
+          artifact_refs: [],
+          evidence_refs: [],
+          created_at: "2026-06-25T01:00:00Z",
+        },
+        "speech.transcribe": {
+          schema_version: "astrabridge-capability-smoke-result-v1",
+          capability_id: "speech.transcribe",
+          mode: "dry_run",
+          status: "pass",
+          provider_invoked: false,
+          provider_requested: false,
+          case_id: "dry_run_speech_transcribe",
+          route: { route_mode: "auto", resolution_status: "ok", resolved_candidate: speechRoute.resolved_candidate, error: null },
+          sanitized_request: { fixture: "astrabridge-speech-smoke.wav" },
+          sanitized_response: { elapsed_ms: 19 },
+          artifact_refs: [],
+          evidence_refs: [],
+          created_at: "2026-06-25T01:00:00Z",
+        },
+      },
+    });
+
+    expect(screen.getByText("Last smoke: dry-run · pass / dry_run_vision_analyze / provider not called / elapsed 12 ms")).toBeInTheDocument();
+    expect(screen.getByText("Last smoke: dry-run · pass / dry_run_speech_transcribe / provider not called / elapsed 19 ms")).toBeInTheDocument();
+  });
+
+  it("shows provider smoke as skipped when the resolved credential is not configured", () => {
+    renderPanel({
+      providerCredentials: {
+        qwen: {
+          provider_id: "qwen",
+          label: "Qwen",
+          enabled: true,
+          auth_mode: "os_keychain",
+          status: "missing",
+        },
+      },
+    });
+
+    expect(screen.getByTestId("capability-provider-smoke-vision.analyze")).toBeDisabled();
+    expect(screen.getByTestId("capability-provider-smoke-skip-vision.analyze")).toHaveTextContent("Provider smoke skipped");
+    expect(screen.getByText("The resolved provider credential is missing.")).toBeInTheDocument();
+  });
+
+  it("shows an unconfigured route and skips provider smoke instead of reporting a failure", () => {
+    const noRoute = buildNoCandidateRoute("speech.transcribe", "Speech Transcription");
+
+    renderPanel({
+      routes: [noRoute],
+      managementEntries: [buildManagementEntry(noRoute)],
+      providerCredentials: {},
+      smokeResults: {
+        "speech.transcribe": {
+          schema_version: "astrabridge-capability-smoke-result-v1",
+          capability_id: "speech.transcribe",
+          mode: "dry_run",
+          status: "skipped",
+          provider_invoked: false,
+          provider_requested: false,
+          case_id: "dry_run_speech_transcribe",
+          route: { route_mode: "auto", resolution_status: "no_capability_candidate", resolved_candidate: null, error: "no_capability_candidate" },
+          sanitized_request: {},
+          sanitized_response: {},
+          artifact_refs: [],
+          evidence_refs: [],
+          created_at: "2026-06-25T01:00:00Z",
+        },
+      },
+    });
+
+    expect(screen.getAllByText("no candidate").length).toBeGreaterThan(0);
+    expect(screen.getByText("Last smoke: dry-run · skipped / dry_run_speech_transcribe / provider not called")).toBeInTheDocument();
+    expect(screen.getByText("No resolved provider route is available, so the real provider smoke was not started.")).toBeInTheDocument();
   });
 
   it("shows plugin and skill visibility guidance without rerouting standalone web search", () => {
@@ -433,5 +599,43 @@ describe("CapabilityRoutesPanel", () => {
     expect(screen.getAllByText("plugin missing").length).toBeGreaterThan(0);
     expect(screen.getByText("Standalone web lane")).toBeInTheDocument();
     expect(screen.getByText("web.search stays separate from model-backed routing, and plugin or skill inventory does not reroute it.")).toBeInTheDocument();
+  });
+
+  it("keeps showing plugin and skill guidance during background registry refreshes", () => {
+    const imageRoute = buildModelRoute("image.generate", "Image Generation");
+    const registry: CodexPluginSkillRegistrySnapshot = {
+      schema_version: "astrabridge-plugin-skill-registry-v1",
+      generated_at: "2026-06-27T01:45:00+08:00",
+      source_catalogs: [],
+      plugins: [],
+      skills: [
+        {
+          schema_version: "astrabridge-plugin-skill-registry-v1",
+          record_id: "skill:imagegen",
+          skill_name: "imagegen",
+          source_catalog_id: "local::skills",
+          display_name: "imagegen",
+          install_status: "installed",
+          enablement_status: "enabled",
+          compatibility_status: "compatible",
+          description: "Image generation skill",
+          effective_enablement_status: "enabled",
+          compatibility_warnings: [],
+          notes: [],
+        },
+      ],
+      notes: [],
+    };
+
+    renderPanel({
+      routes: [imageRoute],
+      managementEntries: [buildManagementEntry(imageRoute)],
+      pluginSkillRegistry: registry,
+      pluginSkillRegistryLoading: true,
+    });
+
+    expect(screen.queryByText("Checking plugin and skill inventory...")).not.toBeInTheDocument();
+    expect(screen.getAllByText("imagegen").length).toBeGreaterThan(0);
+    expect(screen.getByText("skill enabled")).toBeInTheDocument();
   });
 });

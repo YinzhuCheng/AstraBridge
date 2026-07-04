@@ -10,6 +10,7 @@ export type LocaleCode = "en" | "zh-CN";
 export type PermissionMode = "ask" | "auto" | "full";
 export type CollaborationMode = "default" | "plan";
 export type AppearancePreset = "codex" | "paper" | "slate" | "cobalt" | "sunrise";
+export type CursorEnhancementPreference = "auto" | "off";
 export type ExecutionHost = "windows" | "wsl";
 
 export type ProjectPluginSkillPresetPluginRef = {
@@ -62,6 +63,7 @@ export type ProjectFile = {
   ui_preferences: {
     locale?: LocaleCode;
     appearance?: AppearancePreset;
+    cursor_enhancement?: CursorEnhancementPreference;
     execution_host?: ExecutionHost;
     wsl_distro?: string;
     left_sidebar_open?: boolean;
@@ -156,6 +158,68 @@ export type ProjectSummary = {
   updated_at: string;
 };
 
+export type SidebarThreadNode = {
+  thread_id: string;
+  title: string;
+  role?: string;
+  profile_id?: string;
+  provider_id?: string;
+  model?: string;
+  reasoning_effort?: string;
+  updated_at?: string;
+  created_at?: string;
+  missing_at?: string | null;
+  missing_reason?: string | null;
+  is_active?: boolean;
+};
+
+export type SidebarTaskNode = {
+  task_id: string;
+  title: string;
+  status: string;
+  updated_at: string;
+  is_current: boolean;
+  active_provider_thread_id?: string | null;
+  threads: SidebarThreadNode[];
+  provider_id?: string;
+  model?: string;
+  reasoning_effort?: string;
+  thread_count?: number;
+  lane_count?: number;
+  active_lane_label?: string;
+  latest_lane_status?: string;
+  handoff_count?: number;
+  checkpoint_count?: number;
+  missing_thread_count?: number;
+  project_file?: string;
+};
+
+export type SidebarProjectNode = {
+  project_id: string;
+  name: string;
+  project_file: string;
+  workspace_root: string;
+  updated_at: string;
+  is_current: boolean;
+  tasks: SidebarTaskNode[];
+  warnings?: string[];
+};
+
+export type SidebarProjectsResponse = {
+  schema_version: string;
+  projects: SidebarProjectNode[];
+  updated_at?: string;
+};
+
+export type TitleSuggestionResponse = {
+  title: string;
+  source: "llm" | "heuristic" | "unchanged" | "failed";
+  changed: boolean;
+  project?: ProjectFile | null;
+  task?: ProjectTask | null;
+  error?: string | null;
+};
+
 export type Profile = {
   profile_id: string;
   label: string;
@@ -203,12 +267,39 @@ export type Profile = {
   updated_at?: string;
 };
 
+export type SidecarProvenance = {
+  schema_version: "astrabridge-sidecar-provenance-v1" | string;
+  origin: "current_source" | "app_managed" | "unknown" | string;
+  launcher_mode: string;
+  pid: number;
+  command_line: string;
+  command_argv: string[];
+  command_line_redaction: string;
+  executable: string;
+  cwd: string;
+  seed_root?: string | null;
+  source_root: string;
+  repo_root?: string | null;
+  current_source_match: boolean;
+  listen_host: string;
+  listen_port?: number | null;
+  port_owner: {
+    status: "self" | "different_process" | "self_reported" | "unknown" | string;
+    method: string;
+    pid?: number | null;
+    expected_pid?: number | null;
+    listen_host?: string | null;
+    listen_port?: number | null;
+  };
+};
+
 export type RuntimeEnvironment = {
   codex_cli: string | null;
   execution_host?: ExecutionHost;
   wsl_distro?: string | null;
   running: boolean;
   admin_session_token?: string;
+  sidecar?: SidecarProvenance | null;
   router?: {
     ok: boolean;
     service: string;
@@ -609,6 +700,80 @@ export type CodexPluginInstallExecution = {
   notes?: string[];
 };
 
+export type SkillScenarioCheck = {
+  label: string;
+  passed: boolean;
+  message: string;
+};
+
+export type SkillScenarioVerificationCommand = {
+  command: string;
+  cwd: string;
+  exit_code?: number | null;
+  summary?: string | null;
+};
+
+export type SkillScenarioCommandResult = {
+  label: string;
+  command: string;
+  cwd: string;
+  exit_code: number;
+  stdout_path?: string | null;
+  stderr_path?: string | null;
+};
+
+export type SkillScenarioSuggestedScreenshot = {
+  kind: string;
+  path: string;
+  note?: string | null;
+};
+
+export type SkillScenarioReportSeed = {
+  schema_version: string;
+  step_id: string;
+  capability: string;
+  scenario_id: string;
+  trigger_path: string;
+  suggested_report_path: string;
+  suggested_screenshots: SkillScenarioSuggestedScreenshot[];
+};
+
+export type SkillPluginCreatorScenarioExecution = {
+  schema_version: string;
+  execution_id: string;
+  scenario_id: string;
+  capability: string;
+  skill_name: string;
+  skill_display_name: string;
+  skill_record_id?: string | null;
+  started_at: string;
+  completed_at: string;
+  status: string;
+  failure_reason?: string | null;
+  input: {
+    fixture_contract_path: string;
+    brief_path: string;
+  };
+  output: {
+    run_root: string;
+    execution_root: string;
+    plugin_root: string;
+    manifest_path: string;
+    marketplace_path: string;
+    required_paths: string[];
+  };
+  artifact_paths: {
+    events_path: string;
+    result_path: string;
+    report_seed_path: string;
+  };
+  verification_commands: SkillScenarioVerificationCommand[];
+  command_results: SkillScenarioCommandResult[];
+  checks: SkillScenarioCheck[];
+  notes?: string[];
+  report_seed?: SkillScenarioReportSeed | null;
+};
+
 export type IsolationAuditCheck = {
   name: string;
   ok: boolean;
@@ -642,11 +807,16 @@ export type IsolationAuditResponse = {
     sidecar?: number | null;
     router?: number | null;
     router_base_url?: string | null;
+    sidecar_owner_pid?: number | null;
+    sidecar_owner_status?: string | null;
   };
+  sidecar?: SidecarProvenance | null;
   process_boundary: {
     app_server_running: boolean;
     codex_cli?: string | null;
     execution_host?: string | null;
+    sidecar_origin?: string | null;
+    sidecar_launcher_mode?: string | null;
   };
 };
 
@@ -1241,6 +1411,10 @@ export type CapabilitySmokeResponse = {
   smoke: CapabilitySmokeResult;
 };
 
+export type CapabilityInvokeResponse = {
+  result: Record<string, unknown>;
+};
+
 export type CapabilityArtifactSummary = {
   policy: string;
   recent_refs: Array<Record<string, unknown>>;
@@ -1313,6 +1487,158 @@ export type CapabilityManagementResponse = {
   mcp_preset: CapabilityMcpPresetStatus;
   updated_at: string;
 };
+
+export type WebToolContext = Record<string, unknown> | null;
+
+export type WebSearchQueryInput = {
+  query: string;
+  max_results?: number;
+  domains?: string[];
+  exclude_domains?: string[];
+};
+
+export type WebSearchBatchRequest = {
+  queries: WebSearchQueryInput[];
+  dedupe?: boolean;
+  timeout_sec?: number;
+  tool_context?: WebToolContext;
+};
+
+export type WebSearchResultItem = {
+  title: string;
+  url: string;
+  snippet: string;
+  query?: string;
+  query_variant?: string;
+};
+
+export type WebSearchResultsByQuery = {
+  query: string;
+  variant_count: number;
+  result_count: number;
+  results: WebSearchResultItem[];
+  warning?: string;
+};
+
+export type WebSearchBatchResult = {
+  tool: "astrabridge_web_search_batch" | string;
+  source: string;
+  query_count: number;
+  result_count: number;
+  results_by_query: WebSearchResultsByQuery[];
+  merged_results: WebSearchResultItem[];
+  warnings: string[];
+  note: string;
+};
+
+export type WebResearchBriefRequest = {
+  research_goal: string;
+  queries?: string[];
+  source_urls?: string[];
+  search_top_k?: number;
+  fetch_top_n?: number;
+  max_chars_per_source?: number;
+  timeout_sec?: number;
+  tool_context?: WebToolContext;
+};
+
+export type WebResearchSource = {
+  title: string;
+  url: string;
+  query: string;
+  source_origin?: string;
+  source_host?: string;
+  snippet: string;
+  fetch_ok: boolean;
+  cache_hit?: boolean;
+  excerpt: string;
+  truncated: boolean;
+  content_type: string;
+  fetched_at?: string;
+  access_date?: string;
+  status_code?: number;
+  warning?: string;
+};
+
+export type WebResearchFailure = {
+  url: string;
+  warning: string;
+  source_origin?: string;
+  query?: string;
+  source_host?: string;
+};
+
+export type WebResearchSourcePolicy = {
+  mode?: string;
+  pinned_source_count?: number;
+  hinted_source_count?: number;
+  search_expansion?: string;
+  search_result_count?: number;
+  reason?: string;
+};
+
+export type WebResearchBriefResult = {
+  tool: "astrabridge_web_research_brief" | string;
+  research_goal: string;
+  query_plan: string[];
+  source_policy?: WebResearchSourcePolicy;
+  fetch_summary?: {
+    requested_count?: number;
+    ok_count?: number;
+    failed_count?: number;
+    cache_hit_count?: number;
+  };
+  evidence_kind?: string;
+  conclusion_status?: string;
+  conclusion_note?: string;
+  search: {
+    query_count?: number;
+    result_count?: number;
+    warnings: string[];
+  };
+  sources: WebResearchSource[];
+  source_count: number;
+  fetched_source_count: number;
+  failures: WebResearchFailure[];
+  brief: unknown;
+  unresolved_questions: string[];
+  suggested_followup_queries: string[];
+  citation_rule: string;
+};
+
+export type WebFetchRequest = {
+  url: string;
+  max_chars?: number;
+  timeout_sec?: number;
+  tool_context?: WebToolContext;
+};
+
+export type WebFetchResult = {
+  tool: "astrabridge_web_fetch" | string;
+  url: string;
+  source_host?: string;
+  content_type: string;
+  text: string;
+  truncated: boolean;
+  char_count: number;
+  cache_hit?: boolean;
+  fetched_at?: string;
+  access_date?: string;
+  status_code?: number;
+};
+
+export type WebToolResponse<T> = {
+  ok: boolean;
+  record_id: string;
+  tool_event_verified: boolean;
+  tool_context: WebToolContext;
+  path: string;
+  result: T;
+};
+
+export type WebSearchBatchResponse = WebToolResponse<WebSearchBatchResult>;
+export type WebResearchBriefResponse = WebToolResponse<WebResearchBriefResult>;
+export type WebFetchResponse = WebToolResponse<WebFetchResult>;
 
 export type AutomationPermissionMode = "read-only" | "workspace-write" | "full-access";
 export type AutomationKind = "standalone" | "thread";
@@ -1407,6 +1733,10 @@ export type AutomationRun = {
   stdout_excerpt?: string | null;
   stderr_excerpt?: string | null;
   diff_excerpt?: string | null;
+  watchdog_reason?: string | null;
+  watchdog_summary?: string | null;
+  recovered_by?: string | null;
+  recovered_at?: string | null;
 };
 
 export type AutomationInboxItem = {
@@ -1624,17 +1954,47 @@ export type BrowserWorkbenchSession = {
   url: string;
   status: string;
   error?: string | null;
+  page_title?: string;
+  preview_mode?: "remote" | "native" | "external" | "web_fallback" | string;
+  supervision_status?: "starting" | "ready" | "unavailable" | "error" | string;
+  supervision_session_id?: string;
+  supervision_error?: string | null;
+  viewport_width?: number;
+  viewport_height?: number;
+  layout_mode?: "desktop" | "mobile" | string;
+  layout_reason?: string;
+  mobile_optimized?: boolean | null;
+  has_viewport_meta?: boolean | null;
+  horizontal_overflow_ratio?: number | null;
+  wide_element_count?: number | null;
+  mobile_strategy?: "desktop_viewport" | "mobile_user_agent_viewport" | "mobile_host_rewrite_viewport" | string;
+  responsive_fit_score?: number | null;
+  can_go_back?: boolean;
+  can_go_forward?: boolean;
+  loading?: boolean;
+  screenshot_path?: string;
+  updated_at?: string;
 };
 
 export type BrowserWorkbenchCreateRequest = {
   id?: string;
   role?: string;
   url: string;
+  layout_mode?: "desktop" | "mobile";
+  layout_reason?: string;
 };
 
 export type BrowserWorkbenchNavigateRequest = {
   id: string;
   url: string;
+  layout_mode?: "desktop" | "mobile";
+  layout_reason?: string;
+};
+
+export type BrowserWorkbenchLayoutRequest = {
+  id: string;
+  layout_mode: "desktop" | "mobile";
+  layout_reason?: string;
 };
 
 export type ComputerUseBrowserScenarioReport = {
@@ -1752,6 +2112,7 @@ export type RuntimeSupervisorState = {
 export type ProjectReviewFile = {
   path: string;
   status: string;
+  updated_at?: number | string | null;
 };
 
 export type ProjectReviewStatus = {
@@ -1857,6 +2218,7 @@ export type McpRuntimeStatus = {
 export type McpStatusResponse = {
   servers: McpRuntimeStatus[];
   next_cursor: string | null;
+  thread_id?: string | null;
 };
 
 export type ShellThreadSettings = {
@@ -1896,8 +2258,55 @@ export type AttachmentDraft = {
   path: string;
   name: string;
   mimeType: string;
-  kind: "image" | "file";
+  kind: "image" | "file" | "folder";
   previewUrl?: string;
+  size?: number;
+  source?: "local_path" | "browser_upload" | "drop" | "staged";
+  relativePath?: string;
+  fileCount?: number;
+  error?: string;
+};
+
+export type AttachmentStageFile = {
+  name: string;
+  mime_type?: string;
+  data_base64: string;
+  relative_path?: string;
+  size?: number;
+};
+
+export type AttachmentStageSkipped = {
+  name: string;
+  reason: string;
+};
+
+export type AttachmentStageResponse = {
+  attachments: AttachmentDraft[];
+  skipped: AttachmentStageSkipped[];
+};
+
+export type AttachmentDiagnostics = {
+  total_count?: number;
+  image_count?: number;
+  file_count?: number;
+  folder_count?: number;
+  total_size?: number;
+  items?: Array<{
+    name?: string;
+    kind?: string;
+    mime_type?: string;
+    extension?: string;
+    source?: string;
+    size?: number;
+  }>;
+  route?: {
+    provider_id?: string;
+    model_id?: string;
+    context_mode?: string;
+    text_items?: number;
+    local_image_items?: number;
+    mention_items?: number;
+  };
 };
 
 export type ThreadRenderMeta = {
@@ -1940,8 +2349,12 @@ export type EventSnapshot = {
 export type RuntimeActivityKind =
   | "thinking"
   | "web_search"
+  | "web"
+  | "browser"
   | "command"
   | "file_change"
+  | "file_edit"
+  | "multimodal"
   | "compact"
   | "review"
   | "fork"
@@ -1960,6 +2373,20 @@ export type RuntimeActivityState = {
   updated_at?: string;
 };
 
+export type RuntimeActivityEntry = {
+  id: string;
+  kind: RuntimeActivityKind;
+  status: "active" | "completed" | "failed" | "pending" | string;
+  label: string;
+  preview?: string;
+  detail?: string;
+  files?: string[];
+  diff?: RuntimeDiffSummary;
+  toolName?: string;
+  startedAt?: number | null;
+  completedAt?: number | null;
+};
+
 export type RuntimeDiffSummary = {
   added: number;
   deleted: number;
@@ -1973,7 +2400,16 @@ export type RuntimeDiffSummary = {
 export type ThreadReadResponse = { thread: ShellThread; project?: ProjectFile; task?: ProjectTask };
 export type TaskConversationResponse = { thread: ShellThread; task?: ProjectTask; transcript_path?: string; updated_at?: string };
 export type ThreadListResponse = { threads: ShellThread[]; next_cursor: string | null; backwards_cursor: string | null };
-export type TurnStartResponse = { turn: { id: string; status: string }; thread_id?: string; handoff?: ProjectTaskHandoffEvent | null; project?: ProjectFile; task?: ProjectTask };
+export type TurnStartResponse = {
+  turn: { id: string; status: string };
+  thread_id?: string;
+  handoff?: ProjectTaskHandoffEvent | null;
+  project?: ProjectFile;
+  task?: ProjectTask;
+  background_start?: boolean;
+  warning?: string;
+  attachment_diagnostics?: AttachmentDiagnostics;
+};
 export type GoalResponse = { goal: ThreadGoal | null };
 
 export type RuntimeEvent = {

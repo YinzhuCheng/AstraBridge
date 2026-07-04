@@ -10,11 +10,15 @@ import type {
   AutomationSpec,
   AssetRegistryResponse,
   AttachmentDraft,
+  AttachmentStageFile,
+  AttachmentStageResponse,
   BrowserWorkbenchCreateRequest,
+  BrowserWorkbenchLayoutRequest,
   BrowserWorkbenchNavigateRequest,
   BrowserWorkbenchSession,
   ComputerUseBrowserScenarioReport,
   CapabilityArtifactsResponse,
+  CapabilityInvokeResponse,
   CollaborationMode,
   CapabilityManagementResponse,
   CapabilityRouteEntry,
@@ -24,7 +28,9 @@ import type {
   CodexKernelProbeSnapshot,
   CodexPluginInstallPlan,
   CodexPluginSkillRegistrySnapshot,
+  SkillPluginCreatorScenarioExecution,
   ContextMode,
+  CursorEnhancementPreference,
   DogfoodRun,
   DogfoodRunResponse,
   EffectiveCatalogResponse,
@@ -56,6 +62,7 @@ import type {
   ProjectSaveCreateResponse,
   ProjectSaveLoadResponse,
   ProjectSavesResponse,
+  SidebarProjectsResponse,
   ProjectSummary,
   ProjectTasksResponse,
   ReasoningConfig,
@@ -71,16 +78,24 @@ import type {
   ShellThread,
   TaskConversationResponse,
   TestMatrixResponse,
+  TitleSuggestionResponse,
   ThreadListResponse,
   ThreadReadResponse,
   TurnStartResponse,
+  WebFetchRequest,
+  WebFetchResponse,
+  WebResearchBriefRequest,
+  WebResearchBriefResponse,
+  WebSearchBatchRequest,
+  WebSearchBatchResponse,
   WslBootstrapScriptsResponse,
   WslDependencyStatus,
   YunwuImageSmokeResponse,
 } from "./types";
+import { requestWebFetch, requestWebResearchBrief, requestWebSearchBatch } from "./features/web/webToolClient";
 
 let sidecarBaseUrlPromise: Promise<string> | null = null;
-let adminTokenPromise: Promise<string> | null = null;
+const adminTokenPromises = new Map<string, Promise<string>>();
 
 const SIDECAR_URL_STORAGE_KEY = "astrabridge.sidecarBaseUrl";
 
@@ -113,6 +128,14 @@ function browserSidecarBaseUrl() {
   return "http://127.0.0.1:8790";
 }
 
+function hasConfiguredBrowserSidecarBaseUrl() {
+  if (typeof window === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  if (normalizeSidecarBaseUrl(params.get("sidecar"))) return true;
+  if (normalizeSidecarBaseUrl(window.localStorage.getItem(SIDECAR_URL_STORAGE_KEY))) return true;
+  return Boolean(normalizeSidecarBaseUrl(import.meta.env.VITE_ASTRABRIDGE_SIDECAR_URL));
+}
+
 async function sidecarBaseUrl() {
   if (!sidecarBaseUrlPromise) {
     sidecarBaseUrlPromise = (async () => {
@@ -125,22 +148,36 @@ async function sidecarBaseUrl() {
   return sidecarBaseUrlPromise;
 }
 
-type RequestWithTimeout = RequestInit & { timeoutMs?: number };
+export function projectFileMediaHref(path: string) {
+  const suffix = `/api/project/files/media?path=${encodeURIComponent(path)}`;
+  if (typeof window === "undefined") {
+    return suffix;
+  }
+  return `${browserSidecarBaseUrl()}${suffix}`;
+}
+
+type RequestWithTimeout = RequestInit & { timeoutMs?: number; acceptOkFalse?: boolean };
 
 async function request<T>(path: string, init?: RequestWithTimeout): Promise<T> {
   const base = await sidecarBaseUrl();
+  const fetchInit = { ...(init ?? {}) };
+  const acceptOkFalse = Boolean(fetchInit.acceptOkFalse);
+  delete fetchInit.timeoutMs;
+  delete fetchInit.acceptOkFalse;
   const isMutation = (init?.method ?? "GET").toUpperCase() !== "GET";
   const timeoutMs = init?.timeoutMs ?? (isMutation ? 65000 : 15000);
   const cacheMode = init?.cache ?? (isMutation ? "no-store" : "no-store");
-  const headers: Record<string, string> = { ...((init?.headers ?? {}) as Record<string, string>) };
-  if (isMutation || init?.body) {
+  const headers: Record<string, string> = { ...((fetchInit.headers ?? {}) as Record<string, string>) };
+  if (isMutation || fetchInit.body) {
     headers["Content-Type"] = headers["Content-Type"] ?? "application/json";
   }
   if (isMutation) {
+    let adminTokenPromise = adminTokenPromises.get(base);
     if (!adminTokenPromise) {
       adminTokenPromise = fetch(`${base}/api/admin/session`)
         .then((response) => response.json())
         .then((data) => String(data.admin_session_token ?? ""));
+      adminTokenPromises.set(base, adminTokenPromise);
     }
     headers["X-Admin-Token"] = await adminTokenPromise;
   }
@@ -151,7 +188,7 @@ async function request<T>(path: string, init?: RequestWithTimeout): Promise<T> {
     response = await fetch(`${base}${path}`, {
       headers,
       cache: cacheMode,
-      ...init,
+      ...fetchInit,
       signal: controller.signal,
     });
   } catch (error) {
@@ -168,14 +205,39 @@ async function request<T>(path: string, init?: RequestWithTimeout): Promise<T> {
   } catch {
     data = {};
   }
-  if (!response.ok || data.ok === false) {
+  if (
+    isMutation &&
+    response.status === 400 &&
+    typeof data.error === "string" &&
+    data.error.toLowerCase().includes("admin session token")
+  ) {
+    adminTokenPromises.delete(base);
+    const refreshedTokenPromise = fetch(`${base}/api/admin/session`)
+      .then((nextResponse) => nextResponse.json())
+      .then((nextData) => String(nextData.admin_session_token ?? ""));
+    adminTokenPromises.set(base, refreshedTokenPromise);
+    headers["X-Admin-Token"] = await refreshedTokenPromise;
+    response = await fetch(`${base}${path}`, {
+      headers,
+      cache: cacheMode,
+      ...fetchInit,
+      signal: controller.signal,
+    });
+    try {
+      data = (await response.json()) as Record<string, unknown>;
+    } catch {
+      data = {};
+    }
+  }
+  if (!response.ok || (!acceptOkFalse && data.ok === false)) {
     throw new Error(String(data.error ?? `Request failed: ${path}`));
   }
   return data as T;
 }
 
-function jsonRequest<T>(path: string, payload: Record<string, unknown>) {
+function jsonRequest<T>(path: string, payload: Record<string, unknown>, init?: RequestWithTimeout) {
   return request<T>(path, {
+    ...init,
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -218,19 +280,182 @@ function fallbackBrowserRole(role?: string) {
   return value ? value.slice(0, 40) : "Browser";
 }
 
+function browserRoleFromId(id: string) {
+  return fallbackBrowserRole(id.replace(/^ab-browser-/, "").replace(/-/g, " "));
+}
+
+function browserFallbackDesktopUrl(rawUrl: string) {
+  try {
+    const parsed = new URL(rawUrl);
+    const host = parsed.hostname.toLowerCase();
+    if (host === "google.com" || host === "www.google.com") {
+      parsed.hostname = "www.google.com";
+      parsed.searchParams.delete("igu");
+      if (parsed.pathname === "/webhp" && !parsed.searchParams.toString()) {
+        parsed.pathname = "/";
+      }
+      return parsed.toString();
+    }
+    if (host === "m.youtube.com") {
+      parsed.hostname = "www.youtube.com";
+      return parsed.toString();
+    }
+    if (host === "m.facebook.com") {
+      parsed.hostname = "www.facebook.com";
+      return parsed.toString();
+    }
+    const wikipediaMatch = host.match(/^([a-z0-9-]+)\.m\.wikipedia\.org$/i);
+    if (wikipediaMatch?.[1]) {
+      parsed.hostname = `${wikipediaMatch[1]}.wikipedia.org`;
+      return parsed.toString();
+    }
+    return parsed.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+function browserKnownMobileHost(rawUrl: string) {
+  try {
+    const parsed = new URL(rawUrl);
+    const host = parsed.hostname.toLowerCase();
+    if (host === "google.com" || host === "www.google.com") {
+      parsed.hostname = "www.google.com";
+      if (!parsed.pathname || parsed.pathname === "/") {
+        parsed.pathname = "/webhp";
+      }
+      parsed.searchParams.set("igu", "1");
+      return { url: parsed.toString(), strategy: "mobile_host_rewrite_viewport" as const };
+    }
+    if (host === "m.youtube.com" || host === "m.facebook.com" || /\.m\.wikipedia\.org$/i.test(host)) {
+      return { url: parsed.toString(), strategy: "mobile_host_rewrite_viewport" as const };
+    }
+    if (host === "youtube.com" || host === "www.youtube.com") {
+      parsed.hostname = "m.youtube.com";
+      return { url: parsed.toString(), strategy: "mobile_host_rewrite_viewport" as const };
+    }
+    if (host === "youtu.be") {
+      const videoId = parsed.pathname.replace(/^\/+|\/+$/g, "");
+      if (videoId && !parsed.searchParams.has("v")) parsed.searchParams.set("v", videoId);
+      parsed.hostname = "m.youtube.com";
+      parsed.pathname = "/watch";
+      return { url: parsed.toString(), strategy: "mobile_host_rewrite_viewport" as const };
+    }
+    if (host === "facebook.com" || host === "www.facebook.com") {
+      parsed.hostname = "m.facebook.com";
+      return { url: parsed.toString(), strategy: "mobile_host_rewrite_viewport" as const };
+    }
+    const wikipediaMatch = host.match(/^([a-z0-9-]+)\.wikipedia\.org$/i);
+    if (wikipediaMatch?.[1] && wikipediaMatch[1] !== "www" && wikipediaMatch[1] !== "m") {
+      parsed.hostname = `${wikipediaMatch[1]}.m.wikipedia.org`;
+      return { url: parsed.toString(), strategy: "mobile_host_rewrite_viewport" as const };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function browserFallbackMobileResolution(rawUrl: string, layoutMode?: "desktop" | "mobile") {
+  if (layoutMode !== "mobile") {
+    return { url: browserFallbackDesktopUrl(rawUrl), strategy: "desktop_viewport" as const };
+  }
+  // Product strategy for tall/narrow browser surfaces:
+  // 1. Prefer explicit mobile-entry URLs for the common sites we can verify.
+  // 2. Otherwise keep the canonical URL and rely on mobile viewport + user-agent responsive rendering.
+  // The rewrite set stays intentionally small so the browser never guesses unsupported mobile hosts.
+  try {
+    const knownMobileHost = browserKnownMobileHost(rawUrl);
+    if (knownMobileHost) return knownMobileHost;
+    const parsed = new URL(rawUrl);
+    return { url: parsed.toString(), strategy: "mobile_user_agent_viewport" as const };
+  } catch {
+    return { url: rawUrl, strategy: layoutMode === "mobile" ? "mobile_user_agent_viewport" as const : "desktop_viewport" as const };
+  }
+}
+
+function nativeBrowserSession(session: BrowserWorkbenchSession): BrowserWorkbenchSession {
+  return {
+    ...session,
+    preview_mode: "native",
+    supervision_session_id: session.supervision_session_id || session.id,
+    supervision_status: session.supervision_status || "starting",
+  };
+}
+
+function mergeBrowserSupervisor(nativeSession: BrowserWorkbenchSession, supervisor?: BrowserWorkbenchSession) {
+  if (!supervisor) return nativeBrowserSession(nativeSession);
+  return nativeBrowserSession({
+    ...nativeSession,
+    page_title: supervisor.page_title || nativeSession.page_title,
+    viewport_width: supervisor.viewport_width ?? nativeSession.viewport_width,
+    viewport_height: supervisor.viewport_height ?? nativeSession.viewport_height,
+    can_go_back: supervisor.can_go_back ?? nativeSession.can_go_back,
+    can_go_forward: supervisor.can_go_forward ?? nativeSession.can_go_forward,
+    loading: supervisor.loading ?? nativeSession.loading,
+    screenshot_path: supervisor.screenshot_path || nativeSession.screenshot_path,
+    updated_at: supervisor.updated_at || nativeSession.updated_at,
+    supervision_status: supervisor.status === "error" ? "error" : "ready",
+    supervision_session_id: supervisor.id,
+    supervision_error: supervisor.error ?? null,
+  });
+}
+
+async function browserSupervisorCreate(payload: BrowserWorkbenchCreateRequest & { id: string }) {
+  return jsonRequest<BrowserWorkbenchSession>("/api/browser/workbench/create", payload, { timeoutMs: 120000 });
+}
+
+async function browserSupervisorNavigate(payload: BrowserWorkbenchNavigateRequest & { role?: string }) {
+  try {
+    return await jsonRequest<BrowserWorkbenchSession>("/api/browser/workbench/navigate", payload, { timeoutMs: 120000 });
+  } catch {
+    return browserSupervisorCreate({
+      id: payload.id,
+      role: payload.role || browserRoleFromId(payload.id),
+      url: payload.url,
+    });
+  }
+}
+
+async function mergeNativeBrowserSupervisors(nativeSessions: BrowserWorkbenchSession[]) {
+  if (!nativeSessions.length) return nativeSessions;
+  try {
+    const supervisors = await request<BrowserWorkbenchSession[]>("/api/browser/workbench/sessions", { timeoutMs: 3500 });
+    const supervisorsById = new Map(supervisors.map((session) => [session.id, session]));
+    return nativeSessions.map((session) => mergeBrowserSupervisor(session, supervisorsById.get(session.id)));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return nativeSessions.map((session) =>
+      nativeBrowserSession({
+        ...session,
+        supervision_status: session.supervision_status === "ready" ? "ready" : "unavailable",
+        supervision_error: message,
+      }),
+    );
+  }
+}
+
 async function browserCreate(payload: BrowserWorkbenchCreateRequest) {
   const normalized = { ...payload, url: normalizeWorkbenchUrl(payload.url) };
   if (isTauri()) {
-    return invoke<BrowserWorkbenchSession>("browser_create", { request: normalized });
+    const session = nativeBrowserSession(await invoke<BrowserWorkbenchSession>("browser_create", { request: normalized }));
+    void browserSupervisorCreate({ ...normalized, id: session.id, role: session.role }).catch(() => undefined);
+    return session;
   }
+  if (hasConfiguredBrowserSidecarBaseUrl()) {
+    return jsonRequest<BrowserWorkbenchSession>("/api/browser/workbench/create", normalized, { timeoutMs: 120000 });
+  }
+  const fallbackMobile = browserFallbackMobileResolution(normalized.url, normalized.layout_mode);
   const role = fallbackBrowserRole(normalized.role);
   const session: BrowserWorkbenchSession = {
     id: fallbackBrowserId(normalized),
     role,
     title: `AstraBridge Browser - ${role}`,
-    url: normalized.url,
+    url: fallbackMobile.url,
     status: "web_fallback",
     error: null,
+    layout_mode: normalized.layout_mode,
+    mobile_strategy: fallbackMobile.strategy,
   };
   browserWorkbenchFallbackSessions = [
     ...browserWorkbenchFallbackSessions.filter((item) => item.id !== session.id),
@@ -242,25 +467,45 @@ async function browserCreate(payload: BrowserWorkbenchCreateRequest) {
 async function browserNavigate(payload: BrowserWorkbenchNavigateRequest) {
   const normalizedUrl = normalizeWorkbenchUrl(payload.url);
   if (isTauri()) {
-    return invoke<BrowserWorkbenchSession>("browser_navigate", { request: { ...payload, url: normalizedUrl } });
+    const session = nativeBrowserSession(await invoke<BrowserWorkbenchSession>("browser_navigate", { request: { ...payload, url: normalizedUrl } }));
+    void browserSupervisorNavigate({ id: session.id, role: session.role, url: normalizedUrl }).catch(() => undefined);
+    return session;
+  }
+  if (hasConfiguredBrowserSidecarBaseUrl()) {
+    return jsonRequest<BrowserWorkbenchSession>("/api/browser/workbench/navigate", { ...payload, url: normalizedUrl }, { timeoutMs: 120000 });
   }
   const current = browserWorkbenchFallbackSessions.find((item) => item.id === payload.id);
   if (!current) throw new Error(`Browser window not found: ${payload.id}`);
-  const next = { ...current, url: normalizedUrl, status: "web_fallback" };
+  const fallbackMobile = browserFallbackMobileResolution(normalizedUrl, payload.layout_mode);
+  const next = {
+    ...current,
+    url: fallbackMobile.url,
+    status: "web_fallback",
+    layout_mode: payload.layout_mode ?? current.layout_mode,
+    layout_reason: payload.layout_reason ?? current.layout_reason,
+    mobile_strategy: payload.layout_mode ? fallbackMobile.strategy : current.mobile_strategy,
+  };
   browserWorkbenchFallbackSessions = browserWorkbenchFallbackSessions.map((item) => (item.id === payload.id ? next : item));
   return next;
 }
 
 async function browserList() {
   if (isTauri()) {
-    return invoke<BrowserWorkbenchSession[]>("browser_list");
+    const sessions = await invoke<BrowserWorkbenchSession[]>("browser_list");
+    return mergeNativeBrowserSupervisors(sessions.map(nativeBrowserSession));
+  }
+  if (hasConfiguredBrowserSidecarBaseUrl()) {
+    return request<BrowserWorkbenchSession[]>("/api/browser/workbench/sessions");
   }
   return browserWorkbenchFallbackSessions;
 }
 
 async function browserFocus(id: string) {
   if (isTauri()) {
-    return invoke<BrowserWorkbenchSession>("browser_focus", { id });
+    return nativeBrowserSession(await invoke<BrowserWorkbenchSession>("browser_focus", { id }));
+  }
+  if (hasConfiguredBrowserSidecarBaseUrl()) {
+    return jsonRequest<BrowserWorkbenchSession>("/api/browser/workbench/focus", { id });
   }
   const current = browserWorkbenchFallbackSessions.find((item) => item.id === id);
   if (!current) throw new Error(`Browser window not found: ${id}`);
@@ -269,7 +514,12 @@ async function browserFocus(id: string) {
 
 async function browserClose(id: string) {
   if (isTauri()) {
-    return invoke<BrowserWorkbenchSession[]>("browser_close", { id });
+    const sessions = await invoke<BrowserWorkbenchSession[]>("browser_close", { id });
+    void jsonRequest<BrowserWorkbenchSession[]>("/api/browser/workbench/close", { id }).catch(() => undefined);
+    return mergeNativeBrowserSupervisors(sessions.map(nativeBrowserSession));
+  }
+  if (hasConfiguredBrowserSidecarBaseUrl()) {
+    return jsonRequest<BrowserWorkbenchSession[]>("/api/browser/workbench/close", { id });
   }
   browserWorkbenchFallbackSessions = browserWorkbenchFallbackSessions.filter((item) => item.id !== id);
   return browserWorkbenchFallbackSessions;
@@ -277,16 +527,67 @@ async function browserClose(id: string) {
 
 async function browserTileTwoUp(ids: string[]) {
   if (isTauri()) {
-    return invoke<BrowserWorkbenchSession[]>("browser_tile_two_up", { ids });
+    const sessions = await invoke<BrowserWorkbenchSession[]>("browser_tile_two_up", { ids });
+    return mergeNativeBrowserSupervisors(sessions.map(nativeBrowserSession));
+  }
+  if (hasConfiguredBrowserSidecarBaseUrl()) {
+    return jsonRequest<BrowserWorkbenchSession[]>("/api/browser/workbench/tile-two-up", { ids });
   }
   if (ids.length !== 2) throw new Error("Two browser window ids are required.");
   return browserWorkbenchFallbackSessions;
 }
 
+async function browserAction(payload: {
+  id: string;
+  action: "click" | "double_click" | "scroll" | "back" | "forward" | "reload" | "press" | "type_text";
+  x?: number;
+  y?: number;
+  delta_x?: number;
+  delta_y?: number;
+  key?: string;
+  text?: string;
+}) {
+  if (!hasConfiguredBrowserSidecarBaseUrl()) {
+    throw new Error("Interactive browser actions need a connected AstraBridge sidecar.");
+  }
+  return jsonRequest<BrowserWorkbenchSession>("/api/browser/workbench/action", payload, { timeoutMs: 120000 });
+}
+
+async function browserLayout(payload: BrowserWorkbenchLayoutRequest) {
+  if (hasConfiguredBrowserSidecarBaseUrl()) {
+    return jsonRequest<BrowserWorkbenchSession>("/api/browser/workbench/layout", payload, { timeoutMs: 120000 });
+  }
+  const current = browserWorkbenchFallbackSessions.find((item) => item.id === payload.id);
+  if (!current) throw new Error(`Browser window not found: ${payload.id}`);
+  const viewport = payload.layout_mode === "mobile" ? { width: 390, height: 844 } : { width: 1365, height: 900 };
+  const fallbackMobile = browserFallbackMobileResolution(current.url, payload.layout_mode);
+  const next: BrowserWorkbenchSession = {
+    ...current,
+    url: fallbackMobile.url,
+    layout_mode: payload.layout_mode,
+    layout_reason: payload.layout_reason,
+    viewport_width: viewport.width,
+    viewport_height: viewport.height,
+    mobile_strategy: fallbackMobile.strategy,
+  };
+  browserWorkbenchFallbackSessions = browserWorkbenchFallbackSessions.map((item) => (item.id === payload.id ? next : item));
+  return next;
+}
+
+function browserWorkbenchFrameHref(sessionId: string, revision?: string | null) {
+  const params = new URLSearchParams();
+  params.set("id", sessionId);
+  if (revision) params.set("rev", revision);
+  const suffix = `/api/browser/workbench/frame?${params.toString()}`;
+  if (typeof window === "undefined") return suffix;
+  return `${browserSidecarBaseUrl()}${suffix}`;
+}
+
 export const api = {
-  health: () => request<{ ok: boolean; service: string; runtime: RuntimeEnvironment }>("/health"),
+  health: () => request<{ ok: boolean; service: string; sidecar?: RuntimeEnvironment["sidecar"]; runtime: RuntimeEnvironment }>("/health"),
   currentProject: () => request<{ project: ProjectFile | null }>("/api/projects/current"),
   recentProjects: () => request<{ projects: ProjectSummary[] }>("/api/projects/recent"),
+  projectSidebar: () => request<SidebarProjectsResponse>("/api/projects/sidebar"),
   createProject: (payload: {
     name: string;
     project_file: string;
@@ -295,9 +596,11 @@ export const api = {
   }) => jsonRequest<{ project: ProjectFile }>("/api/projects/create", payload),
   openProject: (projectFile: string) => jsonRequest<{ project: ProjectFile }>("/api/projects/open", { project_file: projectFile }),
   closeProject: () => jsonRequest<{ closed: boolean }>("/api/projects/close", {}),
+  suggestProjectTitle: (force = false) => jsonRequest<TitleSuggestionResponse>("/api/project/title/suggest", { force }),
   updateProjectPreferences: (payload: {
     locale?: ProjectFile["ui_preferences"]["locale"];
     appearance?: AppearancePreset;
+    cursor_enhancement?: CursorEnhancementPreference;
     execution_host?: ExecutionHost;
     wsl_distro?: string;
     left_sidebar_open?: boolean;
@@ -334,7 +637,11 @@ export const api = {
     return request<ProjectFilesTree>(`/api/project/files/tree?${params.toString()}`);
   },
   projectFileRead: (path: string) => request<ProjectFilePreview>(`/api/project/files/read?path=${encodeURIComponent(path)}`),
+  projectFileMediaHref,
+  browserWorkbenchFrameHref,
   projectFileMediaUrl: async (path: string) => `${await sidecarBaseUrl()}/api/project/files/media?path=${encodeURIComponent(path)}`,
+  stageAttachments: (payload: { files: AttachmentStageFile[]; directory_name?: string | null }) =>
+    jsonRequest<AttachmentStageResponse>("/api/project/attachments/stage", payload, { timeoutMs: 120000 }),
   projectTerminalHistory: () => request<ProjectTerminalHistory>("/api/project/terminal/history?limit=30"),
   projectTasks: () => request<ProjectTasksResponse>("/api/project/tasks"),
   taskConversation: (taskId?: string | null) => {
@@ -345,6 +652,7 @@ export const api = {
   },
   createTask: (title?: string) => jsonRequest<{ task: ProjectTasksResponse["tasks"][number]; project: ProjectFile }>("/api/project/tasks/create", { title }),
   switchTask: (taskId: string) => jsonRequest<{ task: ProjectTasksResponse["tasks"][number]; project: ProjectFile }>("/api/project/tasks/switch", { task_id: taskId }),
+  suggestTaskTitle: (force = false) => jsonRequest<TitleSuggestionResponse>("/api/project/tasks/title/suggest", { force }),
   createProjectSave: (payload: { thread_id?: string | null; description?: string; provider?: string; model?: string }) =>
     jsonRequest<ProjectSaveCreateResponse>("/api/project/saves/create", payload),
   loadProjectSave: (payload: { save_id: string; preview?: boolean; confirm_dirty?: boolean }) =>
@@ -391,9 +699,17 @@ export const api = {
   capabilityArtifacts: (limit = 20) => request<CapabilityArtifactsResponse>(`/api/runtime/capability-artifacts?limit=${encodeURIComponent(String(limit))}`),
   capabilitySmoke: (payload: { capability_id: string; mode?: "dry_run" | "provider"; allow_provider?: boolean }) =>
     jsonRequest<CapabilitySmokeResponse>("/api/runtime/capability-smoke", payload),
+  invokeCapability: (payload: { capability_id: string; payload: Record<string, unknown> }) =>
+    jsonRequest<CapabilityInvokeResponse>("/api/runtime/capability-invoke", payload, { timeoutMs: 180000 }),
   saveCapabilityRoute: (payload: CapabilityRouteRecord) => jsonRequest<{ route: CapabilityRouteEntry }>("/api/runtime/capability-routes/save", payload),
+  webSearchBatch: (payload: WebSearchBatchRequest) =>
+    requestWebSearchBatch((path, body) => jsonRequest<WebSearchBatchResponse>(path, body), payload),
+  webResearchBrief: (payload: WebResearchBriefRequest) =>
+    requestWebResearchBrief((path, body) => jsonRequest<WebResearchBriefResponse>(path, body, { timeoutMs: 120000 }), payload),
+  webFetch: (payload: WebFetchRequest) =>
+    requestWebFetch((path, body) => jsonRequest<WebFetchResponse>(path, body), payload),
   llmManagerSession: () => request<LlmManagerSession>("/api/llm-manager/session"),
-  llmManagerLogin: (payload: { username?: string; password?: string; mode?: "managed_user" | "anonymous" }) =>
+  llmManagerLogin: (payload: { username?: string; password?: string; mode?: "managed_user" | "anonymous"; use_desktop_key_file?: boolean }) =>
     jsonRequest<{ session: LlmManagerSession }>("/api/llm-manager/login", payload),
   llmManagerLogout: () => jsonRequest<{ session: LlmManagerSession }>("/api/llm-manager/logout", {}),
   llmManagerCreateUser: (payload: { username: string; password?: string; use_desktop_key_file?: boolean }) =>
@@ -463,6 +779,8 @@ export const api = {
   browserFocus,
   browserClose,
   browserTileTwoUp,
+  browserAction,
+  browserLayout,
   addDogfoodCapture: (payload: { path: string; label?: string; provider?: string }) =>
     jsonRequest<DogfoodRunResponse & { capture: Record<string, unknown> }>("/api/dogfood/captures/add", payload),
   dogfoodBrowserSmoke: (payload: { url: string; label?: string; preset?: string; screenshot_path?: string; console_errors?: string[]; auto_milestone?: boolean; include_run?: boolean; actions?: Array<Record<string, unknown>> }) =>
@@ -481,7 +799,7 @@ export const api = {
     permission_mode?: PermissionMode;
     collaboration_mode?: CollaborationMode;
   }) => jsonRequest<NativeKernelDemoResponse>("/api/project/demo/native-kernel/prepare", payload ?? {}),
-  isolationAudit: () => request<IsolationAuditResponse>("/api/audit/isolation"),
+  isolationAudit: () => request<IsolationAuditResponse>("/api/audit/isolation", { acceptOkFalse: true }),
   markDogfoodAsset: (payload: { asset_id: string; status?: string; quality_status?: string; integration_status?: string; role?: string; purpose?: string; notes?: string }) =>
     jsonRequest<AssetRegistryResponse>("/api/dogfood/assets/mark", payload),
   promoteDogfoodAsset: (payload: { asset_id: string; target_name?: string; manifest_section?: "sprites" | "tiles" | "hud"; entity?: string; state?: string; tile_key?: string; role?: string }) =>
@@ -517,6 +835,8 @@ export const api = {
     jsonRequest<CodexPluginInstallPlan>("/api/runtime/plugin-install-plan", payload),
   runtimePluginInstallApply: (payload: { profile_id?: string; plugin_id: string; source_catalog_id?: string }) =>
     jsonRequest<CodexPluginInstallExecution>("/api/runtime/plugin-install-apply", payload),
+  runtimeSkillPluginCreatorFixtureScenario: (payload?: { profile_id?: string; skill_name?: string }) =>
+    jsonRequest<SkillPluginCreatorScenarioExecution>("/api/runtime/skill-scenario/plugin-creator-fixture", payload ?? {}),
   runtimeComputerUseBrowserScenario: (payload?: {
     profile_id?: string;
     run_model?: boolean;
@@ -587,7 +907,7 @@ export const api = {
     }),
   archiveThread: (threadId: string, profileId?: string) =>
     jsonRequest<{ archived: string }>("/api/runtime/threads/archive", { thread_id: threadId, profile_id: profileId }),
-  switchThread: (threadId: string | null) => jsonRequest<{ project: ProjectFile }>("/api/runtime/threads/switch", { thread_id: threadId }),
+  switchThread: (threadId: string | null) => jsonRequest<{ project: ProjectFile; task?: ProjectTasksResponse["tasks"][number] | null }>("/api/runtime/threads/switch", { thread_id: threadId }),
   saveThreadSettings: (payload: {
     thread_id: string;
     profile_id?: string;
@@ -601,7 +921,7 @@ export const api = {
     if (profileId) params.set("profile_id", profileId);
     return request<GoalResponse>(`/api/runtime/goal?${params.toString()}`);
   },
-  setGoal: (payload: { thread_id: string; profile_id?: string; objective: string; token_budget?: number | null }) =>
+  setGoal: (payload: { thread_id: string; profile_id?: string; objective: string; status?: "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete"; token_budget?: number | null }) =>
     jsonRequest<GoalResponse>("/api/runtime/goal/set", payload),
   clearGoal: (threadId: string, profileId?: string) =>
     jsonRequest<GoalResponse>("/api/runtime/goal/clear", { thread_id: threadId, profile_id: profileId }),
@@ -617,7 +937,7 @@ export const api = {
     permission_mode: PermissionMode;
     collaboration_mode?: CollaborationMode;
     context_mode?: ContextMode;
-  }) => jsonRequest<TurnStartResponse>("/api/runtime/turns/start", payload),
+  }) => jsonRequest<TurnStartResponse>("/api/runtime/turns/start", payload, { timeoutMs: 120000 }),
   interruptTurn: (threadId: string, turnId: string, profileId?: string) =>
     jsonRequest<{ interrupt: unknown }>("/api/runtime/turns/interrupt", {
       thread_id: threadId,

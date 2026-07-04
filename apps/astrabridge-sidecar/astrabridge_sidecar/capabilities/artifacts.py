@@ -101,25 +101,37 @@ def _entry_from_summary(workspace_root: Path, summary_path: Path, summary: dict[
 
 def _image_asset_entries(workspace_root: Path) -> list[dict[str, Any]]:
     registry_path = workspace_root / ".astrabridge" / "assets" / "asset_registry.json"
+    generated_manifest_path = workspace_root / ".astrabridge" / "assets" / "generated" / "asset_manifest.json"
     registry = read_json(registry_path, None)
-    assets = list((registry or {}).get("assets") or []) if isinstance(registry, dict) else []
+    generated_manifest = read_json(generated_manifest_path, None)
+    asset_sources: list[tuple[Path, dict[str, Any]]] = []
+    if isinstance(registry, dict):
+        asset_sources.extend((registry_path, item) for item in list(registry.get("assets") or []) if isinstance(item, dict))
+    if isinstance(generated_manifest, dict):
+        asset_sources.extend(
+            (generated_manifest_path, item) for item in list(generated_manifest.get("assets") or []) if isinstance(item, dict)
+        )
+
     entries: list[dict[str, Any]] = []
-    for item in assets:
-        if not isinstance(item, dict):
-            continue
+    seen: set[tuple[str, str]] = set()
+    for source_manifest_path, item in asset_sources:
         source = _safe_path(workspace_root, item.get("source_path") or item.get("local_path"))
         if source is None:
             continue
         asset_id = str(item.get("asset_id") or source.stem)
+        key = (asset_id, str(source))
+        if key in seen:
+            continue
+        seen.add(key)
         entries.append(
             {
                 "artifact_id": asset_id,
                 "capability_id": "image.generate",
-                "provider_id": "yunwu",
+                "provider_id": str(item.get("provider") or "yunwu"),
                 "model": str(item.get("model") or ""),
-                "saved_at": str(item.get("created_at") or item.get("updated_at") or ""),
-                "summary_path": str(registry_path),
-                "relative_summary_path": _relative_path(workspace_root, registry_path),
+                "saved_at": str(item.get("generated_at") or item.get("created_at") or item.get("updated_at") or ""),
+                "summary_path": str(source_manifest_path),
+                "relative_summary_path": _relative_path(workspace_root, source_manifest_path),
                 "artifact_refs": [
                     {
                         "artifact_type": "image",
@@ -131,14 +143,17 @@ def _image_asset_entries(workspace_root: Path) -> list[dict[str, Any]]:
                 ],
                 "preview": {
                     "kind": "image",
-                    "text": str(item.get("role") or item.get("label") or ""),
+                    "text": str(item.get("role") or item.get("label") or item.get("purpose") or ""),
                     "audio_path": "",
                     "image_path": str(source),
                 },
                 "metadata": {
                     "asset_id": asset_id,
                     "status": str(item.get("status") or item.get("quality_status") or ""),
-                    "warnings": list(item.get("warnings") or [])[:5],
+                    "tool": str(item.get("tool") or ""),
+                    "quality": str(item.get("quality") or ""),
+                    "transparency_status": str(item.get("transparency_status") or ""),
+                    "warnings": list(item.get("warnings") or item.get("validation_warnings") or [])[:5],
                 },
             }
         )

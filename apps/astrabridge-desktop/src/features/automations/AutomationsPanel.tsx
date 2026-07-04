@@ -216,6 +216,206 @@ function statusTone(status: string) {
   return "";
 }
 
+function kindLabel(locale: LocaleCode, value: AutomationKind) {
+  if (value === "standalone") return t(locale, "automations_kind_standalone");
+  if (value === "thread") return t(locale, "automations_kind_thread");
+  return value;
+}
+
+function scheduleLabel(locale: LocaleCode, value: AutomationFormState["schedule_mode"]) {
+  if (value === "manual") return t(locale, "automations_schedule_manual");
+  if (value === "interval") return t(locale, "automations_schedule_interval");
+  if (value === "daily") return t(locale, "automations_schedule_daily");
+  return value;
+}
+
+function permissionModeLabel(locale: LocaleCode, value: AutomationPermissionMode) {
+  if (value === "read-only") return t(locale, "automations_permission_read_only");
+  if (value === "workspace-write") return t(locale, "automations_permission_workspace_write");
+  if (value === "full-access") return t(locale, "automations_permission_full_access");
+  return value;
+}
+
+function executionHostLabel(locale: LocaleCode, value: AutomationFormState["execution_host"]) {
+  if (value === "auto") return t(locale, "automations_execution_host_auto");
+  if (value === "windows") return t(locale, "automations_execution_host_windows");
+  if (value === "wsl") return t(locale, "automations_execution_host_wsl");
+  return value;
+}
+
+function workspaceModeLabel(locale: LocaleCode, value: AutomationWorkspaceMode) {
+  if (value === "dedicated_worktree") return t(locale, "automations_workspace_dedicated_worktree");
+  if (value === "current_workspace") return t(locale, "automations_workspace_current_workspace");
+  return value;
+}
+
+function cleanupPolicyLabel(locale: LocaleCode, value: AutomationFormState["cleanup_policy"]) {
+  if (value === "keep_on_finding") return t(locale, "automations_cleanup_keep_on_finding");
+  if (value === "keep_on_failure") return t(locale, "automations_cleanup_keep_on_failure");
+  if (value === "delete_on_no_signal") return t(locale, "automations_cleanup_delete_on_no_signal");
+  if (value === "manual") return t(locale, "automations_cleanup_manual");
+  return value;
+}
+
+function notifyOnLabel(locale: LocaleCode, value: AutomationNotifyOn) {
+  if (value === "finding") return t(locale, "automations_notify_finding");
+  if (value === "failure") return t(locale, "automations_notify_failure");
+  if (value === "every_run") return t(locale, "automations_notify_every_run");
+  return value;
+}
+
+function triggerLabel(locale: LocaleCode, value: string) {
+  if (value === "manual") return t(locale, "automations_trigger_manual");
+  if (value === "schedule") return t(locale, "automations_trigger_schedule");
+  if (value === "retry") return t(locale, "automations_trigger_retry");
+  return value;
+}
+
+function runStatusLabel(locale: LocaleCode, value: string) {
+  if (value === "queued") return t(locale, "automations_status_queued");
+  if (value === "running") return t(locale, "automations_status_running");
+  if (value === "needs_review") return t(locale, "automations_status_needs_review");
+  if (value === "completed") return t(locale, "automations_status_completed");
+  if (value === "failed") return t(locale, "automations_status_failed");
+  if (value === "skipped") return t(locale, "automations_status_skipped");
+  if (value === "cancelled") return t(locale, "automations_status_cancelled");
+  return value;
+}
+
+function signalLabel(locale: LocaleCode, value: string) {
+  if (value === "finding") return t(locale, "automations_signal_finding");
+  if (value === "no_signal") return t(locale, "automations_signal_no_signal");
+  if (value === "unknown") return t(locale, "automations_signal_unknown");
+  return value;
+}
+
+function inboxStateLabel(locale: LocaleCode, value: string) {
+  if (value === "unread") return t(locale, "automations_state_unread");
+  if (value === "reviewed") return t(locale, "automations_state_reviewed");
+  if (value === "archived") return t(locale, "automations_state_archived");
+  if (value === "promoted") return t(locale, "automations_state_promoted");
+  return value;
+}
+
+function inboxDispositionLabel(locale: LocaleCode, value: string) {
+  if (value === "finding") return t(locale, "automations_disposition_finding");
+  if (value === "no_signal") return t(locale, "automations_disposition_no_signal");
+  if (value === "failure") return t(locale, "automations_disposition_failure");
+  if (value === "approval_required") return t(locale, "automations_disposition_approval_required");
+  return value;
+}
+
+function severityLabel(locale: LocaleCode, value: string) {
+  if (value === "info") return t(locale, "automations_severity_info");
+  if (value === "warning") return t(locale, "automations_severity_warning");
+  if (value === "error") return t(locale, "automations_severity_error");
+  return value;
+}
+
+function runDiagnosticNotice(locale: LocaleCode, run: AutomationRun) {
+  const error = String(run.redacted_error || "").trim();
+  const watchdogReason = String(run.watchdog_reason || "").trim().toLowerCase();
+  const watchdogSummary = String(run.watchdog_summary || "").trim();
+  if (watchdogReason === "stale_running_timeout" || ["automation_watchdog_stale_running_timeout", "stale_run_recovered"].includes(error)) {
+    return {
+      title: t(locale, "automations_run_watchdog_title"),
+      body: locale === "en" && watchdogSummary ? watchdogSummary : t(locale, "automations_run_watchdog_body"),
+      raw: error || watchdogReason,
+    };
+  }
+  if (!error) return null;
+  if (watchdogReason === "service_restart_interrupted" || error === "automation_runner_interrupted_after_service_restart") {
+    return {
+      title: t(locale, "automations_run_recovered_title"),
+      body: locale === "en" && watchdogSummary ? watchdogSummary : t(locale, "automations_run_recovered_body"),
+      raw: error,
+    };
+  }
+  if (run.status === "cancelled" && error === "cancelled_by_user") {
+    return {
+      title: t(locale, "automations_run_cancelled_title"),
+      body: t(locale, "automations_run_cancelled_body"),
+      raw: error,
+    };
+  }
+  if (["failed", "cancelled", "needs_review"].includes(run.status)) {
+    return {
+      title: t(locale, "automations_run_diagnostic_title"),
+      body: error,
+      raw: null,
+    };
+  }
+  return null;
+}
+
+type AutomationRunNotice = {
+  title: string;
+  body: string;
+  raw: string | null;
+  tone: "warning" | "success" | "neutral";
+};
+
+function compactArtifactPath(path: string) {
+  const segments = String(path || "")
+    .split(/[\\/]+/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  if (segments.length === 0) return path;
+  if (segments.length === 1) return segments[0];
+  return segments.slice(-2).join(" / ");
+}
+
+function runFinalizationNotice(locale: LocaleCode, run: AutomationRun, inboxItem: AutomationInboxItem | null): AutomationRunNotice | null {
+  const status = String(run.status || "").trim().toLowerCase();
+  if (!["completed", "skipped"].includes(status)) return null;
+  if (inboxItem?.disposition === "finding") {
+    return {
+      title: t(locale, "automations_run_finalized_finding_title"),
+      body: t(locale, "automations_run_finalized_finding_body"),
+      raw: null,
+      tone: "success",
+    };
+  }
+  if (inboxItem?.disposition === "no_signal") {
+    if (String(inboxItem.state || "").trim().toLowerCase() === "archived") {
+      return {
+        title: t(locale, "automations_run_finalized_archived_title"),
+        body: t(locale, "automations_run_finalized_archived_body"),
+        raw: null,
+        tone: "neutral",
+      };
+    }
+    return {
+      title: t(locale, "automations_run_finalized_recorded_title"),
+      body: t(locale, "automations_run_finalized_recorded_body"),
+      raw: null,
+      tone: "neutral",
+    };
+  }
+  return {
+    title: t(locale, "automations_run_finalized_no_inbox_title"),
+    body: t(locale, "automations_run_finalized_no_inbox_body"),
+    raw: null,
+    tone: "neutral",
+  };
+}
+
+function runNoticeClassName(notice: AutomationRunNotice) {
+  if (notice.tone === "success") return "automation-run-notice automation-run-notice-success";
+  if (notice.tone === "neutral") return "automation-run-notice automation-run-notice-neutral";
+  return "automation-run-notice";
+}
+
+function runRecoveryLabel(locale: LocaleCode, run: AutomationRun) {
+  const watchdogReason = String(run.watchdog_reason || "").trim().toLowerCase();
+  if (watchdogReason === "stale_running_timeout") return t(locale, "automations_run_watchdog_title");
+  if (watchdogReason === "service_restart_interrupted") return t(locale, "automations_run_recovered_title");
+  if (run.status === "cancelled" && String(run.redacted_error || "").trim() === "cancelled_by_user") {
+    return t(locale, "automations_run_cancelled_title");
+  }
+  return t(locale, "automations_none");
+}
+
 type Props = {
   locale: LocaleCode;
   projectId: string;
@@ -228,6 +428,7 @@ type Props = {
   mcpPresetOptions?: AutomationMcpPresetOption[];
   pluginSkillPresetOptions?: AutomationPluginSkillPresetOption[];
   isBusy?: boolean;
+  errorMessage?: string | null;
   onCreate: (payload: ReturnType<typeof automationPayloadFromDraft>) => void;
   onUpdate: (automationId: string, patch: ReturnType<typeof automationPayloadFromDraft>) => void;
   onDelete: (automationId: string) => void;
@@ -252,6 +453,7 @@ export function AutomationsPanel({
   mcpPresetOptions = [],
   pluginSkillPresetOptions = [],
   isBusy,
+  errorMessage,
   onCreate,
   onUpdate,
   onDelete,
@@ -317,6 +519,9 @@ export function AutomationsPanel({
   }, [filteredRuns, selectedRunId]);
 
   const selectedRun = filteredRuns.find((run) => run.run_id === selectedRunId) ?? filteredRuns[0] ?? null;
+  const selectedRunInboxItem = selectedRun ? filteredInbox.find((item) => item.run_id === selectedRun.run_id) ?? null : null;
+  const selectedRunFinalization = selectedRun ? runFinalizationNotice(locale, selectedRun, selectedRunInboxItem) : null;
+  const selectedRunNotice = selectedRun ? runDiagnosticNotice(locale, selectedRun) : null;
   const summary = supervisorAutomations?.inbox_summary ?? scheduler?.inbox_summary ?? { unread: 0, reviewed: 0, archived: 0, promoted: 0 };
   const configuredPresetIds = splitList(draft.mcp_preset_ids);
   const knownPresetIds = new Set(mcpPresetOptions.map((item) => item.preset_id));
@@ -399,7 +604,7 @@ export function AutomationsPanel({
               >
                 <span>
                   <strong>{automation.name}</strong>
-                  <small>{automation.kind} · {automation.schedule.mode} · {automation.runtime.permission_mode}</small>
+                  <small>{kindLabel(locale, automation.kind)} / {scheduleLabel(locale, automation.schedule.mode)} / {permissionModeLabel(locale, automation.runtime.permission_mode)}</small>
                 </span>
                 <span className="manager-row-side">
                   <span className={`status-tag ${statusTone(automation.last_status || (automation.enabled ? "enabled" : "paused"))}`}>
@@ -423,6 +628,13 @@ export function AutomationsPanel({
             </div>
           </div>
 
+          {errorMessage ? (
+            <div className="automation-operation-error" data-testid="automation-error-message" role="alert">
+              <strong>{t(locale, "automations_operation_error")}</strong>
+              <span>{errorMessage}</span>
+            </div>
+          ) : null}
+
           <div className="automation-safety-note">
             <strong>{t(locale, "automations_safety_title")}</strong>
             <span>{t(locale, "automations_safety_summary")}</span>
@@ -431,28 +643,28 @@ export function AutomationsPanel({
           <div className="form-grid">
             <label className="field"><span>{t(locale, "automations_id")}</span><input value={draft.automation_id} onChange={(event) => setDraft({ ...draft, automation_id: event.target.value })} disabled={Boolean(selectedAutomation)} /></label>
             <label className="field"><span>{t(locale, "automations_name")}</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
-            <label className="field"><span>{t(locale, "automations_kind")}</span><select value={draft.kind} onChange={(event) => setDraft({ ...draft, kind: event.target.value as AutomationKind })}><option value="standalone">standalone</option><option value="thread">thread</option></select></label>
-            <label className="field"><span>{t(locale, "automations_schedule")}</span><select value={draft.schedule_mode} onChange={(event) => setDraft({ ...draft, schedule_mode: event.target.value as AutomationFormState["schedule_mode"] })}><option value="manual">manual</option><option value="interval">interval</option><option value="daily">daily</option></select></label>
+            <label className="field"><span>{t(locale, "automations_kind")}</span><select value={draft.kind} onChange={(event) => setDraft({ ...draft, kind: event.target.value as AutomationKind })}><option value="standalone">{kindLabel(locale, "standalone")}</option><option value="thread">{kindLabel(locale, "thread")}</option></select></label>
+            <label className="field"><span>{t(locale, "automations_schedule")}</span><select value={draft.schedule_mode} onChange={(event) => setDraft({ ...draft, schedule_mode: event.target.value as AutomationFormState["schedule_mode"] })}><option value="manual">{scheduleLabel(locale, "manual")}</option><option value="interval">{scheduleLabel(locale, "interval")}</option><option value="daily">{scheduleLabel(locale, "daily")}</option></select></label>
             <label className="field"><span>{t(locale, "automations_profile")}</span>
               <select value={draft.profile_id} onChange={(event) => setDraft({ ...draft, profile_id: event.target.value })}>
                 <option value="">{t(locale, "automations_none")}</option>
                 {profiles.map((profile) => <option key={profile.profile_id} value={profile.profile_id}>{profile.label} ({profile.profile_id})</option>)}
               </select>
             </label>
-            <label className="field"><span>{t(locale, "automations_permission")}</span><select value={draft.permission_mode} onChange={(event) => setDraft({ ...draft, permission_mode: event.target.value as AutomationPermissionMode })}><option value="read-only">read-only</option><option value="workspace-write">workspace-write</option><option value="full-access">full-access</option></select></label>
+            <label className="field"><span>{t(locale, "automations_permission")}</span><select value={draft.permission_mode} onChange={(event) => setDraft({ ...draft, permission_mode: event.target.value as AutomationPermissionMode })}><option value="read-only">{permissionModeLabel(locale, "read-only")}</option><option value="workspace-write">{permissionModeLabel(locale, "workspace-write")}</option><option value="full-access">{permissionModeLabel(locale, "full-access")}</option></select></label>
             {draft.schedule_mode === "interval" ? <label className="field"><span>{t(locale, "automations_interval_minutes")}</span><input type="number" min={1} value={draft.interval_minutes} onChange={(event) => setDraft({ ...draft, interval_minutes: Number(event.target.value) || 1 })} /></label> : null}
             {draft.schedule_mode === "daily" ? <label className="field"><span>{t(locale, "automations_daily_time")}</span><input value={`${draft.daily_hour}:${draft.daily_minute}`} onChange={(event) => {
               const [hour = "09", minute = "00"] = event.target.value.split(":", 2);
               setDraft({ ...draft, daily_hour: hour.padStart(2, "0"), daily_minute: minute.padStart(2, "0") });
             }} /></label> : null}
             <label className="field"><span>{t(locale, "automations_timezone")}</span><input value={draft.timezone} onChange={(event) => setDraft({ ...draft, timezone: event.target.value })} /></label>
-            <label className="field"><span>{t(locale, "automations_execution_host")}</span><select value={draft.execution_host} onChange={(event) => setDraft({ ...draft, execution_host: event.target.value as AutomationFormState["execution_host"] })}><option value="auto">auto</option><option value="windows">windows</option><option value="wsl">wsl</option></select></label>
+            <label className="field"><span>{t(locale, "automations_execution_host")}</span><select value={draft.execution_host} onChange={(event) => setDraft({ ...draft, execution_host: event.target.value as AutomationFormState["execution_host"] })}><option value="auto">{executionHostLabel(locale, "auto")}</option><option value="windows">{executionHostLabel(locale, "windows")}</option><option value="wsl">{executionHostLabel(locale, "wsl")}</option></select></label>
             <label className="field"><span>{t(locale, "automations_model")}</span><input value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} /></label>
             <label className="field"><span>{t(locale, "automations_effort")}</span><input value={draft.effort} onChange={(event) => setDraft({ ...draft, effort: event.target.value })} /></label>
-            <label className="field"><span>{t(locale, "automations_workspace_mode")}</span><select value={draft.workspace_mode} onChange={(event) => setDraft({ ...draft, workspace_mode: event.target.value as AutomationWorkspaceMode })}><option value="dedicated_worktree">dedicated_worktree</option><option value="current_workspace">current_workspace</option></select></label>
-            <label className="field"><span>{t(locale, "automations_cleanup_policy")}</span><select value={draft.cleanup_policy} onChange={(event) => setDraft({ ...draft, cleanup_policy: event.target.value as AutomationFormState["cleanup_policy"] })}><option value="keep_on_finding">keep_on_finding</option><option value="keep_on_failure">keep_on_failure</option><option value="delete_on_no_signal">delete_on_no_signal</option><option value="manual">manual</option></select></label>
+            <label className="field"><span>{t(locale, "automations_workspace_mode")}</span><select value={draft.workspace_mode} onChange={(event) => setDraft({ ...draft, workspace_mode: event.target.value as AutomationWorkspaceMode })}><option value="dedicated_worktree">{workspaceModeLabel(locale, "dedicated_worktree")}</option><option value="current_workspace">{workspaceModeLabel(locale, "current_workspace")}</option></select></label>
+            <label className="field"><span>{t(locale, "automations_cleanup_policy")}</span><select value={draft.cleanup_policy} onChange={(event) => setDraft({ ...draft, cleanup_policy: event.target.value as AutomationFormState["cleanup_policy"] })}><option value="keep_on_finding">{cleanupPolicyLabel(locale, "keep_on_finding")}</option><option value="keep_on_failure">{cleanupPolicyLabel(locale, "keep_on_failure")}</option><option value="delete_on_no_signal">{cleanupPolicyLabel(locale, "delete_on_no_signal")}</option><option value="manual">{cleanupPolicyLabel(locale, "manual")}</option></select></label>
             <label className="field"><span>{t(locale, "automations_base_branch")}</span><input value={draft.base_branch} onChange={(event) => setDraft({ ...draft, base_branch: event.target.value })} placeholder="main" /></label>
-            <label className="field"><span>{t(locale, "automations_notify_on")}</span><select value={draft.notify_on} onChange={(event) => setDraft({ ...draft, notify_on: event.target.value as AutomationNotifyOn })}><option value="finding">finding</option><option value="failure">failure</option><option value="every_run">every_run</option></select></label>
+            <label className="field"><span>{t(locale, "automations_notify_on")}</span><select value={draft.notify_on} onChange={(event) => setDraft({ ...draft, notify_on: event.target.value as AutomationNotifyOn })}><option value="finding">{notifyOnLabel(locale, "finding")}</option><option value="failure">{notifyOnLabel(locale, "failure")}</option><option value="every_run">{notifyOnLabel(locale, "every_run")}</option></select></label>
             <label className="field"><span>{t(locale, "automations_timeout_sec")}</span><input type="number" min={60} value={draft.timeout_sec} onChange={(event) => setDraft({ ...draft, timeout_sec: Number(event.target.value) || 1800 })} /></label>
             <label className="field"><span>{t(locale, "automations_max_retries")}</span><input type="number" min={0} value={draft.max_retries} onChange={(event) => setDraft({ ...draft, max_retries: Number(event.target.value) || 0 })} /></label>
             <label className="field"><span>{t(locale, "automations_parallel_runs")}</span><input type="number" min={1} value={draft.max_parallel_runs} onChange={(event) => setDraft({ ...draft, max_parallel_runs: Number(event.target.value) || 1 })} /></label>
@@ -547,15 +759,15 @@ export function AutomationsPanel({
                 <div className="field-row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
                   <span>
                     <strong>{item.title}</strong>
-                    <small>{item.disposition} · {item.state} · {relativeTimeLabel(item.updated_at)}</small>
+                    <small>{inboxDispositionLabel(locale, item.disposition)} / {inboxStateLabel(locale, item.state)} / {relativeTimeLabel(item.updated_at)}</small>
                   </span>
-                  <span className={`status-tag ${statusTone(item.state)}`}>{item.severity}</span>
+                  <span className={`status-tag ${statusTone(item.state)}`}>{severityLabel(locale, item.severity)}</span>
                 </div>
                 <small>{item.summary}</small>
-                <div className="field-row" style={{ marginTop: 8 }}>
+                <div className="field-row automation-inbox-actions">
                   {item.state !== "reviewed" ? <button type="button" className="ghost-button" onClick={() => onMarkReviewed(item.item_id)}>{t(locale, "automations_mark_reviewed")}</button> : null}
                   {item.state !== "archived" ? <button type="button" className="ghost-button" onClick={() => onArchive(item.item_id)}>{t(locale, "automations_archive")}</button> : null}
-                  <input value={promotionRef} onChange={(event) => setPromotionRef(event.target.value)} aria-label={t(locale, "automations_promotion_ref")} placeholder="task:123" />
+                  <input className="automation-promotion-input" value={promotionRef} onChange={(event) => setPromotionRef(event.target.value)} aria-label={t(locale, "automations_promotion_ref")} placeholder="task:123" />
                   <button type="button" className="primary-button" onClick={() => onPromote(item.item_id, promotionRef)}>{t(locale, "automations_promote")}</button>
                 </div>
               </div>
@@ -570,11 +782,11 @@ export function AutomationsPanel({
             {filteredRuns.map((run) => (
               <button key={run.run_id} type="button" className={selectedRunId === run.run_id ? "manager-row manager-row-active" : "manager-row"} onClick={() => setSelectedRunId(run.run_id)}>
                 <span>
-                  <strong>{run.status}</strong>
-                  <small>{run.trigger} · {run.signal} · {relativeTimeLabel(run.finished_at || run.started_at || run.due_at)}</small>
+                  <strong>{runStatusLabel(locale, run.status)}</strong>
+                  <small>{triggerLabel(locale, run.trigger)} / {signalLabel(locale, run.signal)} / {relativeTimeLabel(run.finished_at || run.started_at || run.due_at)}</small>
                 </span>
                 <span className="manager-row-side">
-                  <span className={`status-tag ${statusTone(run.status)}`}>{run.status}</span>
+                  <span className={`status-tag ${statusTone(run.status)}`}>{runStatusLabel(locale, run.status)}</span>
                 </span>
               </button>
             ))}
@@ -587,22 +799,49 @@ export function AutomationsPanel({
               </div>
               <p className="muted compact-copy">{selectedRun.summary || t(locale, "automations_none")}</p>
               <div className="automation-detail-grid">
-                <div><dt>{t(locale, "status")}</dt><dd>{selectedRun.status}</dd></div>
-                <div><dt>{t(locale, "automations_signal")}</dt><dd>{selectedRun.signal}</dd></div>
+                <div><dt>{t(locale, "status")}</dt><dd>{runStatusLabel(locale, selectedRun.status)}</dd></div>
+                <div><dt>{t(locale, "automations_signal")}</dt><dd>{signalLabel(locale, selectedRun.signal)}</dd></div>
                 <div><dt>{t(locale, "automations_due_at")}</dt><dd>{selectedRun.due_at || t(locale, "automations_none")}</dd></div>
                 <div><dt>{t(locale, "automations_worktree")}</dt><dd>{selectedRun.worktree_path || t(locale, "automations_none")}</dd></div>
+                <div><dt>{t(locale, "automations_run_recovery")}</dt><dd>{runRecoveryLabel(locale, selectedRun)}</dd></div>
+                <div><dt>{t(locale, "automations_run_retry_at")}</dt><dd>{selectedRun.next_retry_at || t(locale, "automations_none")}</dd></div>
+                <div>
+                  <dt>{t(locale, "automations_run_inbox_item")}</dt>
+                  <dd>
+                    {selectedRunInboxItem
+                      ? `${selectedRunInboxItem.title} · ${inboxDispositionLabel(locale, selectedRunInboxItem.disposition)} / ${inboxStateLabel(locale, selectedRunInboxItem.state)}`
+                      : t(locale, "automations_none")}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t(locale, "automations_run_manifest")}</dt>
+                  <dd>{selectedRun.artifact_refs.length > 0 ? selectedRun.artifact_refs.map(compactArtifactPath).join(", ") : t(locale, "automations_none")}</dd>
+                </div>
               </div>
+              {selectedRunFinalization ? (
+                <div className={runNoticeClassName(selectedRunFinalization)} data-testid="automation-run-finalization" role="status">
+                  <strong>{selectedRunFinalization.title}</strong>
+                  <span>{selectedRunFinalization.body}</span>
+                </div>
+              ) : null}
+              {selectedRunNotice ? (
+                <div className="automation-run-notice" data-testid="automation-run-diagnostic" role="status">
+                  <strong>{selectedRunNotice.title}</strong>
+                  <span>{selectedRunNotice.body}</span>
+                  {selectedRunNotice.raw ? <code>{selectedRunNotice.raw}</code> : null}
+                </div>
+              ) : null}
               {selectedRun.artifact_refs.length > 0 ? (
                 <div className="field">
                   <span>{t(locale, "automations_artifacts")}</span>
                   <div className="manager-list">
-                    {selectedRun.artifact_refs.map((path) => <code key={path}>{path}</code>)}
+                    {selectedRun.artifact_refs.map((path) => <code key={path} title={path}>{compactArtifactPath(path)}</code>)}
                   </div>
                 </div>
               ) : null}
               {selectedRun.stdout_excerpt ? <pre className="json-preview compact-preview">{selectedRun.stdout_excerpt}</pre> : null}
               {selectedRun.stderr_excerpt ? <pre className="json-preview compact-preview">{selectedRun.stderr_excerpt}</pre> : null}
-              {selectedRun.redacted_error ? <p className="error-text">{selectedRun.redacted_error}</p> : null}
+              {selectedRun.redacted_error && !selectedRunNotice ? <p className="error-text">{selectedRun.redacted_error}</p> : null}
             </div>
           ) : null}
         </section>

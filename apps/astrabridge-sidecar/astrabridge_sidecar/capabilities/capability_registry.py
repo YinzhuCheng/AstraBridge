@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from ..model_catalog import effective_model_record, provider_model_records
+from ..model_catalog import effective_model_record, provider_model_records, resolved_runtime_provider_contract_fields
 from ..providers import get_provider_profile
 from ..web_tool_service import web_lane_descriptor
 from .specs import AdapterContract, CapabilitySpec, default_adapter_contracts, default_capability_specs
@@ -15,6 +15,12 @@ _CAPABILITY_MODALITY_HINTS = {
     "speech.transcribe": ("text", "audio"),
     "speech.synthesize": ("text", "audio"),
     "web.search": ("text",),
+}
+_CAPABILITY_MODEL_PREFERENCE = {
+    # The default image.generate operation calls /images/generations, which is
+    # currently supported by gpt-image-2 variants. Flux models remain eligible
+    # for edit-style asset flows, but should not win the default route.
+    "image.generate": ("gpt-image-2", "gpt-image-2-all", "gpt-image-1", "flux-kontext-pro", "flux-kontext-max"),
 }
 
 
@@ -73,6 +79,8 @@ class CapabilityCandidate:
     provider_default_model: str | None
     provider_fallback_models: tuple[str, ...]
     eligibility_notes: tuple[str, ...]
+    capability_contract: dict[str, Any] = field(default_factory=dict)
+    runtime_provider_contract: dict[str, Any] = field(default_factory=dict)
     model_record: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -92,6 +100,8 @@ class CapabilityCandidate:
             "provider_default_model": self.provider_default_model,
             "provider_fallback_models": list(self.provider_fallback_models),
             "eligibility_notes": list(self.eligibility_notes),
+            "capability_contract": dict(self.capability_contract),
+            "runtime_provider_contract": dict(self.runtime_provider_contract),
         }
         if self.model_record:
             payload["model_record"] = dict(self.model_record)
@@ -207,6 +217,7 @@ class CapabilityRegistry:
                 "Standalone web lane; not resolved through provider/model selection.",
                 "Search result interpretation is delegated to the caller LLM.",
             ),
+            capability_contract=self._capability_contract_payload(spec),
             model_record=None,
         )
 
@@ -243,6 +254,7 @@ class CapabilityRegistry:
             resolved_modalities = _merge_modalities(catalog_modalities, spec.capability_id)
             source = self._candidate_source(adapter, profile, native_model, record)
             notes = self._eligibility_notes(spec, adapter, profile, native_model, record, source, catalog_modalities, resolved_modalities)
+            contract_model = self._candidate_contract_model(adapter, profile, native_model, record, resolved_modalities)
             candidates.append(
                 CapabilityCandidate(
                     capability_id=spec.capability_id,
@@ -260,10 +272,69 @@ class CapabilityRegistry:
                     provider_default_model=profile.default_model,
                     provider_fallback_models=tuple(profile.fallback_models),
                     eligibility_notes=tuple(notes),
+                    capability_contract=self._capability_contract_payload(spec, adapter),
+                    runtime_provider_contract=resolved_runtime_provider_contract_fields(contract_model),
                     model_record=dict(record) if record else None,
                 )
             )
         return candidates
+
+    def _candidate_contract_model(
+        self,
+        adapter: AdapterContract,
+        profile: Any,
+        native_model: str,
+        record: dict[str, Any] | None,
+        resolved_modalities: list[str],
+    ) -> dict[str, Any]:
+        if record is not None:
+            model = dict(record)
+        else:
+            model = {
+                **dict(profile.to_model_defaults()),
+                "id": f"{adapter.provider_id}/{native_model}",
+                "provider": adapter.provider_id,
+                "native_model": native_model,
+                "display_name": native_model,
+                "source_status": "adapter_override",
+            }
+        model.setdefault("provider", adapter.provider_id)
+        model.setdefault("native_model", native_model)
+        model["input_modalities"] = list(resolved_modalities)
+        return model
+
+    def _capability_contract_payload(
+        self,
+        spec: CapabilitySpec,
+        adapter: AdapterContract | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schema_version": spec.schema_version,
+            "capability_id": spec.capability_id,
+            "lane_type": spec.lane_type,
+            "transport_mode": spec.transport_mode,
+            "artifact_policy": spec.artifact_policy,
+            "provider_eligibility_rule": spec.provider_eligibility_rule,
+            "required_input_fields": list(spec.input_schema.required_fields),
+            "required_output_fields": list(spec.output_schema.required_fields),
+            "allow_additional_input_fields": spec.input_schema.allow_additional_fields,
+            "allow_additional_output_fields": spec.output_schema.allow_additional_fields,
+        }
+        if adapter is not None:
+            payload["adapter"] = {
+                "schema_version": adapter.schema_version,
+                "adapter_id": adapter.adapter_id,
+                "provider_id": adapter.provider_id,
+                "model_match": list(adapter.model_match),
+                "supports_streaming": adapter.supports_streaming,
+                "supports_batch": adapter.supports_batch,
+                "normalization_rules": list(adapter.normalization_rules),
+                "request_builder": adapter.request_builder,
+                "response_parser": adapter.response_parser,
+                "artifact_persister": adapter.artifact_persister,
+                "smoke_case_id": adapter.smoke_case_id,
+            }
+        return payload
 
     def _model_matches_adapter(self, adapter: AdapterContract, native_model: str) -> bool:
         if not adapter.model_match:
@@ -336,11 +407,23 @@ class CapabilityRegistry:
             key=lambda item: (
                 0 if item.default_for_provider else 1,
                 0 if item.recommended else 1,
+                _capability_model_rank(item.capability_id, item.model),
                 source_rank.get(item.source, 99),
                 str(item.provider_id or ""),
                 str(item.model or ""),
             ),
         )
+
+
+def _capability_model_rank(capability_id: str, model: str | None) -> int:
+    preferred = _CAPABILITY_MODEL_PREFERENCE.get(str(capability_id or "").strip())
+    if not preferred:
+        return 0
+    model_id = str(model or "").strip()
+    try:
+        return preferred.index(model_id)
+    except ValueError:
+        return len(preferred)
 
 
 def default_capability_registry() -> CapabilityRegistry:

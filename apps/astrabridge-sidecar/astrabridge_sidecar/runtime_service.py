@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import base64
+import binascii
 import json
 import mimetypes
 import os
@@ -22,10 +24,12 @@ from .common import WORKSPACE_STATE_DIRNAME, append_jsonl, new_id, now_iso, read
 from .codex_kernel_probe import discover_codex_binary_and_version, resolve_codex_binary_metadata
 from .codex_kernel_snapshot import build_codex_kernel_probe_snapshot, observe_protocol_features
 from .codex_mcp_probe import probe_mcp_compatibility
+from .codex_plugin_fixture_catalog import materialize_controlled_plugin_fixture_catalog
 from .codex_plugin_install_apply import execute_plugin_install
 from .codex_plugin_install_plan import build_plugin_install_plan
 from .codex_plugin_skill_registry import build_plugin_skill_registry_snapshot
 from .codex_plugin_probe import probe_plugin_discovery
+from .codex_skill_plugin_creator_scenario import execute_plugin_creator_skill_scenario
 from .codex_skill_enablement import (
     apply_skill_enablement_snapshot,
     register_pending_skill_approval_rules,
@@ -64,6 +68,9 @@ EVENT_RESPONSE_LIST_LIMIT = 40
 EVENT_RESPONSE_DEPTH_LIMIT = 6
 EVENT_HYDRATE_TAIL_LIMIT = 5000
 EVENT_HYDRATE_MAX_BYTES = 4 * 1024 * 1024
+ATTACHMENT_STAGE_MAX_FILES = 200
+ATTACHMENT_STAGE_MAX_FILE_BYTES = 25 * 1024 * 1024
+ATTACHMENT_STAGE_MAX_TOTAL_BYTES = 64 * 1024 * 1024
 APP_SERVER_INIT_TIMEOUT_SECONDS = 20.0
 THREAD_START_TIMEOUT_SECONDS = 20.0
 THREAD_FORK_TIMEOUT_SECONDS = 20.0
@@ -209,6 +216,7 @@ class RuntimeService:
         app_server_snapshot, client_factory, warnings = self._kernel_probe_app_server_status(runtime_status)
         codex_home = Path(str(runtime_status.get("codex_home") or "")).expanduser().resolve()
         search_roots = self._kernel_probe_search_roots()
+        plugin_search_roots, plugin_root_warnings = self._kernel_probe_plugin_search_roots(search_roots)
         mcp_report = probe_mcp_compatibility(
             codex_home=codex_home,
             mcp_config=self._mcp_config.snapshot(),
@@ -218,7 +226,7 @@ class RuntimeService:
         plugin_report = probe_plugin_discovery(
             codex_home=codex_home,
             client_factory=client_factory,
-            local_search_roots=search_roots,
+            local_search_roots=plugin_search_roots,
             request_timeout=10.0,
         )
         skill_report = probe_skill_discovery(
@@ -238,7 +246,7 @@ class RuntimeService:
             mcp_report=mcp_report,
             plugin_report=plugin_report,
             skill_report=skill_report,
-            extra_warnings=warnings,
+            extra_warnings=[*warnings, *plugin_root_warnings],
             evidence_sources=["apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py"],
         )
         self._record_event(
@@ -256,11 +264,12 @@ class RuntimeService:
         _app_server_snapshot, client_factory, warnings = self._kernel_probe_app_server_status(runtime_status)
         codex_home = Path(str(runtime_status.get("codex_home") or "")).expanduser().resolve()
         search_roots = self._kernel_probe_search_roots()
+        plugin_search_roots, plugin_root_warnings = self._kernel_probe_plugin_search_roots(search_roots)
         runtime_roots = self._kernel_probe_runtime_roots(runtime_status)
         plugin_report = probe_plugin_discovery(
             codex_home=codex_home,
             client_factory=client_factory,
-            local_search_roots=search_roots,
+            local_search_roots=plugin_search_roots,
             request_timeout=10.0,
         )
         skill_report = probe_skill_discovery(
@@ -273,8 +282,11 @@ class RuntimeService:
             plugin_report=plugin_report,
             skill_report=skill_report,
             runtime_roots=runtime_roots,
-            search_roots=search_roots,
-            extra_notes=[f"app_server_warning:{text}" for text in warnings if str(text or "").strip()],
+            search_roots=plugin_search_roots,
+            extra_notes=[
+                *[f"app_server_warning:{text}" for text in warnings if str(text or "").strip()],
+                *[f"plugin_probe_root_warning:{text}" for text in plugin_root_warnings if str(text or "").strip()],
+            ],
         )
         workspace_root = None
         try:
@@ -396,6 +408,45 @@ class RuntimeService:
             }
         )
         return updated_snapshot
+
+    def skill_plugin_creator_fixture_scenario(
+        self,
+        profile: dict[str, Any],
+        *,
+        skill_name: str = "plugin-creator",
+    ) -> dict[str, Any]:
+        _runtime_status, snapshot = self._plugin_skill_registry_snapshot_payload(profile)
+        skill = next(
+            (
+                item
+                for item in list(snapshot.get("skills") or [])
+                if isinstance(item, dict) and str(item.get("skill_name") or "").strip() == skill_name
+            ),
+            None,
+        )
+        if not isinstance(skill, dict):
+            raise ValueError(f"Skill scenario requires discovered skill `{skill_name}`.")
+        source_path = str(((skill.get("provenance") or {}).get("source_path") or "")).strip()
+        if not source_path:
+            raise ValueError(f"Skill scenario requires a provenance path for `{skill_name}`.")
+        skill_path = Path(source_path).expanduser().resolve()
+        skill_root = skill_path.parent if skill_path.name.lower() == "skill.md" else skill_path
+        result = execute_plugin_creator_skill_scenario(
+            workspace_root=self._projects.require_workspace_root().resolve(),
+            skill_root=skill_root,
+            skill_record_id=str(skill.get("record_id") or "").strip() or None,
+            skill_display_name=str(skill.get("display_name") or skill_name).strip() or skill_name,
+        )
+        self._record_event(
+            {
+                "type": "skill_plugin_creator_fixture_scenario_finished",
+                "profile_id": profile.get("profile_id"),
+                "skill_name": skill_name,
+                "status": result.get("status"),
+                "execution_id": result.get("execution_id"),
+            }
+        )
+        return result
 
     def restore_startup_runtime(self, profile: dict[str, Any] | None, *, thread_id: str | None = None) -> dict[str, Any]:
         if not profile:
@@ -929,7 +980,35 @@ class RuntimeService:
                         fallback_goal = None
                 return {"goal": fallback_goal, "status": "thread_missing", "thread_id": thread_id}
             raise
-        return {"goal": result.get("goal")}
+        return {"goal": self._goal_with_local_state(thread_id, result.get("goal"))}
+
+    def _local_goal_state(self, thread_id: str) -> dict[str, Any] | None:
+        if self._tasks is None:
+            return None
+        try:
+            task = self._tasks.current_task() or {}
+        except Exception:
+            return None
+        goal = task.get("goal")
+        if not isinstance(goal, dict):
+            return None
+        goal_thread_id = str(goal.get("threadId") or goal.get("thread_id") or task.get("active_provider_thread_id") or "").strip()
+        if goal_thread_id and goal_thread_id != thread_id:
+            return None
+        return goal
+
+    def _goal_with_local_state(self, thread_id: str, goal: Any) -> Any:
+        if not isinstance(goal, dict):
+            return goal
+        local_goal = self._local_goal_state(thread_id)
+        if not isinstance(local_goal, dict):
+            return goal
+        merged = dict(goal)
+        for key in ("status", "tokenBudget", "tokensUsed", "timeUsedSeconds", "updatedAt"):
+            if key in local_goal and local_goal.get(key) is not None:
+                merged[key] = local_goal.get(key)
+        merged["threadId"] = thread_id
+        return merged
 
     def set_goal(
         self,
@@ -938,16 +1017,29 @@ class RuntimeService:
         thread_id: str,
         objective: str,
         token_budget: int | None,
+        status: str | None = None,
     ) -> dict[str, Any]:
         runtime_status = self._prepare_runtime(profile, require_secret=False)
         client = self._ensure_client(runtime_status)
+        payload = {"threadId": thread_id, "objective": objective, "tokenBudget": token_budget}
+        if status:
+            payload["status"] = status
         client.request(
             "thread/goal/set",
-            {"threadId": thread_id, "objective": objective, "tokenBudget": token_budget},
+            payload,
         )
         if self._tasks is not None:
-            self._tasks.record_goal(thread_id, {"objective": objective, "tokenBudget": token_budget})
-        self._record_event({"type": "goal_set", "thread_id": thread_id, "token_budget": token_budget})
+            self._tasks.record_goal(
+                thread_id,
+                {
+                    "threadId": thread_id,
+                    "objective": objective,
+                    "tokenBudget": token_budget,
+                    "updatedAt": int(time.time()),
+                    **({"status": status} if status else {}),
+                },
+            )
+        self._record_event({"type": "goal_set", "thread_id": thread_id, "token_budget": token_budget, **({"status": status} if status else {})})
         return self.get_goal(profile, thread_id)
 
     def clear_goal(self, profile: dict[str, Any], thread_id: str) -> dict[str, Any]:
@@ -1084,14 +1176,42 @@ class RuntimeService:
             runtime_status = self._prepare_runtime(profile, require_secret=True)
             client = self._ensure_client(runtime_status)
             effective_thread_id, handoff_event = prepare_effective_thread(client)
-        inputs = self._build_user_inputs(
-            text,
+        try:
+            inputs = self._build_user_inputs(
+                text,
+                attachments or [],
+                thread_id=effective_thread_id,
+                context_mode=normalized_context_mode,
+                profile_id=str(profile.get("profile_id") or ""),
+                provider_id=str(profile.get("provider_id") or ""),
+                model_id=str(model or profile.get("model") or ""),
+            )
+        except Exception as exc:
+            attachment_diagnostics = self._attachment_diagnostics(
+                attachments or [],
+                provider_id=str(profile.get("provider_id") or ""),
+                model_id=str(model or profile.get("model") or ""),
+                context_mode=normalized_context_mode,
+            )
+            self._record_event(
+                {
+                    "type": "attachment_inputs_failed",
+                    "thread_id": effective_thread_id,
+                    "profile_id": profile.get("profile_id"),
+                    "provider_id": profile.get("provider_id"),
+                    "model": model or profile.get("model"),
+                    "context_mode": normalized_context_mode,
+                    "attachment_diagnostics": attachment_diagnostics,
+                    "error": self._attachment_failure_message(exc),
+                }
+            )
+            raise ValueError(f"Attachment preparation failed: {self._attachment_failure_message(exc)}") from exc
+        attachment_diagnostics = self._attachment_diagnostics(
             attachments or [],
-            thread_id=effective_thread_id,
-            context_mode=normalized_context_mode,
-            profile_id=str(profile.get("profile_id") or ""),
+            prepared_inputs=inputs,
             provider_id=str(profile.get("provider_id") or ""),
             model_id=str(model or profile.get("model") or ""),
+            context_mode=normalized_context_mode,
         )
         params = {
             "threadId": effective_thread_id,
@@ -1140,14 +1260,42 @@ class RuntimeService:
                 collaboration_mode=collaboration_mode,
                 reason="turn_start_thread_missing",
             )
-            inputs = self._build_user_inputs(
-                text,
+            try:
+                inputs = self._build_user_inputs(
+                    text,
+                    attachments or [],
+                    thread_id=effective_thread_id,
+                    context_mode=normalized_context_mode,
+                    profile_id=str(profile.get("profile_id") or ""),
+                    provider_id=str(profile.get("provider_id") or ""),
+                    model_id=str(model or profile.get("model") or ""),
+                )
+            except Exception as exc:
+                attachment_diagnostics = self._attachment_diagnostics(
+                    attachments or [],
+                    provider_id=str(profile.get("provider_id") or ""),
+                    model_id=str(model or profile.get("model") or ""),
+                    context_mode=normalized_context_mode,
+                )
+                self._record_event(
+                    {
+                        "type": "attachment_inputs_failed",
+                        "thread_id": effective_thread_id,
+                        "profile_id": profile.get("profile_id"),
+                        "provider_id": profile.get("provider_id"),
+                        "model": model or profile.get("model"),
+                        "context_mode": normalized_context_mode,
+                        "attachment_diagnostics": attachment_diagnostics,
+                        "error": self._attachment_failure_message(exc),
+                    }
+                )
+                raise ValueError(f"Attachment preparation failed: {self._attachment_failure_message(exc)}") from exc
+            attachment_diagnostics = self._attachment_diagnostics(
                 attachments or [],
-                thread_id=effective_thread_id,
-                context_mode=normalized_context_mode,
-                profile_id=str(profile.get("profile_id") or ""),
+                prepared_inputs=inputs,
                 provider_id=str(profile.get("provider_id") or ""),
                 model_id=str(model or profile.get("model") or ""),
+                context_mode=normalized_context_mode,
             )
             params["threadId"] = effective_thread_id
             params["input"] = inputs
@@ -1205,12 +1353,18 @@ class RuntimeService:
                 "thread_id": effective_thread_id,
                 "turn_id": turn.get("id"),
                 "runtime": runtime_status,
-                "attachments": [{"name": item.get("name"), "kind": item.get("kind")} for item in attachments or []],
+                "attachments": self._attachment_event_items(attachments or []),
+                "attachment_diagnostics": attachment_diagnostics,
                 "collaboration_mode": collaboration_mode or "default",
                 "context_mode": normalized_context_mode,
             }
         )
-        return {"turn": turn, "thread_id": effective_thread_id, "handoff": handoff_event}
+        return {
+            "turn": turn,
+            "thread_id": effective_thread_id,
+            "handoff": handoff_event,
+            "attachment_diagnostics": attachment_diagnostics,
+        }
 
     def _resolve_requested_thread_id(self, thread_id: str) -> str:
         clean_thread_id = str(thread_id or "").strip()
@@ -1317,7 +1471,13 @@ class RuntimeService:
                 "profile_id": profile.get("profile_id"),
                 "model": model or profile.get("model"),
                 "runtime": runtime_status,
-                "attachments": [{"name": item.get("name"), "kind": item.get("kind")} for item in attachments],
+                "attachments": self._attachment_event_items(attachments),
+                "attachment_diagnostics": self._attachment_diagnostics(
+                    attachments,
+                    provider_id=str(profile.get("provider_id") or ""),
+                    model_id=str(model or profile.get("model") or ""),
+                    context_mode=context_mode,
+                ),
                 "collaboration_mode": collaboration_mode or "default",
                 "context_mode": context_mode,
                 "warning": (
@@ -1332,6 +1492,12 @@ class RuntimeService:
             "handoff": handoff_event,
             "background_start": True,
             "warning": str(exc),
+            "attachment_diagnostics": self._attachment_diagnostics(
+                attachments,
+                provider_id=str(profile.get("provider_id") or ""),
+                model_id=str(model or profile.get("model") or ""),
+                context_mode=context_mode,
+            ),
         }
 
     def compact_thread(self, profile: dict[str, Any], thread_id: str) -> dict[str, Any]:
@@ -3385,11 +3551,11 @@ class RuntimeService:
         for attachment in attachments:
             staged = self._stage_attachment(str(attachment.get("path") or ""), str(attachment.get("name") or "attachment"))
             runtime_path = self._path_for_runtime(staged)
-            mime_type = str(attachment.get("mime_type") or mimetypes.guess_type(staged.name)[0] or "")
+            mime_type = str(attachment.get("mime_type") or attachment.get("mimeType") or mimetypes.guess_type(staged.name)[0] or "")
             if mime_type.startswith("image/"):
                 items.append({"type": "localImage", "path": runtime_path, "detail": "high"})
             else:
-                items.append({"type": "mention", "name": staged.name, "path": runtime_path})
+                items.append({"type": "mention", "name": str(attachment.get("name") or staged.name), "path": runtime_path})
         for mention in project_mentions:
             raw_path = str(mention.get("path") or "")
             if not raw_path:
@@ -3413,6 +3579,77 @@ class RuntimeService:
                 }
             )
         return items
+
+    def _attachment_event_items(self, attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for attachment in attachments[:20]:
+            if not isinstance(attachment, dict):
+                continue
+            name = self._safe_attachment_filename(str(attachment.get("name") or attachment.get("path") or "attachment"), default="attachment")
+            mime_type = str(attachment.get("mime_type") or attachment.get("mimeType") or "").strip()
+            kind = str(attachment.get("kind") or ("image" if mime_type.startswith("image/") else "file")).strip() or "file"
+            event_item: dict[str, Any] = {"name": name, "kind": kind}
+            if mime_type:
+                event_item["mime_type"] = mime_type[:120]
+            source = str(attachment.get("source") or "").strip()
+            if source:
+                event_item["source"] = source[:60]
+            extension = Path(name).suffix.lower()
+            if extension:
+                event_item["extension"] = extension[:24]
+            try:
+                size = int(attachment.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            if size > 0:
+                event_item["size"] = size
+            items.append(event_item)
+        return items
+
+    def _attachment_diagnostics(
+        self,
+        attachments: list[dict[str, Any]],
+        *,
+        prepared_inputs: list[dict[str, Any]] | None = None,
+        provider_id: str = "",
+        model_id: str = "",
+        context_mode: str = "",
+    ) -> dict[str, Any]:
+        event_items = self._attachment_event_items(attachments)
+        image_count = sum(1 for item in event_items if item.get("kind") == "image" or str(item.get("mime_type") or "").startswith("image/"))
+        folder_count = sum(1 for item in event_items if item.get("kind") == "folder")
+        file_count = max(0, len(event_items) - image_count - folder_count)
+        total_size = sum(int(item.get("size") or 0) for item in event_items)
+        route: dict[str, Any] = {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "context_mode": context_mode,
+        }
+        if prepared_inputs is not None:
+            route.update(
+                {
+                    "text_items": sum(1 for item in prepared_inputs if item.get("type") == "text"),
+                    "local_image_items": sum(1 for item in prepared_inputs if item.get("type") == "localImage"),
+                    "mention_items": sum(1 for item in prepared_inputs if item.get("type") == "mention"),
+                }
+            )
+        return {
+            "total_count": len(event_items),
+            "image_count": image_count,
+            "file_count": file_count,
+            "folder_count": folder_count,
+            "total_size": total_size,
+            "items": event_items,
+            "route": route,
+        }
+
+    def _attachment_failure_message(self, exc: Exception) -> str:
+        if isinstance(exc, FileNotFoundError):
+            return "Attachment file or folder was not found. Remove it, add it again, and retry."
+        if isinstance(exc, SecurityError):
+            return str(redact_sensitive(str(exc)))[:240] or "Attachment was rejected by the secret scanner."
+        message = str(redact_sensitive(str(exc))).strip()
+        return message[:240] or "Attachment preparation failed before the model call."
 
     def _normalize_context_mode(self, context_mode: str | None) -> str:
         mode = str(context_mode or "default").strip().lower()
@@ -3642,11 +3879,175 @@ class RuntimeService:
             self._record_event({"type": "asset_context_pack_failed", "error": str(exc)[:300]})
             return []
 
+    def stage_uploaded_attachments(self, payload: dict[str, Any]) -> dict[str, Any]:
+        files = list(payload.get("files") or [])
+        if len(files) > ATTACHMENT_STAGE_MAX_FILES:
+            raise ValueError(f"Too many attachment files. Maximum is {ATTACHMENT_STAGE_MAX_FILES}.")
+        attachments_root = self._projects.require_shell_state_root() / "attachments"
+        attachments_root.mkdir(parents=True, exist_ok=True)
+        directory_name = str(payload.get("directory_name") or "").strip()
+        skipped: list[dict[str, str]] = []
+        staged_files: list[tuple[Path, str]] = []
+        total_bytes = 0
+
+        if directory_name:
+            directory_root = attachments_root / f"{self._safe_attachment_filename(directory_name, default='folder')}-{new_id('ATTDIR')}"
+            directory_root.mkdir(parents=True, exist_ok=False)
+        else:
+            directory_root = None
+
+        for index, raw_file in enumerate(files):
+            if not isinstance(raw_file, dict):
+                skipped.append({"name": f"attachment-{index + 1}", "reason": "Invalid attachment record."})
+                continue
+            name = self._safe_attachment_filename(str(raw_file.get("name") or ""), default=f"attachment-{index + 1}")
+            try:
+                declared_size = int(raw_file.get("size") or 0)
+            except (TypeError, ValueError):
+                declared_size = 0
+            if declared_size > ATTACHMENT_STAGE_MAX_FILE_BYTES:
+                skipped.append({"name": name, "reason": "File is larger than the upload limit."})
+                continue
+            data_base64 = str(raw_file.get("data_base64") or "")
+            try:
+                data = base64.b64decode(data_base64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                skipped.append({"name": name, "reason": f"Invalid file encoding: {exc}"})
+                continue
+            if len(data) > ATTACHMENT_STAGE_MAX_FILE_BYTES:
+                skipped.append({"name": name, "reason": "File is larger than the upload limit."})
+                continue
+            if total_bytes + len(data) > ATTACHMENT_STAGE_MAX_TOTAL_BYTES:
+                skipped.append({"name": name, "reason": "Attachment upload total is larger than the limit."})
+                continue
+            total_bytes += len(data)
+            try:
+                target = self._uploaded_attachment_target(
+                    attachments_root=attachments_root,
+                    directory_root=directory_root,
+                    raw_relative_path=str(raw_file.get("relative_path") or ""),
+                    name=name,
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                scan_text_for_secrets(target)
+            except SecurityError as exc:
+                try:
+                    target.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                skipped.append({"name": name, "reason": str(exc)})
+                continue
+            except Exception as exc:  # noqa: BLE001
+                skipped.append({"name": name, "reason": str(exc)})
+                continue
+            staged_files.append((target, name))
+
+        if directory_root is not None:
+            if not staged_files:
+                try:
+                    shutil.rmtree(directory_root, ignore_errors=True)
+                except Exception:
+                    pass
+                self._record_event(
+                    {
+                        "type": "attachments_staged",
+                        "mode": "browser_upload_directory",
+                        "created_count": 0,
+                        "skipped_count": len(skipped),
+                        "total_size": total_bytes,
+                    }
+                )
+                return {"attachments": [], "skipped": skipped}
+            response = {
+                "attachments": [
+                    {
+                        "id": new_id("ATT"),
+                        "path": str(directory_root),
+                        "name": self._safe_attachment_filename(directory_name, default=directory_root.name),
+                        "mimeType": "inode/directory",
+                        "kind": "folder",
+                        "size": total_bytes,
+                        "source": "browser_upload",
+                        "fileCount": len(staged_files),
+                    }
+                ],
+                "skipped": skipped,
+            }
+            self._record_event(
+                {
+                    "type": "attachments_staged",
+                    "mode": "browser_upload_directory",
+                    "created_count": 1,
+                    "file_count": len(staged_files),
+                    "skipped_count": len(skipped),
+                    "total_size": total_bytes,
+                    "attachments": self._attachment_event_items(response["attachments"]),
+                }
+            )
+            return response
+
+        attachments: list[dict[str, Any]] = []
+        for path, display_name in staged_files:
+            mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            attachments.append(
+                {
+                    "id": new_id("ATT"),
+                    "path": str(path),
+                    "name": display_name,
+                    "mimeType": mime_type,
+                    "kind": "image" if mime_type.startswith("image/") else "file",
+                    "size": path.stat().st_size,
+                    "source": "browser_upload",
+                }
+            )
+        response = {"attachments": attachments, "skipped": skipped}
+        self._record_event(
+            {
+                "type": "attachments_staged",
+                "mode": "browser_upload_files",
+                "created_count": len(attachments),
+                "skipped_count": len(skipped),
+                "total_size": total_bytes,
+                "attachments": self._attachment_event_items(attachments),
+            }
+        )
+        return response
+
+    def _uploaded_attachment_target(self, *, attachments_root: Path, directory_root: Path | None, raw_relative_path: str, name: str) -> Path:
+        if directory_root is None:
+            extension = Path(name).suffix
+            stem = Path(name).stem or "attachment"
+            return attachments_root / f"{stem}-{new_id('ATT')}{extension}"
+        relative_parts = self._safe_attachment_relative_parts(raw_relative_path or name)
+        if not relative_parts:
+            relative_parts = [name]
+        if Path(relative_parts[-1]).suffix == "" and Path(name).suffix:
+            relative_parts[-1] = name
+        return resolve_under(directory_root, Path(*relative_parts))
+
+    def _safe_attachment_relative_parts(self, value: str) -> list[str]:
+        normalized = str(value or "").replace("\\", "/")
+        parts: list[str] = []
+        for raw_part in normalized.split("/"):
+            part = raw_part.strip()
+            if not part or part == ".":
+                continue
+            if part == ".." or ":" in part or part.startswith("~"):
+                raise SecurityError(f"Invalid attachment relative path: {value}")
+            parts.append(self._safe_attachment_filename(part, default="attachment"))
+        return parts
+
+    def _safe_attachment_filename(self, value: str, *, default: str = "attachment") -> str:
+        name = Path(str(value or "")).name.strip()
+        cleaned = re.sub(r"[\x00-\x1f<>:\"/\\|?*]+", "-", name).strip(" .-")
+        return cleaned[:120] or default
+
     def _stage_attachment(self, raw_path: str, preferred_name: str) -> Path:
         if not raw_path.strip():
             raise ValueError("Attachment path is required.")
         source = Path(raw_path).expanduser().resolve()
-        if not source.exists() or not source.is_file():
+        if not source.exists() or not (source.is_file() or source.is_dir()):
             raise FileNotFoundError(f"Attachment does not exist: {source}")
         try:
             workspace_root = self._projects.require_workspace_root().resolve()
@@ -3656,6 +4057,8 @@ class RuntimeService:
                 return resolve_under(workspace_root, source)
         except Exception:
             pass
+        if source.is_dir():
+            return self._stage_attachment_directory(source, preferred_name)
         try:
             scan_text_for_secrets(source)
         except SecurityError:
@@ -3666,6 +4069,23 @@ class RuntimeService:
         stem = Path(preferred_name).stem or source.stem or "attachment"
         target = attachments_root / f"{stem}-{new_id('ATT')}{extension}"
         shutil.copy2(source, target)
+        return target
+
+    def _stage_attachment_directory(self, source: Path, preferred_name: str) -> Path:
+        files = sorted(path for path in source.rglob("*") if path.is_file())
+        if len(files) > ATTACHMENT_STAGE_MAX_FILES:
+            raise ValueError(f"Attachment folder has too many files. Maximum is {ATTACHMENT_STAGE_MAX_FILES}.")
+        total_bytes = 0
+        for path in files:
+            total_bytes += path.stat().st_size
+            if total_bytes > ATTACHMENT_STAGE_MAX_TOTAL_BYTES:
+                raise ValueError("Attachment folder is larger than the staging limit.")
+            scan_text_for_secrets(path)
+        attachments_root = self._projects.require_shell_state_root() / "attachments"
+        attachments_root.mkdir(parents=True, exist_ok=True)
+        stem = self._safe_attachment_filename(preferred_name or source.name, default=source.name or "folder")
+        target = attachments_root / f"{stem}-{new_id('ATTDIR')}"
+        shutil.copytree(source, target)
         return target
 
     def _execution_host(self) -> str:
@@ -4211,6 +4631,34 @@ for host in candidates:
                     roots.append(project_runtime_root)
         return roots
 
+    def _kernel_probe_plugin_search_roots(self, base_roots: list[Path] | None = None) -> tuple[list[Path], list[str]]:
+        roots: list[Path] = []
+        for root in list(base_roots or self._kernel_probe_search_roots()):
+            resolved = Path(root).resolve()
+            if resolved not in roots:
+                roots.append(resolved)
+        warnings: list[str] = []
+        projects = getattr(self, "_projects", None)
+        if projects is None or not hasattr(projects, "require_shell_state_root"):
+            return roots, warnings
+        try:
+            shell_root = Path(projects.require_shell_state_root()).resolve()
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"fixture_shell_root_unavailable:{str(exc)[:200]}")
+            return roots, warnings
+        try:
+            materialized = materialize_controlled_plugin_fixture_catalog(shell_root)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"fixture_catalog_materialize_failed:{str(exc)[:200]}")
+            return roots, warnings
+        fixture_root_text = str(materialized.get("search_root") or "").strip()
+        if not fixture_root_text:
+            return roots, warnings
+        fixture_root = Path(fixture_root_text).resolve()
+        if fixture_root not in roots:
+            roots.append(fixture_root)
+        return roots, warnings
+
     def _kernel_probe_app_server_status(
         self,
         runtime_status: dict[str, Any],
@@ -4699,7 +5147,17 @@ for host in candidates:
                         },
                     )
                 elif method == "thread/goal/updated" and thread_id:
-                    self._tasks.record_goal(thread_id, payload.get("goal") or {})
+                    incoming_goal = payload.get("goal") or {}
+                    if isinstance(incoming_goal, dict):
+                        existing_goal = self._local_goal_state(thread_id)
+                        normalized_goal = {**incoming_goal, "threadId": thread_id}
+                        existing_status = str((existing_goal or {}).get("status") or "").strip()
+                        incoming_status = str(normalized_goal.get("status") or "").strip()
+                        if existing_status and incoming_status in {"", "active"} and existing_status != "active":
+                            normalized_goal["status"] = existing_status
+                        self._tasks.record_goal(thread_id, normalized_goal)
+                    else:
+                        self._tasks.record_goal(thread_id, incoming_goal)
                 elif method == "thread/goal/cleared" and thread_id:
                     self._tasks.record_goal(thread_id, None)
         except Exception as exc:  # noqa: BLE001

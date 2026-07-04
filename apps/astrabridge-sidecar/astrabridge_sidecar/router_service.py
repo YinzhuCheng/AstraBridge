@@ -18,7 +18,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from .model_catalog import known_context_window, model_catalog_entry
+from .model_catalog import effective_model_record, known_context_window, model_catalog_entry
 from .providers import classify_runtime_failure, get_provider_profile, resolve_provider_id, summarize_response_diagnostics
 from .providers.transports import (
     ChatCompletionsTransport as RegistryChatCompletionsTransport,
@@ -31,6 +31,7 @@ from .providers.transports import (
     ProviderTransport as RegistryProviderTransport,
 )
 from .security import redact_sensitive
+from .usage_signal import normalize_usage_signal, usage_not_available
 
 
 ROUTER_PORT = 8787
@@ -1463,12 +1464,22 @@ class RouterService:
         profile = self._resolve_profile(payload)
         adapter = self._adapter_for(profile)
         warnings = self.temperature_warnings(profile, payload.get("model"), payload.get("temperature"))
+        provider_id = str(profile.get("provider_id") or "")
+        model_id = self._normalize_model_id(provider_id, payload.get("model") or profile.get("model"))
         return {
-            "provider": profile.get("provider_id"),
+            "provider": provider_id,
             "model": payload.get("model"),
             "adapter": adapter.describe(),
             "warnings": warnings,
             "upstream_payload": redact_sensitive(adapter.upstream_payload(payload)),
+            "usage_signal": usage_not_available(
+                source="router_preview",
+                reason="preview_only_no_provider_call",
+                provider_id=provider_id,
+                model=model_id,
+                request_kind=adapter.describe(),
+                pricing=self._model_usage_pricing(provider_id, model_id),
+            ),
         }
 
     def test_provider(self, provider_id: str, model_id: str | None = None, *, stream: bool = False) -> dict[str, Any]:
@@ -1511,6 +1522,8 @@ class RouterService:
             content_type = "application/json; charset=utf-8"
             status = 200
             ok = True
+            usage: Any = None
+            request_kind = "stream" if stream else "request_response"
             if stream:
                 buffer = _BufferHandler()
                 self.forward_response(payload, buffer)
@@ -1526,8 +1539,12 @@ class RouterService:
             else:
                 completed = self.complete_response(payload)
                 normalized = completed["normalized"]
+                usage = getattr(normalized, "usage", None)
                 diagnostics = summarize_response_diagnostics(normalized, text_limit=1200)
                 response_excerpt = str(diagnostics.get("text_excerpt") or "")[:1200]
+            usage_reason = None
+            if usage is None:
+                usage_reason = "stream_health_usage_not_extracted" if stream and ok else "provider_response_usage_not_reported"
             result = {
                 "ok": ok,
                 "provider": provider_id,
@@ -1540,8 +1557,25 @@ class RouterService:
                 "warnings": preview_warnings,
                 "response_excerpt": response_excerpt,
                 "response_diagnostics": diagnostics,
+                "usage_signal": normalize_usage_signal(
+                    source="router_provider_health",
+                    provider_id=provider_id,
+                    model=model_id,
+                    usage=usage,
+                    pricing=self._model_usage_pricing(provider_id, model_id),
+                    reason=usage_reason,
+                    request_kind=request_kind,
+                ),
             }
             if failure_notice:
+                result["usage_signal"] = usage_not_available(
+                    source="router_provider_health",
+                    reason="provider_health_failed",
+                    provider_id=provider_id,
+                    model=model_id,
+                    request_kind=request_kind,
+                    pricing=self._model_usage_pricing(provider_id, model_id),
+                )
                 result["failure_notice"] = failure_notice
             return result
         except Exception as exc:  # noqa: BLE001
@@ -1559,6 +1593,14 @@ class RouterService:
                 "response_excerpt": self._failure_excerpt(failure_notice, fallback=str(exc)[:1200]),
                 "response_diagnostics": None,
                 "failure_notice": failure_notice,
+                "usage_signal": usage_not_available(
+                    source="router_provider_health",
+                    reason="provider_health_failed",
+                    provider_id=provider_id,
+                    model=model_id,
+                    request_kind="stream" if stream else "request_response",
+                    pricing=self._model_usage_pricing(provider_id, model_id),
+                ),
             }
             return result
 
@@ -1569,6 +1611,11 @@ class RouterService:
         if "/" in raw:
             return raw
         return f"{provider_id}/{raw}"
+
+    def _model_usage_pricing(self, provider_id: str, model_id: str) -> dict[str, Any]:
+        configured_models = self._router_config.models() if self._router_config is not None else []
+        native_model = str(model_id or "").split("/", 1)[1] if "/" in str(model_id or "") else str(model_id or "")
+        return dict(effective_model_record(provider_id, native_model, configured_models) or {})
 
     def apply_temperature_config(self, profile: dict[str, Any], upstream_payload: dict[str, Any], model_id: Any) -> None:
         if "temperature" not in upstream_payload:

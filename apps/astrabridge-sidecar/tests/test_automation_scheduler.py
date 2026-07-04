@@ -177,6 +177,9 @@ class AutomationSchedulerTests(unittest.TestCase):
             self.assertEqual(result["recovered_run_ids"], ["run-stale"])
             recovered = store.get_run("run-stale")
             self.assertEqual(recovered["status"], "failed")
+            self.assertEqual(recovered["redacted_error"], "automation_watchdog_stale_running_timeout")
+            self.assertEqual(recovered["watchdog_reason"], "stale_running_timeout")
+            self.assertEqual(recovered["recovered_by"], "scheduler_watchdog")
             self.assertEqual(len(result["queued_run_ids"]), 1)
 
     def test_failed_run_schedules_retry_with_backoff_and_honors_daily_limit(self) -> None:

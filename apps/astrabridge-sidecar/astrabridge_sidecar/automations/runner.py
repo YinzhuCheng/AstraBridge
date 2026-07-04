@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from ..common import now_iso
 from ..security import redact_sensitive
+from ..usage_signal import usage_not_available
 
 
 UTC = dt.timezone.utc
@@ -261,6 +262,11 @@ class AutomationRunner:
             "signal": "unknown",
             "summary": self._safe_excerpt(summary),
             "artifact_refs": [],
+            "usage_signal": usage_not_available(
+                source="automation_runtime",
+                reason="standalone_codex_cli_usage_not_reported",
+                request_kind="automation_standalone",
+            ),
             "redacted_error": self._safe_excerpt(redacted_error) if redacted_error else None,
             "next_retry_at": None,
             "retry_count": int(run.get("retry_count") or 0),

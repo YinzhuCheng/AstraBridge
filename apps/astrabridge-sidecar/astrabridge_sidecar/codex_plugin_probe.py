@@ -432,7 +432,19 @@ def _scan_local_plugin_manifests(search_roots: list[Path]) -> dict[str, Any]:
             plugin_root = manifest_path.parent.parent.resolve()
             if plugin_root in referenced_plugin_roots:
                 continue
-            record = _plugin_record_from_manifest(manifest_path, marketplace_name=None, marketplace_path=None, default_availability="unknown")
+            default_availability = "unknown"
+            try:
+                manifest_path.resolve().relative_to((root / "plugins").resolve())
+            except Exception:
+                default_availability = "unknown"
+            else:
+                default_availability = "installed"
+            record = _plugin_record_from_manifest(
+                manifest_path,
+                marketplace_name=None,
+                marketplace_path=None,
+                default_availability=default_availability,
+            )
             if record is None:
                 continue
             plugins.append(record)
@@ -626,7 +638,8 @@ def _merge_fallback_plugins(discovered_plugins: dict[str, dict[str, Any]], plugi
             "composer_icon_url",
             "brand_color",
         ):
-            if record.get(field) not in {None, "", [], "not_checked"}:
+            value = record.get(field)
+            if value is not None and value != "" and value != [] and value != "not_checked":
                 merged[field] = record[field]
         discovered_plugins[key] = merged
 

@@ -11,6 +11,7 @@ from typing import Any
 
 from .common import app_data_dir, new_id, now_iso, read_json, write_json
 from .model_catalog import current_generated_catalog, effective_model_records, resolved_web_capability_fields, resolved_workflow_contract_fields
+from .usage_signal import usage_not_available
 
 
 VAULT_SCHEMA = "astrabridge-llm-vault-v1"
@@ -81,7 +82,7 @@ class LlmApiManagerService:
             self.logout()
             return {"session": self.session()}
         username = self._normalize_username(payload.get("username") or "user")
-        password = self._password_from_payload(payload, allow_desktop_default=False)
+        password = self._password_from_payload(payload, allow_desktop_default=bool(payload.get("use_desktop_key_file")))
         vault, unlock_key = self._read_encrypted_vault(username, password)
         self._vault_plain = vault
         self._session = {
@@ -370,6 +371,7 @@ class LlmApiManagerService:
                                 "preview_warnings": list(raw.get("preview_warnings") or raw.get("warnings") or []),
                                 "response_diagnostics": dict(raw.get("response_diagnostics") or {}),
                                 "failure_notice": dict(raw.get("failure_notice") or {}),
+                                "usage_signal": dict(raw.get("usage_signal") or {}),
                                 "adapter_warnings": list((raw.get("response_diagnostics") or {}).get("warnings") or raw.get("adapter_warnings") or []),
                                 "response_excerpt": str(
                                     (raw.get("response_diagnostics") or {}).get("text_excerpt")
@@ -389,6 +391,14 @@ class LlmApiManagerService:
                                 "temperature": temperature,
                                 "connectivity": "fail",
                                 "error": str(exc)[:500],
+                                "usage_signal": usage_not_available(
+                                    source="llm_manager_health",
+                                    reason="health_exception",
+                                    provider_id=provider_id,
+                                    model=model_id,
+                                    request_kind="stream" if payload.get("stream", False) else "request_response",
+                                    pricing=model,
+                                ),
                                 "last_verified_at": now_iso(),
                             }
                         result = self._sanitize_result(result)
@@ -633,6 +643,13 @@ class LlmApiManagerService:
             "adapter_warnings": list(result.get("adapter_warnings") or []),
             "response_diagnostics": dict(result.get("response_diagnostics") or {}),
             "failure_notice": dict(result.get("failure_notice") or {}),
+            "usage_signal": dict(result.get("usage_signal") or usage_not_available(
+                source="llm_manager_health",
+                reason="usage_not_reported",
+                provider_id=result.get("provider") or (model or {}).get("provider"),
+                model=result.get("model") or (model or {}).get("id"),
+                pricing=model or {},
+            )),
             "last_verified_at": result.get("last_verified_at") or now_iso(),
             "reason": result.get("reason"),
         }
@@ -701,6 +718,12 @@ class LlmApiManagerService:
             "connectivity": "blocked",
             "reason": code,
             "detail": reason,
+            "usage_signal": usage_not_available(
+                source="llm_manager_health",
+                reason=code,
+                provider_id=provider,
+                model=model_id,
+            ),
             "last_verified_at": now_iso(),
         }
 

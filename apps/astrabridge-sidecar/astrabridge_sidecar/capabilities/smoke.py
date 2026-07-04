@@ -11,6 +11,7 @@ import wave
 import zlib
 
 from ..common import now_iso
+from ..usage_signal import normalize_usage_signal
 from .capability_routes import resolve_capability_route_entry
 from .capability_registry import default_capability_registry
 
@@ -98,6 +99,13 @@ def capability_smoke_snapshot(
             provider_invoked = not _looks_like_local_provider_blocker(provider_error)
             status = "fail"
             provider_notes = ["Provider smoke was requested and failed; inspect the sanitized error before retrying."]
+    usage_reason = None
+    if not provider_requested:
+        usage_reason = "dry_run_no_provider_call"
+    elif provider_result is None:
+        usage_reason = "provider_smoke_failed"
+    elif not isinstance(provider_result.get("usage"), dict):
+        usage_reason = "provider_result_usage_not_reported"
     return {
         "schema_version": CAPABILITY_SMOKE_SCHEMA_VERSION,
         "capability_id": capability_id,
@@ -127,6 +135,14 @@ def capability_smoke_snapshot(
         },
         "artifact_refs": artifact_refs,
         "evidence_refs": evidence_refs,
+        "usage_signal": normalize_usage_signal(
+            source="capability_smoke",
+            provider_id=candidate.get("provider_id"),
+            model=candidate.get("model"),
+            usage=(provider_result or {}).get("usage") if isinstance(provider_result, dict) else None,
+            reason=usage_reason,
+            request_kind=capability_id,
+        ),
         "created_at": now_iso(),
     }
 
@@ -135,15 +151,55 @@ def _provider_smoke_payload(capability_id: str, payload: dict[str, Any]) -> tupl
     timeout_sec = int(payload.get("timeout_sec") or 180)
     if capability_id == "image.generate":
         actual = {
-            "prompt": "AstraBridge provider smoke: a minimal blue square app icon on a white background.",
-            "n": 1,
+            "prompt": str(payload.get("prompt") or "AstraBridge provider smoke: a minimal blue square app icon on a white background.").strip(),
+            "n": int(payload.get("n") or 1),
             "size": str(payload.get("size") or "1024x1024"),
-            "response_format": "url",
+            "response_format": str(payload.get("response_format") or "url"),
+            "quality": str(payload.get("quality") or "auto"),
+            "image_format": str(payload.get("image_format") or payload.get("format") or payload.get("output_format") or "png"),
+            "operation": str(payload.get("operation") or "generate").strip(),
             "timeout_sec": timeout_sec,
-            "purpose": "capability_provider_smoke_image_generate",
+            "purpose": str(payload.get("purpose") or "capability_provider_smoke_image_generate").strip(),
         }
-        return actual, {key: actual[key] for key in ("prompt", "n", "size", "response_format", "purpose")}
+        for key in ("provider_id", "model", "workspace_root", "background", "prompt_category", "moderation"):
+            if payload.get(key):
+                actual[key] = payload[key]
+        sample_keys = ("prompt", "n", "size", "response_format", "quality", "image_format", "operation", "purpose")
+        sample = {key: actual[key] for key in sample_keys}
+        for key in ("provider_id", "model", "workspace_root", "background", "prompt_category", "moderation"):
+            if actual.get(key):
+                sample[key] = actual[key]
+        return actual, sample
     if capability_id == "vision.analyze":
+        custom_image_paths = _clean_string_list(payload.get("image_paths"))
+        custom_image_urls = _clean_string_list(payload.get("image_urls"))
+        custom_image_inputs = [item for item in list(payload.get("image_inputs") or []) if isinstance(item, dict)]
+        if custom_image_paths or custom_image_urls or custom_image_inputs:
+            actual = {
+                "prompt": str(payload.get("prompt") or "Inspect the attached image and summarize the visible facts.").strip(),
+                "image_paths": custom_image_paths,
+                "image_urls": custom_image_urls,
+                "image_inputs": custom_image_inputs,
+                "detail": str(payload.get("detail") or "low").strip(),
+                "max_output_tokens": int(payload.get("max_output_tokens") or 256),
+                "timeout_sec": timeout_sec,
+            }
+            for key in ("provider_id", "model", "workspace_root"):
+                if payload.get(key):
+                    actual[key] = payload[key]
+            sample = {
+                "prompt": actual["prompt"],
+                "image_paths": custom_image_paths,
+                "image_urls": custom_image_urls,
+                "image_inputs": _sanitize_image_input_samples(custom_image_inputs),
+                "detail": actual["detail"],
+                "max_output_tokens": actual["max_output_tokens"],
+            }
+            if actual.get("provider_id"):
+                sample["provider_id"] = actual["provider_id"]
+            if actual.get("model"):
+                sample["model"] = actual["model"]
+            return actual, sample
         actual = {
             "prompt": "This is a provider smoke test. Briefly describe the image color.",
             "image_inputs": [{"data_uri": _red_square_png_data_uri(), "mime_type": "image/png"}],
@@ -180,6 +236,25 @@ def _provider_smoke_payload(capability_id: str, payload: dict[str, Any]) -> tupl
     raise ValueError(f"Unsupported provider smoke capability: {capability_id}")
 
 
+def _clean_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item or "").strip()]
+
+
+def _sanitize_image_input_samples(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for item in items:
+        sample = {key: item.get(key) for key in ("path", "url", "mime_type") if item.get(key)}
+        if item.get("data_uri") or item.get("data"):
+            sample["fixture"] = "inline_image_data"
+            if item.get("mime_type"):
+                sample["mime_type"] = item.get("mime_type")
+        if sample:
+            sanitized.append(sample)
+    return sanitized
+
+
 def _provider_status_notes(capability_id: str, result: dict[str, Any]) -> tuple[str, list[str]]:
     notes = ["Provider smoke invoked the configured capability route and returned a normalized response."]
     if capability_id in {"vision.analyze", "speech.transcribe"} and not str(result.get("text") or "").strip():
@@ -188,10 +263,22 @@ def _provider_status_notes(capability_id: str, result: dict[str, Any]) -> tuple[
     if capability_id == "speech.synthesize" and not result.get("audio_bytes_base64") and not result.get("artifact_refs"):
         notes.append("Provider returned no audio artifact for the fixture.")
         return "warn", notes
-    if capability_id == "image.generate" and not result.get("artifact_refs"):
-        notes.append("Provider returned no image artifact reference for the fixture.")
-        return "warn", notes
+    if capability_id == "image.generate" and not _has_persisted_image_artifact(result.get("artifact_refs") or []):
+        notes.append("Provider returned no persisted local image artifact for the fixture.")
+        return "fail", notes
     return "pass", notes
+
+
+def _has_persisted_image_artifact(refs: Any) -> bool:
+    if not isinstance(refs, list):
+        return False
+    for item in refs:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("local_path") or item.get("path") or "").strip()
+        if path:
+            return True
+    return False
 
 
 def _sanitize_provider_result(result: dict[str, Any] | None) -> dict[str, Any]:
@@ -219,6 +306,14 @@ def _sanitize_provider_result(result: dict[str, Any] | None) -> dict[str, Any]:
         "normalization_notes",
     ]
     sanitized = {key: result.get(key) for key in allowed_keys if key in result}
+    sanitized["usage_signal"] = normalize_usage_signal(
+        source="capability_provider_result",
+        provider_id=result.get("provider_id"),
+        model=result.get("model"),
+        usage=result.get("usage"),
+        reason=None if isinstance(result.get("usage"), dict) else "provider_result_usage_not_reported",
+        request_kind=result.get("capability_id"),
+    )
     text = str(result.get("text") or "").strip()
     if text:
         sanitized["text_preview"] = text[:240]

@@ -282,6 +282,7 @@ def _resolve_skill_source_catalog(
 def _plugin_registry_record(plugin: dict[str, Any], *, source_catalog_id: str) -> dict[str, Any]:
     manifest_status = _clean_text(plugin.get("manifest_status"))
     availability = _clean_text(plugin.get("availability"))
+    source_kind = _clean_text(plugin.get("source_kind"))
     install_status = _plugin_install_status(availability=availability, manifest_status=manifest_status, plugin=plugin)
     warnings: list[dict[str, Any]] = []
     if manifest_status == "malformed":
@@ -319,7 +320,7 @@ def _plugin_registry_record(plugin: dict[str, Any], *, source_catalog_id: str) -
         "installed_version": _optional_text(plugin.get("version")) if install_status == "installed" else None,
         "available_version": _optional_text(plugin.get("available_version") or plugin.get("version")) if install_status in {"available", "update_available"} else None,
         "description": _optional_text(plugin.get("description") or plugin.get("short_description")),
-        "install_root": _plugin_root_path(_clean_text(plugin.get("manifest_path"))),
+        "install_root": _plugin_root_path(_clean_text(plugin.get("manifest_path"))) if source_kind == "installed_root" else None,
         "keywords": _clean_string_list(plugin.get("skills_declared")),
         "declared_app_ids": _clean_string_list(plugin.get("apps") or plugin.get("apps_declared")),
         "declared_hook_keys": _clean_string_list(plugin.get("hooks")),

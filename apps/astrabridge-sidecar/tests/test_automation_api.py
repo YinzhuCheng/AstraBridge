@@ -74,6 +74,37 @@ class _FakeRunner:
         }
 
 
+class _NoSignalRunner:
+    def execute(self, automation: dict[str, Any], run: dict[str, Any], workspace_session: Any) -> dict[str, Any]:
+        return {
+            "run_id": run["run_id"],
+            "automation_id": run["automation_id"],
+            "project_id": run["project_id"],
+            "trigger": run["trigger"],
+            "status": "completed",
+            "due_at": run["due_at"],
+            "started_at": "2026-06-24T01:10:00+00:00",
+            "finished_at": "2026-06-24T01:10:02+00:00",
+            "thread_id": run.get("thread_id"),
+            "turn_id": None,
+            "worktree_path": None,
+            "runtime_profile_id": "openai-compatible",
+            "exit_code": 0,
+            "signal": "unknown",
+            "summary": "Repository clean.",
+            "artifact_refs": [],
+            "redacted_error": None,
+            "next_retry_at": None,
+            "stdout_excerpt": "all good",
+            "stderr_excerpt": None,
+        }
+
+
+class _FailingRunner:
+    def execute(self, automation: dict[str, Any], run: dict[str, Any], workspace_session: Any) -> dict[str, Any]:
+        raise RuntimeError("dirty workspace blocks execution")
+
+
 class AutomationApiTests(unittest.TestCase):
     def test_automation_service_run_now_emits_events_and_supervisor_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -122,6 +153,334 @@ class AutomationApiTests(unittest.TestCase):
             self.assertEqual(status["automations"]["active_runs"], [])
             self.assertEqual(status["automations"]["inbox_summary"]["unread"], 1)
             self.assertEqual(status["automations"]["next_due"], None)
+            self.assertTrue(Path(run_result["artifact_ref"]).exists())
+
+    def test_automation_service_completed_no_signal_archives_inbox_item(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            project_file = root / "demo.abproj"
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="new")
+            runtime = _FakeRuntime()
+            service = AutomationService(
+                projects,
+                runtime_service=runtime,
+                profile_service=_FakeProfiles(),
+                runtime_config=None,
+                event_recorder=runtime.record_external_event,
+            )
+            service._runner = _NoSignalRunner()  # noqa: SLF001
+            service.start()
+            service.create_automation(
+                {
+                    "automation_id": "auto-1",
+                    "project_id": "demo",
+                    "name": "Audit",
+                    "kind": "standalone",
+                    "prompt": "Audit repo",
+                    "runtime": {"permission_mode": "read-only"},
+                    "workspace": {"mode": "current_workspace", "cleanup_policy": "manual"},
+                    "triage": {"archive_no_signal": True, "notify_on": "finding", "finding_keywords": ["todo"]},
+                }
+            )
+
+            run_result = service.run_now("auto-1")
+            self.assertEqual(run_result["run"]["status"], "completed")
+            self.assertEqual(run_result["run"]["signal"], "no_signal")
+            self.assertEqual(run_result["inbox_item"]["state"], "archived")
+            self.assertEqual(run_result["inbox_item"]["disposition"], "no_signal")
+            self.assertTrue(Path(run_result["artifact_ref"]).exists())
+            self.assertTrue(any(event["type"] == "automation_run_completed" for event in runtime.events))
+            self.assertTrue(any(event["type"] == "automation_inbox_item_archived" for event in runtime.events))
+
+    def test_automation_service_completed_no_signal_can_finalize_without_inbox_item(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            project_file = root / "demo.abproj"
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="new")
+            runtime = _FakeRuntime()
+            service = AutomationService(
+                projects,
+                runtime_service=runtime,
+                profile_service=_FakeProfiles(),
+                runtime_config=None,
+                event_recorder=runtime.record_external_event,
+            )
+            service._runner = _NoSignalRunner()  # noqa: SLF001
+            service.start()
+            service.create_automation(
+                {
+                    "automation_id": "auto-1",
+                    "project_id": "demo",
+                    "name": "Audit",
+                    "kind": "standalone",
+                    "prompt": "Audit repo",
+                    "runtime": {"permission_mode": "read-only"},
+                    "workspace": {"mode": "current_workspace", "cleanup_policy": "manual"},
+                    "triage": {"archive_no_signal": False, "notify_on": "finding", "finding_keywords": ["todo"]},
+                }
+            )
+
+            run_result = service.run_now("auto-1")
+            self.assertEqual(run_result["run"]["status"], "completed")
+            self.assertEqual(run_result["run"]["signal"], "no_signal")
+            self.assertIsNone(run_result["inbox_item"])
+            self.assertTrue(Path(run_result["artifact_ref"]).exists())
+            self.assertTrue(any(event["type"] == "automation_run_completed" for event in runtime.events))
+            self.assertFalse(any(event["type"] in {"automation_inbox_item_created", "automation_inbox_item_archived"} for event in runtime.events))
+
+    def test_automation_service_failure_run_surfaces_reviewable_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            project_file = root / "demo.abproj"
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="new")
+            runtime = _FakeRuntime()
+            service = AutomationService(
+                projects,
+                runtime_service=runtime,
+                profile_service=_FakeProfiles(),
+                runtime_config=None,
+                event_recorder=runtime.record_external_event,
+            )
+            service._runner = _FailingRunner()  # noqa: SLF001
+            service.start()
+            service.create_automation(
+                {
+                    "automation_id": "auto-1",
+                    "project_id": "demo",
+                    "name": "Audit",
+                    "kind": "standalone",
+                    "prompt": "Audit repo",
+                    "runtime": {"permission_mode": "read-only"},
+                    "workspace": {"mode": "current_workspace", "cleanup_policy": "manual"},
+                    "triage": {"archive_no_signal": False, "notify_on": "every_run", "finding_keywords": ["todo"]},
+                }
+            )
+
+            run_result = service.run_now("auto-1")
+            self.assertEqual(run_result["run"]["status"], "failed")
+            self.assertEqual(run_result["run"]["signal"], "unknown")
+            self.assertIn("dirty workspace blocks execution", str(run_result["run"]["redacted_error"]))
+            self.assertEqual(run_result["inbox_item"]["state"], "unread")
+            self.assertEqual(run_result["inbox_item"]["disposition"], "failure")
+            self.assertTrue(Path(run_result["artifact_ref"]).exists())
+            self.assertTrue(any(event["type"] == "automation_run_failed" for event in runtime.events))
+
+    def test_automation_service_cancel_run_marks_active_run_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            project_file = root / "demo.abproj"
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="new")
+            runtime = _FakeRuntime()
+            service = AutomationService(
+                projects,
+                runtime_service=runtime,
+                profile_service=_FakeProfiles(),
+                runtime_config=None,
+                event_recorder=runtime.record_external_event,
+            )
+            service.start()
+            service.create_automation(
+                {
+                    "automation_id": "auto-1",
+                    "project_id": "demo",
+                    "name": "Audit",
+                    "kind": "standalone",
+                    "prompt": "Audit repo",
+                    "runtime": {"permission_mode": "read-only"},
+                    "workspace": {"mode": "current_workspace", "cleanup_policy": "manual"},
+                    "triage": {"archive_no_signal": False, "notify_on": "every_run", "finding_keywords": ["todo"]},
+                }
+            )
+
+            queued = service._scheduler.trigger_now("auto-1")  # noqa: SLF001
+            self.assertIsNotNone(queued)
+            cancel_result = service.cancel_run(str(queued["run_id"]))
+            self.assertEqual(cancel_result["run"]["status"], "cancelled")
+            self.assertEqual(cancel_result["run"]["summary"], "queued by scheduler")
+            self.assertEqual(cancel_result["run"]["redacted_error"], "cancelled_by_user")
+            self.assertTrue(Path(cancel_result["artifact_ref"]).exists())
+            cancel_manifest = json.loads(Path(cancel_result["artifact_ref"]).read_text(encoding="utf-8"))
+            self.assertEqual(cancel_manifest["usage_signal"]["status"], "not_available")
+            self.assertEqual(cancel_manifest["usage_signal"]["reason"], "automation_result_usage_not_reported")
+            self.assertEqual(cancel_result["run"]["artifact_refs"], [cancel_result["artifact_ref"]])
+            self.assertEqual(cancel_result["inbox_item"]["disposition"], "failure")
+            self.assertEqual(cancel_result["inbox_item"]["state"], "unread")
+            self.assertTrue(any(event["type"] == "automation_run_failed" and event.get("status") == "cancelled" for event in runtime.events))
+            self.assertTrue(any(event["type"] == "automation_inbox_item_created" for event in runtime.events))
+
+    def test_automation_service_recovers_interrupted_standalone_run_with_review_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            project_file = root / "demo.abproj"
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="new")
+            runtime = _FakeRuntime()
+            service = AutomationService(
+                projects,
+                runtime_service=runtime,
+                profile_service=_FakeProfiles(),
+                runtime_config=None,
+                event_recorder=runtime.record_external_event,
+            )
+            service.create_automation(
+                {
+                    "automation_id": "auto-1",
+                    "project_id": "demo",
+                    "name": "Audit",
+                    "kind": "standalone",
+                    "prompt": "Audit repo",
+                    "runtime": {"permission_mode": "read-only"},
+                    "workspace": {"mode": "current_workspace", "cleanup_policy": "manual"},
+                    "triage": {"archive_no_signal": False, "notify_on": "every_run", "finding_keywords": ["todo"]},
+                }
+            )
+            service._store.record_run(  # noqa: SLF001
+                {
+                    "run_id": "run-interrupted",
+                    "automation_id": "auto-1",
+                    "project_id": "demo",
+                    "trigger": "manual",
+                    "status": "running",
+                    "due_at": "2026-06-24T01:00:00+00:00",
+                    "started_at": "2026-06-24T01:00:01+00:00",
+                    "signal": "unknown",
+                    "summary": "automation run started",
+                }
+            )
+
+            runs = service.list_runs("auto-1")["runs"]
+            recovered = runs[0]
+            self.assertEqual(recovered["run_id"], "run-interrupted")
+            self.assertEqual(recovered["status"], "failed")
+            self.assertEqual(recovered["summary"], "Automation run was interrupted before it wrote a final result.")
+            self.assertEqual(recovered["redacted_error"], "automation_runner_interrupted_after_service_restart")
+            self.assertEqual(recovered["watchdog_reason"], "service_restart_interrupted")
+            self.assertEqual(recovered["recovered_by"], "service_restart")
+            self.assertTrue(Path(recovered["artifact_refs"][0]).exists())
+            manifest = json.loads(Path(recovered["artifact_refs"][0]).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["watchdog"]["reason"], "service_restart_interrupted")
+            self.assertEqual(manifest["watchdog"]["recovered_by"], "service_restart")
+            inbox = service.list_inbox_items("auto-1")["items"]
+            self.assertEqual(inbox[0]["run_id"], "run-interrupted")
+            self.assertEqual(inbox[0]["state"], "unread")
+            self.assertEqual(inbox[0]["disposition"], "failure")
+            self.assertEqual(service.scheduler_status()["active_runs"], [])
+            self.assertTrue(any(event["type"] == "automation_run_failed" and event.get("recovered") is True for event in runtime.events))
+            self.assertTrue(any(event["type"] == "automation_inbox_item_created" for event in runtime.events))
+
+    def test_automation_service_finalizes_watchdog_recovered_stale_run_with_artifact_and_inbox(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            project_file = root / "demo.abproj"
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="new")
+            runtime = _FakeRuntime()
+            service = AutomationService(
+                projects,
+                runtime_service=runtime,
+                profile_service=_FakeProfiles(),
+                runtime_config=None,
+                event_recorder=runtime.record_external_event,
+            )
+            service.create_automation(
+                {
+                    "automation_id": "auto-stale",
+                    "project_id": "demo",
+                    "name": "Watchdog audit",
+                    "kind": "standalone",
+                    "prompt": "Audit repo",
+                    "runtime": {"permission_mode": "read-only"},
+                    "workspace": {"mode": "current_workspace", "cleanup_policy": "manual"},
+                    "triage": {"archive_no_signal": False, "notify_on": "every_run", "finding_keywords": ["todo"]},
+                }
+            )
+            service._store.record_run(  # noqa: SLF001
+                {
+                    "run_id": "run-stale",
+                    "automation_id": "auto-stale",
+                    "project_id": "demo",
+                    "trigger": "schedule",
+                    "status": "failed",
+                    "due_at": "2026-06-24T01:00:00+00:00",
+                    "started_at": "2026-06-24T01:00:01+00:00",
+                    "finished_at": "2026-06-24T01:40:00+00:00",
+                    "signal": "unknown",
+                    "summary": "Automation watchdog recovered a stale running run after the timeout window.",
+                    "redacted_error": "automation_watchdog_stale_running_timeout",
+                    "artifact_refs": [],
+                    "watchdog_reason": "stale_running_timeout",
+                    "watchdog_summary": "No final result was recorded within 1800 seconds, so the scheduler recovered the run for review.",
+                    "recovered_by": "scheduler_watchdog",
+                    "recovered_at": "2026-06-24T01:40:00+00:00",
+                }
+            )
+
+            runs = service.list_runs("auto-stale")["runs"]
+            recovered = runs[0]
+            self.assertEqual(recovered["run_id"], "run-stale")
+            self.assertEqual(recovered["status"], "failed")
+            self.assertEqual(recovered["watchdog_reason"], "stale_running_timeout")
+            self.assertEqual(recovered["recovered_by"], "scheduler_watchdog")
+            self.assertTrue(Path(recovered["artifact_refs"][0]).exists())
+            manifest = json.loads(Path(recovered["artifact_refs"][0]).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["watchdog"]["reason"], "stale_running_timeout")
+            self.assertEqual(manifest["watchdog"]["recovered_by"], "scheduler_watchdog")
+            inbox = service.list_inbox_items("auto-stale")["items"]
+            self.assertEqual(inbox[0]["run_id"], "run-stale")
+            self.assertEqual(inbox[0]["state"], "unread")
+            self.assertEqual(inbox[0]["disposition"], "failure")
+            self.assertTrue(any(event["type"] == "automation_run_failed" and event.get("watchdog_reason") == "stale_running_timeout" for event in runtime.events))
+            self.assertTrue(any(event["type"] == "automation_inbox_item_created" for event in runtime.events))
+
+    def test_automation_service_does_not_recover_intentional_thread_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            project_file = root / "demo.abproj"
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="new")
+            service = AutomationService(projects, profile_service=_FakeProfiles())
+            service.create_automation(
+                {
+                    "automation_id": "auto-thread",
+                    "project_id": "demo",
+                    "name": "Thread audit",
+                    "kind": "thread",
+                    "prompt": "Audit thread",
+                    "runtime": {"permission_mode": "read-only"},
+                    "workspace": {"mode": "current_workspace", "cleanup_policy": "manual"},
+                }
+            )
+            service._store.record_run(  # noqa: SLF001
+                {
+                    "run_id": "run-thread",
+                    "automation_id": "auto-thread",
+                    "project_id": "demo",
+                    "trigger": "manual",
+                    "status": "running",
+                    "due_at": "2026-06-24T01:00:00+00:00",
+                    "started_at": "2026-06-24T01:00:01+00:00",
+                    "thread_id": "thread-1",
+                    "turn_id": "turn-1",
+                    "signal": "unknown",
+                    "summary": "Thread automation turn started.",
+                }
+            )
+
+            runs = service.list_runs("auto-thread")["runs"]
+            self.assertEqual(runs[0]["status"], "running")
+            self.assertEqual(runs[0]["turn_id"], "turn-1")
+            self.assertEqual(service.list_inbox_items("auto-thread")["items"], [])
 
     def test_handler_automation_routes(self) -> None:
         class FakeAutomations:
@@ -185,7 +544,8 @@ class AutomationApiTests(unittest.TestCase):
         thread.start()
         try:
             port = server.server_address[1]
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/automations", timeout=5) as response:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(f"http://127.0.0.1:{port}/api/automations", timeout=5) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(payload["count"], 1)
 
@@ -195,11 +555,11 @@ class AutomationApiTests(unittest.TestCase):
                 headers={"Content-Type": "application/json", "X-Admin-Token": "unit-admin"},
                 method="POST",
             )
-            with urllib.request.urlopen(create_request, timeout=5) as response:
+            with opener.open(create_request, timeout=5) as response:
                 created = json.loads(response.read().decode("utf-8"))
             self.assertEqual(created["automation"]["automation_id"], "auto-2")
 
-            scheduler_request = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/automations/scheduler/status", timeout=5)
+            scheduler_request = opener.open(f"http://127.0.0.1:{port}/api/automations/scheduler/status", timeout=5)
             scheduler_payload = json.loads(scheduler_request.read().decode("utf-8"))
             self.assertTrue(scheduler_payload["scheduler"]["running"])
 
@@ -209,7 +569,7 @@ class AutomationApiTests(unittest.TestCase):
                 headers={"Content-Type": "application/json", "X-Admin-Token": "unit-admin"},
                 method="POST",
             )
-            with urllib.request.urlopen(promote_request, timeout=5) as response:
+            with opener.open(promote_request, timeout=5) as response:
                 promoted = json.loads(response.read().decode("utf-8"))
             self.assertEqual(promoted["item"]["promotion_ref"], "task:123")
 
@@ -219,7 +579,7 @@ class AutomationApiTests(unittest.TestCase):
                 headers={"Content-Type": "application/json", "X-Admin-Token": "unit-admin"},
                 method="POST",
             )
-            with urllib.request.urlopen(update_request, timeout=5) as response:
+            with opener.open(update_request, timeout=5) as response:
                 updated = json.loads(response.read().decode("utf-8"))
             self.assertFalse(updated["automation"]["enabled"])
         finally:

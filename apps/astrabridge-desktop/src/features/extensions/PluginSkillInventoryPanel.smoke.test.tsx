@@ -17,8 +17,8 @@ describe("PluginSkillInventoryPanel smoke", () => {
     renderPanel();
 
     expect(screen.getByText("Extensions")).toBeInTheDocument();
-    expect(screen.getByText(`Plugins: ${snapshot.plugins.length}`)).toBeInTheDocument();
-    expect(screen.getByText(`Skills: ${snapshot.skills.length}`)).toBeInTheDocument();
+    expect(screen.getByTestId("extensions-summary-plugins")).toHaveTextContent(String(snapshot.plugins.length));
+    expect(screen.getByTestId("extensions-summary-sources")).toHaveTextContent(String(snapshot.source_catalogs.length));
   });
 
   it("renders declared MCP details for the smoke plugin fixture", () => {
@@ -27,8 +27,8 @@ describe("PluginSkillInventoryPanel smoke", () => {
     const plugin = snapshot.plugins[0];
     fireEvent.click(screen.getByRole("button", { name: new RegExp(escapeRegExp(plugin.display_name), "i") }));
 
-    expect(screen.getByText("Declared MCP")).toBeInTheDocument();
-    expect(screen.getByText("demo_mcp")).toBeInTheDocument();
+    expect(screen.getAllByText("Declared MCP").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("demo_mcp").length).toBeGreaterThan(0);
   });
 
   it("renders owning plugin details for the smoke skill fixture", () => {

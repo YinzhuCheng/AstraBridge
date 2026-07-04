@@ -63,7 +63,7 @@ cmd /c npm run preview -- --host 127.0.0.1 --port 4181
 Preview/dev URL pattern:
 
 ```text
-http://127.0.0.1:<port>/?sidecar=http://127.0.0.1:8826
+http://127.0.0.1:<port>/?astrabridge_launch=dogfood&sidecar=http://127.0.0.1:8826
 ```
 
 ## Build Gate
@@ -78,7 +78,7 @@ http://127.0.0.1:<port>/?sidecar=http://127.0.0.1:8826
 ## Functional Smoke Gate
 
 - Create project and confirm only `.abproj` and `.astrabridge/` are created as the normal product path.
-- Open an existing project and confirm task/thread state is readable after reload.
+- Open an existing project and confirm task and execution-lane state is readable after reload.
 - Inspect provider/API manager and confirm generated catalog is visible.
 - Confirm one primary lane is healthy enough to run:
   - `deepseek/deepseek-v4-pro`
@@ -91,8 +91,8 @@ http://127.0.0.1:<port>/?sidecar=http://127.0.0.1:8826
 - Create a checkpoint.
 - Preview checkpoint load if available, then confirm load behavior is safe.
 - Run compact when recommended or available in-context.
-- Fork the thread and continue one follow-up turn.
-- Reload the page and confirm visible thread state still matches persisted state.
+- Create a branch task and continue one follow-up turn.
+- Reload the page and confirm visible task state still matches persisted state.
 - Open Setup -> Runtime and confirm:
   - the kernel status panel shows binary path, version, compatibility status, isolated Codex home, app-server status, MCP status, plugin status, and skill status
   - warnings are actionable and secret-safe
@@ -145,11 +145,11 @@ http://127.0.0.1:<port>/?sidecar=http://127.0.0.1:8826
 
 ## Runtime Recovery Gate
 
-- Missing or archived current thread reprojects visible task focus.
-- Compact/fork/reload flows do not cross-leak provider/model/profile state.
-- Checkpoint restore leaves project/task/thread pointers consistent.
+- Missing or archived current execution lane reprojects visible task focus.
+- Compact/branch-task/reload flows do not cross-leak provider/model/profile state.
+- Checkpoint restore leaves project/task/execution-lane pointers consistent.
 - Runtime/supervisor status shows actionable recovery guidance rather than raw transport confusion.
-- Browser-visible thread output matches sidecar thread truth without a forced reload trick.
+- Browser-visible task output matches sidecar task conversation truth without a forced reload trick.
 
 ## Security And Isolation Gate
 
@@ -195,11 +195,21 @@ cd D:\AstraBridge
 rg -n --hidden --glob '!PRIVATE/**' --glob '!node_modules/**' --glob '!dist/**' --glob '!output/**' --glob '!*.png' --glob '!*.jpg' --glob '!*.jpeg' --glob '!*.webp' "Authorization: Bearer|api[_-]?key|sk-[A-Za-z0-9]|vault\\.abvault" .
 ```
 
+If the run changed app-hardening evidence or the docs that describe it:
+
+```powershell
+cd D:\AstraBridge
+python .\scripts\app_hardening_secret_scan.py --repo .
+```
+
 Expected result:
 
 - redacted examples may appear in docs
 - real secret material must not appear
 - changed-file scan for plugin/skill trust-review edits should also return no real secret material
+- `PRIVATE/app-hardening/**` stays untracked, bucketed under `raw/`, `reports/`,
+  `screenshots/`, and `validations/`, and contains no leaked desktop key paths
+  or secret-bearing companion text
 
 ## Legacy Scan Gate
 
@@ -271,7 +281,7 @@ Required content coverage:
 - browser smoke workflow
 - automation smoke workflow
 - checkpoint/restore workflow
-- compact/fork recovery workflow
+- compact/branch-task recovery workflow
 - known limitations
 - troubleshooting
 - artifact locations

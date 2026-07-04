@@ -11,6 +11,8 @@ vi.mock("../../api", () => ({
     runtimeSkillEnablementUpdate: vi.fn(),
     runtimePluginInstallPlan: vi.fn(),
     runtimePluginInstallApply: vi.fn(),
+    runtimeSkillPluginCreatorFixtureScenario: vi.fn(),
+    projectFileRead: vi.fn(),
   },
 }));
 
@@ -169,6 +171,42 @@ const snapshot: CodexPluginSkillRegistrySnapshot = {
   notes: ["plugin_list_status:supported", "skill_list_status:supported"],
 };
 
+const snapshotWithPluginCreator: CodexPluginSkillRegistrySnapshot = {
+  ...snapshot,
+  skills: [
+    ...snapshot.skills,
+    {
+      schema_version: "astrabridge-plugin-skill-registry-v1",
+      record_id: "skill:system:plugin-creator",
+      skill_name: "plugin-creator",
+      source_catalog_id: "local::legacy",
+      display_name: "Plugin Creator",
+      install_status: "installed",
+      enablement_status: "enabled",
+      compatibility_status: "compatible",
+      owner_plugin_id: null,
+      description: "Scaffold a controlled plugin fixture from a fixed brief.",
+      short_description: "Generate a deterministic plugin scaffold for dogfood validation.",
+      trigger_hints: ["plugin scaffold", "fixture plugin"],
+      permission_hints: ["filesystem_write"],
+      observed_enablement_status: "enabled",
+      global_enablement_status: "enabled",
+      project_enablement_status: "inherited",
+      effective_enablement_status: "enabled",
+      enablement_source: "runtime_observed",
+      project_override_supported: true,
+      global_state_path: "D:/AstraBridge/.astrabridge/codex-home/astrabridge-managed/skill-enablement.global.json",
+      project_state_path: "D:/AstraBridge/workspace/.astrabridge/extensions/skill-enablement.json",
+      provenance: {
+        schema_version: "astrabridge-plugin-skill-registry-v1",
+        source_path: "C:/Users/cyz19/.codex/skills/.system/plugin-creator/SKILL.md",
+      },
+      compatibility_warnings: [],
+      notes: ["system_skill"],
+    },
+  ],
+};
+
 describe("PluginSkillInventoryPanel", () => {
   afterEach(() => cleanup());
   beforeEach(() => {
@@ -176,22 +214,41 @@ describe("PluginSkillInventoryPanel", () => {
     vi.mocked(api.runtimeSkillEnablementUpdate).mockReset();
     vi.mocked(api.runtimePluginInstallPlan).mockReset();
     vi.mocked(api.runtimePluginInstallApply).mockReset();
+    vi.mocked(api.runtimeSkillPluginCreatorFixtureScenario).mockReset();
+    vi.mocked(api.projectFileRead).mockReset();
   });
 
   it("renders inventory counts and opens skill details", () => {
     render(<PluginSkillInventoryPanel locale="en" snapshot={snapshot} isLoading={false} />);
 
     expect(screen.getByText("Extensions")).toBeInTheDocument();
-    expect(screen.getByText("Plugins: 2")).toBeInTheDocument();
-    expect(screen.getByText("Skills: 1")).toBeInTheDocument();
+    expect(screen.getByTestId("extensions-summary-plugins")).toHaveTextContent("Plugins");
+    expect(screen.getByTestId("extensions-summary-plugins")).toHaveTextContent("2");
+    expect(screen.getByTestId("extensions-summary-sources")).toHaveTextContent("2");
 
     fireEvent.click(screen.getByRole("button", { name: /Address comments/i }));
 
     expect(screen.getAllByText("Owning plugin").length).toBeGreaterThan(0);
     expect(screen.getAllByText("github").length).toBeGreaterThan(0);
-    expect(screen.getByText("pull request review")).toBeInTheDocument();
-    expect(screen.getByText("tool_search")).toBeInTheDocument();
+    expect(screen.getAllByText("pull request review").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("tool_search").length).toBeGreaterThan(0);
     expect(screen.getByText("Skill controls")).toBeInTheDocument();
+  });
+
+  it("shows plugin-focused inventory state with controlled install guidance", () => {
+    render(<PluginSkillInventoryPanel locale="en" snapshot={snapshot} isLoading={false} initialKind="plugins" />);
+
+    expect(screen.getByRole("heading", { name: "Plugins" })).toBeInTheDocument();
+    expect(screen.getByTestId("extensions-summary-installed")).toHaveTextContent("1");
+    expect(screen.getByTestId("extensions-summary-available")).toHaveTextContent("1");
+    expect(screen.getByTestId("extensions-summary-attention")).toHaveTextContent("1");
+
+    fireEvent.click(screen.getByRole("button", { name: /Legacy Helper/i }));
+
+    expect(screen.getByText("Operation guidance")).toBeInTheDocument();
+    expect(screen.getByText("All plugin writes stay inside AstraBridge-managed isolated runtime roots and evidence directories.")).toBeInTheDocument();
+    expect(screen.getByText("This plugin is ready to install from an AstraBridge-managed local source. Applying the plan copies files into the isolated runtime and records rollback evidence.")).toBeInTheDocument();
+    expect(screen.getAllByText("Contributions").length).toBeGreaterThan(0);
   });
 
   it("filters inventory by search, type, and status", () => {
@@ -525,6 +582,87 @@ describe("PluginSkillInventoryPanel", () => {
     expect(screen.getByText("D:/AstraBridge/PRIVATE/demo-runs/plugin-install-123/result.json")).toBeInTheDocument();
   });
 
+  it("keeps a ready plugin install plan actionable across registry refreshes", async () => {
+    vi.mocked(api.runtimePluginInstallPlan).mockResolvedValue({
+      schema_version: "astrabridge-plugin-install-plan-v1",
+      generated_at: "2026-06-25T19:10:00+08:00",
+      action: "install",
+      status: "ready",
+      reason: "install_available_plugin",
+      plugin: {
+        record_id: "plugin:legacy",
+        plugin_id: "legacy-helper",
+        display_name: "Legacy Helper",
+        source_catalog_id: "local::legacy",
+        install_status: "available",
+        enablement_status: "disabled",
+        compatibility_status: "warning",
+      },
+      source: {
+        source_catalog_id: "local::legacy",
+        kind: "local",
+        display_name: "Legacy local catalog",
+        writable: true,
+      },
+      versions: {
+        current_version: null,
+        target_version: "0.0.9",
+        installed_version: null,
+        available_version: "0.0.9",
+      },
+      permission_hints: [],
+      declared_app_ids: [],
+      mcp_changes: { declared_servers: [] },
+      skill_changes: { declared_skills: [], detected_installed_skills: [] },
+      files: {
+        source_root: "D:/src",
+        target_root: "D:/dst",
+        source_file_count: 1,
+        existing_target_file_count: 0,
+        planned_write_count: 1,
+        source_files: [],
+        existing_target_files: [],
+        planned_write_files: [],
+      },
+      rollback_snapshot: {
+        status: "planned",
+        snapshot_id: "plugin-legacy-helper-abc123",
+        captured_file_count: 0,
+        captured_files: [],
+      },
+      warnings: [],
+      errors: [],
+      notes: [],
+    });
+
+    const refreshedSnapshot: CodexPluginSkillRegistrySnapshot = {
+      ...snapshot,
+      generated_at: "2026-06-25T19:11:00+08:00",
+      plugins: snapshot.plugins.map((plugin) =>
+        plugin.record_id === "plugin:legacy"
+          ? { ...plugin, install_status: "installed" }
+          : plugin,
+      ),
+    };
+
+    const { rerender } = render(<PluginSkillInventoryPanel locale="en" snapshot={snapshot} isLoading={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Legacy Helper/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Preview plan" }));
+
+    await waitFor(() => expect(api.runtimePluginInstallPlan).toHaveBeenCalledWith({
+      plugin_id: "legacy-helper",
+      source_catalog_id: "local::legacy",
+    }));
+    expect(screen.getByRole("button", { name: "Apply" })).toBeEnabled();
+
+    rerender(<PluginSkillInventoryPanel locale="en" snapshot={refreshedSnapshot} isLoading={false} />);
+
+    expect(screen.getByRole("button", { name: "Apply" })).toBeEnabled();
+    expect(screen.getByText("install available plugin")).toBeInTheDocument();
+    expect(screen.getByText("plugin-legacy-helper-abc123")).toBeInTheDocument();
+  });
+
   it("adds a plugin to the active project preset", async () => {
     const onProjectChanged = vi.fn();
     vi.mocked(api.updateProjectPluginSkillPresets).mockResolvedValue({
@@ -654,6 +792,242 @@ describe("PluginSkillInventoryPanel", () => {
     expect(screen.getByText("Project state path")).toBeInTheDocument();
   });
 
+  it("refreshes the registry on demand and keeps the latest snapshot visible while loading", async () => {
+    const onRegistryChanged = vi.fn().mockResolvedValue(undefined);
+
+    const { rerender } = render(
+      <PluginSkillInventoryPanel
+        locale="en"
+        snapshot={snapshot}
+        isLoading={false}
+        onRegistryChanged={onRegistryChanged}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh registry" }));
+    await waitFor(() => expect(onRegistryChanged).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <PluginSkillInventoryPanel
+        locale="en"
+        snapshot={snapshot}
+        isLoading
+        onRegistryChanged={onRegistryChanged}
+      />,
+    );
+
+    expect(screen.getByText("Refreshing inventory while keeping the last verified snapshot visible.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Address comments" })).toBeInTheDocument();
+  });
+
+  it("localizes registry refresh and discovery state in Chinese", () => {
+    render(
+      <PluginSkillInventoryPanel
+        locale="zh-CN"
+        snapshot={snapshot}
+        isLoading
+        onRegistryChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "刷新清单" })).toBeInTheDocument();
+    expect(screen.getByText("正在刷新清单，并保留上一份已验证快照可见。")).toBeInTheDocument();
+    expect(screen.getByText("插件发现: 已支持")).toBeInTheDocument();
+    expect(screen.getByText("技能发现: 已支持")).toBeInTheDocument();
+  });
+
+  it("surfaces pending approval and blocked ownership reasons for skills", () => {
+    render(
+      <PluginSkillInventoryPanel
+        locale="en"
+        snapshot={{
+          ...snapshot,
+          skills: [
+            {
+              ...snapshot.skills[0],
+              record_id: "skill:pending",
+              display_name: "Pending skill",
+              skill_name: "plugin:pending",
+              global_enablement_status: "disabled",
+              effective_enablement_status: "disabled",
+              enablement_status: "disabled",
+              enablement_source: "global_default",
+              notes: ["enablement_pending_user_approval"],
+            },
+            {
+              ...snapshot.skills[0],
+              record_id: "skill:blocked",
+              display_name: "Blocked skill",
+              skill_name: "plugin:blocked",
+              owner_plugin_id: "missing-plugin",
+              effective_enablement_status: "blocked",
+              enablement_status: "enabled",
+              enablement_source: "blocked",
+              enablement_block_reason: "owner_plugin_unavailable",
+              notes: ["plugin_owned"],
+            },
+          ],
+        }}
+        isLoading={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Pending skill/i }));
+    expect(screen.getAllByText("Waiting for approval").length).toBeGreaterThan(0);
+    expect(screen.getByText("This skill came from a newly installed plugin and remains disabled until you explicitly approve it.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Blocked skill/i }));
+    expect(screen.getByText("Owning plugin unavailable")).toBeInTheDocument();
+    expect(screen.getByText("AstraBridge cannot enable this skill until its owning plugin becomes available again. (owner plugin unavailable)")).toBeInTheDocument();
+  });
+
+  it("renders Plugin Creator controlled task evidence paths in Chinese", () => {
+    render(<PluginSkillInventoryPanel locale="zh-CN" snapshot={snapshotWithPluginCreator} isLoading={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Plugin Creator/i }));
+
+    expect(screen.getByTestId("plugin-creator-skill-scenario-panel")).toBeInTheDocument();
+    expect(screen.getByText("受控任务")).toBeInTheDocument();
+    expect(screen.getByText("固定 brief 路径")).toBeInTheDocument();
+    expect(screen.getByText("apps/astrabridge-sidecar/tests/fixtures/skill_plugin_creator_fixture/input/plugin-creator-brief.md")).toBeInTheDocument();
+    expect(screen.getByText("apps/astrabridge-desktop/output/playwright/real-scenario-dogfood/step10-skills-plugin-creator-report-partial.json")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "运行受控任务" })).toBeInTheDocument();
+  });
+
+  it("renders the latest Plugin Creator controlled task execution evidence after a run", async () => {
+    vi.mocked(api.runtimeSkillPluginCreatorFixtureScenario).mockResolvedValue({
+      schema_version: "astrabridge-skill-plugin-creator-scenario-v1",
+      execution_id: "skill-plugin-creator-123",
+      scenario_id: "skills_plugin_creator_fixture_scaffold",
+      capability: "skills",
+      skill_name: "plugin-creator",
+      skill_display_name: "Plugin Creator",
+      skill_record_id: "skill:system:plugin-creator",
+      started_at: "2026-06-26T12:30:00+08:00",
+      completed_at: "2026-06-26T12:31:00+08:00",
+      status: "pass",
+      failure_reason: "",
+      input: {
+        fixture_contract_path: "apps/astrabridge-sidecar/tests/fixtures/skill_plugin_creator_fixture/fixture-contract.json",
+        brief_path: "apps/astrabridge-sidecar/tests/fixtures/skill_plugin_creator_fixture/input/plugin-creator-brief.md",
+      },
+      output: {
+        run_root: "PRIVATE/demo-runs/skills-plugin-creator-scenario/",
+        execution_root: "PRIVATE/demo-runs/skills-plugin-creator-scenario/executions/skill-plugin-creator-123/",
+        plugin_root: "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/",
+        manifest_path: "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/.codex-plugin/plugin.json",
+        marketplace_path: "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/.agents/plugins/marketplace.json",
+        required_paths: [],
+      },
+      artifact_paths: {
+        events_path: "PRIVATE/demo-runs/skills-plugin-creator-scenario/executions/skill-plugin-creator-123/events.jsonl",
+        result_path: "PRIVATE/demo-runs/skills-plugin-creator-scenario/executions/skill-plugin-creator-123/result.json",
+        report_seed_path: "PRIVATE/demo-runs/skills-plugin-creator-scenario/executions/skill-plugin-creator-123/dogfood-report-seed.json",
+      },
+      verification_commands: [],
+      command_results: [],
+      checks: [
+        { label: "plugin-root-exists", passed: true, message: "Plugin root was created." },
+        { label: "manifest-plugin-name", passed: true, message: "Generated manifest uses the fixed plugin name." },
+      ],
+      notes: [],
+      report_seed: {
+        schema_version: "astrabridge-real-scenario-dogfood-report-seed-v1",
+        step_id: "step_12",
+        capability: "skills",
+        scenario_id: "skills_plugin_creator_fixture_scaffold",
+        trigger_path: "能力 -> 技能 -> Plugin Creator",
+        suggested_report_path: "apps/astrabridge-desktop/output/playwright/real-scenario-dogfood/step12-skills-plugin-creator-pass.json",
+        suggested_screenshots: [],
+      },
+    });
+
+    render(<PluginSkillInventoryPanel locale="en" snapshot={snapshotWithPluginCreator} isLoading={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Plugin Creator/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Run controlled task" }));
+
+    await waitFor(() => expect(api.runtimeSkillPluginCreatorFixtureScenario).toHaveBeenCalledWith({
+      skill_name: "plugin-creator",
+    }));
+
+    expect(screen.getByText("Latest execution")).toBeInTheDocument();
+    expect(screen.getByText("skill-plugin-creator-123")).toBeInTheDocument();
+    expect(screen.getByText("PRIVATE/demo-runs/skills-plugin-creator-scenario/executions/skill-plugin-creator-123/result.json")).toBeInTheDocument();
+    expect(screen.getByText("apps/astrabridge-desktop/output/playwright/real-scenario-dogfood/step12-skills-plugin-creator-pass.json")).toBeInTheDocument();
+  });
+
+  it("can preview the generated Plugin Creator manifest after a successful run", async () => {
+    vi.mocked(api.runtimeSkillPluginCreatorFixtureScenario).mockResolvedValue({
+      schema_version: "astrabridge-skill-plugin-creator-scenario-v1",
+      execution_id: "skill-plugin-creator-123",
+      scenario_id: "skills_plugin_creator_fixture_scaffold",
+      capability: "skills",
+      skill_name: "plugin-creator",
+      skill_display_name: "Plugin Creator",
+      skill_record_id: "skill:system:plugin-creator",
+      started_at: "2026-06-26T12:30:00+08:00",
+      completed_at: "2026-06-26T12:31:00+08:00",
+      status: "pass",
+      failure_reason: "",
+      input: {
+        fixture_contract_path: "apps/astrabridge-sidecar/tests/fixtures/skill_plugin_creator_fixture/fixture-contract.json",
+        brief_path: "apps/astrabridge-sidecar/tests/fixtures/skill_plugin_creator_fixture/input/plugin-creator-brief.md",
+      },
+      output: {
+        run_root: "PRIVATE/demo-runs/skills-plugin-creator-scenario/",
+        execution_root: "PRIVATE/demo-runs/skills-plugin-creator-scenario/executions/skill-plugin-creator-123/",
+        plugin_root: "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/",
+        manifest_path: "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/.codex-plugin/plugin.json",
+        marketplace_path: "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/.agents/plugins/marketplace.json",
+        required_paths: [],
+      },
+      artifact_paths: {
+        events_path: "PRIVATE/demo-runs/skills-plugin-creator-scenario/executions/skill-plugin-creator-123/events.jsonl",
+        result_path: "PRIVATE/demo-runs/skills-plugin-creator-scenario/executions/skill-plugin-creator-123/result.json",
+        report_seed_path: "PRIVATE/demo-runs/skills-plugin-creator-scenario/executions/skill-plugin-creator-123/dogfood-report-seed.json",
+      },
+      verification_commands: [],
+      command_results: [],
+      checks: [],
+      notes: [],
+      report_seed: {
+        schema_version: "astrabridge-real-scenario-dogfood-report-seed-v1",
+        step_id: "step_12",
+        capability: "skills",
+        scenario_id: "skills_plugin_creator_fixture_scaffold",
+        trigger_path: "能力 -> 技能 -> Plugin Creator",
+        suggested_report_path: "apps/astrabridge-desktop/output/playwright/real-scenario-dogfood/step12-skills-plugin-creator-pass.json",
+        suggested_screenshots: [],
+      },
+    });
+    vi.mocked(api.projectFileRead).mockResolvedValue({
+      path: "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/.codex-plugin/plugin.json",
+      name: "plugin.json",
+      kind: "json",
+      size: 128,
+      updated_at: Date.parse("2026-06-26T12:31:00+08:00"),
+      content: "{\"name\":\"astrabridge-skills-dogfood-sample\"}",
+    });
+
+    render(<PluginSkillInventoryPanel locale="zh-CN" snapshot={snapshotWithPluginCreator} isLoading={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Plugin Creator/i }));
+    fireEvent.click(screen.getByRole("button", { name: "运行受控任务" }));
+
+    await waitFor(() => expect(api.runtimeSkillPluginCreatorFixtureScenario).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "预览 Manifest" }));
+
+    await waitFor(() =>
+      expect(api.projectFileRead).toHaveBeenCalledWith(
+        "PRIVATE/demo-runs/skills-plugin-creator-scenario/generated/plugins/astrabridge-skills-dogfood-sample/.codex-plugin/plugin.json",
+      ),
+    );
+    expect(screen.getByTestId("plugin-creator-artifact-preview")).toBeInTheDocument();
+    expect(screen.getByText(/"name": "astrabridge-skills-dogfood-sample"/i)).toBeInTheDocument();
+  });
+
   it("can reset a project override back to the global skill setting", async () => {
     vi.mocked(api.runtimeSkillEnablementUpdate).mockResolvedValue(snapshot);
 
@@ -698,6 +1072,7 @@ describe("PluginSkillInventoryPanel", () => {
               owner_plugin_id: "missing-plugin",
               enablement_status: "blocked",
               effective_enablement_status: "blocked",
+              enablement_block_reason: "owner_plugin_unavailable",
               compatibility_warnings: [
                 {
                   schema_version: "astrabridge-plugin-skill-warning-v1",
@@ -717,5 +1092,6 @@ describe("PluginSkillInventoryPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /Address comments/i }));
     expect(screen.getByRole("button", { name: "Enable globally" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Enable for project" })).toBeDisabled();
+    expect(screen.getByText("Owning plugin unavailable")).toBeInTheDocument();
   });
 });

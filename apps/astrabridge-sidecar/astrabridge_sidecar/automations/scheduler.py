@@ -231,8 +231,15 @@ class AutomationScheduler:
             updated = dict(run)
             updated["status"] = "failed"
             updated["finished_at"] = _to_iso(now)
-            updated["redacted_error"] = "stale_run_recovered"
-            updated["summary"] = "Scheduler marked stale running automation as failed."
+            updated["redacted_error"] = "automation_watchdog_stale_running_timeout"
+            updated["summary"] = "Automation watchdog recovered a stale running run after the timeout window."
+            updated["watchdog_reason"] = "stale_running_timeout"
+            updated["watchdog_summary"] = (
+                f"No final result was recorded within {int(self._stale_after.total_seconds())} seconds, "
+                "so the scheduler recovered the run for review."
+            )
+            updated["recovered_by"] = "scheduler_watchdog"
+            updated["recovered_at"] = _to_iso(now)
             self._store.record_run(updated)
             recovered.append(str(updated.get("run_id") or ""))
         return recovered

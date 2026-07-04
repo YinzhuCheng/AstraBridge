@@ -97,20 +97,22 @@ def write_json(path: Path, payload: Any) -> None:
         pass
     last_error: Exception | None = None
     for attempt in range(10):
-        temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temp_path = path.with_name(f".tmp-{uuid.uuid4().hex[:8]}")
         try:
             temp_path.write_text(text, encoding="utf-8")
             os.replace(temp_path, path)
             return
-        except PermissionError as exc:
+        except OSError as exc:
             # Windows file watchers and concurrent readers can briefly hold the
-            # destination after another atomic write. Use a fresh temp file on
-            # each retry so failed replacements never leak into later attempts.
+            # destination or remove a just-created temp file. Use a fresh temp
+            # file on each retry so failed replacements never leak into later
+            # attempts.
             last_error = exc
             try:
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+            path.parent.mkdir(parents=True, exist_ok=True)
             time.sleep(min(0.05 * (attempt + 1), 0.5))
     if last_error is not None:
         raise last_error

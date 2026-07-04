@@ -258,6 +258,10 @@ class AutomationRun:
     redacted_error: str | None
     next_retry_at: str | None
     retry_count: int
+    watchdog_reason: str | None
+    watchdog_summary: str | None
+    recovered_by: str | None
+    recovered_at: str | None
 
     @classmethod
     def normalize(cls, payload: Any) -> "AutomationRun":
@@ -293,6 +297,10 @@ class AutomationRun:
             redacted_error=_clean_text(payload.get("redacted_error")) or None,
             next_retry_at=_clean_text(payload.get("next_retry_at")) or None,
             retry_count=_positive_int(payload.get("retry_count"), field="retry_count", default=0, minimum=0),
+            watchdog_reason=_clean_text(payload.get("watchdog_reason")) or None,
+            watchdog_summary=_clean_text(payload.get("watchdog_summary")) or None,
+            recovered_by=_clean_text(payload.get("recovered_by")) or None,
+            recovered_at=_clean_text(payload.get("recovered_at")) or None,
         )
 
     def to_dict(self) -> dict[str, Any]:

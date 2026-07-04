@@ -28,6 +28,7 @@ class IsolationAuditService:
         runtime_environment: dict[str, Any],
         router_status: dict[str, Any],
         official_codex_status: dict[str, Any],
+        sidecar_provenance: dict[str, Any] | None = None,
         sidecar_port: int | None = None,
     ) -> dict[str, Any]:
         project = current_project or {}
@@ -129,6 +130,19 @@ class IsolationAuditService:
         )
         secret_scan = _scan_astrabridge_state(project_file, workspace)
         checks.append(_check("project_and_astrabridge_state_have_no_secret_like_content", not secret_scan, secret_scan[:10]))
+        sidecar = dict(sidecar_provenance or {})
+        sidecar_owner = dict(sidecar.get("port_owner") or {})
+        sidecar_origin = str(sidecar.get("origin") or "unknown")
+        sidecar_port_value = sidecar.get("listen_port") if sidecar.get("listen_port") is not None else sidecar_port
+        checks.append(_check("sidecar_provenance_schema_present", sidecar.get("schema_version") == "astrabridge-sidecar-provenance-v1", sidecar.get("schema_version")))
+        checks.append(_check("sidecar_origin_known", sidecar_origin in {"current_source", "app_managed"}, sidecar_origin))
+        checks.append(
+            _check(
+                "sidecar_port_owner_reported",
+                bool(sidecar_owner.get("pid")) and sidecar_owner.get("listen_port") is not None,
+                sidecar_owner,
+            )
+        )
         return {
             "ok": all(item["ok"] for item in checks),
             "checks": checks,
@@ -156,14 +170,19 @@ class IsolationAuditService:
                 "config_sha256": _sha256(official_config) if official_config and official_config.exists() else None,
             },
             "ports": {
-                "sidecar": sidecar_port,
+                "sidecar": sidecar_port_value,
                 "router": router_status.get("listen_port"),
                 "router_base_url": router_status.get("base_url"),
+                "sidecar_owner_pid": sidecar_owner.get("pid"),
+                "sidecar_owner_status": sidecar_owner.get("status"),
             },
+            "sidecar": sidecar,
             "process_boundary": {
                 "app_server_running": bool(runtime_environment.get("running")),
                 "codex_cli": runtime_environment.get("codex_cli"),
                 "execution_host": runtime_environment.get("execution_host"),
+                "sidecar_origin": sidecar_origin,
+                "sidecar_launcher_mode": sidecar.get("launcher_mode"),
             },
         }
 

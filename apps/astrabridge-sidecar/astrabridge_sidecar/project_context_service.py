@@ -342,13 +342,22 @@ class ProjectContextService:
             "Freshness rule: this pack supersedes any older auto-injected AstraBridge Project/Asset Context Pack text already present in the thread history.",
             "If counts, paths, goals, plans, or asset refs conflict, use this newest pack and the referenced JSON files.",
         ]
+        active_route = self._task_active_provider_route(task, thread_id)
         project_lines = [
             f"Project: {project.get('name') or 'untitled'}",
             f"Workspace: {project.get('workspace_root') or ''}",
             f"Current task: {task.get('title') or task.get('task_id') or 'none'}",
             f"Current thread: {thread_id or 'none'}",
-            f"Default runtime: profile={project.get('default_profile_id') or ''} model={project.get('default_model') or ''} effort={project.get('default_effort') or ''}",
         ]
+        if active_route:
+            project_lines.append(
+                f"Active provider route: profile={active_route.get('profile_id') or ''} "
+                f"provider={active_route.get('provider_id') or ''} model={active_route.get('model') or ''} "
+                f"effort={active_route.get('reasoning_effort') or ''}"
+            )
+        project_lines.append(
+            f"Default runtime: profile={project.get('default_profile_id') or ''} model={project.get('default_model') or ''} effort={project.get('default_effort') or ''}"
+        )
         sections: list[ContextSection] = [
             ContextSection("intro", "Intro", 0, "\n".join(intro_lines), essential=True),
             ContextSection("project", "Project", 1, "\n".join(project_lines), essential=True),
@@ -936,25 +945,29 @@ class ProjectContextService:
         return str(goal or "").strip()
 
     def _task_active_provider(self, task: dict[str, Any]) -> str:
-        active_thread_id = str(task.get("active_provider_thread_id") or "").strip()
+        active = self._task_active_provider_route(task, "")
+        provider = str(active.get("provider_id") or "").strip()
+        if provider:
+            return provider[:80]
+        return ""
+
+    def _task_active_provider_route(self, task: dict[str, Any], thread_id: str) -> dict[str, Any]:
+        active_thread_id = str(task.get("active_provider_thread_id") or thread_id or "").strip()
         provider_threads = list(task.get("provider_threads") or [])
         for item in provider_threads:
             if not isinstance(item, dict):
                 continue
             if str(item.get("thread_id") or "").strip() != active_thread_id:
                 continue
-            provider = str(item.get("provider_id") or "").strip()
-            if provider:
-                return provider[:80]
+            return dict(item)
         if self._tasks is not None:
             try:
                 active = self._tasks.active_provider_thread(include_missing_fallback=True) or {}
             except Exception:
                 active = {}
-            provider = str(active.get("provider_id") or "").strip()
-            if provider:
-                return provider[:80]
-        return ""
+            if active:
+                return dict(active)
+        return {}
 
     def _plan_is_completed(self, plan: dict[str, Any]) -> bool:
         steps = list(plan.get("steps") or plan.get("plan") or [])

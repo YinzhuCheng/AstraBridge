@@ -1,0 +1,59 @@
+{
+  "schema_version": "astrabridge-plugin-fixture-contract-v1",
+  "fixture_id": "astrabridge-dogfood-fixture",
+  "source": {
+    "kind": "local_marketplace",
+    "catalog_root_rel": ".",
+    "marketplace_path_rel": ".agents/plugins/marketplace.json",
+    "plugin_root_rel": ".agents/plugins/plugins/astrabridge-dogfood-fixture",
+    "manifest_path_rel": ".agents/plugins/plugins/astrabridge-dogfood-fixture/.codex-plugin/plugin.json",
+    "expected_install_status": "available",
+    "expected_enablement_status": "disabled"
+  },
+  "plugin": {
+    "plugin_id": "astrabridge-dogfood-fixture",
+    "display_name": "AstraBridge Dogfood Fixture",
+    "version": "1.0.0",
+    "description": "Local-only fixture plugin used to validate plugin inventory, install planning, project preset references, and dogfood evidence contracts.",
+    "brand_color": "#2563EB",
+    "logo_rel": "./assets/logo.png",
+    "composer_icon_rel": "./assets/icon.png",
+    "declared_mcp_servers": [
+      "astrabridge_fixture_echo"
+    ],
+    "declared_app_ids": [
+      "astrabridge-fixture-app"
+    ],
+    "declared_skills": [
+      "astrabridge-fixture-skill"
+    ]
+  },
+  "project_preset_reference": {
+    "preset_id": "project-default",
+    "plugin_ref": {
+      "plugin_id": "astrabridge-dogfood-fixture",
+      "source_catalog_id": "fixture::astrabridge-dogfood-fixture",
+      "display_name": "AstraBridge Dogfood Fixture"
+    },
+    "skill_ref": {
+      "record_id": "skill::astrabridge-fixture-skill::fixture",
+      "skill_name": "astrabridge-fixture-skill",
+      "owner_plugin_id": "astrabridge-dogfood-fixture",
+      "source_catalog_id": "fixture::astrabridge-dogfood-fixture",
+      "display_name": "AstraBridge Fixture Skill"
+    },
+    "note": "This preset reference block is a stable fixture contract. Runtime snapshots may compute a different source_catalog_id when the local catalog is discovered."
+  },
+  "safety_contract": {
+    "requires_local_only_source": true,
+    "forbidden_remote_source_kinds": [
+      "remote_marketplace",
+      "shared_remote"
+    ],
+    "forbidden_mcp_transport_kinds": [
+      "http",
+      "sse"
+    ],
+    "requires_local_icon_assets": true
+  }
+}

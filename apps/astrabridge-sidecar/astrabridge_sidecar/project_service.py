@@ -23,6 +23,7 @@ from .common import (
 from .codex_plugin_skill_project_presets import normalize_project_plugin_skill_presets
 from .profile_service import ProfileService
 from .model_catalog import preferred_provider_model_record
+from .security import SECRET_RE, SecurityError, redact_sensitive
 from .wsl_dependency_service import DEFAULT_WSL_DISTRO, ASTRABRIDGE_WSL_CODEX_HOME, ASTRABRIDGE_WSL_ROOT
 
 
@@ -46,6 +47,8 @@ MANAGED_STATE_FILES = (
     "ui_state.json",
 )
 STORAGE_POLICY_SCHEMA_VERSION = "astrabridge-storage-policy-v1"
+SIDEBAR_SCHEMA_VERSION = "astrabridge-sidebar-v1"
+SIDEBAR_TASK_STATE_SCHEMA_VERSION = "astrabridge-task-state-v1"
 _OPENAI_DEFAULT_MODEL = str(
     (preferred_provider_model_record("openai", include_deprecated=False) or {}).get("native_model") or "gpt-5.5"
 )
@@ -252,6 +255,51 @@ class ProjectService:
             write_json(self.store_path, payload)
         return payload
 
+    def sidebar_snapshot(self, *, project_limit: int = 20, task_limit: int = 30, thread_limit: int = 20) -> dict[str, Any]:
+        """Return a compact recent-project tree without switching projects.
+
+        This intentionally reads recent project files and their workspace-local
+        task state directly. It must not call open_project or mutate the active
+        runtime because the left sidebar is a navigation preview.
+        """
+        current_file = str((self.current_project or {}).get("project_file") or "")
+        recent_items = list(self.list_recent().get("projects") or [])
+        project_nodes: list[dict[str, Any]] = []
+        seen_files: set[str] = set()
+
+        if self.current_project:
+            current_node = self._sidebar_project_node(
+                dict(self.current_project),
+                current_file=current_file,
+                task_limit=task_limit,
+                thread_limit=thread_limit,
+            )
+            project_nodes.append(current_node)
+            seen_files.add(str(current_node.get("project_file") or ""))
+
+        for item in recent_items:
+            if len(project_nodes) >= project_limit:
+                break
+            project_file = str((item or {}).get("project_file") or "").strip()
+            if not project_file or project_file in seen_files:
+                continue
+            node = self._sidebar_project_node_from_recent(
+                item,
+                current_file=current_file,
+                task_limit=task_limit,
+                thread_limit=thread_limit,
+            )
+            if node is None:
+                continue
+            project_nodes.append(node)
+            seen_files.add(str(node.get("project_file") or ""))
+
+        return {
+            "schema_version": SIDEBAR_SCHEMA_VERSION,
+            "projects": project_nodes,
+            "updated_at": now_iso(),
+        }
+
     def require_workspace_root(self) -> Path:
         if not self.current_project:
             raise ValueError("No project is open.")
@@ -312,6 +360,15 @@ class ProjectService:
         self._remember_project(self.current_project)
         return self.current_project
 
+    def update_project_title(self, title: str) -> dict[str, Any]:
+        clean_title = str(title or "").strip()
+        if not clean_title:
+            raise ValueError("Project title cannot be empty.")
+        redacted_title = str(redact_sensitive(clean_title)).strip()
+        if SECRET_RE.search(redacted_title):
+            raise SecurityError("Secret-like content is not allowed in project titles.")
+        return self.update_project({"name": redacted_title[:160]})
+
     def switch_thread(self, thread_id: str | None) -> dict[str, Any]:
         if not self.current_project:
             raise ValueError("No project is open.")
@@ -363,6 +420,176 @@ class ProjectService:
         )
         payload["projects"] = projects[:20]
         write_json(self.store_path, payload)
+
+    def _sidebar_project_node_from_recent(
+        self,
+        item: dict[str, Any],
+        *,
+        current_file: str,
+        task_limit: int,
+        thread_limit: int,
+    ) -> dict[str, Any] | None:
+        project_file = str((item or {}).get("project_file") or "").strip()
+        if not project_file:
+            return None
+        project_path = Path(project_file).expanduser()
+        if not project_path.exists():
+            return None
+        warnings: list[str] = []
+        try:
+            project = read_json(project_path, {})
+        except Exception as exc:
+            project = dict(item)
+            warnings.append(f"project_read_failed: {type(exc).__name__}")
+        if not isinstance(project, dict):
+            project = dict(item)
+            warnings.append("project_read_failed: invalid_payload")
+        if str(project.get("schema_version") or "") != PROJECT_SCHEMA_VERSION:
+            project = {**dict(item), **{key: project.get(key) for key in ("project_id", "name", "workspace_root", "updated_at") if isinstance(project, dict)}}
+            warnings.append("project_schema_unsupported")
+        project.setdefault("project_file", project_file)
+        if warnings:
+            project["_sidebar_warnings"] = warnings
+        return self._sidebar_project_node(project, current_file=current_file, task_limit=task_limit, thread_limit=thread_limit)
+
+    def _sidebar_project_node(
+        self,
+        project: dict[str, Any],
+        *,
+        current_file: str,
+        task_limit: int,
+        thread_limit: int,
+    ) -> dict[str, Any]:
+        project_file = str(project.get("project_file") or "")
+        workspace_root = str(project.get("workspace_root") or "")
+        current_task_id = str(project.get("current_task_id") or "")
+        task_state, warnings = self._sidebar_task_state(project)
+        tasks = [
+            self._sidebar_task_node(task, project=project, current_task_id=current_task_id, thread_limit=thread_limit)
+            for task in list(task_state.get("tasks") or [])[:task_limit]
+            if isinstance(task, dict)
+        ]
+        return {
+            "project_id": str(project.get("project_id") or ""),
+            "name": str(redact_sensitive(project.get("name") or Path(project_file).stem or "Project"))[:160],
+            "project_file": project_file,
+            "workspace_root": workspace_root,
+            "updated_at": str(project.get("updated_at") or task_state.get("updated_at") or ""),
+            "is_current": bool(project_file and current_file and project_file == current_file),
+            "tasks": tasks,
+            "warnings": [*list(project.get("_sidebar_warnings") or []), *warnings],
+        }
+
+    def _sidebar_task_state(self, project: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        warnings: list[str] = []
+        workspace_root = str(project.get("workspace_root") or "").strip()
+        if not workspace_root:
+            return {"schema_version": SIDEBAR_TASK_STATE_SCHEMA_VERSION, "tasks": []}, ["missing_workspace_root"]
+        task_path = Path(workspace_root).expanduser() / WORKSPACE_STATE_DIRNAME / "tasks.json"
+        try:
+            state = read_json(task_path, {"schema_version": SIDEBAR_TASK_STATE_SCHEMA_VERSION, "current_task_id": None, "tasks": []})
+        except Exception as exc:
+            return {"schema_version": SIDEBAR_TASK_STATE_SCHEMA_VERSION, "tasks": []}, [f"task_state_read_failed: {type(exc).__name__}"]
+        if not isinstance(state, dict):
+            return {"schema_version": SIDEBAR_TASK_STATE_SCHEMA_VERSION, "tasks": []}, ["task_state_invalid"]
+        tasks = state.get("tasks")
+        if not isinstance(tasks, list):
+            state["tasks"] = []
+            warnings.append("task_state_tasks_invalid")
+        return state, warnings
+
+    def _sidebar_task_node(self, task: dict[str, Any], *, project: dict[str, Any], current_task_id: str, thread_limit: int) -> dict[str, Any]:
+        active_thread_id = str(task.get("active_provider_thread_id") or "")
+        provider_threads = [dict(item) for item in list(task.get("provider_threads") or []) if isinstance(item, dict)]
+        fork_threads = [dict(item) for item in list(task.get("fork_threads") or []) if isinstance(item, dict)]
+        thread_nodes = self._sidebar_thread_nodes(provider_threads, fork_threads, active_thread_id=active_thread_id, limit=thread_limit)
+        active_lane = self._sidebar_active_lane([*provider_threads, *fork_threads], active_thread_id=active_thread_id)
+        missing_count = len([item for item in provider_threads if item.get("missing_at")])
+        return {
+            "task_id": str(task.get("task_id") or ""),
+            "title": str(redact_sensitive(task.get("title") or "New task"))[:160],
+            "status": str(task.get("status") or ""),
+            "updated_at": str(task.get("updated_at") or task.get("created_at") or ""),
+            "is_current": bool(current_task_id and str(task.get("task_id") or "") == current_task_id),
+            "active_provider_thread_id": active_thread_id or None,
+            "threads": thread_nodes,
+            "provider_id": str((provider_threads[0] if provider_threads else {}).get("provider_id") or ""),
+            "model": str((provider_threads[0] if provider_threads else {}).get("model") or ""),
+            "reasoning_effort": str((provider_threads[0] if provider_threads else {}).get("reasoning_effort") or ""),
+            "thread_count": len(thread_nodes),
+            "lane_count": len(thread_nodes),
+            "active_lane_label": self._sidebar_thread_title(active_lane) if active_lane else "",
+            "latest_lane_status": self._sidebar_lane_status(active_lane),
+            "handoff_count": len(list(task.get("handoff_events") or [])),
+            "checkpoint_count": len(list(task.get("checkpoint_refs") or [])),
+            "missing_thread_count": missing_count,
+            "project_file": str(project.get("project_file") or ""),
+        }
+
+    def _sidebar_active_lane(self, lanes: list[dict[str, Any]], *, active_thread_id: str) -> dict[str, Any]:
+        clean_active = str(active_thread_id or "").strip()
+        if clean_active:
+            for item in lanes:
+                if str(item.get("thread_id") or "").strip() == clean_active:
+                    return dict(item)
+        live_lanes = [dict(item) for item in lanes if not item.get("missing_at")]
+        if live_lanes:
+            live_lanes.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+            return live_lanes[0]
+        return dict(lanes[0]) if lanes else {}
+
+    def _sidebar_lane_status(self, lane: dict[str, Any]) -> str:
+        status = lane.get("status")
+        if isinstance(status, dict):
+            return str(status.get("type") or status.get("status") or "").strip()[:80]
+        return str(status or "").strip()[:80]
+
+    def _sidebar_thread_nodes(
+        self,
+        provider_threads: list[dict[str, Any]],
+        fork_threads: list[dict[str, Any]],
+        *,
+        active_thread_id: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        nodes: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in [*provider_threads, *fork_threads]:
+            thread_id = str(item.get("thread_id") or "").strip()
+            if not thread_id or thread_id in seen:
+                continue
+            seen.add(thread_id)
+            nodes.append(
+                {
+                    "thread_id": thread_id,
+                    "title": self._sidebar_thread_title(item),
+                    "role": str(item.get("role") or "provider"),
+                    "profile_id": str(item.get("profile_id") or ""),
+                    "provider_id": str(item.get("provider_id") or ""),
+                    "model": str(item.get("model") or ""),
+                    "reasoning_effort": str(item.get("reasoning_effort") or ""),
+                    "updated_at": str(item.get("updated_at") or item.get("created_at") or ""),
+                    "created_at": str(item.get("created_at") or ""),
+                    "missing_at": str(item.get("missing_at") or "") or None,
+                    "missing_reason": str(item.get("missing_reason") or "") or None,
+                    "is_active": bool(active_thread_id and thread_id == active_thread_id),
+                }
+            )
+            if len(nodes) >= limit:
+                break
+        return nodes
+
+    def _sidebar_thread_title(self, item: dict[str, Any]) -> str:
+        name = str(item.get("name") or "").strip()
+        if name:
+            return str(redact_sensitive(name))[:160]
+        provider = str(item.get("provider_id") or item.get("profile_id") or "").strip()
+        model = str(item.get("model") or "").strip()
+        if provider and model:
+            return f"{provider} / {model}"
+        if model:
+            return model
+        return str(item.get("thread_id") or "Thread")
 
     def _remember_current_project(self, project: dict[str, Any] | None) -> None:
         payload = {
@@ -589,6 +816,7 @@ class ProjectService:
         return {
             "locale": "zh-CN",
             "appearance": "codex",
+            "cursor_enhancement": "auto",
             "execution_host": runtime["execution_host"],
             "wsl_distro": runtime["wsl_distro"],
             "left_sidebar_open": True,
@@ -600,6 +828,10 @@ class ProjectService:
     def _normalize_ui_preferences(self, preferences: dict[str, Any]) -> dict[str, Any]:
         defaults = self._default_ui_preferences()
         merged = {**defaults, **preferences}
+        cursor_enhancement = str(merged.get("cursor_enhancement") or defaults["cursor_enhancement"]).strip().lower()
+        if cursor_enhancement not in {"auto", "off"}:
+            cursor_enhancement = defaults["cursor_enhancement"]
+        merged["cursor_enhancement"] = cursor_enhancement
         host = str(merged.get("execution_host") or "").strip().lower()
         if host not in {"windows", "wsl"}:
             host = defaults["execution_host"]

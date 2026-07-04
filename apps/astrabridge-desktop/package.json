@@ -4,7 +4,7 @@
     "version":  "0.1.0",
     "type":  "module",
     "scripts":  {
-                    "dev":  "node ./node_modules/vite/bin/vite.js --host 127.0.0.1",
+                    "dev":  "node ./node_modules/vite/bin/vite.js --host 127.0.0.1 --port 4181 --strictPort",
                     "build":  "node ./node_modules/typescript/bin/tsc \u0026\u0026 node ./node_modules/vite/bin/vite.js build",
                     "preview":  "node ./node_modules/vite/bin/vite.js preview --host 127.0.0.1",
                     "test":  "node ./node_modules/vitest/vitest.mjs run",

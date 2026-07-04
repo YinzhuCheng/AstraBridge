@@ -1,0 +1,40 @@
+{
+  "name": "astrabridge-dogfood-fixture",
+  "version": "1.0.0",
+  "description": "Safe local fixture plugin for AstraBridge real-scenario dogfood tests.",
+  "author": {
+    "name": "AstraBridge"
+  },
+  "skills": [
+    "astrabridge-fixture-skill"
+  ],
+  "mcpServers": {
+    "astrabridge_fixture_echo": {
+      "command": "node",
+      "args": [
+        "scripts/fixture-mcp-server.js"
+      ]
+    }
+  },
+  "apps": [
+    "astrabridge-fixture-app"
+  ],
+  "interface": {
+    "displayName": "AstraBridge Dogfood Fixture",
+    "shortDescription": "Safe local fixture for plugin inventory and install rehearsal.",
+    "longDescription": "Local-only fixture plugin used to validate plugin inventory, install planning, project preset references, and dogfood evidence contracts.",
+    "developerName": "AstraBridge",
+    "category": "Productivity",
+    "capabilities": [
+      "Local fixture",
+      "Registry smoke"
+    ],
+    "defaultPrompt": [
+      "Use the AstraBridge fixture plugin when validating local plugin inventory.",
+      "Explain the fixture plugin contract before plugin install rehearsal."
+    ],
+    "brandColor": "#2563EB",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/logo.png"
+  }
+}

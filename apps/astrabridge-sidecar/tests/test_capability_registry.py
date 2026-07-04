@@ -34,6 +34,10 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertIn("image", qwen_models["qwen3.7-plus"]["input_modalities"])
         self.assertEqual(qwen_models["qwen3-vl-plus"]["source"], "adapter_override")
         self.assertTrue(any("expanded from catalog/profile defaults" in note for note in qwen_models["qwen3.7-plus"]["eligibility_notes"]))
+        self.assertEqual(qwen_models["qwen3.7-plus"]["capability_contract"]["capability_id"], "vision.analyze")
+        self.assertEqual(qwen_models["qwen3.7-plus"]["capability_contract"]["adapter"]["adapter_id"], "qwen.vision.chat.v1")
+        self.assertEqual(qwen_models["qwen3.7-plus"]["runtime_provider_contract"]["schema_version"], "astrabridge-runtime-provider-contract-v1")
+        self.assertTrue(qwen_models["qwen3.7-plus"]["runtime_provider_contract"]["capability_metadata"]["vision"]["supports_image_inputs"])
 
     def test_yunwu_image_generation_keeps_adapter_override_models(self) -> None:
         registry = default_capability_registry()
@@ -41,10 +45,13 @@ class CapabilityRegistryTests(unittest.TestCase):
         candidates = registry.resolve_candidates("image.generate")
         yunwu_models = {item["model"]: item for item in candidates if item["provider_id"] == "yunwu"}
 
+        self.assertEqual(candidates[0]["model"], "gpt-image-2")
         self.assertIn("gpt-image-2", yunwu_models)
         self.assertIn("flux-kontext-pro", yunwu_models)
         self.assertEqual(yunwu_models["gpt-image-2"]["source"], "adapter_override")
         self.assertFalse(yunwu_models["gpt-image-2"]["catalog_present"])
+        self.assertEqual(yunwu_models["gpt-image-2"]["capability_contract"]["required_input_fields"], ["prompt"])
+        self.assertEqual(yunwu_models["gpt-image-2"]["runtime_provider_contract"]["provider_metadata"]["provider_id"], "yunwu")
 
     def test_qwen_transcription_prefers_catalog_default_but_keeps_contract_model(self) -> None:
         registry = default_capability_registry()

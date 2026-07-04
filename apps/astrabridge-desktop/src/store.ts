@@ -1,10 +1,23 @@
 ﻿import { create } from "zustand";
-import type { AppearancePreset, EventSnapshot, LocaleCode, PermissionMode, ProjectFile, RuntimeActivityState, RuntimeDiffSummary, ShellThreadSettings } from "./types";
+import type {
+  AppearancePreset,
+  CursorEnhancementPreference,
+  EventSnapshot,
+  LocaleCode,
+  PermissionMode,
+  ProjectFile,
+  RuntimeActivityState,
+  RuntimeDiffSummary,
+  ShellThreadSettings,
+} from "./types";
+
+import { normalizeCursorEnhancementPreference } from "./features/brand/cursorEnhancement";
 
 type AppState = {
   project: ProjectFile | null;
   locale: LocaleCode;
   appearance: AppearancePreset;
+  cursorEnhancement: CursorEnhancementPreference;
   leftSidebarOpen: boolean;
   leftSidebarWidth: number;
   rightSidebarWidth: number;
@@ -15,6 +28,7 @@ type AppState = {
   setProject: (project: ProjectFile | null) => void;
   setLocale: (locale: LocaleCode) => void;
   setAppearance: (appearance: AppearancePreset) => void;
+  setCursorEnhancement: (preference: CursorEnhancementPreference) => void;
   setLeftSidebarWidth: (width: number) => void;
   setRightSidebarWidth: (width: number) => void;
   toggleLeftSidebar: () => void;
@@ -46,10 +60,27 @@ const EMPTY_EVENTS: EventSnapshot = {
   threadStatusByThread: {},
 };
 
+const CURSOR_ENHANCEMENT_STORAGE_KEY = "astrabridge.cursorEnhancement";
+
+function readCursorEnhancementPreference(): CursorEnhancementPreference {
+  if (typeof window === "undefined") {
+    return "auto";
+  }
+  return normalizeCursorEnhancementPreference(window.localStorage.getItem(CURSOR_ENHANCEMENT_STORAGE_KEY));
+}
+
+function persistCursorEnhancementPreference(preference: CursorEnhancementPreference) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(CURSOR_ENHANCEMENT_STORAGE_KEY, preference);
+}
+
 export const useAppStore = create<AppState>((set) => ({
   project: null,
   locale: "zh-CN",
   appearance: "codex",
+  cursorEnhancement: readCursorEnhancementPreference(),
   leftSidebarOpen: true,
   leftSidebarWidth: 300,
   rightSidebarWidth: 340,
@@ -63,6 +94,7 @@ export const useAppStore = create<AppState>((set) => ({
       project,
       locale: project?.ui_preferences.locale ?? "zh-CN",
       appearance: project?.ui_preferences.appearance ?? "codex",
+      cursorEnhancement: normalizeCursorEnhancementPreference(project?.ui_preferences.cursor_enhancement ?? readCursorEnhancementPreference()),
       leftSidebarOpen: project?.ui_preferences.left_sidebar_open ?? true,
       leftSidebarWidth: project?.ui_preferences.left_sidebar_width ?? 300,
       rightSidebarWidth: project?.ui_preferences.right_sidebar_width ?? 340,
@@ -73,8 +105,20 @@ export const useAppStore = create<AppState>((set) => ({
     })),
   setLocale: (locale) => set(() => ({ locale })),
   setAppearance: (appearance) => set(() => ({ appearance })),
-  setLeftSidebarWidth: (width) => set(() => ({ leftSidebarWidth: Math.max(220, Math.min(width, 420)) })),
-  setRightSidebarWidth: (width) => set(() => ({ rightSidebarWidth: Math.max(260, Math.min(width, 460)) })),
+  setCursorEnhancement: (cursorEnhancement) => {
+    persistCursorEnhancementPreference(cursorEnhancement);
+    set(() => ({ cursorEnhancement }));
+  },
+  setLeftSidebarWidth: (width) =>
+    set(() => {
+      const viewportWidth = typeof window === "undefined" ? 1280 : window.innerWidth;
+      return { leftSidebarWidth: Math.max(220, Math.min(width, Math.min(520, viewportWidth - 420))) };
+    }),
+  setRightSidebarWidth: (width) =>
+    set(() => {
+      const viewportWidth = typeof window === "undefined" ? 1280 : window.innerWidth;
+      return { rightSidebarWidth: Math.max(280, Math.min(width, Math.max(520, viewportWidth - 360))) };
+    }),
   toggleLeftSidebar: () => set((state) => ({ leftSidebarOpen: !state.leftSidebarOpen })),
   toggleRightSidebar: () => set((state) => ({ rightSidebarOpen: !state.rightSidebarOpen })),
   setCommandPaletteOpen: (open) => set(() => ({ commandPaletteOpen: open })),

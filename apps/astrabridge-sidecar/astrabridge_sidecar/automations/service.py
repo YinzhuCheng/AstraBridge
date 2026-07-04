@@ -35,10 +35,12 @@ class AutomationService:
             runtime_config=runtime_config,
         )
         self._triage = AutomationTriageService(project_service, self._store)
+        self._executing_run_ids: set[str] = set()
 
     def start(self) -> dict[str, Any]:
         if not self._has_open_project():
             return self._neutral_scheduler_status(running=False)
+        self._reconcile_watchdog_runs()
         status = self._scheduler.start()
         self._record_event("automation_scheduler_started", {"scheduler": status})
         return status
@@ -50,6 +52,7 @@ class AutomationService:
 
     def list_automations(self) -> dict[str, Any]:
         self._require_project()
+        self._reconcile_watchdog_runs()
         items = self._store.list_automations()
         return {"automations": items, "count": len(items)}
 
@@ -119,6 +122,7 @@ class AutomationService:
             "automation_run_started",
             {"automation_id": running_run.get("automation_id"), "run_id": running_run.get("run_id")},
         )
+        self._executing_run_ids.add(str(running_run.get("run_id") or ""))
         session = None
         try:
             session = self._workspace.prepare_workspace(automation, running_run)
@@ -134,6 +138,8 @@ class AutomationService:
                 "redacted_error": str(exc)[:300] or "automation_execute_failed",
                 "signal": "unknown",
             }
+        finally:
+            self._executing_run_ids.discard(str(running_run.get("run_id") or ""))
         cleanup_result = None
         if session is not None and str(runner_result.get("status") or "").lower() != "running":
             classification = self._triage.classify_result(automation, running_run, runner_result)
@@ -188,11 +194,13 @@ class AutomationService:
 
     def list_runs(self, automation_id: str | None = None) -> dict[str, Any]:
         self._require_project()
+        self._reconcile_watchdog_runs()
         runs = self._store.list_runs(automation_id)
         return {"runs": runs, "count": len(runs)}
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         self._require_project()
+        self._reconcile_watchdog_runs()
         run = self._store.get_run(run_id)
         if not run:
             raise ValueError("Automation run not found.")
@@ -206,20 +214,40 @@ class AutomationService:
         current = str(run.get("status") or "").lower()
         if current not in {"queued", "running", "needs_review"}:
             return {"run": run}
-        updated = self._store.record_run(
+        automation = self._store.get_automation(str(run.get("automation_id") or ""))
+        if not automation:
+            raise ValueError("Automation not found.")
+        finalized = self._triage.finalize_run(
+            automation,
+            run,
             {
                 **run,
                 "status": "cancelled",
                 "finished_at": now_iso(),
                 "summary": str(run.get("summary") or "automation run cancelled"),
                 "redacted_error": str(run.get("redacted_error") or "cancelled_by_user"),
-            }
+                "signal": "unknown",
+            },
         )
+        updated = finalized["run"]
         self._record_event("automation_run_failed", {"automation_id": updated.get("automation_id"), "run_id": updated.get("run_id"), "status": "cancelled"})
-        return {"run": updated}
+        inbox_item = finalized.get("inbox_item")
+        if inbox_item:
+            self._record_event(
+                "automation_inbox_item_created",
+                {
+                    "automation_id": inbox_item.get("automation_id"),
+                    "run_id": inbox_item.get("run_id"),
+                    "item_id": inbox_item.get("item_id"),
+                    "state": inbox_item.get("state"),
+                    "disposition": inbox_item.get("disposition"),
+                },
+            )
+        return {"run": updated, "inbox_item": inbox_item, "artifact_ref": finalized.get("artifact_ref")}
 
     def list_inbox_items(self, automation_id: str | None = None, *, include_archived: bool = True) -> dict[str, Any]:
         self._require_project()
+        self._reconcile_watchdog_runs()
         items = self._store.list_inbox_items(automation_id, include_archived=include_archived)
         return {"items": items, "count": len(items)}
 
@@ -249,6 +277,7 @@ class AutomationService:
     def scheduler_status(self) -> dict[str, Any]:
         if not self._has_open_project():
             return self._neutral_scheduler_status(running=False)
+        self._reconcile_watchdog_runs()
         status = dict(self._scheduler.status())
         runs = self._store.list_runs()
         active_runs = [
@@ -301,6 +330,142 @@ class AutomationService:
         if self._scheduler.status().get("running"):
             return
         self._scheduler.start()
+
+    def _reconcile_watchdog_runs(self) -> list[dict[str, Any]]:
+        recovered = self._recover_interrupted_runs()
+        finalized = self._finalize_watchdog_failures()
+        return [*recovered, *finalized]
+
+    def _recover_interrupted_runs(self) -> list[dict[str, Any]]:
+        recovered: list[dict[str, Any]] = []
+        for run in self._store.list_runs():
+            run_id = str(run.get("run_id") or "")
+            if run_id in self._executing_run_ids:
+                continue
+            if str(run.get("status") or "").lower() != "running":
+                continue
+            automation = self._store.get_automation(str(run.get("automation_id") or ""))
+            if not automation:
+                continue
+            if str(automation.get("kind") or "").lower() != "standalone":
+                continue
+            summary = "Automation run was interrupted before it wrote a final result."
+            finalized = self._triage.finalize_run(
+                automation,
+                run,
+                {
+                    **run,
+                    "status": "failed",
+                    "finished_at": now_iso(),
+                    "summary": summary,
+                    "redacted_error": "automation_runner_interrupted_after_service_restart",
+                    "signal": "unknown",
+                    "watchdog_reason": "service_restart_interrupted",
+                    "watchdog_summary": (
+                        "AstraBridge found this run still marked active after the automation worker stopped, "
+                        "so it recovered the run into a reviewable failure."
+                    ),
+                    "recovered_by": "service_restart",
+                    "recovered_at": now_iso(),
+                },
+                cleanup_result={"status": "unknown", "reason": "service_restart_or_runner_exit_before_final_state"},
+            )
+            final_run = finalized["run"]
+            recovered.append(final_run)
+            self._record_event(
+                "automation_run_failed",
+                {
+                    "automation_id": final_run.get("automation_id"),
+                    "run_id": final_run.get("run_id"),
+                    "status": final_run.get("status"),
+                    "signal": final_run.get("signal"),
+                    "recovered": True,
+                    "watchdog_reason": final_run.get("watchdog_reason"),
+                    "recovered_by": final_run.get("recovered_by"),
+                },
+            )
+            inbox_item = finalized.get("inbox_item")
+            if inbox_item:
+                self._record_event(
+                    "automation_inbox_item_created",
+                    {
+                        "automation_id": inbox_item.get("automation_id"),
+                        "run_id": inbox_item.get("run_id"),
+                        "item_id": inbox_item.get("item_id"),
+                        "state": inbox_item.get("state"),
+                        "disposition": inbox_item.get("disposition"),
+                    },
+                )
+        return recovered
+
+    def _finalize_watchdog_failures(self) -> list[dict[str, Any]]:
+        finalized_runs: list[dict[str, Any]] = []
+        for run in self._store.list_runs():
+            status = str(run.get("status") or "").lower()
+            if status != "failed":
+                continue
+            if list(run.get("artifact_refs") or []):
+                continue
+            watchdog_reason = str(run.get("watchdog_reason") or "").strip().lower()
+            redacted_error = str(run.get("redacted_error") or "").strip()
+            if watchdog_reason != "stale_running_timeout" and redacted_error not in {
+                "automation_watchdog_stale_running_timeout",
+                "stale_run_recovered",
+            }:
+                continue
+            automation = self._store.get_automation(str(run.get("automation_id") or ""))
+            if not automation:
+                continue
+            finalized = self._triage.finalize_run(
+                automation,
+                run,
+                {
+                    **run,
+                    "status": "failed",
+                    "finished_at": run.get("finished_at") or now_iso(),
+                    "summary": str(run.get("summary") or "Automation watchdog recovered a stale running run after the timeout window."),
+                    "redacted_error": "automation_watchdog_stale_running_timeout",
+                    "signal": str(run.get("signal") or "unknown") or "unknown",
+                    "watchdog_reason": "stale_running_timeout",
+                    "watchdog_summary": str(run.get("watchdog_summary") or "").strip()
+                    or "The scheduler did not observe a final result before the stale timeout, so AstraBridge recovered this run for review.",
+                    "recovered_by": str(run.get("recovered_by") or "scheduler_watchdog").strip() or "scheduler_watchdog",
+                    "recovered_at": run.get("recovered_at") or run.get("finished_at") or now_iso(),
+                },
+                cleanup_result={"status": "unknown", "reason": "scheduler_watchdog_recovered_stale_running_run"},
+            )
+            final_run = finalized["run"]
+            finalized_runs.append(final_run)
+            self._record_event(
+                "automation_run_failed",
+                {
+                    "automation_id": final_run.get("automation_id"),
+                    "run_id": final_run.get("run_id"),
+                    "status": final_run.get("status"),
+                    "signal": final_run.get("signal"),
+                    "recovered": True,
+                    "watchdog_reason": final_run.get("watchdog_reason"),
+                    "recovered_by": final_run.get("recovered_by"),
+                },
+            )
+            inbox_item = finalized.get("inbox_item")
+            if inbox_item:
+                inbox_event = (
+                    "automation_inbox_item_archived"
+                    if str(inbox_item.get("state") or "") == "archived"
+                    else "automation_inbox_item_created"
+                )
+                self._record_event(
+                    inbox_event,
+                    {
+                        "automation_id": inbox_item.get("automation_id"),
+                        "run_id": inbox_item.get("run_id"),
+                        "item_id": inbox_item.get("item_id"),
+                        "state": inbox_item.get("state"),
+                        "disposition": inbox_item.get("disposition"),
+                    },
+                )
+        return finalized_runs
 
     def _require_project(self) -> None:
         if not self._has_open_project():

@@ -105,8 +105,8 @@ function summarizeFileChanges(changes: FileChangeSummaryInput[]) {
     deleted += counts.deleted;
     files.push(path);
 
-    const changeLabel = kind === "add" ? "鏂板" : kind === "delete" ? "鍒犻櫎" : movePath ? `鏇存柊骞剁Щ鍔ㄥ埌 ${movePath}` : "鏇存柊";
-    detailLines.push(`${path} 路 ${changeLabel} 路 +${counts.added} -${counts.deleted}`);
+    const changeLabel = kind === "add" ? "新增" : kind === "delete" ? "删除" : movePath ? `更新并移动到 ${movePath}` : "更新";
+    detailLines.push(`${path} · ${changeLabel} · +${counts.added} -${counts.deleted}`);
 
     const excerpt = diff
       .split(/\r?\n/)
@@ -207,7 +207,7 @@ function collabToolPreview(item: Extract<ThreadMessageSource, { type: "collabAge
     .filter(Boolean)
     .join("\n");
   return {
-    title: item.tool === "spawnAgent" ? "Forked collaborator thread" : `Collab tool: ${item.tool}`,
+    title: item.tool === "spawnAgent" ? "Forked branch task" : `Collab tool: ${item.tool}`,
     detail,
   };
 }
@@ -224,7 +224,7 @@ function liveCollabPreview(item: Record<string, unknown>) {
       : prompt
           ? prompt.slice(0, 80)
           : tool === "spawnAgent"
-            ? "Preparing collaborator thread"
+            ? "Preparing branch task"
             : tool;
   const detail = [
     receiverThreadIds.length > 0 ? `receivers: ${receiverThreadIds.join(", ")}` : "",
@@ -397,11 +397,11 @@ function renderBlocksForCodingEvent(event: DecoratedCodingEvent, fallbackKey: st
         role: "activity",
         activity: {
           kind: "fork",
-          label: "Execution lane switched",
+          label: "模型通道已切换",
           status: "completed",
-          preview: [event.provider_id, model].filter(Boolean).join(" / ") || "Provider handoff",
+          preview: [event.provider_id ? `提供方 ${event.provider_id}` : "", model ? `模型 ${model}` : ""].filter(Boolean).join(" · ") || "Provider handoff",
           detail: [
-            toThreadId ? `to thread: ${toThreadId}` : "",
+            toThreadId ? `to execution lane: ${toThreadId}` : "",
             reused ? "reused existing lane" : "",
             projectionMode ? `projection: ${projectionMode}` : "",
             targetRuntime.protocol ? `protocol: ${String(targetRuntime.protocol)}` : "",
@@ -443,7 +443,7 @@ export function itemActivityFromPayload(item: Record<string, unknown>, status = 
   if (itemType === "commandExecution") {
     return {
       kind: "command",
-      label: "姝ｅ湪鎵ц鍛戒护",
+      label: "正在执行命令",
       status,
       preview: String(item.command ?? ""),
       detail: String(item.command ?? ""),
@@ -451,12 +451,12 @@ export function itemActivityFromPayload(item: Record<string, unknown>, status = 
     };
   }
   if (itemType === "fileChange") {
-    return { kind: "file_change", label: "姝ｅ湪淇敼鏂囦欢", status, item_id: itemId };
+    return { kind: "file_change", label: "正在修改文件", status, item_id: itemId };
   }
   if (itemType === "webSearch") {
     return {
       kind: "web_search",
-      label: "姝ｅ湪鎼滅储",
+      label: "正在搜索",
       status,
       preview: String(item.query ?? ""),
       detail: safeJsonPreview(item.action),
@@ -466,7 +466,7 @@ export function itemActivityFromPayload(item: Record<string, unknown>, status = 
   if (itemType === "mcpToolCall") {
     return {
       kind: "mcp",
-      label: "姝ｅ湪璋冪敤 MCP 宸ュ叿",
+      label: "正在调用 MCP 工具",
       status,
       preview: [item.server, item.tool].filter(Boolean).join("."),
       detail: safeJsonPreview(item.arguments),
@@ -476,7 +476,7 @@ export function itemActivityFromPayload(item: Record<string, unknown>, status = 
   if (itemType === "dynamicToolCall") {
     return {
       kind: "tool",
-      label: "姝ｅ湪璋冪敤宸ュ叿",
+      label: "正在调用工具",
       status,
       preview: [item.namespace, item.tool].filter(Boolean).join("."),
       detail: safeJsonPreview(item.arguments),
@@ -496,7 +496,7 @@ export function itemActivityFromPayload(item: Record<string, unknown>, status = 
     const collab = liveCollabPreview(item);
     return {
       kind: item.tool === "spawnAgent" ? "fork" : "tool",
-      label: item.tool === "spawnAgent" ? "鍒涘缓鍗忎綔绾跨▼" : "姝ｅ湪璋冪敤鍗忎綔宸ュ叿",
+      label: item.tool === "spawnAgent" ? "创建分支任务" : "正在调用协作工具",
       status,
       preview: collab.preview,
       detail: [collab.detail, safeJsonPreview(item.agentsStates)].filter(Boolean).join("\n\n"),
@@ -578,7 +578,7 @@ export function renderBlocksForItem(item: ThreadMessageSource): ThreadRenderBloc
         role: "activity",
         activity: {
           kind: "web_search",
-          label: "缃戦〉鎼滅储",
+          label: "网页搜索",
           status: "completed",
           preview: item.query,
           detail: safeJsonPreview(item.action),
@@ -601,7 +601,7 @@ export function renderBlocksForItem(item: ThreadMessageSource): ThreadRenderBloc
         role: "activity",
         activity: {
           kind: "review",
-          label: "杩涘叆瀹℃煡妯″紡",
+          label: "进入审查模式",
           status: "completed",
           preview: item.review,
           item_id: item.id,
@@ -625,7 +625,7 @@ export function renderBlocksForItem(item: ThreadMessageSource): ThreadRenderBloc
         role: "activity",
         activity: {
           kind: "compact",
-          label: "涓婁笅鏂囧凡鍘嬬缉",
+          label: "上下文已压缩",
           status: "completed",
           preview: "Context compaction completed",
           item_id: item.id,
@@ -636,47 +636,245 @@ export function renderBlocksForItem(item: ThreadMessageSource): ThreadRenderBloc
   }
 }
 
-export function hasPersistedRenderableTurnContent(
-  turn?: {
-    completedAt?: number | null;
-    items?: ThreadMessageSource[];
-    coding_events?: DecoratedCodingEvent[];
-  } | null,
-) {
-  if (!turn?.completedAt) return false;
-  const itemContent = (turn.items ?? []).some((item) =>
-    [
-      "agentMessage",
-      "plan",
-      "commandExecution",
-      "fileChange",
-      "mcpToolCall",
-      "dynamicToolCall",
-      "collabAgentToolCall",
-      "webSearch",
-      "imageView",
-      "imageGeneration",
-      "enteredReviewMode",
-      "exitedReviewMode",
-      "contextCompaction",
-    ].includes(item.type),
-  );
+const RENDERABLE_ITEM_TYPES = [
+  "agentMessage",
+  "plan",
+  "commandExecution",
+  "fileChange",
+  "mcpToolCall",
+  "dynamicToolCall",
+  "collabAgentToolCall",
+  "webSearch",
+  "imageView",
+  "imageGeneration",
+  "enteredReviewMode",
+  "exitedReviewMode",
+  "contextCompaction",
+];
+
+const RENDERABLE_CODING_EVENT_TYPES = [
+  "agent_message",
+  "plan_update",
+  "reasoning_summary",
+  "command_execution",
+  "file_change",
+  "file_read",
+  "edit_operation",
+  "checkpoint_created",
+  "verification_result",
+  "provider_handoff",
+  "runtime_transition",
+];
+
+type RenderableTurn = {
+  id?: string;
+  status?: string;
+  error?: unknown;
+  completedAt?: number | null;
+  items?: ThreadMessageSource[];
+  coding_events?: DecoratedCodingEvent[];
+};
+
+type ConversationRenderThread = {
+  id?: string;
+  displayName?: string | null;
+  status?: string | { type?: string; stale_error_type?: string; stale_error_normalized?: boolean; activeFlags?: unknown[] } | null;
+  turns?: RenderableTurn[] | null;
+};
+
+export type ConversationRenderState =
+  | { kind: "loading"; tone: "info"; title: string; detail: string }
+  | { kind: "ready"; tone: "default"; title: string; detail?: string; staleErrorType?: string }
+  | { kind: "empty"; tone: "default" | "info"; title: string; detail: string; emptyKind: "new_thread" | "terminal_empty" }
+  | {
+      kind: "diagnostic";
+      tone: "info" | "warning" | "danger";
+      title: string;
+      detail: string;
+      diagnosticKind:
+        | "runtime_error"
+        | "thread_not_loaded"
+        | "turn_failed"
+        | "turn_interrupted"
+        | "turn_cancelled"
+        | "render_mismatch"
+        | "stale_runtime_error";
+    };
+
+function hasRenderableTurnContent(turn?: RenderableTurn | null) {
+  const itemContent = (turn?.items ?? []).some((item) => RENDERABLE_ITEM_TYPES.includes(item.type));
   if (itemContent) return true;
-  return (turn.coding_events ?? []).some((event) =>
-    [
-      "agent_message",
-      "plan_update",
-      "reasoning_summary",
-      "command_execution",
-      "file_change",
-      "file_read",
-      "edit_operation",
-      "checkpoint_created",
-      "verification_result",
-      "provider_handoff",
-      "runtime_transition",
-    ].includes(String(event.event_type ?? "")),
+  return (turn?.coding_events ?? []).some((event) => RENDERABLE_CODING_EVENT_TYPES.includes(String(event.event_type ?? "")));
+}
+
+export function hasPersistedRenderableTurnContent(turn?: RenderableTurn | null) {
+  if (!turn?.completedAt) return false;
+  return hasRenderableTurnContent(turn);
+}
+
+export function hasRenderableThreadContent(thread?: { turns?: RenderableTurn[] } | null) {
+  return (thread?.turns ?? []).some((turn) => hasRenderableTurnContent(turn));
+}
+
+function threadStatusRecord(thread?: ConversationRenderThread | null) {
+  const status = thread?.status;
+  if (status && typeof status === "object") return status;
+  if (typeof status === "string" && status.trim()) return { type: status.trim() };
+  return {};
+}
+
+function threadStatusType(thread?: ConversationRenderThread | null) {
+  return String(threadStatusRecord(thread).type ?? "").trim();
+}
+
+function latestTurn(thread?: ConversationRenderThread | null) {
+  const turns = thread?.turns ?? [];
+  return turns.length > 0 ? turns[turns.length - 1] : null;
+}
+
+function turnErrorMessage(error: unknown) {
+  if (!error) return "";
+  if (typeof error === "string") return error;
+  if (typeof error === "object") {
+    const record = error as { message?: unknown; additionalDetails?: unknown };
+    return String(record.message ?? record.additionalDetails ?? "").trim();
+  }
+  return String(error);
+}
+
+function hasApiConversationPayload(thread?: ConversationRenderThread | null) {
+  return (thread?.turns ?? []).some((turn) =>
+    (turn.items ?? []).length > 0 ||
+    (turn.coding_events ?? []).length > 0 ||
+    Boolean((turn as { completionQuality?: unknown }).completionQuality),
   );
+}
+
+export function describeConversationRenderState({
+  activeThread,
+  selectedRuntimeThread,
+  taskConversationThread,
+  blocks,
+  isLoading,
+}: {
+  activeThread?: ConversationRenderThread | null;
+  selectedRuntimeThread?: ConversationRenderThread | null;
+  taskConversationThread?: ConversationRenderThread | null;
+  blocks?: ThreadRenderBlock[];
+  isLoading?: boolean;
+}): ConversationRenderState {
+  if (isLoading) {
+    return {
+      kind: "loading",
+      tone: "info",
+      title: "Conversation is loading",
+      detail: "AstraBridge is refreshing the task conversation and internal execution lane.",
+    };
+  }
+
+  const renderedBlocks = blocks ?? [];
+  const sourceThread = activeThread ?? taskConversationThread ?? selectedRuntimeThread ?? null;
+  const statusSource = selectedRuntimeThread ?? activeThread ?? taskConversationThread ?? null;
+  const status = threadStatusRecord(statusSource);
+  const statusType = threadStatusType(statusSource);
+  const staleErrorType = String(status.stale_error_type ?? "").trim();
+  const staleErrorNormalized = Boolean(status.stale_error_normalized || staleErrorType);
+  const latest = latestTurn(sourceThread) ?? latestTurn(selectedRuntimeThread) ?? latestTurn(taskConversationThread);
+  const turnStatus = String(latest?.status ?? "").trim().toLowerCase();
+  const hasPayload = hasApiConversationPayload(sourceThread) || hasApiConversationPayload(selectedRuntimeThread) || hasApiConversationPayload(taskConversationThread);
+
+  if (statusType === "systemError") {
+    return {
+      kind: "diagnostic",
+      tone: "danger",
+      diagnosticKind: "runtime_error",
+      title: "Task runtime error",
+      detail: "The runtime reported a system error for this task's execution lane. Use the inspector recovery controls or retry after restart.",
+    };
+  }
+
+  if (statusType === "notLoaded") {
+    return {
+      kind: "diagnostic",
+      tone: "warning",
+      diagnosticKind: "thread_not_loaded",
+      title: "Execution lane is not loaded",
+      detail: "The runtime has not loaded this task's execution lane yet. Refresh the task or switch back to the active provider lane.",
+    };
+  }
+
+  if (turnStatus === "failed" || Boolean(latest?.error)) {
+    const message = turnErrorMessage(latest?.error);
+    return {
+      kind: "diagnostic",
+      tone: "danger",
+      diagnosticKind: "turn_failed",
+      title: "Last turn failed",
+      detail: message || "The last turn ended with an error before a renderable assistant response was available.",
+    };
+  }
+
+  if (turnStatus === "interrupted") {
+    return {
+      kind: "diagnostic",
+      tone: "warning",
+      diagnosticKind: "turn_interrupted",
+      title: "Last turn was interrupted",
+      detail: "The turn stopped before completion. Continue, retry, or fork from the current task if the context is still useful.",
+    };
+  }
+
+  if (turnStatus === "cancelled" || turnStatus === "canceled") {
+    return {
+      kind: "diagnostic",
+      tone: "warning",
+      diagnosticKind: "turn_cancelled",
+      title: "Last turn was cancelled",
+      detail: "The turn was cancelled before a renderable assistant response was available.",
+    };
+  }
+
+  if (renderedBlocks.length === 0 && hasPayload) {
+    return {
+      kind: "diagnostic",
+      tone: "warning",
+      diagnosticKind: "render_mismatch",
+      title: "Conversation data needs review",
+      detail: "The API returned turn data, but the chat renderer could not turn it into visible messages. Check the inspector for raw execution-lane and task-conversation evidence.",
+    };
+  }
+
+  if (staleErrorNormalized) {
+    return {
+      kind: "diagnostic",
+      tone: "info",
+      diagnosticKind: "stale_runtime_error",
+      title: "Recovered stale runtime status",
+      detail: `The runtime previously reported ${staleErrorType || "an error"}, but the latest completed turn is clean. The raw status is retained in diagnostics.`,
+    };
+  }
+
+  if (renderedBlocks.length > 0) {
+    return { kind: "ready", tone: "default", title: "Conversation is renderable" };
+  }
+
+  if (turnStatus === "completed") {
+    return {
+      kind: "empty",
+      tone: "info",
+      emptyKind: "terminal_empty",
+      title: "Turn completed without visible output",
+      detail: "The latest turn completed, but it did not include assistant, tool, plan, artifact, or diagnostic content for the chat surface.",
+    };
+  }
+
+  return {
+    kind: "empty",
+    tone: "default",
+    emptyKind: "new_thread",
+    title: "No turns yet",
+    detail: "Start with a prompt or attachments.",
+  };
 }
 
 export function summarizeTurnBlocks(

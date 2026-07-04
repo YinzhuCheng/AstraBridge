@@ -5,7 +5,7 @@
     "identifier":  "app.astrabridge.desktop",
     "build":  {
                   "beforeDevCommand":  "",
-                  "devUrl":  "http://127.0.0.1:5173",
+                  "devUrl":  "http://127.0.0.1:4181",
                   "beforeBuildCommand":  "",
                   "frontendDist":  "../dist"
               },

@@ -10,7 +10,7 @@ This runbook defines the repeatable AstraBridge product demo path for browser-ba
 
 ### 1. No-key demo
 
-Use this when the goal is to verify product workflow, routing surfaces, thread state, checkpoint/compact/fork behavior, and browser usability without spending provider quota.
+Use this when the goal is to verify product workflow, routing surfaces, task and execution-lane state, checkpoint/compact/branch-task behavior, and browser usability without spending provider quota.
 
 Expected focus:
 
@@ -36,7 +36,7 @@ Expected focus:
 - model catalog and health state
 - redacted capability credential readiness
 - one real coding turn
-- checkpoint/compact/fork continuation
+- checkpoint/compact/branch-task continuation
 
 Never print, paste, screenshot, or commit plaintext keys.
 
@@ -44,8 +44,8 @@ Never print, paste, screenshot, or commit plaintext keys.
 
 - Sidecar is healthy at `http://127.0.0.1:8826/health`
 - Web app is reachable at either:
-  - `http://127.0.0.1:<preview-port>/?sidecar=http://127.0.0.1:8826`
-  - `http://127.0.0.1:<dev-port>/?sidecar=http://127.0.0.1:8826`
+  - `http://127.0.0.1:<preview-port>/?astrabridge_launch=dogfood&sidecar=http://127.0.0.1:8826`
+  - `http://127.0.0.1:<dev-port>/?astrabridge_launch=dogfood&sidecar=http://127.0.0.1:8826`
 - Current project uses `.abproj` and `.astrabridge/`
 - Generated catalog is active
 - At least one primary lane is healthy for a key-backed run
@@ -120,8 +120,8 @@ For key-backed runs:
 ## Main Demo Flow
 
 1. Open the app and confirm the current project is loaded.
-2. Open the coding thread surface.
-3. Create a thread if none exists.
+2. Open the task coding surface.
+3. Create a task if none exists.
 4. Select the provider/model lane for the run.
 5. Send one bounded coding request, for example:
    - `Scan the current workspace, identify one concrete bug or missing edge case, explain the plan briefly, then make the fix and summarize the changed files.`
@@ -135,9 +135,9 @@ For key-backed runs:
 8. Create a checkpoint.
 9. Preview checkpoint load if the UI offers a preview path.
 10. Run compact if context guard recommends it.
-11. Fork the thread.
+11. Create a branch task.
 12. Continue with one follow-up turn.
-13. Reload the page and confirm visible task/thread state still matches the persisted session.
+13. Reload the page and confirm visible task and execution-lane state still matches the persisted task.
 
 ## Expected Visible Behaviors
 
@@ -145,8 +145,8 @@ For key-backed runs:
 - No legacy `.lcr`, `.lcrproj`, `.codexproj`, `.codex-shell`, or `lcr-models` product path appears.
 - Runtime or provider errors, if any, are categorized and actionable.
 - Checkpoint activity writes under `.astrabridge/`.
-- Fork/compact flow does not cross-leak model or profile state.
-- Browser-visible thread output matches the sidecar's thread truth.
+- Branch/compact flow does not cross-leak model or profile state.
+- Browser-visible task output matches the sidecar's task conversation truth.
 
 ## Browser Smoke Workflow
 
@@ -161,7 +161,7 @@ Confirm all of the following:
 - project loads
 - provider panel opens
 - catalog is visible
-- thread surface is usable
+- task surface is usable
 - review surface is usable
 - checkpoint controls are usable
 - diagnostics or runtime status is readable
@@ -361,8 +361,8 @@ During the demo, confirm:
 
 - checkpoint create works
 - checkpoint preview or dirty-state warning appears when relevant
-- checkpoint restore does not corrupt project/task/thread pointers
-- compact and fork leave the session usable
+- checkpoint restore does not corrupt project/task/execution-lane pointers
+- compact and branch-task flows leave the task usable
 - reload does not lose the visible state
 
 If runtime status becomes degraded, follow `docs/SECURITY_AND_ISOLATION.md` and `docs/RELEASE_CHECKLIST.md` sections for recovery and reset checks.
@@ -399,10 +399,10 @@ Preferred local artifact root:
 - confirm preview or dev server is still serving
 - rebuild preview if the bundle is stale
 
-### App opens but thread output does not update
+### App opens but task output does not update
 
-- inspect runtime status and current thread state
-- confirm event stream and thread API are in sync
+- inspect runtime status and current task/execution-lane state
+- confirm event stream and task display API are in sync
 - reload once to distinguish stale UI from missing persistence
 
 ### Provider lane looks unavailable
@@ -426,9 +426,9 @@ Preferred local artifact root:
 - confirm isolated `ASTRABRIDGE_CODEX_HOME` roots are active
 - inspect warnings, source catalog, and rollback metadata before assuming the plugin is trustworthy
 
-### Checkpoint or fork flow looks wrong
+### Checkpoint or branch-task flow looks wrong
 
-- confirm current task/thread pointers are still aligned
+- confirm current task/execution-lane pointers are still aligned
 - inspect supervisor recovery hints
 - use the documented recovery checks in `docs/RELEASE_CHECKLIST.md` rather than hand-editing project state
 

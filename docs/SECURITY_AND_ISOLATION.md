@@ -1,6 +1,21 @@
 # Security And Isolation
 
-Last updated: 2026-06-25
+Last updated: 2026-06-26
+
+## Local Dev Port Isolation
+
+AstraBridge may use a loopback Vite dev URL while running desktop dogfood or UI verification. That port is process-local but not app-private: any other local WebView or browser that opens the same URL can load the same frontend bundle.
+
+The frontend must therefore treat a bare loopback dev URL as untrusted. In development mode, a loopback URL without an explicit launch marker renders only the local launch isolation screen. Product UI is allowed when at least one of these is true:
+
+- the page is running inside Tauri;
+- the build is not a dev build;
+- the URL contains an explicit controlled-entry marker such as `ab_session` or `astrabridge_launch`;
+- `VITE_ASTRABRIDGE_ALLOW_BARE_DEV=1` is set for a deliberate local debugging session.
+
+`sidecar` and `smoke` are not launch markers. They may configure a trusted session after the page is already admitted, but they must not admit a page on their own. This prevents unrelated local clients or stale browser tabs from landing on AstraBridge project creation or runtime state when they accidentally reuse an old dogfood URL.
+
+The default desktop dev port is `4181` and is started with Vite `--strictPort`, so accidental fallback to another service is visible as a startup failure instead of a silent cross-app load. Sidecar CORS is also scoped to explicit origins by default. Use `ASTRABRIDGE_ALLOWED_ORIGINS` for additional known dev origins, or `ASTRABRIDGE_ALLOW_ANY_LOOPBACK_ORIGIN=1` only for a deliberate temporary debugging session.
 
 ## Product Boundaries
 
@@ -18,7 +33,7 @@ Normal AstraBridge product behavior must not use:
 - official Codex `~/.codex/config.toml`
 - project `.codex/`
 - project `.codex*`
-- official OpenAI account login as a product auth path
+- official OpenAI account login is not a product auth path
 
 ## Secrets
 
@@ -87,7 +102,7 @@ Default per-project storage is intentionally split into:
 - Workspace state (visible to users): `<workspace>/.astrabridge/`
   - `attachments`, `captures`, `downloads`, `caches`, `reviews`, `runtime-cwd`, `tmp`
   - `storage_policy.json`
-  - runtime events and thread state snapshots
+  - runtime events and internal execution-lane/thread state snapshots
 - Runtime execution roots (large/cross-run artifacts): `%APPDATA%/AstraBridge/runtime/<project-runtime-id>/`
   - `project_runtime_root` (shared runtime workspace bucket)
   - `project_runtime_root/codex_home`
@@ -126,6 +141,22 @@ Not allowed in durable artifacts:
 - plaintext credentials
 - real auth headers
 - raw secret payloads
+
+### App hardening evidence buckets
+
+`PRIVATE/app-hardening/` is a preserved evidence root with fixed buckets:
+
+- `PRIVATE/app-hardening/raw/`
+- `PRIVATE/app-hardening/reports/`
+- `PRIVATE/app-hardening/screenshots/`
+- `PRIVATE/app-hardening/validations/`
+
+Keep temporary preview HTML files, sidecar logs, page-capture JSON, and other
+low-level evidence under `raw/`, not at the top of `PRIVATE/app-hardening/`.
+Do not track these artifacts in git.
+
+Screenshot pixels still require manual review. Automated scans can audit
+filenames and companion text artifacts, but they do not OCR image content.
 
 ## Capability Runtime Safety
 
@@ -242,6 +273,13 @@ Its outputs must remain sanitized and must not be staged from `PRIVATE/**`.
 Before a release candidate or public push:
 
 - run a secret scan excluding `PRIVATE/**`, `node_modules/**`, `dist/**`, and generated binaries
+- if the round touched `PRIVATE/app-hardening/**` or related public docs, run:
+
+```powershell
+cd D:\AstraBridge
+python .\scripts\app_hardening_secret_scan.py --repo .
+```
+
 - run a legacy scan to confirm old project/state paths are not exposed as normal product behavior
 - confirm official Codex config remains untouched
 

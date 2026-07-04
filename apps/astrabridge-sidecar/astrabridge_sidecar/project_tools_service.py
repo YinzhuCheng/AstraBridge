@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .common import WORKSPACE_STATE_DIRNAME, now_iso
+from .common import WORKSPACE_STATE_DIRNAME, now_iso, path_for_host
 from .coding_kernel import (
     EditExecutor,
     available_operations_for_request,
@@ -65,7 +65,7 @@ SKIP_DIRS = {
     "node_modules",
     "target",
 }
-MANAGED_STATE_PREVIEW_ALLOWLIST = {"artifacts", "capabilities", "captures", "exports", "reports", "reviews", "saves"}
+MANAGED_STATE_PREVIEW_ALLOWLIST = {"artifacts", "assets", "capabilities", "captures", "exports", "reports", "reviews", "saves"}
 SECRET_NAME_PARTS = ("secret", "token", "apikey", "api_key", "authorization", "cookie", "password", ".env")
 MAX_TEXT_BYTES = 1_000_000
 MAX_IMAGE_BYTES = 2_500_000
@@ -1273,10 +1273,12 @@ class ProjectToolsService:
         }
 
     def _safe_rel_path(self, root: Path, rel_path: str, *, allow_managed_state: bool) -> Path:
-        raw = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
+        raw = str(rel_path or "").strip()
         if not raw:
             raise ValueError("path is required.")
-        candidate = (root / raw).resolve()
+        normalized = raw.replace("\\", "/")
+        host_path = path_for_host(normalized)
+        candidate = host_path.resolve() if host_path.is_absolute() else (root / normalized.lstrip("/")).resolve()
         if root not in candidate.parents and candidate != root:
             raise ValueError("Path escapes the workspace.")
         rel = candidate.relative_to(root)
@@ -1365,7 +1367,13 @@ class ProjectToolsService:
             path = self._workspace_relative_git_path(path, root=root, repo_root=repo_root)
             rel = Path(path) if path else Path()
             if path and not self._skip_file(rel):
-                files.append({"path": path, "status": status})
+                item: dict[str, Any] = {"path": path, "status": status}
+                if root is not None:
+                    try:
+                        item["updated_at"] = (root / rel).stat().st_mtime
+                    except OSError:
+                        pass
+                files.append(item)
         return files
 
     def _workspace_relative_git_path(self, path: str, *, root: Path | None, repo_root: Path | None) -> str:
@@ -1438,7 +1446,7 @@ class ProjectToolsService:
                 except OSError:
                     continue
         candidates.sort(reverse=True)
-        return [{"path": path, "status": "recent"} for _, path in candidates[:40]]
+        return [{"path": path, "status": "recent", "updated_at": mtime} for mtime, path in candidates[:40]]
 
     def _run(self, args: list[str], *, timeout: int) -> dict[str, Any]:
         try:

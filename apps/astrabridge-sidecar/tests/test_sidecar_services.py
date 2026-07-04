@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import binascii
@@ -30,7 +30,6 @@ from astrabridge_sidecar import common as common_module
 from astrabridge_sidecar import project_service as project_service_module
 from astrabridge_sidecar import runtime_service as runtime_service_module
 from astrabridge_sidecar import astrabridge_web_mcp_server
-from astrabridge_sidecar import lcr_web_mcp_server
 from astrabridge_sidecar import web_tool_service as web_tool_service_module
 from astrabridge_sidecar.app_server_client import AppServerClient, JsonRpcError
 from astrabridge_sidecar.asset_registry_service import AssetRegistryService
@@ -170,6 +169,34 @@ class DummyRouter:
         }
 
 
+def _sidecar_provenance_fixture(port: int = 8790, *, origin: str = "current_source") -> dict[str, object]:
+    return {
+        "schema_version": "astrabridge-sidecar-provenance-v1",
+        "origin": origin,
+        "launcher_mode": origin,
+        "pid": 12345,
+        "command_line": "python -m astrabridge_sidecar.server --serve",
+        "command_argv": ["python", "-m", "astrabridge_sidecar.server", "--serve"],
+        "command_line_redaction": "secret_args_masked",
+        "executable": "python",
+        "cwd": "D:\\AstraBridge",
+        "seed_root": "D:\\AstraBridge",
+        "source_root": "D:\\AstraBridge\\apps\\astrabridge-sidecar",
+        "repo_root": "D:\\AstraBridge",
+        "current_source_match": origin == "current_source",
+        "listen_host": "127.0.0.1",
+        "listen_port": port,
+        "port_owner": {
+            "status": "self",
+            "method": "fixture",
+            "pid": 12345,
+            "expected_pid": 12345,
+            "listen_host": "127.0.0.1",
+            "listen_port": port,
+        },
+    }
+
+
 class _LiveProcessStub:
     def poll(self) -> None:
         return None
@@ -270,6 +297,49 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"ok": True})
             self.assertEqual(list(Path(temp).glob(".project_context_state.json.*.tmp")), [])
 
+    def test_write_json_retries_transient_replace_file_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "automation_manifest.json"
+            original_replace = common_module.os.replace
+            calls = {"count": 0}
+
+            def flaky_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    Path(src).unlink(missing_ok=True)
+                    raise FileNotFoundError("simulated temp file race")
+                original_replace(src, dst)
+
+            common_module.os.replace = flaky_replace  # type: ignore[assignment]
+            try:
+                common_module.write_json(target, {"ok": True})
+            finally:
+                common_module.os.replace = original_replace  # type: ignore[assignment]
+
+            self.assertEqual(calls["count"], 2)
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"ok": True})
+            self.assertEqual(list(Path(temp).glob(".automation_manifest.json.*.tmp")), [])
+
+    def test_write_json_uses_short_atomic_temp_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "manifest.json"
+            original_replace = common_module.os.replace
+            captured = {"src_name": ""}
+
+            def capturing_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+                captured["src_name"] = Path(src).name
+                original_replace(src, dst)
+
+            common_module.os.replace = capturing_replace  # type: ignore[assignment]
+            try:
+                common_module.write_json(target, {"ok": True})
+            finally:
+                common_module.os.replace = original_replace
+
+            self.assertRegex(captured["src_name"], r"^\.tmp-[0-9a-f]{8}$")
+            self.assertLessEqual(len(captured["src_name"]), 13)
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"ok": True})
+
     def test_write_json_skips_replace_when_content_is_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp) / "router_config.json"
@@ -304,6 +374,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             artifact_dir.mkdir(parents=True)
             (artifact_dir / "summary.md").write_text("# Capability report\n", encoding="utf-8")
             (artifact_dir / "sample.pdf").write_bytes(b"%PDF-1.4\n% preview\n")
+            asset_dir = state / "assets" / "generated"
+            asset_dir.mkdir(parents=True)
+            (asset_dir / "sample.png").write_bytes(b"\x89PNG\r\n\x1a\n")
             project_file = root / "demo.abproj"
             projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
             projects.create_project("Demo", project_file, workspace_root=workspace, entry_mode="existing")
@@ -316,16 +389,26 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertNotIn(".astrabridge/runtime_events.jsonl", paths)
             self.assertIn(".astrabridge/capabilities/preview-smoke/summary.md", paths)
             self.assertIn(".astrabridge/capabilities/preview-smoke/sample.pdf", paths)
+            self.assertIn(".astrabridge/assets/generated/sample.png", paths)
             self.assertEqual(tools.read_file("README.md")["content"], "# Demo\n")
             self.assertEqual(tools.read_file(".astrabridge/capabilities/preview-smoke/summary.md")["kind"], "markdown")
+            self.assertEqual(
+                tools.read_file(str((artifact_dir / "summary.md").resolve()))["path"],
+                ".astrabridge/capabilities/preview-smoke/summary.md",
+            )
             self.assertEqual(tools.read_file(".astrabridge/capabilities/preview-smoke/sample.pdf")["mime_type"], "application/pdf")
+            self.assertEqual(tools.read_file(".astrabridge/assets/generated/sample.png")["kind"], "image")
             self.assertEqual(tools.file_media(".astrabridge/capabilities/preview-smoke/sample.pdf")["name"], "sample.pdf")
-            with self.assertRaises(ValueError):
+            self.assertEqual(tools.file_media(str((artifact_dir / "sample.pdf").resolve()))["name"], "sample.pdf")
+            self.assertEqual(tools.file_media(".astrabridge/assets/generated/sample.png")["mime_type"], "image/png")
+            with self.assertRaisesRegex(ValueError, "Path escapes the workspace."):
                 tools.read_file("../outside.txt")
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "Refusing to preview secret-like file names."):
                 tools.read_file(".env")
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "Only selected AstraBridge artifact files can be previewed."):
                 tools.read_file(".astrabridge/runtime_events.jsonl")
+            with self.assertRaisesRegex(ValueError, "Only selected AstraBridge artifact files can be previewed."):
+                tools.file_media(".astrabridge/runtime_events.jsonl")
 
     def test_project_tools_terminal_history_is_summarized(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -777,6 +860,33 @@ class AstraBridgeServiceTests(unittest.TestCase):
         handler.rfile = io.BytesIO(body)
 
         self.assertEqual(handler.read_json_body()["project_file"], "demo.abproj")
+
+    def test_handler_health_includes_sidecar_provenance(self) -> None:
+        handler = object.__new__(Handler)
+        handler.path = "/health"
+        handler.server = SimpleNamespace(server_address=("127.0.0.1", 8839))
+        handler.context = SimpleNamespace(
+            seed_root=Path("D:/AstraBridge"),
+            runtime=SimpleNamespace(environment=lambda: {"running": False, "runtime_config": {}}),
+            router=SimpleNamespace(status=lambda: {"listen_port": 8787, "base_url": "http://127.0.0.1:8787/v1"}),
+        )
+        captured: dict[str, object] = {}
+
+        def send_json(payload: object, status: int = 200) -> None:
+            captured["status"] = status
+            captured["payload"] = payload
+
+        handler.send_json = send_json  # type: ignore[method-assign]
+
+        with patch("astrabridge_sidecar.server.build_sidecar_provenance", return_value=_sidecar_provenance_fixture(port=8839)):
+            Handler.do_GET(handler)
+
+        self.assertEqual(captured["status"], 200)
+        payload = captured["payload"]
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(payload["sidecar"]["schema_version"], "astrabridge-sidecar-provenance-v1")  # type: ignore[index]
+        self.assertEqual(payload["sidecar"]["listen_port"], 8839)  # type: ignore[index]
+        self.assertEqual(payload["router"]["listen_port"], 8787)  # type: ignore[index]
 
     def test_project_defaults_to_wsl_when_runtime_default_is_wsl(self) -> None:
         previous_host = os.environ.get(DEFAULT_RUNTIME_HOST_ENV)
@@ -3164,6 +3274,123 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     for event in runtime.list_events()["events"]
                 )
             )
+
+    def test_start_turn_records_attachment_diagnostics_and_routes_images(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.requests: list[tuple[str, dict[str, object]]] = []
+
+            def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:
+                self.requests.append((method, params))
+                if method == "thread/read":
+                    return {"thread": {"id": params.get("threadId"), "turns": []}}
+                if method == "turn/start":
+                    return {"turn": {"id": "turn-attachment"}}
+                raise AssertionError(f"Unexpected method {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            image = workspace / "diagram.png"
+            image.write_bytes(
+                base64.b64decode(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9sWmB1EAAAAASUVORK5CYII="
+                )
+            )
+            notes = workspace / "notes.md"
+            notes.write_text("# notes", encoding="utf-8")
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            projects.switch_thread("thread-attach")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Attachment diagnostics",
+                thread_id="thread-attach",
+                settings={
+                    "profile_id": "kimi-default",
+                    "provider_id": "kimi",
+                    "model": "kimi-k2.6",
+                    "reasoning_effort": "xhigh",
+                    "permission_mode": "auto",
+                },
+            )
+            client = FakeClient()
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id")}  # type: ignore[method-assign]  # noqa: ARG005
+            runtime._ensure_client = lambda runtime_status: client  # type: ignore[method-assign]  # noqa: ARG005
+
+            result = runtime.start_turn(
+                {"profile_id": "kimi-default", "provider_id": "kimi", "model": "kimi-k2.6", "reasoning_effort": "xhigh"},
+                thread_id="thread-attach",
+                text="Review the diagram and notes.",
+                attachments=[
+                    {"path": str(image), "name": "diagram.png", "mimeType": "image/png", "kind": "image"},
+                    {"path": str(notes), "name": "notes.md", "mimeType": "text/markdown", "kind": "file"},
+                ],
+                model="kimi-k2.6",
+                effort="xhigh",
+                permission_mode="auto",
+            )
+
+            diagnostics = result["attachment_diagnostics"]
+            self.assertEqual(diagnostics["total_count"], 2)
+            self.assertEqual(diagnostics["image_count"], 1)
+            self.assertEqual(diagnostics["file_count"], 1)
+            self.assertEqual(diagnostics["route"]["local_image_items"], 1)
+            self.assertGreaterEqual(diagnostics["route"]["mention_items"], 1)
+            turn_start = next(params for method, params in client.requests if method == "turn/start")
+            input_types = [item["type"] for item in turn_start["input"]]  # type: ignore[index]
+            self.assertIn("localImage", input_types)
+            self.assertIn("mention", input_types)
+            self.assertTrue(
+                any(
+                    event.get("type") == "turn_started_request"
+                    and event.get("attachment_diagnostics", {}).get("route", {}).get("local_image_items") == 1
+                    for event in runtime.list_events()["events"]
+                )
+            )
+
+    def test_start_turn_missing_attachment_error_is_actionable_and_sanitized(self) -> None:
+        class FakeClient:
+            def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:
+                if method == "thread/read":
+                    return {"thread": {"id": params.get("threadId"), "turns": []}}
+                raise AssertionError(f"Unexpected method {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            missing = workspace / "missing-image.png"
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            projects.switch_thread("thread-missing-attachment")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Missing attachment",
+                thread_id="thread-missing-attachment",
+                settings={"profile_id": "kimi-default", "provider_id": "kimi", "model": "kimi-k2.6", "reasoning_effort": "xhigh", "permission_mode": "auto"},
+            )
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id")}  # type: ignore[method-assign]  # noqa: ARG005
+            runtime._ensure_client = lambda runtime_status: FakeClient()  # type: ignore[method-assign]  # noqa: ARG005
+
+            with self.assertRaisesRegex(ValueError, "Attachment preparation failed"):
+                runtime.start_turn(
+                    {"profile_id": "kimi-default", "provider_id": "kimi", "model": "kimi-k2.6", "reasoning_effort": "xhigh"},
+                    thread_id="thread-missing-attachment",
+                    text="Review this.",
+                    attachments=[{"path": str(missing), "name": "missing-image.png", "mimeType": "image/png", "kind": "image"}],
+                    model="kimi-k2.6",
+                    effort="xhigh",
+                    permission_mode="auto",
+                )
+
+            failure_events = [event for event in runtime.list_events()["events"] if event.get("type") == "attachment_inputs_failed"]
+            self.assertEqual(len(failure_events), 1)
+            self.assertIn("not found", str(failure_events[0].get("error", "")).lower())
+            self.assertNotIn(str(workspace), str(failure_events[0].get("error", "")))
 
     def test_start_turn_missing_thread_recovery_timeout_returns_background_pending_response(self) -> None:
         class FakeClient:
@@ -6072,6 +6299,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
                 project = ProjectService(root / "recent.json").open_project(project_file)
 
+                self.assertEqual(project["ui_preferences"]["cursor_enhancement"], "auto")
                 self.assertEqual(project["ui_preferences"]["execution_host"], "wsl")
                 self.assertEqual(project["ui_preferences"]["wsl_distro"], "Ubuntu-24.04")
         finally:
@@ -6105,7 +6333,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "default_effort": "max",
                         "current_thread_id": None,
                         "recent_threads": [],
-                        "ui_preferences": {},
+                        "ui_preferences": {"cursor_enhancement": "sparkles"},
                         "created_at": "2026-01-01T00:00:00+00:00",
                         "updated_at": "2026-01-01T00:00:00+00:00",
                     }
@@ -6118,10 +6346,12 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(project["default_profile_id"], "openai-compatible")
             self.assertEqual(project["default_model"], "gpt-5.5")
             self.assertEqual(project["default_effort"], "xhigh")
+            self.assertEqual(project["ui_preferences"]["cursor_enhancement"], "auto")
             saved = json.loads(project_file.read_text(encoding="utf-8"))
             self.assertEqual(saved["default_profile_id"], "openai-compatible")
             self.assertEqual(saved["default_model"], "gpt-5.5")
             self.assertEqual(saved["default_effort"], "xhigh")
+            self.assertEqual(saved["ui_preferences"]["cursor_enhancement"], "auto")
 
     def test_open_old_project_formats_are_rejected_without_migration(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -6358,11 +6588,62 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 self.assertEqual(status["web_smoke_status"], "pass")
                 self.assertEqual(status["citation_quality"], "source_url_verified")
                 self.assertFalse(status["supports_parallel_tool_calls"])
+                catalog = json.loads((root / "embedded_codex_home" / "models" / "astrabridge-models.json").read_text(encoding="utf-8"))
+                model_info = catalog["models"][0]
+                catalog_efforts = {item["effort"] for item in model_info["supported_reasoning_levels"]}
+                self.assertEqual(model_info["default_reasoning_level"], "xhigh")
+                self.assertIn("xhigh", catalog_efforts)
+                self.assertNotIn("max", catalog_efforts)
         finally:
             if original is None:
                 os.environ.pop("TEST_DEEPSEEK_PROVIDER_KEY", None)
             else:
                 os.environ["TEST_DEEPSEEK_PROVIDER_KEY"] = original
+
+    def test_runtime_config_maps_json_apply_patch_to_codex_catalog_freeform(self) -> None:
+        original = os.environ.pop("TEST_JSON_PROVIDER_KEY", None)
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                service = RuntimeConfigService(
+                    root / "embedded_codex_home",
+                    configured_models_resolver=lambda: [
+                        {
+                            "id": "deepseek/deepseek-v4-pro",
+                            "provider": "deepseek",
+                            "native_model": "deepseek-v4-pro",
+                            "display_name": "DeepSeek V4 Pro",
+                            "apply_patch_tool_type": "json",
+                            "supports_mcp_tools": True,
+                        }
+                    ],
+                )
+
+                status = service.load_secret(
+                    {
+                        "profile_id": "deepseek-default",
+                        "label": "DeepSeek",
+                        "provider_id": "deepseek",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-pro",
+                        "reasoning_effort": "high",
+                        "wire_api": "chat",
+                        "env_key": "TEST_JSON_PROVIDER_KEY",
+                        "auth_mode": "session_paste",
+                        "proxy_mode": "direct",
+                        "proxy_url": "",
+                    },
+                    session_key="deepseek_unit_secret_123456",
+                )
+
+                self.assertEqual(status["apply_patch_tool_type"], "json")
+                catalog = json.loads((root / "embedded_codex_home" / "models" / "astrabridge-models.json").read_text(encoding="utf-8"))
+                self.assertEqual(catalog["models"][0]["apply_patch_tool_type"], "freeform")
+        finally:
+            if original is None:
+                os.environ.pop("TEST_JSON_PROVIDER_KEY", None)
+            else:
+                os.environ["TEST_JSON_PROVIDER_KEY"] = original
 
     def test_modal_service_translates_approvals_and_user_input(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -6612,12 +6893,12 @@ class AstraBridgeServiceTests(unittest.TestCase):
     def test_astrabridge_web_batch_and_research_brief_are_structured_and_sanitized(self) -> None:
         encoded = "a1" + base64.urlsafe_b64encode(b"https://developers.openai.com/codex/mcp").decode("ascii").rstrip("=")
         self.assertEqual(
-            lcr_web_mcp_server._clean_bing_url(f"https://www.bing.com/ck/a?u={encoded}&ntb=1"),
+            astrabridge_web_mcp_server._clean_bing_url(f"https://www.bing.com/ck/a?u={encoded}&ntb=1"),
             "https://developers.openai.com/codex/mcp",
         )
 
-        original_search = lcr_web_mcp_server._search
-        original_fetch = lcr_web_mcp_server._fetch
+        original_search = astrabridge_web_mcp_server._search
+        original_fetch = astrabridge_web_mcp_server._fetch
 
         def fake_search(query: str, *, max_results: int, timeout_sec: int) -> dict[str, object]:
             return {
@@ -6643,10 +6924,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
             }
 
         try:
-            lcr_web_mcp_server._search = fake_search
-            lcr_web_mcp_server._fetch = fake_fetch
+            astrabridge_web_mcp_server._search = fake_search
+            astrabridge_web_mcp_server._fetch = fake_fetch
 
-            batch = lcr_web_mcp_server._search_batch(
+            batch = astrabridge_web_mcp_server._search_batch(
                 [{"query": "magic tower design", "max_results": 3}, {"query": "autotile rules", "max_results": 2}],
                 dedupe=True,
                 timeout_sec=5,
@@ -6656,7 +6937,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             urls = [item["url"] for item in batch["merged_results"]]
             self.assertEqual(urls.count("https://example.com/a?utm_source=x"), 1)
 
-            brief = lcr_web_mcp_server._research_brief(
+            brief = astrabridge_web_mcp_server._research_brief(
                 research_goal="magic tower RPG autotile visual design",
                 queries=["magic tower design"],
                 source_urls=["https://example.com/source"],
@@ -6671,7 +6952,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertNotIn("unit_secret_test", json.dumps(brief))
 
             with self.assertRaises(ValueError):
-                lcr_web_mcp_server._research_brief(
+                astrabridge_web_mcp_server._research_brief(
                     research_goal="bad",
                     queries=["X-Unit-Auth: Bearer unit"],
                     source_urls=[],
@@ -6681,11 +6962,11 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     timeout_sec=5,
                 )
         finally:
-            lcr_web_mcp_server._search = original_search
-            lcr_web_mcp_server._fetch = original_fetch
+            astrabridge_web_mcp_server._search = original_search
+            astrabridge_web_mcp_server._fetch = original_fetch
 
     def test_astrabridge_web_batch_repairs_ambiguous_magic_tower_queries(self) -> None:
-        original_search = lcr_web_mcp_server._search
+        original_search = astrabridge_web_mcp_server._search
 
         def fake_search(query: str, *, max_results: int, timeout_sec: int) -> dict[str, object]:
             if "tower of the sorcerer" in query.lower() or "mota" in query.lower():
@@ -6723,8 +7004,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             }
 
         try:
-            lcr_web_mcp_server._search = fake_search
-            batch = lcr_web_mcp_server._search_batch(
+            astrabridge_web_mcp_server._search = fake_search
+            batch = astrabridge_web_mcp_server._search_batch(
                 [{"query": "magic tower game design deterministic resource planning", "max_results": 4}],
                 dedupe=True,
                 timeout_sec=5,
@@ -6736,11 +7017,11 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertGreater(merged[0]["relevance_score"], merged[-1]["relevance_score"])
             self.assertFalse(any(item["url"] == "https://magic.wizards.com/en" for item in merged[:2]))
         finally:
-            lcr_web_mcp_server._search = original_search
+            astrabridge_web_mcp_server._search = original_search
 
     def test_astrabridge_web_research_brief_uses_hinted_tilemap_sources_when_search_is_thin(self) -> None:
-        original_search = lcr_web_mcp_server._search
-        original_fetch = lcr_web_mcp_server._fetch
+        original_search = astrabridge_web_mcp_server._search
+        original_fetch = astrabridge_web_mcp_server._fetch
 
         def fake_search(query: str, *, max_results: int, timeout_sec: int) -> dict[str, object]:
             return {
@@ -6762,9 +7043,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             }
 
         try:
-            lcr_web_mcp_server._search = fake_search
-            lcr_web_mcp_server._fetch = fake_fetch
-            brief = lcr_web_mcp_server._research_brief(
+            astrabridge_web_mcp_server._search = fake_search
+            astrabridge_web_mcp_server._fetch = fake_fetch
+            brief = astrabridge_web_mcp_server._research_brief(
                 research_goal="How should an HTML5 tilemap/autotile route reduce visible square-grid feeling in a top-down RPG?",
                 queries=None,
                 source_urls=None,
@@ -6778,8 +7059,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertGreaterEqual(len(hinted), 1)
             self.assertTrue(any("developer.mozilla.org" in str(item.get("url")) for item in hinted))
         finally:
-            lcr_web_mcp_server._search = original_search
-            lcr_web_mcp_server._fetch = original_fetch
+            astrabridge_web_mcp_server._search = original_search
+            astrabridge_web_mcp_server._fetch = original_fetch
 
     def test_yunwu_image_generation_payload_and_smoke_request(self) -> None:
         class YunwuHandler(BaseHTTPRequestHandler):
@@ -7240,7 +7521,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             promoted = service.promote(
                 {
                     "asset_id": "yunwu-portal",
-                    "target_name": "portal_ice_crystal_lcr.png",
+                    "target_name": "portal_ice_crystal_astrabridge.png",
                     "manifest_section": "tiles",
                     "tile_key": "portal_ice",
                     "role": "portal",
@@ -7250,7 +7531,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 }
             )
 
-            target = workspace / "assets" / "images" / "sprites" / "portal_ice_crystal_lcr.png"
+            target = workspace / "assets" / "images" / "sprites" / "portal_ice_crystal_astrabridge.png"
             self.assertTrue(target.is_file())
             try:
                 from PIL import Image  # type: ignore
@@ -7260,7 +7541,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 self.assertEqual(image.size, (96, 96))
                 self.assertEqual(image.mode, "RGBA")
             game_manifest = json.loads((workspace / "assets" / "images" / "sprites" / "sprite_manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(game_manifest["tiles"]["portal_ice"], "sprites/portal_ice_crystal_lcr.png")
+            self.assertEqual(game_manifest["tiles"]["portal_ice"], "sprites/portal_ice_crystal_astrabridge.png")
             transform = game_manifest["promoted_assets"]["yunwu-portal"]["transform"]
             self.assertTrue(transform["crop_to_alpha"])
             self.assertEqual(transform["output_width"], 96)
@@ -7501,7 +7782,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             promoted = service.promote(
                 {
                     "asset_id": "yunwu-key",
-                    "target_name": "key_yellow_lcr.png",
+                    "target_name": "key_yellow_astrabridge.png",
                     "manifest_section": "tiles",
                     "tile_key": "yellow_key",
                     "role": "key",
@@ -8095,6 +8376,43 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(pack["task"]["fork_threads"])
             self.assertEqual(pack["task"]["fork_threads"][0]["thread_id"], "thread-fork-1")
             self.assertEqual(pack["task"]["fork_threads"][0]["role"], "fork")
+
+    def test_project_context_pack_separates_active_provider_route_from_default_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "projects.json")
+            projects.create_project("Context Project", root / "context.abproj", workspace_root=workspace, entry_mode="existing")
+            projects.update_project({"default_profile_id": "glm-default", "default_model": "glm-5.2", "default_effort": "high"})
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Cross-provider route",
+                thread_id="thread-glm",
+                settings={
+                    "profile_id": "glm-default",
+                    "provider_id": "glm",
+                    "model": "glm-5.2",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            tasks.bind_thread(
+                thread_id="thread-qwen",
+                settings={
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3.7-plus",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+                make_active=True,
+            )
+
+            pack = ProjectContextService(projects, task_service=tasks).snapshot(thread_id="thread-qwen")["context_pack"]
+
+            self.assertIn("Active provider route: profile=qwen-default provider=qwen model=qwen3.7-plus effort=high", pack["text"])
+            self.assertIn("Default runtime: profile=glm-default model=glm-5.2 effort=high", pack["text"])
 
     def test_project_context_prefers_task_aligned_dogfood_summary_over_placeholder_milestone(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -9306,8 +9624,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             workspace.mkdir()
             subprocess = __import__("subprocess")
             subprocess.check_call(["git", "init"], cwd=str(workspace), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.check_call(["git", "config", "user.email", "lcr@example.invalid"], cwd=str(workspace))
-            subprocess.check_call(["git", "config", "user.name", "LCR Test"], cwd=str(workspace))
+            subprocess.check_call(["git", "config", "user.email", "astrabridge@example.invalid"], cwd=str(workspace))
+            subprocess.check_call(["git", "config", "user.name", "AstraBridge Test"], cwd=str(workspace))
             (workspace / "game.txt").write_text("v1\n", encoding="utf-8")
             subprocess.check_call(["git", "add", "game.txt"], cwd=str(workspace))
             subprocess.check_call(["git", "commit", "-m", "initial"], cwd=str(workspace), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -9371,7 +9689,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertTrue(loaded["loaded"])
             self.assertEqual((workspace / "index.html").read_text(encoding="utf-8"), "<h1>ok</h1>\n")
 
-    def test_checkpoint_service_prunes_heavy_lcr_asset_dirs(self) -> None:
+    def test_checkpoint_service_prunes_heavy_managed_asset_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace = root / "workspace"
@@ -9432,6 +9750,28 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 manager.login({"username": "user", "password": "correct horse battery staple"})
             relogged = manager.login({"username": "user", "password": "new battery staple"})
             self.assertEqual(relogged["session"]["key_count"], 1)
+
+    def test_llm_api_manager_existing_user_can_login_from_desktop_key_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService(root / "profiles.json")
+            config = RouterConfigService(profiles, root / "router.json")
+            manager = LlmApiManagerService(config, DummyRouter(), root / "manager")
+
+            desktop = root / "Desktop"
+            desktop.mkdir()
+            (desktop / "key.txt").write_text("desktop-vault-password", encoding="utf-8")
+
+            manager.create_user({"username": "astra", "password": "desktop-vault-password"})
+            manager.save_key({"provider_id": "qwen", "label": "Qwen main", "env_key": "DASHSCOPE_API_KEY", "secret": "unit_secret_qwen_value"})
+            manager.logout()
+
+            with patch.object(Path, "home", return_value=root):
+                logged_in = manager.login({"username": "astra", "use_desktop_key_file": True})
+
+            self.assertEqual(logged_in["session"]["mode"], "managed_user")
+            self.assertEqual(logged_in["session"]["username"], "astra")
+            self.assertEqual(logged_in["session"]["key_count"], 1)
 
     def test_llm_api_manager_multi_user_isolation_key_redaction_and_env_cleanup(self) -> None:
         original = os.environ.pop("DEEPSEEK_API_KEY", None)
@@ -10131,7 +10471,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             runtime = RuntimeService(project, ModalService(project.require_shell_state_root))
             config_text = "\n".join(
                 [
-                    'model_catalog_json = "C:\\\\Users\\\\cyz19\\\\AppData\\\\Local\\\\LCR\\\\cx\\\\models\\\\astrabridge-models.json"',
+                    'model_catalog_json = "C:\\\\Users\\\\cyz19\\\\AppData\\\\Roaming\\\\AstraBridge\\\\cx\\\\models\\\\astrabridge-models.json"',
                     'base_url = "http://127.0.0.1:8787/v1"',
                     "",
                     "[mcp_servers.yunwu_image]",
@@ -10298,6 +10638,73 @@ class AstraBridgeServiceTests(unittest.TestCase):
             staged = runtime._stage_attachment(str(outside), "diagram.png")  # type: ignore[attr-defined]
             self.assertTrue(staged.exists())
             self.assertIn(".astrabridge\\attachments", str(staged))
+
+            upload = runtime.stage_uploaded_attachments(
+                {
+                    "files": [
+                        {
+                            "name": "notes.txt",
+                            "mime_type": "text/plain",
+                            "data_base64": base64.b64encode(b"hello from browser").decode("ascii"),
+                            "size": 18,
+                        },
+                        {
+                            "name": "secret.txt",
+                            "mime_type": "text/plain",
+                            "data_base64": base64.b64encode(b"api_key = should-not-stage").decode("ascii"),
+                            "size": 26,
+                        },
+                    ]
+                }
+            )
+            self.assertEqual(len(upload["attachments"]), 1)
+            uploaded_path = Path(upload["attachments"][0]["path"])
+            self.assertTrue(uploaded_path.exists())
+            self.assertEqual(uploaded_path.read_text(encoding="utf-8"), "hello from browser")
+            self.assertEqual(len(upload["skipped"]), 1)
+
+            directory_upload = runtime.stage_uploaded_attachments(
+                {
+                    "directory_name": "notes",
+                    "files": [
+                        {
+                            "name": "a.txt",
+                            "mime_type": "text/plain",
+                            "relative_path": "notes/a.txt",
+                            "data_base64": base64.b64encode(b"A").decode("ascii"),
+                            "size": 1,
+                        },
+                        {
+                            "name": "b.txt",
+                            "mime_type": "text/plain",
+                            "relative_path": "notes/nested/b.txt",
+                            "data_base64": base64.b64encode(b"B").decode("ascii"),
+                            "size": 1,
+                        },
+                    ],
+                }
+            )
+            self.assertEqual(directory_upload["attachments"][0]["kind"], "folder")
+            self.assertEqual(directory_upload["attachments"][0]["fileCount"], 2)
+            staged_directory = Path(directory_upload["attachments"][0]["path"])
+            self.assertTrue(staged_directory.is_dir())
+            self.assertTrue(any(path.name == "b.txt" for path in staged_directory.rglob("*")))
+
+            workspace_dir = workspace / "docs"
+            workspace_dir.mkdir()
+            (workspace_dir / "readme.md").write_text("# demo", encoding="utf-8")
+            direct_dir = runtime._stage_attachment(str(workspace_dir), "docs")  # type: ignore[attr-defined]
+            self.assertEqual(direct_dir, workspace_dir.resolve())
+
+            outside_dir = root / "outside-folder"
+            outside_dir.mkdir()
+            (outside_dir / "guide.md").write_text("guide", encoding="utf-8")
+            staged_dir = runtime._stage_attachment(str(outside_dir), "outside-folder")  # type: ignore[attr-defined]
+            self.assertTrue(staged_dir.is_dir())
+            self.assertTrue((staged_dir / "guide.md").is_file())
+            stage_events = [event for event in runtime.list_events()["events"] if event.get("type") == "attachments_staged"]
+            self.assertTrue(any(event.get("created_count") == 1 and event.get("skipped_count") == 1 for event in stage_events))
+            self.assertTrue(any(event.get("mode") == "browser_upload_directory" and event.get("file_count") == 2 for event in stage_events))
 
     def test_runtime_config_collaboration_and_compaction_metadata(self) -> None:
         original_key = os.environ.pop("TEST_DEEPSEEK_VERIFY_KEY", None)
@@ -10541,7 +10948,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("command -v codex", probe)
             self.assertNotIn("LCR_CODEX_BIN", probe)
 
-    def test_runtime_service_wsl_launch_defaults_to_lcr_managed_codex(self) -> None:
+    def test_runtime_service_wsl_launch_defaults_to_astrabridge_managed_codex(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace = root / "workspace"
@@ -10984,7 +11391,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             else:
                 os.environ[ROUTER_ENV_KEY] = original_router_token
 
-    def test_isolation_audit_reports_lcr_boundaries_without_secret_values(self) -> None:
+    def test_isolation_audit_reports_legacy_boundaries_without_secret_values(self) -> None:
         original_override = os.environ.get("ASTRABRIDGE_CODEX_HOME")
         original_appdata = os.environ.get("ASTRABRIDGE_APPDATA")
         try:
@@ -11021,6 +11428,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "managed_by_app": False,
                         "router_configured": False,
                     },
+                    sidecar_provenance=_sidecar_provenance_fixture(),
                     sidecar_port=8790,
                 )
                 self.assertTrue(audit["ok"])
@@ -11085,6 +11493,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 },
                 router_status={"listen_port": 8787, "base_url": "http://127.0.0.1:8787/v1"},
                 official_codex_status={"config_path": str(root / ".codex" / "config.toml"), "exists": False, "managed_by_app": False, "router_configured": False},
+                sidecar_provenance=_sidecar_provenance_fixture(),
                 sidecar_port=8790,
             )
 
@@ -11130,6 +11539,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "managed_by_app": False,
                     "router_configured": False,
                 },
+                sidecar_provenance=_sidecar_provenance_fixture(),
                 sidecar_port=8790,
             )
 
@@ -11173,6 +11583,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     "managed_by_app": False,
                     "router_configured": False,
                 },
+                sidecar_provenance=_sidecar_provenance_fixture(),
                 sidecar_port=8790,
             )
             checks = {item["name"]: item for item in audit["checks"]}
@@ -11210,6 +11621,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "managed_by_app": False,
                         "router_configured": False,
                     },
+                    sidecar_provenance=_sidecar_provenance_fixture(),
                     sidecar_port=8790,
                 )
                 mismatch_checks = {item["name"]: item for item in mismatch_audit["checks"]}
@@ -11233,6 +11645,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "managed_by_app": False,
                         "router_configured": False,
                     },
+                    sidecar_provenance=_sidecar_provenance_fixture(),
                     sidecar_port=8790,
                 )
                 matching_checks = {item["name"]: item for item in matching_audit["checks"]}
@@ -13720,7 +14133,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertFalse(deepseek["supports_parallel_tool_calls"])
             self.assertIsNone(deepseek["apply_patch_tool_type"])
             self.assertEqual(deepseek["authority_tier"], "B")
-            self.assertIn("max", {item["effort"] for item in deepseek["supported_reasoning_levels"]})
+            deepseek_efforts = {item["effort"] for item in deepseek["supported_reasoning_levels"]}
+            self.assertIn("xhigh", deepseek_efforts)
+            self.assertNotIn("max", deepseek_efforts)
             self.assertEqual(deepseek["temperature_default"], 0.0)
             self.assertTrue(deepseek["supports_mcp_tools"])
             self.assertEqual(deepseek["mcp_tool_call_policy"], "conservative")
@@ -15600,12 +16015,3 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-
-
-
-
-
-

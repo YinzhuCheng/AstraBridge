@@ -268,13 +268,20 @@ class TaskService:
         clean_thread_id = str(thread_id or "").strip()
         if not clean_thread_id:
             return self.current_task()
-        task = self.current_task()
+        state = self._state()
+        tasks = [dict(item) for item in list(state.get("tasks") or []) if isinstance(item, dict)]
+        task = self._find_task_for_thread(tasks, clean_thread_id)
+        if not task:
+            task_id = str(self._project().get("current_task_id") or state.get("current_task_id") or "")
+            task = self._find_task(tasks, task_id) or self.current_task()
         if not task:
             return None
         task["active_provider_thread_id"] = clean_thread_id
         task["updated_at"] = now_iso()
-        state = self._state()
-        state["tasks"] = self._replace_task(list(state.get("tasks") or []), task)
+        updated_tasks = self._replace_task(tasks, task)
+        updated_tasks = self._enforce_task_thread_ownership(updated_tasks, owner_task=task)
+        task = self._find_task(updated_tasks, str(task.get("task_id") or "")) or task
+        state["tasks"] = updated_tasks
         state["current_task_id"] = task["task_id"]
         state["updated_at"] = now_iso()
         self._write_state(state)
@@ -888,6 +895,19 @@ class TaskService:
         for task in tasks:
             if str(task.get("task_id") or "") == task_id:
                 return dict(task)
+        return None
+
+    def _find_task_for_thread(self, tasks: list[dict[str, Any]], thread_id: str) -> dict[str, Any] | None:
+        clean_thread_id = str(thread_id or "").strip()
+        if not clean_thread_id:
+            return None
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            for collection_name in ("provider_threads", "fork_threads"):
+                for item in list(task.get(collection_name) or []):
+                    if isinstance(item, dict) and str(item.get("thread_id") or "").strip() == clean_thread_id:
+                        return dict(task)
         return None
 
     def _state(self) -> dict[str, Any]:

@@ -1,85 +1,59 @@
 # Legacy Cleanup Audit
 
-Last updated: 2026-06-23
+Last updated: 2026-06-27
 
 ## Purpose
 
-This audit classifies current legacy-string matches so that later cleanup steps can work from evidence instead of rescanning and re-deciding scope.
+This audit classifies legacy-string matches so future agents can distinguish current product facts from historical evidence, guardrails, and compatibility shims.
 
-Scan baseline used for this audit:
+## Current Product Boundary
 
-```powershell
-cd D:\AstraBridge
-rg -n "Local Codex Router|Research OS|LCR|lcr|\.lcrproj|\.lcr|\.codexproj|\.codex-shell|lcr-models" --glob "!PRIVATE/**" --glob "!node_modules/**" --glob "!dist/**" .
-```
+- Normal project format: `.abproj`
+- Normal workspace state: `.astrabridge/`
+- OpenAI is a normal API-key provider, not an official account-login path
+- Official Codex state such as `~/.codex/config.toml` and project `.codex*` files is not a normal AstraBridge write target
+- `PRIVATE/**` and preserved demo/validation evidence are retained by default
 
 ## Classification Rules
 
-- `delete`: remove the matched legacy path or compatibility layer entirely
-- `rewrite`: keep the behavior, but rewrite names, docs, or fields to current AstraBridge wording
-- `rename`: current behavior stays, but identifiers should be renamed to remove legacy naming
-- `historical-evidence`: keep as explicit history or negative regression evidence
-- `false-positive`: scan hit is intentional guardrail text, test fixture data, or internal-only noise that is not the immediate cleanup target
+- `guardrail`: text intentionally names unsupported legacy paths so they are not reintroduced
+- `historical-evidence`: preserved plans, audit notes, or negative tests
+- `compatibility-shim`: a small delegating module or route kept only for older private imports or preserved evidence
+- `current`: canonical AstraBridge implementation or documentation
+- `cleanup-candidate`: old naming that should be renamed when touching the nearby code
 
 ## Current Summary
 
-- Product-facing doc/rule hits are now mostly negative-path warnings or active-plan text, not normal-path product guidance.
-- The highest-value cleanup targets are still in sidecar/runtime/Desktop contracts that expose `lcr_*` tool names, SSE event names, evidence field names, preset names, and compatibility routes.
-- Old project-format tests are intentionally valuable and should stay as negative coverage.
+- Product-facing docs should describe AstraBridge names and paths.
+- Historical plans under `PLAN/**` may mention old names as evidence, but they are not current entry points unless their progress block says otherwise.
+- Web-lane implementation ownership is canonicalized:
+  - current MCP implementation: `apps/astrabridge-sidecar/astrabridge_sidecar/astrabridge_web_mcp_server.py`
+  - current service implementation: `apps/astrabridge-sidecar/astrabridge_sidecar/web_tool_service.py`
+  - legacy modules `lcr_web_mcp_server.py` and `lcr_web_service.py` are compatibility shims only
+- The previously mojibake dogfood plans have been rewritten as readable current-state records.
+- Old project-format rejection tests remain valuable negative coverage.
 
 ## Audit Matrix
 
-| Path | Matched content / cluster | Classification | Reason | Responsible step |
-| --- | --- | --- | --- | --- |
-| `AGENTS.md` | `Research OS Local Codex Router prototype` in repo intro | `rewrite` | Current rule file should describe current product identity without leaning on old prototype branding. | `3.3` |
-| `AGENTS.md` | Negative rule mentioning `.lcrproj`, `.lcr`, `.codexproj`, `.codex-shell` | `false-positive` | Intentional guardrail text; it prevents reintroduction of old product paths. | none |
-| `README.md` | Negative warning about legacy `.lcrproj`, `.lcr`, `.codexproj`, `.codex-shell` | `false-positive` | Intentional “not supported” product warning, not a normal-path legacy entry. | none |
-| `HANDOFF.md` | Negative warning about legacy `.lcrproj`, `.lcr`, `.codexproj`, `.codex-shell` | `false-positive` | Intentional non-goal statement, not stale operator guidance. | none |
-| `PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md` | Many `LCR`, `Research OS`, `.lcrproj`, `.codexproj`, `.codex-shell` mentions | `historical-evidence` | The active cleanup plan must name the legacy targets it is retiring. | none |
-| `docs/DEMO_RUNBOOK.md` | “No legacy `.lcr`, `.lcrproj`, `.codexproj`, `.codex-shell`, or `lcr-models` product path appears.” | `false-positive` | This is an acceptance assertion for absence, not a stale product path. | none |
-| `docs/RELEASE_CHECKLIST.md` | Legacy scan command containing old path names | `false-positive` | The scan must reference the strings it is checking for. | none |
-| `docs/SECURITY_AND_ISOLATION.md` | “official OpenAI account login” negative rule | `false-positive` | This is an intentional prohibition, aligned with current product policy. | none |
-| `apps/astrabridge-sidecar/tests/test_sidecar_services.py` | Old project-format rejection tests for `.codexproj` / `.lcrproj` and `.codex-shell` / `.lcr` state | `historical-evidence` | These are important negative tests proving hard cut behavior; do not delete unless replaced by equivalent negative coverage. | `3.2` |
-| `apps/astrabridge-sidecar/tests/test_sidecar_services.py` | Imports and assertions for `lcr_web_*`, `lcr.event`, `lcrVerifiedEvidence`, `lcrCompletionQuality`, `LCR`-named checks | `rename` | Test expectations are still tied to legacy public/runtime names and should follow the product-facing rename chain. | `3.3` |
-| `apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py` | `LEGACY_BROWSER_SMOKE_TOOL_NAME`, `_LCR_WEB_TOOL_*`, `_normalize_lcr_web_tool_name`, `lcrVerifiedEvidence`, `lcrCompletionQuality`, compatibility aliases | `rename` | This file still carries the main legacy public contract surface. These names are likely visible in API payloads, tool metadata, or event traces. | `3.3` |
-| `apps/astrabridge-sidecar/astrabridge_sidecar/server.py` | SSE events `lcr.hello` / `lcr.event`, compatibility routes `/api/router/mcp/preset/lcr-web`, `/api/lcr-web/*` | `rewrite` | These are behavior-level compatibility routes and event names. They should be explicitly removed or reduced once the current AstraBridge contract is the only supported surface. | `3.2` |
-| `apps/astrabridge-desktop/src/App.tsx` | EventSource listeners for `lcr.hello` / `lcr.event` | `rewrite` | Desktop still subscribes to old SSE event names for compatibility. Remove after server-side legacy event support is retired. | `3.2` |
-| `apps/astrabridge-desktop/src/features/runtime/threadRendering.ts` | `lcrVerifiedEvidence`, `lcrCompletionQuality` fields | `rename` | These legacy field names leak into the desktop event/evidence contract and should be renamed to AstraBridge-neutral names. | `3.3` |
-| `apps/astrabridge-sidecar/astrabridge_sidecar/mcp_config_service.py` | `lcr_web_preset()`, `apply_lcr_web_preset()`, preset name `lcr_web`, tool names `lcr_web_*` | `rewrite` | This is a current compatibility layer. It needs either deletion or clear relegation behind non-default compatibility routing. | `3.2` and `3.3` |
-| `apps/astrabridge-sidecar/astrabridge_sidecar/lcr_web_service.py` and `lcr_web_mcp_server.py` | Legacy module filenames, server/tool names, schema `lcr-web-research-record-v1`, debug env `LCR_MCP_DEBUG_LOG` | `rename` | Internal files may temporarily remain, but externally visible tool/server/schema/env names should be moved to AstraBridge naming. | `3.3` then `4.2` |
-| `apps/astrabridge-sidecar/astrabridge_sidecar/checkpoint_service.py` | `EXCLUDED_LCR_LOG_NAMES`, `EXCLUDED_LCR_ASSET_DIR_NAMES` | `rename` | Internal constants still express legacy semantics even though behavior now guards AstraBridge workspace state. | `3.2` |
-| `apps/astrabridge-sidecar/astrabridge_sidecar/isolation_audit_service.py` | check names `workspace_no_old_lcr_state`, `workspace_no_old_codex_shell_state` | `rewrite` | The checks are still valid, but names may surface in diagnostics and should be rewritten to “legacy state” wording. | `3.3` |
-| `apps/astrabridge-sidecar/astrabridge_sidecar/modal_service.py` | sample file path `lcr-approval-smoke.txt`, normalized log key `lcr_log_read` | `rename` | User-visible examples and modal/tool keys should no longer carry `lcr` naming. | `3.3` |
-| `apps/astrabridge-sidecar/astrabridge_sidecar/tool_context_service.py` | `LEGACY_BROWSER_SMOKE_TOOL_NAME = "lcr_browser_smoke"` and `lcr_web_` checks | `rename` | Current context metadata still hard-codes legacy tool names. | `3.3` |
-| `apps/astrabridge-sidecar/astrabridge_sidecar/wsl_dependency_service.py` | probe client name `lcr-bootstrap-check` | `rename` | Internal probe naming should not keep legacy branding once cleanup reaches runtime polish. | `3.3` or `4.2` |
-| `apps/astrabridge-sidecar/astrabridge_sidecar/yunwu_image_mcp_server.py` and `yunwu_image_service.py` | `lcr-yunwu-image`, `LCR_MCP_DEBUG_LOG`, multipart boundary `lcr-yunwu-*` | `rename` | Current MCP server naming still carries legacy prefixes. | `3.3` |
-| `apps/astrabridge-desktop/src/styles.css` | keyframe names `lcr-shimmer-sweep`, `lcr-number-pop` | `rename` | CSS animation names are internal-only, but trivial cleanup candidates once higher-value contract renames are done. | `3.3` or `4.3` |
-| `apps/astrabridge-sidecar/astrabridge_sidecar/project_context_service.py` | skip entry `.codex-shell` | `historical-evidence` | This remains a useful exclusion/guard against legacy state contamination. Keep unless replaced by a broader legacy-state abstraction. | `3.2` |
-| `apps/astrabridge-sidecar/astrabridge_sidecar/project_tools_service.py` | `SKIP_LCR_DIRS`, `allow_lcr` naming | `rename` | Internal naming still reflects old semantics; behavior should remain but names should become legacy-neutral. | `3.2` |
-| `apps/astrabridge-sidecar/tests/test_sidecar_services.py` fixture asset names such as `portal_ice_crystal_lcr.png`, `key_yellow_lcr.png`, git identity `lcr@example.invalid` / `LCR Test` | `false-positive` | These are test fixtures or synthetic identities, not current product path names. Rename only if touched during nearby test cleanup. | optional later |
+| Path or cluster | Classification | Current handling |
+| --- | --- | --- |
+| `AGENTS.md` / `README.md` / `docs/SECURITY_AND_ISOLATION.md` negative mentions of `.lcrproj`, `.lcr`, `.codexproj`, `.codex-shell`, or official OpenAI login | `guardrail` | Keep as prohibitions, not product guidance. |
+| `PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md` | `historical-evidence` | Completed normalization record; do not reopen as the active plan unless the user explicitly asks to revise that record. |
+| Dogfood and capability execution plans that mention older file paths in completion records | `historical-evidence` | Keep records intact; add newer notes instead of rewriting preserved evidence. |
+| `apps/astrabridge-sidecar/tests/test_sidecar_services.py` old project/state rejection tests | `historical-evidence` | Keep unless equivalent negative coverage replaces them. |
+| `apps/astrabridge-sidecar/tests/test_web_lane.py` and web helper tests | `current` | Tests target `astrabridge_web_mcp_server` and `web_tool_service`. |
+| `apps/astrabridge-sidecar/astrabridge_sidecar/lcr_web_mcp_server.py` | `compatibility-shim` | Delegates to `astrabridge_web_mcp_server`; no new logic belongs here. |
+| `apps/astrabridge-sidecar/astrabridge_sidecar/lcr_web_service.py` | `compatibility-shim` | Delegates to `web_tool_service`; no new logic belongs here. |
+| `apps/astrabridge-sidecar/astrabridge_sidecar/task_service.py` old `lcr minimal visual mode:` prefix | `compatibility-shim` | Kept only so preserved threads get readable visual-review titles; new content should use `astrabridge minimal visual mode:`. |
+| `apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py` legacy-named aliases or evidence fields | `cleanup-candidate` | Rename opportunistically only with focused tests because payload compatibility may be involved. |
+| `apps/astrabridge-sidecar/astrabridge_sidecar/server.py` old SSE event aliases or old compatibility routes | `cleanup-candidate` | Keep only when needed for old clients or preserved evidence; prefer current AstraBridge routes/events. |
+| `apps/astrabridge-desktop/src/App.tsx` old event aliases | `cleanup-candidate` | Remove only after sidecar aliases are retired and UI tests cover current event names. |
+| CSS animation names with legacy prefixes | `current` | Renamed to `astrabridge-*` keyframes. |
 
-## Recommended Next Actions
+## Rules For Future Changes
 
-### For step 3.2
-
-Prioritize behavior-level compatibility layers and explicit old project/state handling:
-
-- server compatibility routes and SSE event aliases
-- `mcp_config_service` compatibility preset path
-- legacy-named internal exclusion constants where the behavior is still valid but the implementation should stop modeling “LCR mode”
-
-### For step 3.3
-
-Prioritize externally visible or contract-like legacy names:
-
-- runtime tool names and aliases
-- evidence field names such as `lcrVerifiedEvidence` and `lcrCompletionQuality`
-- MCP server/tool/display names
-- modal/tool/log example names
-- user-visible diagnostic check names
-
-## Non-Goals For This Audit
-
-- No code deletion or renaming was performed here.
-- No test expectations were changed here.
-- No private paths or secrets are recorded in this audit.
+- Do not add new product behavior to `lcr_*` modules.
+- Do not create new public routes, event names, fields, or tool names with legacy prefixes.
+- Prefer adding a tiny explicit shim over leaving old implementation bodies in old module names.
+- When a compatibility shim is reduced or removed, update [LEGACY_COMPATIBILITY_SHIMS.md](/D:/AstraBridge/docs/archive/LEGACY_COMPATIBILITY_SHIMS.md).
+- Keep scans secret-safe and exclude `PRIVATE/**`, build outputs, and dependency directories unless the user names a specific target.

@@ -19,7 +19,7 @@ It is not the official Codex App. OpenAI, DeepSeek, Kimi, Qwen, Yunwu, and other
 - `apps/astrabridge-sidecar/`: sidecar services, project/runtime/provider/model APIs
 - `apps/astrabridge-desktop/`: desktop/web UI, i18n, browser-facing workflow surfaces
 - `docs/`: active operator, security, release, and demo documentation
-- `PLAN/`: active repository execution plan
+- `PLAN/`: tracked execution plans, surface maps, and historical execution records
 - `PRIVATE/`: local-only demo runs, screenshots, validation artifacts, and private operator material
 
 ## Quickstart
@@ -39,7 +39,7 @@ cd D:\AstraBridge\apps\astrabridge-desktop
 npm install
 cmd /c npm run test
 cmd /c npm run build
-cmd /c npm run dev -- --host 127.0.0.1 --port 4181
+cmd /c npm run dev
 ```
 
 ### Browser Smoke URL Shape
@@ -47,7 +47,7 @@ cmd /c npm run dev -- --host 127.0.0.1 --port 4181
 Use the desktop dev server with an explicit sidecar URL:
 
 ```text
-http://127.0.0.1:4181/?sidecar=http://127.0.0.1:8826&smoke=1
+http://127.0.0.1:4181/?astrabridge_launch=dogfood&sidecar=http://127.0.0.1:8826&smoke=1
 ```
 
 ## Demo Modes
@@ -77,9 +77,29 @@ Use this only when the task explicitly requires real provider connectivity or mo
 ## Current Entry Points
 
 - [Project Summary](/D:/AstraBridge/docs/PROJECT_SUMMARY.md)
+- [Repository Governance](/D:/AstraBridge/docs/REPO_GOVERNANCE.md)
+- [Verification Matrix](/D:/AstraBridge/docs/VERIFICATION_MATRIX.md)
+- [Ownership Boundaries](/D:/AstraBridge/docs/OWNERSHIP_BOUNDARIES.md)
 - [Project Log](/D:/AstraBridge/docs/PROJECT_LOG.md)
 - [Asset Sources](/D:/AstraBridge/docs/ASSET_SOURCES.md)
 - [Demo Runbook](/D:/AstraBridge/docs/DEMO_RUNBOOK.md)
 - [Security And Isolation](/D:/AstraBridge/docs/SECURITY_AND_ISOLATION.md)
 - [Release Checklist](/D:/AstraBridge/docs/RELEASE_CHECKLIST.md)
-- [Active Execution Plan](/D:/AstraBridge/PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md)
+- [Completed Repository Normalization Record](/D:/AstraBridge/PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md)
+- [Legacy Compatibility Shim Archive](/D:/AstraBridge/docs/archive/LEGACY_COMPATIBILITY_SHIMS.md)
+
+## Local Governance Gate
+
+Use the quick local gate after repository hygiene, documentation, script, or narrow governance changes:
+
+```powershell
+python scripts/run_local_gate.py --quick
+```
+
+Use the full local gate before release preparation or broad cross-subsystem handoff:
+
+```powershell
+python scripts/run_local_gate.py --full
+```
+
+The gate is local-first. This repository currently has no `.github/workflows` CI entry point.

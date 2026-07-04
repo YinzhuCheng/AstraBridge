@@ -62,3 +62,11 @@ export async function selectFiles(title = "Select files"): Promise<string[]> {
   return normalized ? [normalized] : [];
 }
 
+export async function selectAttachmentFiles(title = "Select attachments"): Promise<string[]> {
+  return selectFiles(title);
+}
+
+export async function selectAttachmentDirectory(title = "Select attachment folder"): Promise<string | null> {
+  return selectDirectory(title);
+}
+

@@ -11,6 +11,17 @@ DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT = 80
 ASTRABRIDGE_MODEL_CATALOG_FILENAME = "astrabridge-models.json"
 ASTRABRIDGE_MODELS_CACHE_FILENAME = "astrabridge-models-cache.json"
 PROFILE_MODEL_RESERVED_FIELDS = {"id", "provider", "native_model", "display_name", "displayName"}
+RUNTIME_PROVIDER_CONTRACT_SCHEMA_VERSION = "astrabridge-runtime-provider-contract-v1"
+RUNTIME_PROVIDER_CONTRACT_AUDIT_FIELDS = (
+    "reasoning_effort",
+    "tool_schema",
+    "apply_patch_tool_type",
+    "web_search",
+    "vision",
+    "parallel_tools",
+    "mcp",
+    "token_usage",
+)
 WEB_CAPABILITY_DEFAULTS = {
     "native_web_search_support": "unverified",
     "tool_web_search_support": "unverified",
@@ -217,6 +228,171 @@ def resolved_workflow_contract_fields(
     }
 
 
+def resolved_runtime_provider_contract_fields(model: dict[str, Any]) -> dict[str, Any]:
+    provider_id = str(model.get("provider") or model.get("provider_id") or "").strip()
+    native_model = str(model.get("native_model") or model.get("model") or "").strip()
+    model_id = str(model.get("id") or "").strip() or (f"{provider_id}/{native_model}" if provider_id and native_model else native_model)
+    provider_efforts = _clean_string_list(model.get("supported_reasoning_levels"))
+    if not provider_efforts:
+        provider_efforts = known_reasoning_efforts(provider_id, native_model)
+    codex_efforts = _codex_reasoning_efforts(provider_efforts)
+    provider_default_effort = str(model.get("default_reasoning_level") or model.get("reasoning_effort") or "").strip()
+    codex_default_effort = _codex_reasoning_effort(provider_default_effort or (codex_efforts[-1] if codex_efforts else "high"))
+    if codex_default_effort not in codex_efforts:
+        codex_efforts = [*codex_efforts, codex_default_effort]
+
+    input_modalities = normalize_input_modalities(model.get("input_modalities"), provider_id, native_model)
+    apply_patch_tool_type = model.get("apply_patch_tool_type")
+    codex_apply_patch_tool_type = _codex_apply_patch_tool_type(apply_patch_tool_type)
+    web_search_tool_type = str(model.get("web_search_tool_type") or "text").strip()
+    codex_web_search_tool_type = web_search_tool_type if web_search_tool_type in {"text", "text_and_image"} else "text"
+    context_window = (
+        _optional_positive_int(model.get("context_window"))
+        or _optional_positive_int(model.get("max_context_window"))
+        or _optional_positive_int(model.get("advertised_context_window"))
+        or known_context_window(provider_id, native_model)
+    )
+    auto_compact_token_limit = _optional_positive_int(model.get("auto_compact_token_limit"))
+    tool_output_token_limit = _optional_positive_int(model.get("tool_output_token_limit"))
+    if context_window and not auto_compact_token_limit:
+        auto_compact_token_limit = compact_limit(context_window)
+    if context_window and not tool_output_token_limit:
+        tool_output_token_limit = tool_output_truncation_limit(context_window)
+    supports_mcp_tools = bool(model.get("supports_mcp_tools", False))
+    mcp_tool_call_policy = str(model.get("mcp_tool_call_policy") or "unsupported")
+    supports_parallel = bool(model.get("supports_parallel_tool_calls", False))
+    supports_image_detail_original = bool("image" in input_modalities and model.get("supports_image_detail_original", False))
+    authority = assess_model_authority(
+        {
+            **model,
+            "supports_tool_calls": bool(supports_mcp_tools or apply_patch_tool_type),
+            "supports_parallel_tool_calls": supports_parallel,
+            "apply_patch_tool_type": apply_patch_tool_type,
+        }
+    )
+    web_capabilities = resolved_web_capability_fields(model, mcp_fallback_to_smoke=True)
+    workflow_contract = resolved_workflow_contract_fields(model, modalities_default=",".join(input_modalities))
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not provider_id:
+        errors.append("provider_id_missing")
+    if not native_model:
+        errors.append("native_model_missing")
+    if context_window is None:
+        warnings.append("context_window_unverified")
+    if provider_default_effort and codex_default_effort not in codex_efforts:
+        warnings.append("default_reasoning_effort_not_in_supported_set")
+    if apply_patch_tool_type and codex_apply_patch_tool_type is None:
+        warnings.append("unsupported_apply_patch_tool_type")
+    if web_search_tool_type not in {"text", "text_and_image"}:
+        warnings.append("unsupported_web_search_tool_type_defaulted_to_text")
+    if supports_mcp_tools and mcp_tool_call_policy == "unsupported":
+        warnings.append("mcp_tools_enabled_with_unsupported_policy")
+    if supports_parallel and not (supports_mcp_tools or codex_apply_patch_tool_type):
+        warnings.append("parallel_tools_enabled_without_structured_tool_surface")
+    if model.get("supports_image_detail_original") and "image" not in input_modalities:
+        warnings.append("image_detail_original_enabled_without_image_modality")
+    if not tool_output_token_limit:
+        warnings.append("tool_output_token_limit_unverified")
+
+    validation_status = "fail" if errors else "warn" if warnings else "pass"
+    pricing_fields = {
+        "currency": str(model.get("pricing_currency") or ""),
+        "input_per_mtok": model.get("pricing_input_per_mtok"),
+        "output_per_mtok": model.get("pricing_output_per_mtok"),
+        "cached_input_per_mtok": model.get("pricing_cached_input_per_mtok"),
+        "status": str(model.get("pricing_status") or "unknown"),
+        "source_url_present": bool(str(model.get("pricing_source_url") or "").strip()),
+    }
+    usage_available = context_window is not None or tool_output_token_limit is not None
+    return {
+        "schema_version": RUNTIME_PROVIDER_CONTRACT_SCHEMA_VERSION,
+        "audited_fields": list(RUNTIME_PROVIDER_CONTRACT_AUDIT_FIELDS),
+        "model_id": model_id,
+        "provider_metadata": {
+            "provider_id": provider_id or None,
+            "native_model": native_model or None,
+            "supported_reasoning_levels": provider_efforts,
+            "default_reasoning_level": provider_default_effort or None,
+            "input_modalities": input_modalities,
+            "tool_mode": model.get("tool_mode"),
+            "model_kind": model.get("model_kind"),
+        },
+        "codex_runtime_metadata": {
+            "model_id": model_id,
+            "supported_reasoning_levels": codex_efforts,
+            "default_reasoning_level": codex_default_effort,
+            "apply_patch_tool_type": codex_apply_patch_tool_type,
+            "web_search_tool_type": codex_web_search_tool_type,
+            "supports_parallel_tool_calls": supports_parallel,
+            "supports_mcp_tools": supports_mcp_tools,
+            "mcp_tool_call_policy": mcp_tool_call_policy,
+            "input_modalities": input_modalities,
+            "supports_image_detail_original": supports_image_detail_original,
+            "context_window": context_window,
+            "auto_compact_token_limit": auto_compact_token_limit,
+            "tool_output_token_limit": tool_output_token_limit,
+        },
+        "capability_metadata": {
+            "reasoning_effort": {
+                "provider_values": provider_efforts,
+                "codex_values": codex_efforts,
+                "provider_default": provider_default_effort or None,
+                "codex_default": codex_default_effort,
+            },
+            "tool_schema": {
+                "supports_tool_calls": bool(supports_mcp_tools or codex_apply_patch_tool_type),
+                "tool_mode": model.get("tool_mode"),
+                "experimental_supported_tools": list(model.get("experimental_supported_tools") or []),
+                "codex_builtin_tools": dict(model.get("codex_builtin_tools") or {}),
+                "argument_validation": str(model.get("mcp_tool_argument_validation") or "unsupported"),
+            },
+            "apply_patch_tool_type": {
+                "provider_value": apply_patch_tool_type,
+                "codex_value": codex_apply_patch_tool_type,
+                "mapping_status": _apply_patch_mapping_status(apply_patch_tool_type, codex_apply_patch_tool_type),
+            },
+            "web_search": {
+                "tool_type": codex_web_search_tool_type,
+                "supports_search_tool": bool(model.get("supports_search_tool", False)),
+                **web_capabilities,
+            },
+            "vision": {
+                "input_modalities": input_modalities,
+                "supports_image_inputs": "image" in input_modalities,
+                "supports_image_detail_original": supports_image_detail_original,
+                "modality_limits": dict(model.get("modality_limits") or {}),
+            },
+            "parallel_tools": {
+                "supported": supports_parallel,
+                "status": authority.parallel_tool_call_status,
+            },
+            "mcp": {
+                "supports_mcp_tools": supports_mcp_tools,
+                "tool_call_policy": mcp_tool_call_policy,
+                "verified_servers": list(model.get("mcp_verified_servers") or []),
+                "smoke_status": str(model.get("mcp_smoke_status") or "untested"),
+                "argument_validation": str(model.get("mcp_tool_argument_validation") or "unsupported"),
+            },
+            "token_usage": {
+                "usage_event": "thread/tokenUsage/updated",
+                "usage_available": usage_available,
+                "context_window": context_window,
+                "auto_compact_token_limit": auto_compact_token_limit,
+                "tool_output_token_limit": tool_output_token_limit,
+                "pricing": pricing_fields,
+                "workflow_contract": workflow_contract,
+            },
+        },
+        "validation": {
+            "status": validation_status,
+            "errors": errors,
+            "warnings": warnings,
+        },
+    }
+
+
 def provider_model_records(
     provider_id: str,
     configured_models: list[dict[str, Any]] | None = None,
@@ -292,18 +468,22 @@ def model_catalog_entry(
     configured_model = configured_model or {}
     configured_efforts = [str(item) for item in list(configured_model.get("supported_reasoning_levels") or []) if str(item).strip()]
     profile = _profile_for(provider_id, native_model)
-    efforts = configured_efforts or known_reasoning_efforts(provider_id, native_model)
-    default_effort = (
+    efforts = _codex_reasoning_efforts(configured_efforts or known_reasoning_efforts(provider_id, native_model))
+    default_effort_raw = (
         _codex_reasoning_effort(reasoning_effort)
         if reasoning_effort
         else str(configured_model.get("default_reasoning_level") or "").strip()
         or (profile.default_reasoning_level() if profile else "")
         or (efforts[-1] if efforts else None)
     )
+    default_effort = _codex_reasoning_effort(default_effort_raw)
+    if default_effort and default_effort not in efforts:
+        efforts.append(default_effort)
     resolved_compact_limit = compact_limit(context_window, auto_compact_token_limit)
     truncation_limit = int(configured_model.get("tool_output_token_limit") or tool_output_truncation_limit(context_window))
     input_modalities = normalize_input_modalities(configured_model.get("input_modalities"), provider_id, native_model)
     apply_patch_tool_type = configured_model.get("apply_patch_tool_type")
+    codex_apply_patch_tool_type = _codex_apply_patch_tool_type(apply_patch_tool_type)
     web_search_tool_type = configured_model.get("web_search_tool_type")
     temperature_default = _optional_float(configured_model.get("temperature_default"), 0.0)
     temperature_ui_min = _optional_float(configured_model.get("temperature_ui_min"), 0.0)
@@ -322,6 +502,29 @@ def model_catalog_entry(
         if warning not in ui_warnings:
             ui_warnings.append(warning)
     web_capabilities = resolved_web_capability_fields(configured_model)
+    runtime_provider_contract = resolved_runtime_provider_contract_fields(
+        {
+            **configured_model,
+            "id": model_id,
+            "provider": provider_id,
+            "native_model": native_model,
+            "context_window": context_window,
+            "auto_compact_token_limit": resolved_compact_limit,
+            "tool_output_token_limit": truncation_limit,
+            "input_modalities": input_modalities,
+            "supported_reasoning_levels": efforts,
+            "default_reasoning_level": default_effort,
+            "apply_patch_tool_type": apply_patch_tool_type,
+            "web_search_tool_type": web_search_tool_type,
+            "supports_parallel_tool_calls": bool(configured_model.get("supports_parallel_tool_calls", False)),
+            "supports_mcp_tools": bool(configured_model.get("supports_mcp_tools", False)),
+            "mcp_tool_call_policy": configured_model.get("mcp_tool_call_policy") or "unsupported",
+            "mcp_smoke_status": configured_model.get("mcp_smoke_status") or "untested",
+            "mcp_tool_argument_validation": configured_model.get("mcp_tool_argument_validation") or "unsupported",
+            "codex_builtin_tools": dict(configured_model.get("codex_builtin_tools") or {}),
+            "modality_limits": dict(configured_model.get("modality_limits") or {}),
+        }
+    )
     return {
         "slug": model_id,
         "id": model_id,
@@ -351,7 +554,7 @@ def model_catalog_entry(
         "default_reasoning_summary": configured_model.get("default_reasoning_summary") or "auto",
         "support_verbosity": bool(configured_model.get("support_verbosity", False)),
         "default_verbosity": configured_model.get("default_verbosity"),
-        "apply_patch_tool_type": apply_patch_tool_type if apply_patch_tool_type in {"freeform", "json"} else None,
+        "apply_patch_tool_type": codex_apply_patch_tool_type,
         "web_search_tool_type": web_search_tool_type if web_search_tool_type in {"text", "text_and_image"} else "text",
         "truncation_policy": {"type": "tokens", "mode": "tokens", "limit": truncation_limit},
         "supports_parallel_tool_calls": bool(configured_model.get("supports_parallel_tool_calls", False)),
@@ -400,6 +603,7 @@ def model_catalog_entry(
         "deprecated_after": configured_model.get("deprecated_after"),
         "confidence": configured_model.get("confidence"),
         "source_provenance": dict(configured_model.get("source_provenance") or {}),
+        "runtime_provider_contract": runtime_provider_contract,
     }
 
 
@@ -424,6 +628,40 @@ def catalog_entry_from_record(
     )
 
 
+def _clean_string_list(values: Any) -> list[str]:
+    items = values if isinstance(values, (list, tuple)) else [values]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if isinstance(item, dict):
+            text = str(item.get("effort") or item.get("reasoningEffort") or item.get("id") or "").strip()
+        else:
+            text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        out.append(text)
+        seen.add(text)
+    return out
+
+
+def _apply_patch_mapping_status(provider_value: Any, codex_value: str | None) -> str:
+    normalized = str(provider_value or "").strip().lower()
+    if not normalized and codex_value is None:
+        return "disabled"
+    if normalized == "freeform" and codex_value == "freeform":
+        return "native_freeform"
+    if normalized == "json" and codex_value == "freeform":
+        return "json_to_codex_freeform"
+    return "unsupported"
+
+
+def _codex_apply_patch_tool_type(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"freeform", "json"}:
+        return "freeform"
+    return None
+
+
 def _codex_reasoning_effort(effort: Any) -> str:
     normalized = str(effort or "high").strip().lower()
     if normalized == "max":
@@ -431,6 +669,15 @@ def _codex_reasoning_effort(effort: Any) -> str:
     if normalized in {"off", "auto", "minimal", "low", "medium", "high", "xhigh", "none"}:
         return normalized
     return "high"
+
+
+def _codex_reasoning_efforts(efforts: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for effort in efforts:
+        codex_effort = _codex_reasoning_effort(effort)
+        if codex_effort not in normalized:
+            normalized.append(codex_effort)
+    return normalized or ["high"]
 
 
 def _optional_float(value: Any, fallback: float) -> float:

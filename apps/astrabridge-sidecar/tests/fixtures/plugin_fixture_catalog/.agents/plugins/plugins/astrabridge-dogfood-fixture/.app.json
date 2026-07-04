@@ -1,0 +1,9 @@
+{
+  "apps": [
+    {
+      "id": "astrabridge-fixture-app",
+      "name": "AstraBridge Fixture App",
+      "description": "Local fixture app contribution used for plugin contract tests."
+    }
+  ]
+}
