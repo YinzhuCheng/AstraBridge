@@ -195,20 +195,20 @@ Then execute the revised highest-leverage work unit in the same turn when feasib
 ## Current Progress
 
 - Current status: In progress
-- Completed steps: Step 0, Create Durable Execution Plan; Step 1, Reconcile Plan And Contract Ownership
-- Current step: Step 2, Isolate Provider Runtime Client Lanes
-- Next step: Step 2, Isolate Provider Runtime Client Lanes
+- Completed steps: Step 0, Create Durable Execution Plan; Step 1, Reconcile Plan And Contract Ownership; Step 2, Isolate Provider Runtime Client Lanes
+- Current step: Step 3, Establish Canonical Protocol Schemas And Code Generation
+- Next step: Step 3, Establish Canonical Protocol Schemas And Code Generation
 - Last updated: 2026-07-16
 
 ## Current Work Unit
 
-- ID: STAB-02
-- Goal: Eliminate cross-provider client lifecycle interference before adding durable scheduling and protocol migration.
-- Inputs: `apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py`; `apps/astrabridge-sidecar/astrabridge_sidecar/app_server_client.py`; `apps/astrabridge-sidecar/tests/test_sidecar_services.py`; `apps/astrabridge-sidecar/tests/test_task_graph_worker_runtime.py`.
-- Expected output: a runtime client pool keyed by a redacted immutable signature, with per-lane lifecycle/lease isolation and no process-global provider environment mutation.
-- Acceptance check: different provider/model signatures can execute concurrently without client closure or configuration contamination; equal signatures reuse safely; existing single-lane tests remain green; secrets are not logged or persisted.
+- ID: STAB-03
+- Goal: Establish one canonical, versioned protocol schema source before cross-language Agent Envelope and durable run/event migration.
+- Inputs: `apps/astrabridge-sidecar/astrabridge_sidecar/protocol/`; `apps/astrabridge-sidecar/astrabridge_sidecar/agent_orchestration_contract.py`; `apps/astrabridge-desktop/src/types.ts`; `scripts/contract_boundary_audit.py`.
+- Expected output: backend-owned JSON Schema 2020-12 definitions plus deterministic Python/TypeScript generated or checked projections and freshness validation.
+- Acceptance check: valid fixtures pass in both languages; negative fixtures fail with stable diagnostics; generated output is deterministic and stale-generation checks fail; no provider credentials or raw secrets enter schemas or reports.
 - Status: queued
-- Next action: Inspect current runtime client lifecycle and implement Step 2 as one bounded isolation change, then stop after updating this plan.
+- Next action: Inspect existing protocol and graph contract types, choose the schema/code-generation boundary, and implement Step 3 as one bounded schema change.
 
 ## Execution Steps
 
@@ -275,7 +275,7 @@ Acceptance criteria:
 - Lane keys, snapshots, and logs contain no credential values.
 - Existing single-lane and task-graph runtime tests pass, and the local process audit finds no new stale AstraBridge processes.
 
-Status: not started
+Status: completed
 
 ### 3. Establish Canonical Protocol Schemas And Code Generation
 
@@ -745,3 +745,12 @@ Status: not started
 - Preserved: completed plans, stale plan histories, fixtures, raw reports, and unrelated working-tree changes were not deleted or staged.
 - Blockers: None for Step 1. No pull request was attempted because the user requested commit/push only.
 - Next step: Step 2, Isolate Provider Runtime Client Lanes.
+
+### 2026-07-16 - Step 2
+
+- Completed: Isolated provider runtime client lanes with a redacted-signature `RuntimeClientPool`, per-lane leases, lifecycle locks, bounded concurrency/restart behavior, idle reaping, and pool shutdown.
+- Files changed: `apps/astrabridge-sidecar/astrabridge_sidecar/runtime_client_pool.py`, `apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py`, `apps/astrabridge-sidecar/astrabridge_sidecar/runtime_config_service.py`, `apps/astrabridge-sidecar/astrabridge_sidecar/secret_service.py`, `apps/astrabridge-sidecar/tests/test_runtime_client_pool.py`, `docs/CODE_OWNERSHIP_AND_CONTRACTS.md`, `docs/INTERFACE_GOVERNANCE.md`, `scripts/contract_boundary_audit.py`, and this plan.
+- Validation: provider lane tests passed 7/7; `test_sidecar_services.py` passed 382 tests; `test_task_graph_worker_runtime.py` passed 39 tests plus 3 subtests; `python scripts/contract_boundary_audit.py` passed 4/4; relevant Python compilation passed; stale-process audit reported no clearly stale AstraBridge wrappers.
+- Security and preservation: lane IDs/snapshots are opaque digests; private provider environments are passed without mutating process-global configuration; no credential-bearing artifacts were staged; unrelated UI, graph, provider, diagnostics, and raw validation changes remain unstaged and preserved.
+- Blockers: None for Step 2. GitHub CLI authentication is still invalid (HTTP 401), but the Git remote credential path is available for the requested push; no merge conflict or unmerged path exists.
+- Next step: Step 3, Establish Canonical Protocol Schemas And Code Generation.

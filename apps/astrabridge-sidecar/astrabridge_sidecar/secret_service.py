@@ -6,6 +6,7 @@ import ctypes.wintypes
 import hashlib
 import os
 from dataclasses import dataclass
+from collections.abc import Mapping
 
 
 KEYCHAIN_PREFIX = "AstraBridge:"
@@ -53,8 +54,16 @@ class SecretService:
         digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
         return digest[:12]
 
-    def metadata(self, *, env_key: str, auth_mode: str, secret_ref: str | None) -> SecretMetadata:
-        env_value = os.environ.get(env_key)
+    def metadata(
+        self,
+        *,
+        env_key: str,
+        auth_mode: str,
+        secret_ref: str | None,
+        environment: Mapping[str, str] | None = None,
+    ) -> SecretMetadata:
+        env_source = environment if environment is not None else os.environ
+        env_value = env_source.get(env_key)
         if env_value:
             return SecretMetadata(True, "environment", self.fingerprint(env_value), secret_ref)
         if auth_mode == "os_keychain" and secret_ref:

@@ -40,6 +40,7 @@ STABILITY_PLAN_PATH = REPO_ROOT / "PLAN" / "ASTRABRIDGE_STABILITY_PROTOCOL_AND_A
 CAPABILITY_PLAN_PATH = REPO_ROOT / "PLAN" / "CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md"
 OWNERSHIP_DOC_PATH = REPO_ROOT / "docs" / "CODE_OWNERSHIP_AND_CONTRACTS.md"
 PROTOCOL_PACKAGE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "protocol" / "__init__.py"
+RUNTIME_CLIENT_POOL_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "runtime_client_pool.py"
 
 EXPECTED_PROVIDER_TRANSPORTS = {
     "qwen": "QwenResponsesTransport",
@@ -69,6 +70,7 @@ def _audit_stability_ownership() -> dict[str, Any]:
         "capability_plan": CAPABILITY_PLAN_PATH,
         "ownership_doc": OWNERSHIP_DOC_PATH,
         "protocol_package": PROTOCOL_PACKAGE_PATH,
+        "runtime_client_pool": RUNTIME_CLIENT_POOL_PATH,
     }
     missing = [name for name, path in required_paths.items() if not path.exists()]
     if missing:
@@ -80,6 +82,7 @@ def _audit_stability_ownership() -> dict[str, Any]:
 
     ownership_markers = (
         "astrabridge_sidecar.protocol",
+        "Provider runtime client lanes and lifecycle leases",
         "Agent Envelope, delivery events, and artifact references",
         "MCP protocol core and broker boundary",
         "Durable graph run state, scheduler commands, and ordered events",

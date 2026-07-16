@@ -4,7 +4,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 
 from .common import default_codex_home, now_iso, write_json
 from .mcp_config_service import McpConfigService
@@ -77,25 +77,34 @@ class RuntimeConfigService:
         require_secret: bool,
         session_key: str | None = None,
         enable_computer_use_plugins: bool = False,
+        environment: MutableMapping[str, str] | None = None,
+        codex_home: Path | None = None,
     ) -> dict[str, Any]:
-        runtime = self._normalize_profile(profile)
+        runtime_environment = environment if environment is not None else os.environ
+        runtime = self._normalize_profile(profile, environment=runtime_environment)
         runtime["computer_use_plugins_enabled"] = bool(enable_computer_use_plugins)
         if session_key is not None and session_key.strip():
-            os.environ[runtime["env_key"]] = session_key.strip()
+            runtime_environment[runtime["env_key"]] = session_key.strip()
         elif runtime["auth_mode"] == "os_keychain" and runtime.get("secret_ref"):
             loaded = self._secrets.load(str(runtime.get("secret_ref")))
             if loaded:
-                os.environ[runtime["env_key"]] = loaded
-        self.codex_home.mkdir(parents=True, exist_ok=True)
-        self._write_config(runtime, enable_computer_use_plugins=enable_computer_use_plugins)
-        self._apply_proxy_environment(runtime)
-        os.environ["CODEX_HOME"] = str(self.codex_home)
-        secret_loaded = bool(os.environ.get(runtime["env_key"]))
+                runtime_environment[runtime["env_key"]] = loaded
+        target_codex_home = Path(codex_home).expanduser().resolve() if codex_home is not None else self.codex_home
+        target_codex_home.mkdir(parents=True, exist_ok=True)
+        self._write_config(
+            runtime,
+            codex_home=target_codex_home,
+            environment=runtime_environment,
+            enable_computer_use_plugins=enable_computer_use_plugins,
+        )
+        self._apply_proxy_environment(runtime, environment=runtime_environment)
+        runtime_environment["CODEX_HOME"] = str(target_codex_home)
+        secret_loaded = bool(runtime_environment.get(runtime["env_key"]))
         if require_secret and not secret_loaded:
             raise RuntimeError(
                 f"runtime_secret_missing: set {runtime['env_key']} in the environment, paste a session key, or load a local key file."
             )
-        runtime = {**runtime, "codex_home": str(self.codex_home), "configured": True, "secret_loaded": secret_loaded}
+        runtime = {**runtime, "codex_home": str(target_codex_home), "configured": True, "secret_loaded": secret_loaded}
         self._active_runtime = runtime
         return self.redacted(runtime)
 
@@ -229,7 +238,12 @@ class RuntimeConfigService:
             bool(runtime_status.get("computer_use_plugins_enabled")),
         )
 
-    def _normalize_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_profile(
+        self,
+        profile: dict[str, Any],
+        *,
+        environment: MutableMapping[str, str] | None = None,
+    ) -> dict[str, Any]:
         provider_id = str(profile.get("provider_id") or "openai").strip()
         if not PROVIDER_ID_RE.match(provider_id):
             raise SecurityError(f"Invalid provider_id: {provider_id}")
@@ -262,6 +276,7 @@ class RuntimeConfigService:
             env_key=env_key,
             auth_mode=str(profile.get("auth_mode") or "env_ref"),
             secret_ref=str(profile.get("secret_ref") or "") or None,
+            environment=environment,
         )
         return {
             "profile_id": str(profile.get("profile_id") or provider_id),
@@ -326,40 +341,61 @@ class RuntimeConfigService:
             raise SecurityError("proxy_url must be a credential-free local HTTP(S) or SOCKS5 URL.")
         return mode, proxy_url if mode == "custom" else ""
 
-    def _apply_proxy_environment(self, runtime: dict[str, Any]) -> None:
+    def _apply_proxy_environment(
+        self,
+        runtime: dict[str, Any],
+        *,
+        environment: MutableMapping[str, str] | None = None,
+    ) -> None:
+        runtime_environment = environment if environment is not None else os.environ
         mode = str(runtime.get("proxy_mode") or "direct")
         if mode == "system":
             return
         if mode == "direct":
             for key in PROXY_ENV_KEYS:
-                os.environ.pop(key, None)
-            os.environ["NO_PROXY"] = LOCAL_NO_PROXY
-            os.environ["no_proxy"] = LOCAL_NO_PROXY
+                runtime_environment.pop(key, None)
+            runtime_environment["NO_PROXY"] = LOCAL_NO_PROXY
+            runtime_environment["no_proxy"] = LOCAL_NO_PROXY
             return
         proxy_url = str(runtime.get("proxy_url") or "").strip()
         if not proxy_url:
             raise SecurityError("Custom proxy mode requires proxy_url.")
         for key in PROXY_ENV_KEYS:
-            os.environ[key] = proxy_url
-        os.environ["NO_PROXY"] = LOCAL_NO_PROXY
-        os.environ["no_proxy"] = LOCAL_NO_PROXY
+            runtime_environment[key] = proxy_url
+        runtime_environment["NO_PROXY"] = LOCAL_NO_PROXY
+        runtime_environment["no_proxy"] = LOCAL_NO_PROXY
 
-    def _write_config(self, runtime: dict[str, Any], *, enable_computer_use_plugins: bool = False) -> None:
+    def _write_config(
+        self,
+        runtime: dict[str, Any],
+        *,
+        codex_home: Path | None = None,
+        environment: MutableMapping[str, str] | None = None,
+        enable_computer_use_plugins: bool = False,
+    ) -> None:
+        target_codex_home = Path(codex_home).expanduser().resolve() if codex_home is not None else self.codex_home
+        runtime_environment = environment if environment is not None else os.environ
         codex_model = codex_model_id(runtime, runtime["model"])
-        codex_base_url = os.environ.get("ASTRABRIDGE_BASE_URL", DEFAULT_ROUTER_BASE_URL).rstrip("/")
+        codex_base_url = runtime_environment.get("ASTRABRIDGE_BASE_URL", DEFAULT_ROUTER_BASE_URL).rstrip("/")
         context_window = (
-            _optional_positive_int(os.environ.get("ASTRABRIDGE_MODEL_CONTEXT_WINDOW"))
+            _optional_positive_int(runtime_environment.get("ASTRABRIDGE_MODEL_CONTEXT_WINDOW"))
             or _optional_positive_int(runtime.get("context_window"))
             or 128_000
         )
         auto_compact_limit = (
-            _optional_positive_int(os.environ.get("ASTRABRIDGE_AUTO_COMPACT_TOKEN_LIMIT"))
+            _optional_positive_int(runtime_environment.get("ASTRABRIDGE_AUTO_COMPACT_TOKEN_LIMIT"))
             or _optional_positive_int(runtime.get("auto_compact_token_limit"))
             or None
         )
         auto_compact_limit = compact_limit(context_window, auto_compact_limit)
         tool_output_limit = tool_output_truncation_limit(context_window)
-        catalog_path = self._write_model_catalog(runtime, codex_model, context_window, auto_compact_limit)
+        catalog_path = self._write_model_catalog(
+            runtime,
+            codex_model,
+            context_window,
+            auto_compact_limit,
+            codex_home=target_codex_home,
+        )
         metadata_lines = []
         metadata_lines.append(f'model_catalog_json = "{_toml_escape(str(catalog_path))}"')
         metadata_lines.append(f"model_context_window = {context_window}")
@@ -387,7 +423,7 @@ class RuntimeConfigService:
                 "",
             ]
         )
-        (self.codex_home / "config.toml").write_text(content, encoding="utf-8", newline="\n")
+        (target_codex_home / "config.toml").write_text(content, encoding="utf-8", newline="\n")
 
     def _model_provider_section_lines(self, runtime: dict[str, Any], codex_base_url: str) -> list[str]:
         providers: dict[str, str] = {}
@@ -469,11 +505,12 @@ class RuntimeConfigService:
             configured_model=configured_model,
             auto_compact_token_limit=auto_compact_limit,
         )
-        catalog_path = self.codex_home / "models" / ASTRABRIDGE_MODEL_CATALOG_FILENAME
+        target_codex_home = Path(codex_home).expanduser().resolve() if codex_home is not None else self.codex_home
+        catalog_path = target_codex_home / "models" / ASTRABRIDGE_MODEL_CATALOG_FILENAME
         catalog_payload = {"models": [model]}
         write_json(catalog_path, catalog_payload)
         write_json(
-            self.codex_home / ASTRABRIDGE_MODELS_CACHE_FILENAME,
+            target_codex_home / ASTRABRIDGE_MODELS_CACHE_FILENAME,
             {
                 "fetched_at": now_iso(),
                 "etag": "astrabridge",

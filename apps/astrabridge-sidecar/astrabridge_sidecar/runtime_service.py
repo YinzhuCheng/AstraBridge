@@ -52,6 +52,7 @@ from .profile_service import ProfileService
 from .providers import HistoryProjector, NeutralMessage, ReasoningArtifact, classify_runtime_failure
 from .router_service import ROUTER_ENV_KEY, ROUTER_PORT
 from .runtime_config_service import RuntimeConfigService, codex_model_id, codex_reasoning_effort
+from .runtime_client_pool import RuntimeClientPool
 from .security import SecurityError, redact_sensitive, resolve_under, scan_text_for_secrets
 from .secret_service import SecretService
 from .task_service import _display_thread_name
@@ -135,6 +136,9 @@ class RuntimeService:
         self._native_turn_loop = None
         self._client: AppServerClient | None = None
         self._runtime_signature: tuple[Any, ...] | None = None
+        self._runtime_client_pool = RuntimeClientPool()
+        self._runtime_lane_environments: dict[str, dict[str, str]] = {}
+        self._runtime_projection_is_pooled = False
         self._events: list[dict[str, Any]] = []
         self._hydrated_event_log_path: Path | None = None
         self._context_guard_continue_once: set[str] = set()
@@ -192,6 +196,7 @@ class RuntimeService:
             "execution_host": execution_host,
             "wsl_distro": self._wsl_distro(),
             "running": self._client.is_running() if self._client else False,
+            "runtime_lanes": self._runtime_client_pool.snapshots(),
             "runtime_config": {
                 **self._runtime_config.status(),
                 "execution_host": execution_host,
@@ -201,6 +206,21 @@ class RuntimeService:
 
     def restart(self) -> dict[str, Any]:
         self._close_client("manual_restart")
+        return self.environment()
+
+    def shutdown(self) -> dict[str, Any]:
+        """Close every owned runtime lane during sidecar shutdown."""
+
+        closed_lanes = self._runtime_client_pool.shutdown()
+        with self._lock:
+            self._runtime_lane_environments.clear()
+            self._client = None
+            self._runtime_signature = None
+            self._runtime_projection_is_pooled = False
+            self._mcp_status_thread_signature = None
+            self._mcp_status_thread_id = None
+        if closed_lanes:
+            self._record_event({"type": "runtime_pool_shutdown", "lane_ids": closed_lanes})
         return self.environment()
 
     def kernel_probe_snapshot(self, profile: dict[str, Any]) -> dict[str, Any]:
@@ -2632,10 +2652,89 @@ class RuntimeService:
         deferred_runtime = self._deferred_active_runtime_status(profile)
         if deferred_runtime is not None:
             return deferred_runtime
-        runtime_status = self._runtime_config.prepare_profile(profile, require_secret=require_secret)
+        router_environment = self._router_runtime_environment()
+        # Runtime preparation is deliberately rendered from a private mapping.
+        # Mutating ``os.environ`` here made a concurrent provider handoff race
+        # with another lane and could leak a router token or proxy selection
+        # into the wrong app-server process.
+        runtime_environment = dict(os.environ)
+        runtime_environment.update(router_environment)
+        lane_codex_home = self._runtime_lane_codex_home(profile, runtime_environment)
+        runtime_status = self._prepare_runtime_profile(
+            profile,
+            require_secret=require_secret,
+            environment=runtime_environment,
+            codex_home=lane_codex_home,
+        )
         runtime_status["execution_host"] = self._execution_host()
         runtime_status["wsl_distro"] = self._wsl_distro()
+        try:
+            signature = self._runtime_config.runtime_signature(runtime_status)
+            self._runtime_lane_environments[RuntimeClientPool.lane_id_for(signature)] = runtime_environment
+        except Exception:
+            # Compatibility test doubles may not expose the production
+            # signature method; the client factory will fall back to a fresh
+            # process-local environment in that case.
+            pass
         return runtime_status
+
+    def _prepare_runtime_profile(
+        self,
+        profile: dict[str, Any],
+        *,
+        require_secret: bool,
+        environment: dict[str, str],
+        codex_home: Path | None,
+    ) -> dict[str, Any]:
+        import inspect
+
+        prepare = self._runtime_config.prepare_profile
+        kwargs: dict[str, Any] = {"require_secret": require_secret}
+        try:
+            parameters = inspect.signature(prepare).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if "environment" in parameters:
+            kwargs["environment"] = environment
+        if "codex_home" in parameters and codex_home is not None:
+            kwargs["codex_home"] = codex_home
+        return prepare(profile, **kwargs)
+
+    def _runtime_lane_codex_home(self, profile: dict[str, Any], environment: dict[str, str]) -> Path | None:
+        """Return a deterministic, credential-free Codex home for one lane."""
+
+        configured_home = getattr(self._runtime_config, "codex_home", None)
+        try:
+            base_home = Path(configured_home() if callable(configured_home) else configured_home).expanduser().resolve()
+        except (TypeError, ValueError, OSError):
+            return None
+        env_key = str(profile.get("env_key") or "OPENAI_API_KEY")
+        secret_fingerprint = None
+        fingerprint = getattr(self._secrets, "fingerprint", None)
+        if callable(fingerprint):
+            try:
+                secret_fingerprint = fingerprint(environment.get(env_key))
+            except Exception:
+                secret_fingerprint = None
+        mcp_updated_at = None
+        try:
+            mcp_updated_at = dict(self._mcp_config.snapshot() or {}).get("updated_at")
+        except Exception:
+            pass
+        lane_hint = (
+            str(profile.get("provider_id") or "").strip().lower(),
+            str(profile.get("model") or "").strip(),
+            str(profile.get("base_url") or "").strip(),
+            str(profile.get("wire_api") or "").strip().lower(),
+            env_key,
+            secret_fingerprint,
+            str(profile.get("proxy_mode") or "direct").strip().lower(),
+            str(profile.get("proxy_url") or "").strip(),
+            self._execution_host(),
+            self._wsl_distro(),
+            mcp_updated_at,
+        )
+        return base_home.parent / "runtime-lanes" / RuntimeClientPool.lane_id_for(lane_hint)
 
     def _should_defer_runtime_prepare(self, profile: dict[str, Any]) -> bool:
         if not (self._runtime_start_turn_in_progress or self._runtime_thread_start_in_progress):
@@ -2701,10 +2800,18 @@ class RuntimeService:
 
     def _ensure_client(self, runtime_status: dict[str, Any]) -> AppServerClient:
         desired_signature = self._runtime_config.runtime_signature(runtime_status)
+        self._runtime_client_pool.reap_idle()
+        close_legacy_client = False
         with self._lock:
-            if self._client is not None and self._client.is_running():
-                if self._runtime_signature == desired_signature:
-                    return self._client
+            current = self._client
+            current_signature = self._runtime_signature
+            current_is_pooled = self._runtime_projection_is_pooled
+            if current is not None and current.is_running() and current_signature == desired_signature:
+                # Selecting the same signature never requires a process
+                # lifecycle transition. This also preserves compatibility for
+                # callers that inject a legacy unpooled client in tests.
+                return current
+            if current is not None and current.is_running() and current_signature != desired_signature and not current_is_pooled:
                 if (
                     (self._runtime_start_turn_in_progress and not getattr(self._runtime_operation_local, "in_start_turn", False))
                     or (self._runtime_thread_start_in_progress and not getattr(self._runtime_operation_local, "in_thread_start", False))
@@ -2720,50 +2827,120 @@ class RuntimeService:
                     raise RuntimeError("runtime_switch_deferred_start_turn")
                 if self._runtime_switch_is_pinned_signature(desired_signature):
                     raise RuntimeError("runtime_switch_deferred_active_turn")
-                self._close_client("runtime_signature_mismatch")
-            launch = self._resolve_launch_target(runtime_status)
-            env = os.environ.copy()
-            try:
-                workspace_root = self._projects.require_workspace_root()
-                env["ASTRABRIDGE_WORKSPACE_ROOT"] = str(workspace_root)
-                env["ASTRABRIDGE_ASSET_ROOT"] = str(workspace_root / WORKSPACE_STATE_DIRNAME / "assets" / "generated")
-                runtime_roots = self._projects.current_runtime_roots()
-                env["ASTRABRIDGE_PROJECT_RUNTIME_ROOT"] = str(runtime_roots["project_runtime_root"])
-                env["ASTRABRIDGE_DOWNLOADS_ROOT"] = str(runtime_roots["downloads_root"])
-                env["ASTRABRIDGE_CACHES_ROOT"] = str(runtime_roots["caches_root"])
-                env["ASTRABRIDGE_TMP_ROOT"] = str(runtime_roots["tmp_root"])
-            except Exception:
-                pass
-            client = AppServerClient(
-                codex_executable=launch["codex_executable"],
-                launch_command=launch["launch_command"],
-                ws_url=launch.get("ws_url"),
-                env={**env, **dict(launch.get("env_updates") or {})},
-                cwd=launch["cwd"],
-                allow_plugins=bool(launch.get("allow_plugins")),
-                on_notification=self._on_notification,
-                on_server_request=self._on_server_request,
-                on_stderr=self._on_stderr,
-            )
-            try:
-                client.start()
-            except TimeoutError as exc:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-                raise RuntimeError(
-                    "Codex runtime initialization timed out. The desktop app-server did not become ready in time."
-                ) from exc
-            except Exception as exc:  # noqa: BLE001
-                try:
-                    client.close()
-                except Exception:
-                    pass
-                raise RuntimeError(f"Codex runtime failed to start: {exc}") from exc
+                # Compatibility path for callers/tests that inject a legacy
+                # unpooled client directly. Production clients are lane-owned
+                # and are never closed merely because another signature starts.
+                close_legacy_client = True
+        if close_legacy_client:
+            self._close_client("runtime_signature_mismatch")
+        client = self._runtime_client_pool.get_or_create(
+            desired_signature,
+            lambda: self._create_runtime_client(runtime_status, desired_signature),
+        )
+        with self._lock:
             self._client = client
             self._runtime_signature = desired_signature
-            self._record_event({"type": "runtime_started", "runtime": runtime_status})
+            self._runtime_projection_is_pooled = True
+        return client
+
+    def _create_runtime_client(
+        self,
+        runtime_status: dict[str, Any],
+        signature: tuple[Any, ...],
+    ) -> AppServerClient:
+        launch = self._resolve_launch_target(runtime_status)
+        lane_id = RuntimeClientPool.lane_id_for(signature)
+        env = dict(self._runtime_lane_environments.get(lane_id) or os.environ)
+        env.update(self._router_runtime_environment())
+        try:
+            workspace_root = self._projects.require_workspace_root()
+            env["ASTRABRIDGE_WORKSPACE_ROOT"] = str(workspace_root)
+            env["ASTRABRIDGE_ASSET_ROOT"] = str(workspace_root / WORKSPACE_STATE_DIRNAME / "assets" / "generated")
+            runtime_roots = self._projects.current_runtime_roots()
+            env["ASTRABRIDGE_PROJECT_RUNTIME_ROOT"] = str(runtime_roots["project_runtime_root"])
+            env["ASTRABRIDGE_DOWNLOADS_ROOT"] = str(runtime_roots["downloads_root"])
+            env["ASTRABRIDGE_CACHES_ROOT"] = str(runtime_roots["caches_root"])
+            env["ASTRABRIDGE_TMP_ROOT"] = str(runtime_roots["tmp_root"])
+        except Exception:
+            pass
+        client = AppServerClient(
+            codex_executable=launch["codex_executable"],
+            launch_command=launch["launch_command"],
+            ws_url=launch.get("ws_url"),
+            env={**env, **dict(launch.get("env_updates") or {})},
+            cwd=launch["cwd"],
+            allow_plugins=bool(launch.get("allow_plugins")),
+            on_notification=self._on_notification,
+            on_server_request=self._on_server_request,
+            on_stderr=self._on_stderr,
+        )
+        try:
+            client.start()
+        except TimeoutError as exc:
+            try:
+                client.close()
+            except Exception:
+                pass
+            raise RuntimeError(
+                "Codex runtime initialization timed out. The desktop app-server did not become ready in time."
+            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            try:
+                client.close()
+            except Exception:
+                pass
+            raise RuntimeError(f"Codex runtime failed to start: {exc}") from exc
+        self._record_event({"type": "runtime_started", "runtime": runtime_status})
+        return client
+
+    def _router_runtime_environment(self) -> dict[str, str]:
+        router_environment = getattr(self._router, "runtime_environment", None)
+        if not callable(router_environment):
+            return {}
+        try:
+            values = dict(router_environment() or {})
+        except Exception as exc:  # noqa: BLE001
+            self._record_event({"type": "router_runtime_environment_failed", "error": str(exc)[:300]})
+            return {}
+        required = {"ASTRABRIDGE_BASE_URL", ROUTER_ENV_KEY}
+        if not required.issubset(values):
+            self._record_event({"type": "router_runtime_environment_incomplete", "keys": sorted(values)})
+            return {}
+        return {key: str(value) for key, value in values.items() if value is not None}
+
+    def _close_client(self, reason: str) -> None:
+        client = self._detach_client()
+        if client is None:
+            self._record_event({"type": "runtime_lane_retire_requested", "reason": reason})
+            return
+        try:
+            # ``RuntimeClientPool.close_lane`` has already closed an idle
+            # client. Calling close again is harmless for legacy injected
+            # clients and keeps the compatibility path straightforward.
+            client.close()
+        finally:
+            self._record_event({"type": "runtime_stopped", "reason": reason})
+
+    def _detach_client(self) -> Any | None:
+        with self._lock:
+            signature = self._runtime_signature
+            client = self._client
+        pooled = signature is not None and self._runtime_client_pool.has_lane(signature)
+        if not pooled and client is None:
+            return
+        if pooled and signature is not None:
+            client = self._runtime_client_pool.close_lane(signature, force=False)
+            self._runtime_lane_environments.pop(RuntimeClientPool.lane_id_for(signature), None)
+        with self._lock:
+            self._client = None
+            self._runtime_signature = None
+            self._runtime_projection_is_pooled = False
+            self._mcp_status_thread_signature = None
+            self._mcp_status_thread_id = None
+            self._runtime_pin_signature = None
+            self._runtime_pin_until_monotonic = 0.0
+            self._runtime_pin_thread_id = None
+            self._runtime_pin_turn_id = None
             return client
 
     def _runtime_request_client(self, runtime_status: dict[str, Any]) -> "_RuntimeRequestClient":
@@ -2785,6 +2962,12 @@ class RuntimeService:
         with self._lock:
             signature = self._runtime_config.runtime_signature(runtime_status)
             if self._client is not None and self._runtime_signature is not None and signature != self._runtime_signature:
+                if self._runtime_projection_is_pooled:
+                    # A pooled lane remains valid while another provider lane
+                    # is prepared. The subsequent caller selects the desired
+                    # lane through ``_ensure_client`` instead of closing this
+                    # one as a global singleton implementation did.
+                    return
                 if (
                     (self._runtime_start_turn_in_progress and not getattr(self._runtime_operation_local, "in_start_turn", False))
                     or (self._runtime_thread_start_in_progress and not getattr(self._runtime_operation_local, "in_thread_start", False))
@@ -2823,6 +3006,8 @@ class RuntimeService:
         return self._runtime_switch_is_pinned_signature(signature)
 
     def _runtime_switch_is_pinned_signature(self, requested_signature: tuple[Any, ...]) -> bool:
+        if self._runtime_projection_is_pooled:
+            return False
         if getattr(self._runtime_operation_local, "in_start_turn", False):
             return False
         return (
@@ -5751,6 +5936,19 @@ class _RuntimeRequestClient:
         self._runtime = runtime
         self._runtime_status = runtime_status
         self._client = runtime._ensure_client(runtime_status)
+        self._lease = None
+        try:
+            signature = runtime._runtime_config.runtime_signature(runtime_status)
+            if runtime._runtime_client_pool.has_lane(signature):
+                self._lease = runtime._runtime_client_pool.acquire(
+                    signature,
+                    lambda: self._client,
+                )
+                self._client = self._lease.client
+        except Exception:
+            # Compatibility doubles may not implement the production pool
+            # surface. They continue to use the raw client facade.
+            self._lease = None
 
     def is_running(self) -> bool:
         return self._client.is_running()
@@ -5770,9 +5968,32 @@ class _RuntimeRequestClient:
                     "runtime": self._runtime_status,
                 }
             )
+            self._release_lease()
             self._runtime._close_client(f"{method}_transport_retry")
             self._client = self._runtime._ensure_client(self._runtime_status)
+            try:
+                signature = self._runtime._runtime_config.runtime_signature(self._runtime_status)
+                if self._runtime._runtime_client_pool.has_lane(signature):
+                    self._lease = self._runtime._runtime_client_pool.acquire(signature, lambda: self._client)
+                    self._client = self._lease.client
+            except Exception:
+                self._lease = None
             return self._client.request(method, params, timeout=timeout)
+
+    def close(self) -> None:
+        self._release_lease()
+
+    def _release_lease(self) -> None:
+        lease = self._lease
+        self._lease = None
+        if lease is not None:
+            lease.release()
+
+    def __del__(self) -> None:
+        try:
+            self._release_lease()
+        except Exception:
+            pass
 
 
 class _ExistingProbeClient:
