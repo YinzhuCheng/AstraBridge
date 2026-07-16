@@ -1,6 +1,6 @@
 # Verification Matrix
 
-Last updated: 2026-06-27
+Last updated: 2026-07-10
 
 ## Quick Gate
 
@@ -13,9 +13,12 @@ python scripts/run_local_gate.py --quick
 The quick gate runs:
 
 - `python scripts/repo_governance_check.py --repo .`
+- `python scripts/app_hardening_secret_scan.py --repo .`
+- `python scripts/contract_boundary_audit.py`
 - `python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_repo_governance_check.py`
+- `python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_app_hardening_secret_scan.py`
 
-Expected result: no governance errors and passing governance-script tests.
+Expected result: no governance or secret-scan errors and passing focused checker tests. The governance pass includes canonical document-registry coverage, replacement-chain validation, current-guidance local-link checks, mojibake checks, and retired-path guardrails.
 
 ## Focused Gate
 
@@ -28,9 +31,12 @@ python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_web_lane.p
 
 cd apps/astrabridge-desktop
 npm.cmd test -- src/features/i18n/catalog.test.ts
+npm.cmd test -- src/features/ui/uiSystem.test.ts src/features/navigation/SetupLandingPanel.test.tsx
 ```
 
 Expected result: quick gate passes and the touched subsystem's regression tests pass.
+
+For shared UI density, tooltips, or surface hierarchy changes, also capture a desktop and a `900x760` in-app-browser screenshot. Include one keyboard-focus, hover-tooltip, or disabled-control state when the browser control channel is available.
 
 ## Full Local Gate
 

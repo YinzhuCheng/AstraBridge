@@ -1,6 +1,6 @@
 # AstraBridge Handoff
 
-Last updated: 2026-06-25
+Last updated: 2026-07-10
 
 ## Product Identity
 
@@ -18,6 +18,16 @@ Last updated: 2026-06-25
 - OpenAI is a normal API-key provider
 - Runtime state is app-owned and isolated
 - `PRIVATE/**` is local-only and must not be pushed
+
+## Canonical Entry Points
+
+- Document and plan status: [DOCUMENT_REGISTRY.md](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.md)
+- Machine-readable registry: [DOCUMENT_REGISTRY.json](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.json)
+- Current default execution queue: [ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md)
+- Fast current state: [PROJECT_SUMMARY.md](/D:/AstraBridge/docs/PROJECT_SUMMARY.md)
+- Interface status and cleanup rules: [INTERFACE_GOVERNANCE.md](/D:/AstraBridge/docs/INTERFACE_GOVERNANCE.md)
+
+Do not resume an older plan from its embedded progress text until the registry confirms that it is active for the current request. Completed and superseded plans remain evidence, not queues.
 
 ## Current Architecture
 
@@ -131,13 +141,16 @@ Extensions rules:
 
 ## Current Validated Baseline
 
-Most recent validated desktop baseline in the current repository normalization pass:
+Current second-phase baseline captured on 2026-07-10:
 
-- `cd D:\AstraBridge\apps\astrabridge-desktop`
-- `cmd /c npm run test`
-- `cmd /c npm run build`
+- Baseline report: `PRIVATE/app-standardization-ui-dogfood/baseline/step1-baseline.md`
+- Desktop suite: `296` passed / `4` failed.
+- Desktop build: passed with the known large-chunk warning.
+- Quick governance gate: two known mojibake errors remain in a completed Agent Graph GUI/runtime record.
+- UI evidence: 10 visible in-app-browser screenshots, including `1280x720` and `900x760`.
+- Provider usage: no live call, `0` tokens.
 
-These commands passed on `2026-06-23` during repository normalization steps `1.1` and `1.2`.
+The green 2026-06-23 repository-normalization baseline remains historical evidence. It does not override current failures in the dirty worktree.
 
 Additional validated baseline notes:
 
@@ -187,6 +200,8 @@ The repository normalization and Codex kernel/plugin/skill integration plans are
 
 ## Active Operator Entry Points
 
+- [Canonical Document Registry](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.md)
+- [Current Standardization, UI, And Live Dogfood Plan](/D:/AstraBridge/PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md)
 - [Project Summary](/D:/AstraBridge/docs/PROJECT_SUMMARY.md)
 - [Project Log](/D:/AstraBridge/docs/PROJECT_LOG.md)
 - [Asset Sources](/D:/AstraBridge/docs/ASSET_SOURCES.md)
@@ -216,8 +231,9 @@ When a follow-up agent touches kernel or extension work, do not improvise the wo
 
 When continuing a numbered execution plan, follow the plan that explicitly owns the requested work:
 
-- if the user asks for capability runtime work, use [CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md](/D:/AstraBridge/PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md)
-- if the user asks for UI hardening, dogfood, or other tracked follow-up work, use the matching current plan under `PLAN/`
+- use [DOCUMENT_REGISTRY.md](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.md) to resolve plan status before following any embedded progress block
+- for the current documentation/API normalization, UI renewal, and live-dogfood objective, use [ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md)
+- if the user explicitly asks for capability-runtime implementation or advancement, use the conditional active [CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md](/D:/AstraBridge/PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md)
 - the repository normalization plan is complete and should not be reopened unless the user explicitly asks to revise that historical record
 - complete one full numbered step per turn when a plan declares that cadence, then update that plan's progress and completion record
 

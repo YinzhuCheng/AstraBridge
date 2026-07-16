@@ -76,6 +76,8 @@ Use this only when the task explicitly requires real provider connectivity or mo
 
 ## Current Entry Points
 
+- [Canonical Document Registry](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.md)
+- [Current Standardization, UI, And Live Dogfood Plan](/D:/AstraBridge/PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md)
 - [Project Summary](/D:/AstraBridge/docs/PROJECT_SUMMARY.md)
 - [Repository Governance](/D:/AstraBridge/docs/REPO_GOVERNANCE.md)
 - [Verification Matrix](/D:/AstraBridge/docs/VERIFICATION_MATRIX.md)
@@ -87,6 +89,8 @@ Use this only when the task explicitly requires real provider connectivity or mo
 - [Release Checklist](/D:/AstraBridge/docs/RELEASE_CHECKLIST.md)
 - [Completed Repository Normalization Record](/D:/AstraBridge/PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md)
 - [Legacy Compatibility Shim Archive](/D:/AstraBridge/docs/archive/LEGACY_COMPATIBILITY_SHIMS.md)
+
+`docs/DOCUMENT_REGISTRY.json` is the machine-readable source for document and plan status. Do not resume a plan merely because its own historical progress block says `In progress`; follow the registry's status, replacement, and activation fields.
 
 ## Local Governance Gate
 

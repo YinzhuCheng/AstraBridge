@@ -1,6 +1,6 @@
 # Security And Isolation
 
-Last updated: 2026-06-26
+Last updated: 2026-07-12
 
 ## Local Dev Port Isolation
 
@@ -80,6 +80,7 @@ See [PRIVATE/README.md](/D:/AstraBridge/PRIVATE/README.md) for the local-only ru
 Use these when testing or running a clean-user demo:
 
 - `ASTRABRIDGE_APPDATA`
+- `ASTRABRIDGE_RUNTIME_ROOT`
 - `ASTRABRIDGE_CODEX_HOME`
 
 Recommended use cases:
@@ -95,6 +96,16 @@ Isolation objective:
 - make demo and smoke runs reproducible
 - make cleanup optional rather than required
 
+The Windows desktop launcher removes inherited `CODEX_HOME` and
+`ASTRABRIDGE_CODEX_HOME` values before starting its managed sidecar. This keeps
+normal desktop projects on their project-specific runtime homes. Direct sidecar
+test/demo launches may still use `ASTRABRIDGE_CODEX_HOME` explicitly.
+
+All AstraBridge-managed roots are fail-closed if they equal, contain, or are
+contained by the conventional official Codex home (`%USERPROFILE%/.codex`). A
+bad override therefore stops with an isolation error instead of sharing state
+with the official app.
+
 ### Safe default storage model
 
 Default per-project storage is intentionally split into:
@@ -103,7 +114,12 @@ Default per-project storage is intentionally split into:
   - `attachments`, `captures`, `downloads`, `caches`, `reviews`, `runtime-cwd`, `tmp`
   - `storage_policy.json`
   - runtime events and internal execution-lane/thread state snapshots
-- Runtime execution roots (large/cross-run artifacts): `%APPDATA%/AstraBridge/runtime/<project-runtime-id>/`
+- Runtime execution roots (large/cross-run artifacts):
+  - Windows default when `D:` is available: `D:/AstraBridgeRuntime/<project-runtime-id>/`
+  - Windows fallback: `%APPDATA%/AstraBridge/runtime/<project-runtime-id>/`
+  - Explicit override: `ASTRABRIDGE_RUNTIME_ROOT/<project-runtime-id>/`
+  - An explicit `ASTRABRIDGE_APPDATA` keeps the runtime below
+    `ASTRABRIDGE_APPDATA/runtime/` for clean-user tests and preserved demos.
   - `project_runtime_root` (shared runtime workspace bucket)
   - `project_runtime_root/codex_home`
   - `project_runtime_root/downloads`
@@ -117,6 +133,12 @@ Default per-project storage is intentionally split into:
   - `ASTRABRIDGE_CODEX_HOME`
 
 These roots must not be inside the user workspace.
+
+The desktop owns the full sidecar process tree. On Windows it terminates that
+tree when the app exits and reclaims a stale AstraBridge `--serve` tree bound to
+the desktop-managed port before a new sidecar starts. Matching requires the
+managed port, an AstraBridge sidecar command marker, and `--serve`; unrelated
+development sidecars and the official `codex.exe` are never selected by name.
 
 ## Artifact Policy
 

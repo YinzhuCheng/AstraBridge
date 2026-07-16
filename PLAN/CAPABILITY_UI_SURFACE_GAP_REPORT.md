@@ -2,6 +2,8 @@
 
 Last updated: 2026-06-25
 
+**Document status:** Completed historical snapshot. Do not use this report as a current implementation queue. Use [CAPABILITY_RUNTIME_SURFACE_MAP.md](/D:/AstraBridge/PLAN/CAPABILITY_RUNTIME_SURFACE_MAP.md) for the maintained surface map and the user-activated capability-runtime plan for executable work.
+
 ## Purpose
 
 This report completes step 1 of `PLAN/CAPABILITY_UI_MANAGEMENT_IMPLEMENTATION_PLAN.md`.

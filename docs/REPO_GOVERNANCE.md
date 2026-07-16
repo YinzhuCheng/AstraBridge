@@ -1,6 +1,6 @@
 # Repository Governance
 
-Last updated: 2026-06-27
+Last updated: 2026-07-10
 
 ## Purpose
 
@@ -36,7 +36,19 @@ Use these statuses when describing plan and documentation files:
 | `archived` | The file documents old behavior, shims, or evidence. | Do not treat it as current product guidance. |
 | `reference` | The file describes stable product context or operator process. | Use it to orient work, not as an execution queue. |
 
-## Current Document Inventory
+## Canonical Document Registry
+
+- Human-readable index: [DOCUMENT_REGISTRY.md](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.md)
+- Machine-readable inventory: [DOCUMENT_REGISTRY.json](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.json)
+
+The registry owns document status, replacement, archive policy, and execution activation. Historical progress text inside a plan does not override the registry. Every superseded entry must name a replacement, and every archived entry must name a replacement or explicit historical purpose.
+
+Only two execution plans are classified `active`:
+
+- `PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md` is the current default queue.
+- `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md` is conditional and activates only when the user explicitly asks to implement or advance capability runtime.
+
+## Bootstrap Document Inventory
 
 | File | Status | Notes |
 | --- | --- | --- |
@@ -45,19 +57,23 @@ Use these statuses when describing plan and documentation files:
 | `docs/PROJECT_SUMMARY.md` | active | Fast project state and current entry points. |
 | `docs/PROJECT_LOG.md` | active | Chronological memory of substantive repository work. |
 | `docs/REPO_GOVERNANCE.md` | active | Governance rules, document status, and local gate policy. |
+| `docs/DOCUMENT_REGISTRY.md` | active | Canonical human-readable document and plan status index. |
+| `docs/DOCUMENT_REGISTRY.json` | active | Machine-readable registry with owner, scope, replacement, and archive policy. |
 | `docs/VERIFICATION_MATRIX.md` | active | Quick/focused/full/release validation matrix. |
 | `docs/OWNERSHIP_BOUNDARIES.md` | active | Product subsystem and state ownership boundaries. |
 | `docs/ASSET_SOURCES.md` | active | Committed asset provenance and local-artifact policy. |
 | `docs/ARCHITECTURE.md` | reference | Current architecture and user mental model. |
 | `docs/HANDOFF.md` | reference | Handoff guidance for future agents/operators. |
 | `docs/LEGACY_CLEANUP_AUDIT.md` | reference | Current classification of legacy residue. |
+| `docs/INTERFACE_GOVERNANCE.md` | reference | Current interface status, evidence, replacement, and cleanup rules. |
 | `docs/archive/LEGACY_COMPATIBILITY_SHIMS.md` | archived | Compatibility shim inventory and do-not-revive list. |
 | `PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md` | complete | Completed normalization record. |
 | `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md` | active | Capability runtime follow-on plan when requested. |
+| `PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md` | active | Current default second-phase execution queue. |
 | `PLAN/CAPABILITY_REAL_SCENARIO_DOGFOOD_PLAN.md` | complete | Completed 24-step dogfood record; preserved evidence. |
 | `PLAN/FIVE_CAPABILITY_REAL_SCENARIO_EXECUTION_PLAN.md` | superseded | Superseded by the completed 24-step dogfood record. |
 
-Other files under `PLAN/**` are execution records, surface maps, or area-specific plans. If a plan is unclear, classify it before resuming it.
+The full 102-entry inventory lives in the canonical registry. Do not infer status for an unlisted future file; add it to the registry before treating it as guidance or an execution queue.
 
 ## Local Governance Gate
 
@@ -70,10 +86,13 @@ python scripts/run_local_gate.py --quick
 
 The governance check scans text files for:
 
-- mojibake outside tests or explicit negative checks
+- registry coverage, required fields, status values, replacement targets, and active-plan activation conflicts
+- broken local Markdown links in registered `active` and `reference` guidance
+- mojibake in current guidance, while preserved completed/superseded records remain auditable historical information
+- retired runtime symbols outside their canonical transport registry, test, archive, or inventory contexts
 - secret-like strings
 - tracked `PRIVATE/**` files other than `PRIVATE/README.md`
-- legacy product paths outside allowed guardrail, archive, test, or shim contexts
+- legacy product paths outside allowed guardrail, archive, completed-history, test, or shim contexts
 - active documents that could mislead agents into treating completed normalization as the current execution queue
 
 Findings are graded:

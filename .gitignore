@@ -11,6 +11,7 @@ test-results/
 playwright-report/
 *.tsbuildinfo
 *.pyc
+*.egg-info/
 .env
 .env.*
 *.key

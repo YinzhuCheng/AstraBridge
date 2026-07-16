@@ -1,6 +1,6 @@
 # Legacy Compatibility Shims
 
-Last updated: 2026-06-27
+Last updated: 2026-07-10
 
 ## Purpose
 
@@ -19,6 +19,7 @@ This archive records legacy entry points that remain only to keep old private ru
 | --- | --- | --- | --- |
 | `apps/astrabridge-sidecar/astrabridge_sidecar/lcr_web_mcp_server.py` | `apps/astrabridge-sidecar/astrabridge_sidecar/astrabridge_web_mcp_server.py` | shim only | The legacy module now aliases the canonical module object so monkeypatches and old imports resolve to the same implementation. |
 | `apps/astrabridge-sidecar/astrabridge_sidecar/lcr_web_service.py` | `apps/astrabridge-sidecar/astrabridge_sidecar/web_tool_service.py` | shim only | Kept for older imports; the service class source of truth is `AstraBridgeWebService`. |
+| RouterService inline provider adapters | `apps/astrabridge-sidecar/astrabridge_sidecar/providers/transports/` | removed 2026-07-10 | The unused historical classes were removed from `router_service.py` after a zero-import audit and transport-registry regression. The original block is preserved in the Step 5 private interface evidence. |
 | `lcr minimal visual mode:` thread-title prefix | `astrabridge minimal visual mode:` | parser compatibility only | `task_service.py` accepts the old prefix only to keep preserved threads readable. New prompts and tests should use the AstraBridge prefix. |
 
 ## Do Not Revive

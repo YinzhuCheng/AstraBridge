@@ -2,6 +2,8 @@
 
 Last updated: 2026-06-25
 
+**Document status:** Completed historical snapshot. Do not resume this report as an implementation queue. Use the maintained extension guidance in [HANDOFF.md](/D:/AstraBridge/docs/HANDOFF.md) and the current registry-selected execution plan.
+
 ## Purpose
 
 This report turns the current AstraBridge plugin and skill situation into an execution-ready gap inventory for the remaining plan steps.

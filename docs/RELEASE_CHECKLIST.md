@@ -1,6 +1,6 @@
 # AstraBridge Release Checklist
 
-Last updated: 2026-06-25
+Last updated: 2026-07-06
 
 This checklist is the product-ready gate for a local AstraBridge preview build. It is written as an operator checklist, not just a developer reminder list.
 
@@ -143,6 +143,105 @@ http://127.0.0.1:<port>/?astrabridge_launch=dogfood&sidecar=http://127.0.0.1:882
   - timestamp
 - Deprecated models show warnings rather than silently disappearing.
 
+## Agentic Update Pipeline Gate
+
+This gate is required when a release candidate changes provider metadata, provider adapters, capability routes, Codex kernel candidate handling, plugin/skill update behavior, automation scheduling, or update review UI.
+
+- Public update workflow docs are current:
+  - [AGENTIC_UPDATE_PIPELINE_RUNBOOK.md](/D:/AstraBridge/docs/AGENTIC_UPDATE_PIPELINE_RUNBOOK.md)
+  - [CODEX_KERNEL_UPGRADE_RUNBOOK.md](/D:/AstraBridge/docs/CODEX_KERNEL_UPGRADE_RUNBOOK.md)
+  - [PROVIDER_MODEL_COMPATIBILITY_RUNBOOK.md](/D:/AstraBridge/docs/PROVIDER_MODEL_COMPATIBILITY_RUNBOOK.md)
+- The release evidence records the user-selected update scope:
+  - `scope`
+  - `providers`
+  - `models` when applicable
+  - `version_policy`
+  - `target_version` when pinned
+  - `apply_mode`
+  - `allow_network`
+  - `allow_provider_calls`
+  - `allow_install`
+  - `allow_code_changes`
+- The updater never silently performs any of these actions:
+  - provider API calls
+  - Codex candidate install or binary switching
+  - metadata apply
+  - source-code mutation
+  - plugin/skill installation
+  - external writeback, merge, push, or release publication
+- A proposal-only or discovery run preserves:
+  - `run-contract.json`
+  - `sources/source-index.json`
+  - `sources/source-pack.jsonl`
+  - `parsed/parser-output.json` or `parsed/codex-kernel-candidates.json`
+  - `proposals/proposal.json`
+  - `diffs/proposal-diff.json`
+  - `validation/validation-report.json`
+  - `rollback/rollback-manifest.json`
+  - `secret-scan/secret-scan-report.json`
+  - `summary.json`
+- If metadata apply is used:
+  - proposal risk is `metadata_only` or lower
+  - manual approval is recorded
+  - apply manifest lists changed paths
+  - rollback manifest validates
+  - rollback has been tested in an isolated state root or equivalent release rehearsal
+- If provider-backed smoke is used:
+  - `allow_provider_calls=true` is recorded in the run contract
+  - credential availability is recorded only as redacted status
+  - smoke artifacts are preserved under `PRIVATE/agentic-update-pipeline/`
+  - no API keys, bearer tokens, cookies, authorization headers, vault passwords, desktop key contents, or raw provider secrets appear in durable artifacts
+- If Codex kernel verification is used:
+  - candidate version and release source are recorded
+  - probe evidence is preserved
+  - smoke evidence is preserved before any `verified` claim
+  - no official Codex config or product `.codex*` project state is written
+- If code-change planning is used:
+  - branch/worktree boundary is recorded
+  - main-worktree mutation is not used unless explicitly authorized
+  - rollback instructions avoid destructive git commands without user approval
+- Required commands for updater-adjacent changes:
+
+```powershell
+cd D:\AstraBridge\apps\astrabridge-sidecar
+.\.venv\Scripts\python.exe -m unittest tests.test_agentic_update_contract tests.test_agentic_update_artifacts tests.test_agentic_update_discovery tests.test_agentic_update_parsers tests.test_agentic_update_diffing tests.test_agentic_update_service
+```
+
+For release candidates that touch the desktop update review panel:
+
+```powershell
+cd D:\AstraBridge\apps\astrabridge-desktop
+cmd /c npm run test -- AgenticUpdateReviewPanel.test.tsx
+cmd /c npm run build
+```
+
+For release candidates that touch automation update checks:
+
+```powershell
+cd D:\AstraBridge\apps\astrabridge-sidecar
+.\.venv\Scripts\python.exe -m unittest tests.test_agentic_update_automation tests.test_automation_api tests.test_agentic_update_service
+```
+
+Required updater secret scan:
+
+```powershell
+cd D:\AstraBridge
+rg -n -i "api[_-]?key\s*[:=]|authorization\s*:|bearer\s+[A-Za-z0-9._~+/=-]{12,}|password\s*[:=]|cookie\s*:|sk-[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AIza[0-9A-Za-z_-]{20,}|BEGIN (RSA|OPENSSH|EC|DSA) PRIVATE KEY" docs PLAN apps/astrabridge-sidecar/skills/agentic-update-pipeline apps/astrabridge-sidecar/astrabridge_sidecar/agentic_updates apps/astrabridge-sidecar/tests/test_agentic_update_*.py scripts/agentic_update_fixture_dogfood.py
+```
+
+Expected updater status language:
+
+- `discovered`: sources fetched or replayed, no promotion claim
+- `proposed`: proposal/diff generated, not applied
+- `applied`: permitted metadata-only apply completed with rollback evidence
+- `verified`: required validation and smoke evidence passed
+- `partial`: usable but warning-gated or incomplete
+- `blocked`: promotion/apply refused until recorded blockers are resolved
+- `deprecated`: source-backed deprecation warning or catalog change
+- `recommended`: verified and manually reviewed enough to suggest
+
+Do not call a provider/model/kernel `recommended` or `verified` when the latest update run is only `proposed`, `partial`, or `blocked`.
+
 ## Runtime Recovery Gate
 
 - Missing or archived current execution lane reprojects visible task focus.
@@ -192,7 +291,8 @@ Example repo scan:
 
 ```powershell
 cd D:\AstraBridge
-rg -n --hidden --glob '!PRIVATE/**' --glob '!node_modules/**' --glob '!dist/**' --glob '!output/**' --glob '!*.png' --glob '!*.jpg' --glob '!*.jpeg' --glob '!*.webp' "Authorization: Bearer|api[_-]?key|sk-[A-Za-z0-9]|vault\\.abvault" .
+$secretPattern = ('Author' + 'ization: Bear' + 'er|api[_-]?' + 'key|sk-' + '[A-Za-z0-9]|vault' + '\.abvault')
+rg -n --hidden --glob '!PRIVATE/**' --glob '!node_modules/**' --glob '!dist/**' --glob '!output/**' --glob '!*.png' --glob '!*.jpg' --glob '!*.jpeg' --glob '!*.webp' $secretPattern .
 ```
 
 If the run changed app-hardening evidence or the docs that describe it:
@@ -266,6 +366,7 @@ The following docs must be aligned with the current product path:
 - [DEMO_RUNBOOK.md](/D:/AstraBridge/docs/DEMO_RUNBOOK.md)
 - [SECURITY_AND_ISOLATION.md](/D:/AstraBridge/docs/SECURITY_AND_ISOLATION.md)
 - [CODEX_KERNEL_UPGRADE_RUNBOOK.md](/D:/AstraBridge/docs/CODEX_KERNEL_UPGRADE_RUNBOOK.md)
+- [AGENTIC_UPDATE_PIPELINE_RUNBOOK.md](/D:/AstraBridge/docs/AGENTIC_UPDATE_PIPELINE_RUNBOOK.md)
 
 Required content coverage:
 
@@ -277,6 +378,7 @@ Required content coverage:
 - capability route and MCP preset management
 - capability dry-run smoke and artifact preview policy
 - runtime kernel compatibility workflow and compatibility-matrix update path
+- agentic update scope/version policy workflow, validation, rollback, and promotion policy
 - plugin/skill inventory, smoke, and install-plan/apply review path
 - browser smoke workflow
 - automation smoke workflow
