@@ -6040,6 +6040,7 @@ const [taskGraphDryRunError, setTaskGraphDryRunError] = useState<string | null>(
 const [taskGraphFixtureRunError, setTaskGraphFixtureRunError] = useState<string | null>(null);
 const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null>(null);
   const [taskGraphLiveDispatchStarted, setTaskGraphLiveDispatchStarted] = useState(false);
+  const [taskGraphStatusRunId, setTaskGraphStatusRunId] = useState<string | null>(null);
   const [taskGraphOptimisticLiveRunRefs, setTaskGraphOptimisticLiveRunRefs] = useState<Record<string, TaskGraphRunRef>>({});
   const [taskGraphLiveRunRefs, setTaskGraphLiveRunRefs] = useState<Record<string, TaskGraphRunRef>>({});
   const [taskGraphImportExportError, setTaskGraphImportExportError] = useState<string | null>(null);
@@ -6183,6 +6184,16 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
     queryFn: () => api.taskGraph(activeTaskGraphId),
     enabled: Boolean(graphWorkspaceOpen && taskGraphHydrationTaskId && activeTaskGraphId),
     refetchInterval: smokeMode ? false : graphWorkspaceOpen ? 4000 : false,
+    retry: smokeMode ? false : undefined,
+  });
+  const taskGraphRunStatus = useQuery({
+    queryKey: ["task-graph-run-status", taskGraphStatusRunId],
+    queryFn: () => api.taskGraphRunStatus(String(taskGraphStatusRunId)),
+    enabled: Boolean(taskGraphStatusRunId),
+    refetchInterval: (query) => {
+      const status = String(query.state.data?.live_run?.run_status ?? "").trim();
+      return status && !["completed", "failed", "cancelled", "partial"].includes(status) ? 1000 : false;
+    },
     retry: smokeMode ? false : undefined,
   });
   const taskGraphTemplateList =
@@ -6645,6 +6656,7 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
     onSuccess: (data) => {
       taskGraphRequestedRunIntentRef.current = null;
       setTaskGraphLiveDispatchStarted(false);
+      setTaskGraphStatusRunId(data.live_run?.run_id ?? null);
       setTaskGraphFixtureRunError(null);
       clearTaskGraphOptimisticLiveRunRef(data.graph?.graph_id ?? data.live_run?.run_ref?.graph_id);
       cacheTaskGraphLiveRunRef(data.live_run?.run_ref);
@@ -6839,6 +6851,24 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       };
     });
   };
+  useEffect(() => {
+    const data = taskGraphRunStatus.data;
+    if (!data) return;
+    cacheTaskGraphLiveRunRef(data.live_run?.run_ref);
+    cacheProjectTask(data.task);
+    if (data.graph) {
+      queryClient.setQueryData(
+        ["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id],
+        { graph: data.graph, task: data.task ?? currentTask },
+      );
+    }
+    queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+    queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    const status = String(data.live_run?.run_status ?? "").trim();
+    if (["completed", "failed", "cancelled", "partial"].includes(status)) {
+      setTaskGraphStatusRunId(null);
+    }
+  }, [taskGraphRunStatus.data]);
   const primeTaskGraphOptimisticLiveRunRef = ({
     graphId,
     taskId,

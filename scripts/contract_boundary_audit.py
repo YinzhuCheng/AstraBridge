@@ -54,6 +54,7 @@ PROTOCOL_TS_GENERATED_PATH = REPO_ROOT / "apps" / "astrabridge-desktop" / "src" 
 PROTOCOL_FIXTURE_PATH = REPO_ROOT / "apps" / "astrabridge-desktop" / "src" / "astrabridge_protocol" / "fixtures" / "protocol_v1.json"
 RUNTIME_CLIENT_POOL_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "runtime_client_pool.py"
 DURABLE_RUN_STORE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "durable_run_store.py"
+GRAPH_SCHEDULER_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "graph_scheduler.py"
 
 EXPECTED_PROVIDER_TRANSPORTS = {
     "qwen": "QwenResponsesTransport",
@@ -85,6 +86,7 @@ def _audit_stability_ownership() -> dict[str, Any]:
         "protocol_package": PROTOCOL_PACKAGE_PATH,
         "runtime_client_pool": RUNTIME_CLIENT_POOL_PATH,
         "durable_run_store": DURABLE_RUN_STORE_PATH,
+        "graph_scheduler": GRAPH_SCHEDULER_PATH,
     }
     missing = [name for name, path in required_paths.items() if not path.exists()]
     if missing:
@@ -101,6 +103,7 @@ def _audit_stability_ownership() -> dict[str, Any]:
         "MCP protocol core and broker boundary",
         "Durable graph run state, scheduler commands, and ordered events",
         "DurableRunEventStore",
+        "DurableGraphScheduler",
         "Canonical NodeType registry and compiled graph executable metadata",
         "ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md",
     )
@@ -161,6 +164,37 @@ def _audit_durable_run_store() -> dict[str, Any]:
         "owner": "astrabridge_sidecar.durable_run_store.DurableRunEventStore",
         "status": "pass" if not errors else "fail",
         "path": str(DURABLE_RUN_STORE_PATH.relative_to(REPO_ROOT)),
+        "errors": errors,
+    }
+
+
+def _audit_graph_scheduler() -> dict[str, Any]:
+    """Verify the async graph scheduler is the runtime dispatch owner."""
+
+    errors: list[str] = []
+    source = GRAPH_SCHEDULER_PATH.read_text(encoding="utf-8") if GRAPH_SCHEDULER_PATH.exists() else ""
+    if not source:
+        errors.append("graph scheduler implementation is missing")
+    for marker in (
+        "class DurableGraphScheduler",
+        "def submit(",
+        "def wait(",
+        "def shutdown(",
+        "_worker_loop",
+        "redact_sensitive",
+    ):
+        if marker not in source:
+            errors.append(f"graph scheduler missing required marker: {marker}")
+    runtime_source_path = SIDECAR_ROOT / "astrabridge_sidecar" / "runtime_service.py"
+    runtime_source = runtime_source_path.read_text(encoding="utf-8") if runtime_source_path.exists() else ""
+    for marker in ("queue_task_graph_run", "_run_graph_scheduler_job", "graph_run_status"):
+        if marker not in runtime_source:
+            errors.append(f"runtime scheduler bridge missing required marker: {marker}")
+    return {
+        "contract": "async_durable_graph_scheduler",
+        "owner": "astrabridge_sidecar.graph_scheduler.DurableGraphScheduler + RuntimeService",
+        "status": "pass" if not errors else "fail",
+        "path": str(GRAPH_SCHEDULER_PATH.relative_to(REPO_ROOT)),
         "errors": errors,
     }
 
@@ -374,6 +408,7 @@ def audit_contract_boundaries() -> dict[str, Any]:
     checks = [
         _audit_stability_ownership(),
         _audit_durable_run_store(),
+        _audit_graph_scheduler(),
         _audit_protocol_schema_generation(),
         _audit_provider_transport_registry(),
         _audit_task_graph_fixtures(),

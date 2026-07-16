@@ -41,6 +41,7 @@ from .codex_skill_enablement import (
 )
 from .codex_skill_probe import probe_skill_discovery
 from .dogfood_run_service import MAX_BROWSER_SMOKE_ACTIONS
+from .graph_scheduler import DurableGraphScheduler
 from .astrabridge_capabilities_mcp_server import _tools as astrabridge_capability_dynamic_tools
 from .astrabridge_web_mcp_server import _tools as astrabridge_web_dynamic_tools
 from .capabilities.capability_routes import resolve_capability_route_entry
@@ -191,6 +192,10 @@ class RuntimeService:
         self._terminal_turn_notifications: dict[tuple[str, str], dict[str, Any]] = {}
         self._observed_turn_aliases: dict[tuple[str, str], dict[str, Any]] = {}
         self._fail_closed_turn_interrupts: set[tuple[str, str]] = set()
+        self._graph_scheduler = DurableGraphScheduler(
+            self._run_graph_scheduler_job,
+            max_workers=4,
+        )
 
     def resolve_capability_route(self, capability_id: str) -> dict[str, Any]:
         configured_models = self._router_config.models() if self._router_config is not None else None
@@ -317,6 +322,7 @@ class RuntimeService:
     def shutdown(self) -> dict[str, Any]:
         """Close every owned runtime lane during sidecar shutdown."""
 
+        self._graph_scheduler.shutdown(wait=False)
         closed_lanes = self._runtime_client_pool.shutdown()
         with self._lock:
             self._runtime_lane_environments.clear()
@@ -1693,7 +1699,327 @@ class RuntimeService:
             "lineage": lineage,
         }
 
+    def _validate_graph_live_run_submission(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate/compile a live run without creating a provider client.
+
+        Admission is deliberately separate from execution.  This keeps the
+        HTTP receipt path bounded while ensuring the background worker cannot
+        discover a graph, budget, policy, or provider-profile error after it
+        has already started a live attempt.
+        """
+
+        if self._tasks is None:
+            raise ValueError("Task service is required for live task-graph execution.")
+        if not isinstance(payload, dict):
+            raise TypeError("Task-graph live run payload must be a dict.")
+        graph_id = str(payload.get("graph_id") or "").strip()
+        if not graph_id:
+            raise ValueError("graph_id is required.")
+        raw_graph = self._tasks.graph_definition(graph_id)
+        if not raw_graph:
+            raise ValueError("Unknown graph_id for live task-graph execution.")
+        graph = validate_graph_definition(raw_graph)
+        task = self._tasks.current_task() or {}
+        run_budget = dict(payload.get("budget") or {}) if isinstance(payload.get("budget"), dict) else {}
+        run_token_limit = self._graph_live_run_token_limit(run_budget)
+        if run_token_limit is None:
+            raise ValueError(
+                "Live task-graph execution requires a positive budget.limits.total_tokens value."
+            )
+        profiles_snapshot = self._profiles.list_profiles() if self._profiles is not None else None
+        configured_models = self._router_config.models() if self._router_config is not None else None
+        dry_run_result = self._tasks.dry_run_graph(
+            {"graph_id": graph_id, "budget": run_budget, "validation_mode": "live"},
+            profiles_snapshot=profiles_snapshot,
+            configured_models=configured_models,
+        )
+        dry_run = dict(dry_run_result.get("dry_run") or {})
+        if str(dry_run.get("overall_status") or "").strip() != "pass":
+            graph_reasons = [
+                str(item).strip()
+                for item in list(dict(dry_run.get("graph_result") or {}).get("reasons") or [])
+                if str(item or "").strip()
+            ]
+            raise ValueError(
+                "Task graph live run is blocked until dry-run passes. "
+                + (graph_reasons[0] if graph_reasons else "Resolve the dry-run findings first.")
+            )
+
+        orchestration_graph = self._tasks._orchestration_graph_for_task_graph(graph)
+        compiled_plan = compile_agent_orchestration_graph(
+            orchestration_graph,
+            known_model_capabilities=self._tasks._known_model_capabilities_for_graph(orchestration_graph),
+        )
+        compiled_nodes = {
+            str(item.get("node_id") or "").strip(): dict(item)
+            for item in list(compiled_plan.get("nodes") or [])
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+        }
+        node_map = {
+            str(item.get("node_id") or "").strip(): dict(item)
+            for item in list(graph.get("nodes") or [])
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+        }
+        parent_thread_id = str(
+            payload.get("parent_thread_id")
+            or self._tasks.visible_provider_thread_id(include_missing_fallback=True)
+            or ""
+        ).strip()
+        if any(
+            str(dict(compiled_nodes.get(node_id) or {}).get("spawn_mode") or "").strip() == "subagent_worker"
+            for node_id in compiled_nodes
+        ) and not parent_thread_id:
+            raise ValueError(
+                "Live task-graph execution requires an active provider thread before starting subagent worker nodes."
+            )
+        prepared_nodes = self._prepare_graph_live_run_nodes(
+            task=task,
+            graph=graph,
+            compiled_nodes=compiled_nodes,
+            node_map=node_map,
+            run_token_limit=run_token_limit,
+        )
+        return {
+            "graph": graph,
+            "task": task,
+            "graph_id": graph_id,
+            "run_budget": run_budget,
+            "run_token_limit": run_token_limit,
+            "compiled_plan": compiled_plan,
+            "compiled_nodes": compiled_nodes,
+            "node_map": node_map,
+            "prepared_nodes": prepared_nodes,
+            "parent_thread_id": parent_thread_id,
+        }
+
+    def queue_task_graph_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist a run receipt and dispatch it independently of HTTP lifetime."""
+
+        submission = self._validate_graph_live_run_submission(payload)
+        graph = dict(submission["graph"])
+        compiled_plan = dict(submission["compiled_plan"])
+        compiled_nodes = dict(submission["compiled_nodes"])
+        run_budget = dict(submission["run_budget"])
+        run_id = new_id("graph-run-live")
+        created_at = now_iso()
+        parallel_groups = [
+            dict(group)
+            for group in list(compiled_plan.get("parallel_groups") or [])
+            if isinstance(group, dict)
+        ]
+        max_parallelism = max(
+            1,
+            int(dict(compiled_plan.get("topology") or {}).get("max_parallelism") or 0),
+            max((len(list(group.get("node_ids") or [])) for group in parallel_groups), default=1),
+        )
+        node_states: dict[str, dict[str, Any]] = {}
+        event_refs: list[dict[str, Any]] = [
+            {
+                "event_id": f"{run_id}-created",
+                "run_id": run_id,
+                "task_id": graph["task_id"],
+                "trace_id": f"trace-{run_id}",
+                "event_type": "run_created",
+                "created_at": created_at,
+                "summary": f"{graph['title']} live task-graph run admitted to the durable scheduler.",
+            }
+        ]
+        for node_id, compiled_node in compiled_nodes.items():
+            dependency_node_ids = [
+                str(item).strip()
+                for item in list(compiled_node.get("dependency_node_ids") or [])
+                if str(item or "").strip()
+            ]
+            node_states[node_id] = {
+                "node_id": node_id,
+                "run_id": run_id,
+                "status": "waiting_on_dependencies" if dependency_node_ids else "queued",
+                "outcome": "pending",
+                "attempt_count": 0,
+                "started_at": created_at,
+                "updated_at": created_at,
+                "worker_origin": None,
+            }
+            event_refs.append(
+                {
+                    "event_id": f"{run_id}-{node_id}-queued",
+                    "run_id": run_id,
+                    "task_id": graph["task_id"],
+                    "trace_id": f"trace-{run_id}",
+                    "event_type": "node_queued",
+                    "created_at": created_at,
+                    "summary": f"{self._tasks._graph_node_label(graph, node_id)} queued for scheduler dispatch.",
+                    "node_id": node_id,
+                }
+            )
+        budget_snapshot = self._tasks._graph_run_budget_snapshot(
+            graph=graph,
+            compiled_plan=compiled_plan,
+            run_budget=run_budget,
+        )
+        queued_manifest = {
+            "schema_version": "astrabridge-task-graph-run-v1",
+            "run_id": run_id,
+            "graph_id": graph["graph_id"],
+            "task_id": graph["task_id"],
+            "trace_id": f"trace-{run_id}",
+            "context_id": f"context-{run_id}",
+            "status": "queued",
+            "entry_node_ids": list(compiled_plan.get("entry_node_ids") or []),
+            "node_run_states": [deepcopy(item) for item in node_states.values()],
+            "artifact_refs": [],
+            "event_refs": deepcopy(event_refs),
+            "approval_state": {"status": "not_required"},
+            "run_policy_snapshot": {
+                "mode": "live_run",
+                "scheduler": "durable_graph_scheduler_v1",
+                "scheduler_owner_id": self._graph_scheduler.owner_id,
+                "template_id": graph.get("template_id"),
+                "parallel_group_count": int(
+                    dict(compiled_plan.get("topology") or {}).get("parallel_group_count")
+                    or len(parallel_groups)
+                ),
+                "max_parallelism": max_parallelism,
+                "parallel_group_ids": [
+                    str(group.get("group_id") or "").strip()
+                    for group in parallel_groups
+                    if str(group.get("group_id") or "").strip()
+                ],
+                "budget": budget_snapshot,
+            },
+            "created_at": created_at,
+            "updated_at": created_at,
+            "state_version": 1,
+        }
+        live_run_ref = self._tasks.record_graph_run(queued_manifest, graph_definition=graph)
+        worker_payload = dict(payload)
+        worker_payload["_scheduler_run_id"] = run_id
+        try:
+            self._graph_scheduler.submit(
+                run_id,
+                worker_payload,
+                max_parallelism=max_parallelism,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._mark_graph_scheduler_failure(run_id, exc)
+            raise
+        return {
+            "schema_version": "astrabridge-task-graph-run-receipt-v1",
+            "queued": True,
+            "live_run": {
+                "run_id": run_id,
+                "run_status": str(live_run_ref.get("status") or "queued"),
+                "run_ref": live_run_ref,
+                "status_url": f"/api/task-graphs/run/status?run_id={run_id}",
+                "events_url": f"/api/task-graphs/run/status?run_id={run_id}",
+                "event_cursor": len(event_refs),
+            },
+            "scheduler": self._graph_scheduler.status(),
+            "graph": graph,
+            "task": self._tasks.task_view(self._tasks.current_task(), compact_graph_runs=True),
+        }
+
+    def _run_graph_scheduler_job(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        worker_payload = dict(payload)
+        worker_payload["_scheduler_run_id"] = str(run_id or "").strip()
+        try:
+            return self.execute_task_graph_run(worker_payload)
+        except Exception as exc:  # noqa: BLE001
+            self._mark_graph_scheduler_failure(str(run_id or "").strip(), exc)
+            raise
+
+    def _mark_graph_scheduler_failure(self, run_id: str, exc: Exception) -> None:
+        clean_run_id = str(run_id or "").strip()
+        if not clean_run_id or self._tasks is None:
+            return
+        error_text = str(redact_sensitive(str(exc) or type(exc).__name__))[:500]
+        try:
+            store = self._tasks.durable_run_store()
+            current = store.load_run(clean_run_id)
+            if current is not None and str(current.get("status") or "") not in {
+                "completed",
+                "failed",
+                "cancelled",
+                "partial",
+            }:
+                updated_at = now_iso()
+                store.compare_and_swap_run(
+                    clean_run_id,
+                    int(current.get("state_version") or 0),
+                    status="failed",
+                    patch={
+                        "failure": {
+                            "failure_kind": "scheduler_dispatch",
+                            "error": error_text,
+                        },
+                        "updated_at": updated_at,
+                    },
+                    event={
+                        "event_id": f"{clean_run_id}-scheduler-failed",
+                        "run_id": clean_run_id,
+                        "task_id": str(current.get("task_id") or ""),
+                        "trace_id": str(current.get("trace_id") or f"trace-{clean_run_id}"),
+                        "event_type": "run_failed",
+                        "created_at": updated_at,
+                        "summary": "Durable graph scheduler could not dispatch the run.",
+                        "failure_kind": "scheduler_dispatch",
+                    },
+                )
+        except Exception:
+            pass
+        try:
+            compact_ref = self._tasks.graph_run_ref(clean_run_id)
+            if compact_ref:
+                compact_ref = {
+                    **dict(compact_ref),
+                    "status": "failed",
+                    "latest_event_type": "run_failed",
+                    "latest_event_at": now_iso(),
+                }
+                self._tasks.persist_graph_run_ref(compact_ref)
+        except Exception:
+            pass
+
+    def graph_scheduler_status(self) -> dict[str, Any]:
+        return self._graph_scheduler.status()
+
+    def graph_run_status(self, run_id: str) -> dict[str, Any]:
+        clean_run_id = str(run_id or "").strip()
+        if not clean_run_id:
+            raise ValueError("run_id is required.")
+        if self._tasks is None:
+            raise ValueError("Task service is required for graph run status.")
+        durable_run = self._tasks.durable_run_store().load_run(clean_run_id, include_events=True)
+        if durable_run is None:
+            raise ValueError("Task graph run not found.")
+        graph_id = str(durable_run.get("graph_id") or "").strip()
+        graph = self._tasks.graph_definition(graph_id) if graph_id else None
+        scheduler_job = self._graph_scheduler.get(clean_run_id)
+        return {
+            "schema_version": "astrabridge-task-graph-run-status-v1",
+            "run": redact_sensitive(durable_run),
+            "live_run": {
+                "run_id": clean_run_id,
+                "run_status": str(durable_run.get("status") or ""),
+                "run_ref": self._tasks.graph_run_ref(clean_run_id),
+                "event_cursor": len(list(durable_run.get("event_refs") or [])),
+            },
+            "events": [
+                redact_sensitive(dict(item))
+                for item in list(durable_run.get("event_refs") or [])
+                if isinstance(item, dict)
+            ],
+            "scheduler_job": scheduler_job,
+            "scheduler": self._graph_scheduler.status(),
+            "graph": graph,
+            "task": self._tasks.task_view(self._tasks.current_task(), compact_graph_runs=True),
+        }
+
     def execute_task_graph_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Synchronous compatibility adapter; normal HTTP callers use the scheduler."""
         if self._tasks is None:
             raise ValueError("Task service is required for live task-graph execution.")
         if not isinstance(payload, dict):
@@ -1766,7 +2092,10 @@ class RuntimeService:
             run_token_limit=run_token_limit,
         )
 
-        run_id = new_id("graph-run-live")
+        scheduler_run_id = str(payload.get("_scheduler_run_id") or "").strip()
+        if not re.fullmatch(r"graph-run-live-[A-Za-z0-9_-]{8,128}", scheduler_run_id):
+            scheduler_run_id = ""
+        run_id = scheduler_run_id or new_id("graph-run-live")
         created_at = now_iso()
         workspace_root = Path(self._projects.require_workspace_root())
         artifact_root = workspace_root / "PRIVATE" / "task-graph" / "live-run" / run_id
@@ -1880,6 +2209,21 @@ class RuntimeService:
         }
         write_json(run_manifest_path, run_manifest)
         live_run_ref = self._tasks.record_graph_run(run_manifest, graph_definition=graph)
+        if scheduler_run_id:
+            # The queued receipt was admitted at state_version 1.  Promote the
+            # durable projection before any provider turn starts; subsequent
+            # snapshots continue through TaskService's CAS bridge.
+            live_run_ref = dict(
+                self._tasks.persist_graph_run_ref(
+                    {
+                        **dict(live_run_ref),
+                        "status": "running",
+                        "latest_event_type": "run_created",
+                        "latest_event_at": created_at,
+                    }
+                ).get("run_ref")
+                or live_run_ref
+            )
 
         incoming_handoffs: dict[str, list[dict[str, Any]]] = {}
         original_visible_thread_id = self._tasks.visible_provider_thread_id(include_missing_fallback=True)

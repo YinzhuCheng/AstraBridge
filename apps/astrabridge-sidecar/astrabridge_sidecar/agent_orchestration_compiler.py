@@ -168,6 +168,10 @@ def compile_agent_orchestration_graph(
             "node_count": len(compiled_nodes),
             "edge_count": len(compiled_edges),
             "parallel_group_count": len(parallel_groups),
+            "max_parallelism": max(
+                1,
+                max((len(list(group.get("node_ids") or [])) for group in parallel_groups), default=1),
+            ),
             "approval_node_count": len(approval_nodes),
             "max_depth": int(dict(canonical.get("graph_policy") or {}).get("max_depth") or 0),
         },

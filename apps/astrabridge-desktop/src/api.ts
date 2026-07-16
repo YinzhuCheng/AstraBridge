@@ -1329,20 +1329,43 @@ export const api = {
     payload: {
       graph_id: string;
       budget: { limits: { total_tokens: number } };
+      compatibility_mode?: "sync";
+      wait_for_completion?: boolean;
     },
     init?: RequestWithTimeout,
   ) =>
     jsonRequest<{
       schema_version: string;
+      queued?: boolean;
       live_run: {
         run_id: string;
         run_status: string;
         run_ref: TaskGraphRunRef;
         artifact_paths?: Record<string, string>;
+        status_url?: string;
+        events_url?: string;
+        event_cursor?: number;
       };
+      scheduler?: Record<string, unknown>;
       graph: TaskGraphDefinition;
       task: ProjectTask | null;
     }>("/api/task-graphs/run", payload, { timeoutMs: 300000, ...(init ?? {}) }),
+  taskGraphRunStatus: (runId: string) =>
+    request<{
+      schema_version: string;
+      run: Record<string, unknown>;
+      live_run: {
+        run_id: string;
+        run_status: string;
+        run_ref?: TaskGraphRunRef | null;
+        event_cursor?: number;
+      };
+      events: Array<Record<string, unknown>>;
+      scheduler_job?: Record<string, unknown> | null;
+      scheduler?: Record<string, unknown>;
+      graph: TaskGraphDefinition | null;
+      task: ProjectTask | null;
+    }>(`/api/task-graphs/run/status?run_id=${encodeURIComponent(runId)}`),
   importTaskGraphFile: (payload: { graph_path?: string | null; graph_text?: string | null }) =>
     jsonRequest<AgentOrchestrationGraphImportResponse>("/api/task-graphs/import", payload),
   exportTaskGraphFile: (payload: { graph_id: string; export_path?: string | null }) =>

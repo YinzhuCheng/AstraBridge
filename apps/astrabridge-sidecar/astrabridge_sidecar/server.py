@@ -566,6 +566,15 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 )
                 return
+            if path == "/api/task-graphs/run/status":
+                run_id = self._optional_query_string(query, "run_id")
+                if not run_id:
+                    raise ValueError("run_id is required.")
+                status_method = getattr(self.context.runtime, "graph_run_status", None)
+                if not callable(status_method):
+                    raise ValueError("Graph run status is unavailable on this runtime.")
+                self.send_json(status_method(run_id))
+                return
             if path in {"/api/task-graphs/graph", "/api/task-graphs/current"}:
                 graph = self.context.tasks.graph_definition(self._optional_query_string(query, "graph_id"))
                 task_view = self.context.tasks.task_view(
@@ -1164,7 +1173,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/task-graphs/run":
                 try:
-                    self.send_json(self.context.runtime.execute_task_graph_run(payload))
+                    queue_method = getattr(self.context.runtime, "queue_task_graph_run", None)
+                    compatibility_mode = str(payload.get("compatibility_mode") or "").strip().lower()
+                    wait_for_completion = bool(payload.get("wait_for_completion"))
+                    if callable(queue_method) and compatibility_mode != "sync" and not wait_for_completion:
+                        self.send_json(queue_method(payload))
+                    else:
+                        self.send_json(self.context.runtime.execute_task_graph_run(payload))
                 except Exception as exc:  # noqa: BLE001
                     structured_error = public_error(exc)
                     graph_id = str(payload.get("graph_id") or "").strip()

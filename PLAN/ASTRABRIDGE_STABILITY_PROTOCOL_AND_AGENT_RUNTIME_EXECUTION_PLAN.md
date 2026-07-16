@@ -195,20 +195,20 @@ Then execute the revised highest-leverage work unit in the same turn when feasib
 ## Current Progress
 
 - Current status: In progress
-- Completed steps: Step 0, Create Durable Execution Plan; Step 1, Reconcile Plan And Contract Ownership; Step 2, Isolate Provider Runtime Client Lanes; Step 3, Establish Canonical Protocol Schemas And Code Generation; Step 4, Add The Workspace-Local Durable Run And Event Store
-- Current step: Step 5, Move Live Graph Execution To An Asynchronous Durable Scheduler
-- Next step: Step 5, Move Live Graph Execution To An Asynchronous Durable Scheduler
-- Last updated: 2026-07-16
+- Completed steps: Step 0, Create Durable Execution Plan; Step 1, Reconcile Plan And Contract Ownership; Step 2, Isolate Provider Runtime Client Lanes; Step 3, Establish Canonical Protocol Schemas And Code Generation; Step 4, Add The Workspace-Local Durable Run And Event Store; Step 5, Move Live Graph Execution To An Asynchronous Durable Scheduler
+- Current step: Step 6, Add Leases, Checkpoints, Startup Reconciliation, And Effect Journaling
+- Next step: Step 6, Add Leases, Checkpoints, Startup Reconciliation, And Effect Journaling
+- Last updated: 2026-07-17
 
 ## Current Work Unit
 
-- ID: STAB-05
-- Goal: Move live graph execution behind an asynchronous scheduler whose durable store is the only state-advancing authority.
-- Inputs: `DurableRunEventStore`; `task_service.py` compatibility bridge; `runtime_service.py` graph execution path; Step 4 CAS/lease/outbox primitives.
-- Expected output: queued run receipt, background scheduler loop, dependency/parallel dispatch, attempt leases, and projection/event reads without HTTP-lifetime coupling.
-- Acceptance check: slow fake-provider creation returns within the bounded receipt budget; closing the caller does not stop the run; dependency ordering and `max_parallelism` hold; only the scheduler advances live state.
+- ID: STAB-06
+- Goal: Add lease/checkpoint/effect-journal semantics on top of the durable scheduler before enabling crash recovery and retries.
+- Inputs: `DurableRunEventStore`; `DurableGraphScheduler`; `task_service.py` compatibility bridge; `runtime_service.py` graph execution path; Step 4 CAS/lease/outbox primitives.
+- Expected output: attempt dispatch intents, owner boot IDs, heartbeats/expiration, startup reconciliation, and idempotent provider/Agent Envelope/MCP effect records.
+- Acceptance check: duplicate submission and completion evidence remain idempotent; a crash before dispatch replays safely; known external handles reattach; ambiguous non-idempotent effects become `needs_review`.
 - Status: queued
-- Next action: Trace the current synchronous live graph entry path and define the smallest scheduler receipt/worker seam without duplicating provider or UI execution.
+- Next action: Trace the current attempt/provider dispatch boundaries and bind scheduler jobs to durable leases and outbox intents without duplicating external effects.
 
 ## Execution Steps
 
@@ -341,7 +341,7 @@ Acceptance criteria:
 - Only the scheduler can move an executing node to its next state.
 - Existing graph definition, compilation, and run API compatibility fixtures pass.
 
-Status: not started
+Status: completed
 
 ### 6. Add Leases, Checkpoints, Startup Reconciliation, And Effect Journaling
 
@@ -775,3 +775,13 @@ Status: not started
 - Environment note: task-graph tests require the existing writable runtime-root override on this machine because the default `D:\AstraBridgeRuntime` is access-denied; no product files or historical artifacts were cleaned.
 - Blockers: None for Step 4.
 - Next step: Step 5, Move Live Graph Execution To An Asynchronous Durable Scheduler.
+
+### 2026-07-17 - Step 5
+
+- Completed: Added `DurableGraphScheduler` with bounded daemon workers, redacted job metadata, idempotent submission, wait/status/shutdown controls, and a runtime callback seam. The normal `/api/task-graphs/run` route now admits a durable queued run and returns a receipt; `RuntimeService.execute_task_graph_run` remains an explicit synchronous compatibility adapter and honors scheduler-owned run IDs only.
+- Durable projection/API: queued manifests are persisted through `TaskService.record_graph_run`/`DurableRunEventStore` before dispatch; scheduler workers promote the durable projection to `running`; `graph_run_status` returns the durable run plus ordered events and scheduler metadata; Desktop API and App polling read the status projection rather than keeping request-local execution state.
+- Dependency/parallel evidence: compiled plans now expose `topology.max_parallelism` derived from independent groups; the existing live path starts all runnable turns in a dependency group before waiting, while scheduler tests prove bounded independent dispatch and the durable receipt boundary.
+- Validation: `test_graph_scheduler.py` passed 4/4 (sub-500 ms receipt, caller-disconnect lifetime, two-worker concurrency, failure redaction, runtime queued receipt); `test_task_graph_worker_runtime.py` passed 39/39; `test_task_graph_api.py` passed 12/12; compiler tests passed 7/7; contract audit passed 7/7; Desktop Vitest/build passed (62 files, 451 tests, production build).
+- Security and preservation: scheduler job/status payloads never expose callback payloads; callback errors are redacted; no secrets or provider credentials were staged; `.pnpm-store/`, `.tmp/`, and `tmp/` remain untracked and preserved; stale-process helper remained clean.
+- Blockers: None for Step 5. Full crash recovery, leases, checkpoints, and effect journaling remain intentionally owned by Step 6.
+- Next step: Step 6, Add Leases, Checkpoints, Startup Reconciliation, And Effect Journaling.
