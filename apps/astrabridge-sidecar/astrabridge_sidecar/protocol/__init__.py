@@ -1,12 +1,20 @@
 """AstraBridge cross-provider protocol ownership boundary.
 
-This package is the migration target for versioned schemas, immutable Agent
-Envelopes, delivery events, and artifact references. Existing graph and
-capability modules remain compatibility bridges until the stability execution
-plan migrates each consumer behind these boundaries.
+The JSON Schema in :mod:`astrabridge_sidecar.protocol.schema.v1` is the sole
+business-schema source. Generated Python/TypeScript projections live in the
+separate ``protocol/generated`` and ``src/astrabridge_protocol/generated``
+directories; existing graph and capability modules are compatibility bridges.
 """
 
-PROTOCOL_PACKAGE_OWNER = "astrabridge_sidecar.protocol"
-PROTOCOL_SCHEMA_VERSION = "astrabridge-protocol-boundary-v1"
+from .generated.v1 import SCHEMA_ID, SCHEMA_VERSION, validate_protocol_payload
 
-__all__ = ["PROTOCOL_PACKAGE_OWNER", "PROTOCOL_SCHEMA_VERSION"]
+PROTOCOL_PACKAGE_OWNER = "astrabridge_sidecar.protocol"
+PROTOCOL_SCHEMA_VERSION = SCHEMA_VERSION
+PROTOCOL_SCHEMA_ID = SCHEMA_ID
+
+__all__ = [
+    "PROTOCOL_PACKAGE_OWNER",
+    "PROTOCOL_SCHEMA_ID",
+    "PROTOCOL_SCHEMA_VERSION",
+    "validate_protocol_payload",
+]

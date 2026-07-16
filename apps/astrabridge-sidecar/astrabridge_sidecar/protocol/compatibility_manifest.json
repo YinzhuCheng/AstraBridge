@@ -1,0 +1,39 @@
+{
+  "manifest_version": "astrabridge-protocol-compatibility-v1",
+  "source_schema": "astrabridge-task-graph-v1|astrabridge-agent-orchestration-graph-v1|astrabridge-agent-orchestration-compiled-plan-v1",
+  "target_schema": "astrabridge-protocol-v1",
+  "write_schema": "astrabridge-protocol-v1",
+  "read_compatibility": [
+    "astrabridge-protocol-v1",
+    "astrabridge-task-graph-v1",
+    "astrabridge-task-graph-run-v1",
+    "astrabridge-agent-orchestration-graph-v1",
+    "astrabridge-agent-orchestration-compiled-plan-v1"
+  ],
+  "idempotent": true,
+  "preserves": [
+    "graph_id",
+    "task_id",
+    "node_ids",
+    "edge_ids",
+    "entry_node_ids",
+    "artifact lineage",
+    "security policy"
+  ],
+  "adapters": [
+    "migrate_graph_definition",
+    "migrate_compiled_plan",
+    "adapt_legacy_artifact_path"
+  ],
+  "artifact_uri_schemes": ["ab-artifact", "workspace"],
+  "forbidden_fields": [
+    "api_key",
+    "access_token",
+    "authorization",
+    "cookie",
+    "private_reasoning",
+    "raw_prompt",
+    "raw_secret",
+    "secret"
+  ]
+}

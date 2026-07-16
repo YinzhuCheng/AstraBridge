@@ -1,0 +1,188 @@
+{
+  "valid": {
+    "ArtifactRef": {
+      "artifact_id": "artifact-1",
+      "artifact_uri": "workspace://.astrabridge/runs/run-1/artifacts/artifact-1.json",
+      "media_type": "application/json",
+      "status": "ready",
+      "lineage": {
+        "task_id": "task-1",
+        "run_id": "run-1",
+        "source_node_id": "node-worker"
+      }
+    },
+    "ContentPart": {
+      "part_id": "part-1",
+      "kind": "text",
+      "mime_type": "text/plain",
+      "text": "bounded handoff"
+    },
+    "AgentEnvelope": {
+      "envelope_id": "envelope-1",
+      "schema_version": "astrabridge-protocol-v1",
+      "message_id": "message-1",
+      "task_id": "task-1",
+      "run_id": "run-1",
+      "sender": {"agent_id": "agent-a", "provider_id": "qwen", "lane_id": "lane-a"},
+      "recipient": {"agent_id": "agent-b", "provider_id": "deepseek", "lane_id": "lane-b"},
+      "kind": "handoff",
+      "content": [{"part_id": "part-1", "kind": "text", "mime_type": "text/plain", "text": "bounded handoff"}],
+      "created_at": "2026-07-16T12:00:00+09:00",
+      "delivery": {"attempt": 1, "idempotency_key": "delivery-1", "trace_id": "trace-1", "sequence": 0}
+    },
+    "AgentTask": {
+      "task_id": "task-1",
+      "schema_version": "astrabridge-protocol-v1",
+      "run_id": "run-1",
+      "graph_id": "graph-1",
+      "node_id": "node-worker",
+      "kind": "worker",
+      "input": [{"part_id": "part-1", "kind": "text", "mime_type": "text/plain", "text": "bounded input"}],
+      "output_policy": {"mode": "structured_and_artifacts"},
+      "security_policy": {"exclude_private_memory": true},
+      "created_at": "2026-07-16T12:00:00+09:00"
+    },
+    "RunEvent": {
+      "event_id": "event-1",
+      "schema_version": "astrabridge-protocol-v1",
+      "run_id": "run-1",
+      "task_id": "task-1",
+      "trace_id": "trace-1",
+      "sequence": 0,
+      "event_type": "run_created",
+      "created_at": "2026-07-16T12:00:00+09:00",
+      "payload": {"status": "queued"}
+    },
+    "CapabilityInput": {
+      "capability_id": "image.inspect",
+      "schema_version": "astrabridge-protocol-v1",
+      "request_id": "request-1",
+      "input": {"prompt": "inspect the image"},
+      "created_at": "2026-07-16T12:00:00+09:00"
+    },
+    "CapabilityOutput": {
+      "capability_id": "image.inspect",
+      "schema_version": "astrabridge-protocol-v1",
+      "request_id": "request-1",
+      "status": "ok",
+      "output": {"labels": ["diagram"]},
+      "created_at": "2026-07-16T12:00:01+09:00"
+    },
+    "GraphDefinition": {
+      "schema_version": "astrabridge-protocol-v1",
+      "graph_id": "graph-1",
+      "task_id": "task-1",
+      "title": "Protocol fixture graph",
+      "nodes": [
+        {
+          "node_id": "node-start",
+          "kind": "worker",
+          "label": "Start",
+          "ports": {
+            "inputs": [{"port_id": "task_context", "port_type": "text", "required": true}],
+            "outputs": [{"port_id": "machine_result", "port_type": "structured_json", "schema_ref": "schema.result"}]
+          }
+        }
+      ],
+      "edges": [],
+      "entry_node_ids": ["node-start"],
+      "state_version": 1,
+      "migration": {
+        "source_schema": "astrabridge-protocol-v1",
+        "target_schema": "astrabridge-protocol-v1",
+        "idempotency_key": "graph:graph-1:1"
+      }
+    },
+    "CompiledPlan": {
+      "schema_version": "astrabridge-protocol-v1",
+      "graph_id": "graph-1",
+      "task_id": "task-1",
+      "graph_schema_version": "astrabridge-protocol-v1",
+      "compiled_at": "2026-07-16T12:00:00+09:00",
+      "entry_node_ids": ["node-start"],
+      "topology": {"node_count": 1, "edge_count": 0},
+      "nodes": [{"node_id": "node-start", "kind": "worker"}],
+      "edges": []
+    },
+    "MigrationManifest": {
+      "manifest_version": "astrabridge-protocol-compatibility-v1",
+      "source_schema": "astrabridge-task-graph-v1",
+      "target_schema": "astrabridge-protocol-v1",
+      "idempotent": true,
+      "preserves": ["graph_id", "node_ids", "edge_ids", "artifact lineage", "security policy"],
+      "adapters": ["migrate_graph_definition"]
+    }
+  },
+  "invalid": {
+    "invalid_port_type": {
+      "kind": "GraphDefinition",
+      "payload": {
+        "schema_version": "astrabridge-protocol-v1",
+        "graph_id": "graph-invalid-port",
+        "task_id": "task-1",
+        "title": "Invalid port",
+        "nodes": [{"node_id": "node-start", "kind": "worker", "ports": {"inputs": [{"port_id": "bad", "port_type": "telepathy"}]}}],
+        "edges": [],
+        "entry_node_ids": ["node-start"],
+        "state_version": 1,
+        "migration": {"source_schema": "astrabridge-protocol-v1", "target_schema": "astrabridge-protocol-v1", "idempotency_key": "invalid-port"}
+      }
+    },
+    "invalid_schema_ref": {
+      "kind": "GraphDefinition",
+      "payload": {
+        "schema_version": "astrabridge-protocol-v1",
+        "graph_id": "graph-invalid-ref",
+        "task_id": "task-1",
+        "title": "Invalid schema ref",
+        "nodes": [{"node_id": "node-start", "kind": "worker", "schema_ref": "https://example.invalid/schema"}],
+        "edges": [],
+        "entry_node_ids": ["node-start"],
+        "state_version": 1,
+        "migration": {"source_schema": "astrabridge-protocol-v1", "target_schema": "astrabridge-protocol-v1", "idempotency_key": "invalid-ref"}
+      }
+    },
+    "invalid_artifact_uri": {
+      "kind": "ArtifactRef",
+      "payload": {
+        "artifact_id": "artifact-invalid",
+        "artifact_uri": "https://outside.invalid/secret.json",
+        "media_type": "application/json",
+        "status": "ready",
+        "lineage": {"task_id": "task-1", "run_id": "run-1", "source_node_id": "node-worker"}
+      }
+    },
+    "private_reasoning_field": {
+      "kind": "AgentEnvelope",
+      "payload": {
+        "envelope_id": "envelope-private",
+        "schema_version": "astrabridge-protocol-v1",
+        "message_id": "message-private",
+        "task_id": "task-1",
+        "run_id": "run-1",
+        "sender": {"agent_id": "agent-a", "provider_id": "qwen"},
+        "recipient": {"agent_id": "agent-b", "provider_id": "deepseek"},
+        "kind": "result",
+        "content": [{"part_id": "part-1", "kind": "text", "mime_type": "text/plain", "text": "safe"}],
+        "created_at": "2026-07-16T12:00:00+09:00",
+        "delivery": {"attempt": 1, "idempotency_key": "delivery-private", "trace_id": "trace-private"},
+        "private_reasoning": "must never cross the envelope boundary"
+      }
+    },
+    "missing_envelope_required_field": {
+      "kind": "AgentEnvelope",
+      "payload": {
+        "envelope_id": "envelope-missing",
+        "schema_version": "astrabridge-protocol-v1",
+        "message_id": "message-missing",
+        "task_id": "task-1",
+        "run_id": "run-1",
+        "sender": {"agent_id": "agent-a", "provider_id": "qwen"},
+        "kind": "task",
+        "content": [{"part_id": "part-1", "kind": "text", "mime_type": "text/plain", "text": "safe"}],
+        "created_at": "2026-07-16T12:00:00+09:00",
+        "delivery": {"attempt": 1, "idempotency_key": "delivery-missing", "trace_id": "trace-missing"}
+      }
+    }
+  }
+}

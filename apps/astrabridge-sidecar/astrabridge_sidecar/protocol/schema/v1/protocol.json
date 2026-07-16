@@ -1,0 +1,305 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astrabridge.dev/schemas/protocol/v1.json",
+  "title": "AstraBridge cross-provider protocol",
+  "type": "object",
+  "x-astrabridge-schema-version": "astrabridge-protocol-v1",
+  "x-forbidden-properties": [
+    "api_key",
+    "access_token",
+    "authorization",
+    "cookie",
+    "private_reasoning",
+    "raw_prompt",
+    "raw_secret",
+    "secret"
+  ],
+  "$defs": {
+    "Identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "minLength": 1,
+      "format": "date-time"
+    },
+    "SchemaVersion": {
+      "type": "string",
+      "const": "astrabridge-protocol-v1"
+    },
+    "SchemaRef": {
+      "type": "string",
+      "pattern": "^schema\\.[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "PortDefinition": {
+      "type": "object",
+      "required": ["port_id", "port_type"],
+      "properties": {
+        "port_id": {"$ref": "#/$defs/Identifier"},
+        "port_type": {"type": "string", "enum": ["text", "structured_json", "image", "audio", "video", "document", "code_diff", "dataset", "tool_result", "agent_report", "approval_record"]},
+        "shape": {"type": "string", "enum": ["single", "list"]},
+        "required": {"type": "boolean"},
+        "schema_ref": {"$ref": "#/$defs/SchemaRef"}
+      },
+      "additionalProperties": true
+    },
+    "LooseObject": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "ArtifactUri": {
+      "type": "string",
+      "pattern": "^(ab-artifact|workspace)://[A-Za-z0-9._-][A-Za-z0-9._/-]*(\\?[A-Za-z0-9._=&/-]*)?$"
+    },
+    "ArtifactStatus": {
+      "type": "string",
+      "enum": ["pending", "ready", "partial", "blocked", "redacted", "failed"]
+    },
+    "ArtifactLineage": {
+      "type": "object",
+      "required": ["task_id", "run_id", "source_node_id"],
+      "properties": {
+        "task_id": {"$ref": "#/$defs/Identifier"},
+        "run_id": {"$ref": "#/$defs/Identifier"},
+        "source_node_id": {"$ref": "#/$defs/Identifier"},
+        "parent_artifact_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/Identifier"}
+        }
+      },
+      "additionalProperties": true
+    },
+    "ArtifactRef": {
+      "type": "object",
+      "required": ["artifact_id", "artifact_uri", "media_type", "status", "lineage"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/Identifier"},
+        "artifact_uri": {"$ref": "#/$defs/ArtifactUri"},
+        "media_type": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$"},
+        "status": {"$ref": "#/$defs/ArtifactStatus"},
+        "lineage": {"$ref": "#/$defs/ArtifactLineage"},
+        "metadata": {"$ref": "#/$defs/LooseObject"}
+      },
+      "additionalProperties": true
+    },
+    "ContentPart": {
+      "type": "object",
+      "required": ["part_id", "kind", "mime_type"],
+      "properties": {
+        "part_id": {"$ref": "#/$defs/Identifier"},
+        "kind": {"type": "string", "enum": ["text", "artifact", "json", "image", "audio", "video", "document", "code", "tool_result"]},
+        "mime_type": {"type": "string", "minLength": 1},
+        "text": {"type": "string"},
+        "data": {},
+        "artifact": {"$ref": "#/$defs/ArtifactRef"},
+        "metadata": {"$ref": "#/$defs/LooseObject"}
+      },
+      "anyOf": [
+        {"type": "object", "required": ["text"]},
+        {"type": "object", "required": ["data"]},
+        {"type": "object", "required": ["artifact"]}
+      ],
+      "additionalProperties": true
+    },
+    "PeerRef": {
+      "type": "object",
+      "required": ["agent_id", "provider_id"],
+      "properties": {
+        "agent_id": {"$ref": "#/$defs/Identifier"},
+        "provider_id": {"$ref": "#/$defs/Identifier"},
+        "model_id": {"$ref": "#/$defs/Identifier"},
+        "lane_id": {"$ref": "#/$defs/Identifier"}
+      },
+      "additionalProperties": true
+    },
+    "Delivery": {
+      "type": "object",
+      "required": ["attempt", "idempotency_key", "trace_id"],
+      "properties": {
+        "attempt": {"type": "integer", "minimum": 1},
+        "idempotency_key": {"$ref": "#/$defs/Identifier"},
+        "trace_id": {"$ref": "#/$defs/Identifier"},
+        "sequence": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "AgentEnvelope": {
+      "type": "object",
+      "required": ["envelope_id", "schema_version", "message_id", "task_id", "run_id", "sender", "recipient", "kind", "content", "created_at", "delivery"],
+      "properties": {
+        "envelope_id": {"$ref": "#/$defs/Identifier"},
+        "schema_version": {"$ref": "#/$defs/SchemaVersion"},
+        "message_id": {"$ref": "#/$defs/Identifier"},
+        "task_id": {"$ref": "#/$defs/Identifier"},
+        "run_id": {"$ref": "#/$defs/Identifier"},
+        "sender": {"$ref": "#/$defs/PeerRef"},
+        "recipient": {"$ref": "#/$defs/PeerRef"},
+        "kind": {"type": "string", "enum": ["task", "result", "event", "handoff", "control"]},
+        "content": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/ContentPart"}},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "delivery": {"$ref": "#/$defs/Delivery"},
+        "security_policy": {"$ref": "#/$defs/LooseObject"},
+        "metadata": {"$ref": "#/$defs/LooseObject"}
+      },
+      "additionalProperties": true
+    },
+    "AgentTask": {
+      "type": "object",
+      "required": ["task_id", "schema_version", "run_id", "graph_id", "node_id", "kind", "input", "output_policy", "security_policy", "created_at"],
+      "properties": {
+        "task_id": {"$ref": "#/$defs/Identifier"},
+        "schema_version": {"$ref": "#/$defs/SchemaVersion"},
+        "run_id": {"$ref": "#/$defs/Identifier"},
+        "graph_id": {"$ref": "#/$defs/Identifier"},
+        "node_id": {"$ref": "#/$defs/Identifier"},
+        "kind": {"type": "string", "minLength": 1},
+        "input": {"type": "array", "items": {"$ref": "#/$defs/ContentPart"}},
+        "output_policy": {"$ref": "#/$defs/LooseObject"},
+        "security_policy": {"$ref": "#/$defs/LooseObject"},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "metadata": {"$ref": "#/$defs/LooseObject"}
+      },
+      "additionalProperties": true
+    },
+    "RunEvent": {
+      "type": "object",
+      "required": ["event_id", "schema_version", "run_id", "task_id", "trace_id", "sequence", "event_type", "created_at", "payload"],
+      "properties": {
+        "event_id": {"$ref": "#/$defs/Identifier"},
+        "schema_version": {"$ref": "#/$defs/SchemaVersion"},
+        "run_id": {"$ref": "#/$defs/Identifier"},
+        "task_id": {"$ref": "#/$defs/Identifier"},
+        "trace_id": {"$ref": "#/$defs/Identifier"},
+        "sequence": {"type": "integer", "minimum": 0},
+        "event_type": {"type": "string", "enum": ["run_created", "run_dry_run_started", "run_dry_run_completed", "node_queued", "node_started", "node_progress", "node_completed", "node_blocked", "node_failed", "node_cancelled", "artifact_created", "artifact_redacted", "approval_requested", "approval_resolved", "handoff_created", "run_cancel_requested", "run_cancelled", "run_completed", "run_failed", "run_rolled_back"]},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "payload": {"$ref": "#/$defs/LooseObject"},
+        "artifact_refs": {"type": "array", "items": {"$ref": "#/$defs/ArtifactRef"}}
+      },
+      "additionalProperties": true
+    },
+    "CapabilityInput": {
+      "type": "object",
+      "required": ["capability_id", "schema_version", "request_id", "input", "created_at"],
+      "properties": {
+        "capability_id": {"$ref": "#/$defs/Identifier"},
+        "schema_version": {"$ref": "#/$defs/SchemaVersion"},
+        "request_id": {"$ref": "#/$defs/Identifier"},
+        "input": {"$ref": "#/$defs/LooseObject"},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "artifact_refs": {"type": "array", "items": {"$ref": "#/$defs/ArtifactRef"}}
+      },
+      "additionalProperties": true
+    },
+    "CapabilityOutput": {
+      "type": "object",
+      "required": ["capability_id", "schema_version", "request_id", "status", "output", "created_at"],
+      "properties": {
+        "capability_id": {"$ref": "#/$defs/Identifier"},
+        "schema_version": {"$ref": "#/$defs/SchemaVersion"},
+        "request_id": {"$ref": "#/$defs/Identifier"},
+        "status": {"type": "string", "enum": ["ok", "partial", "blocked", "failed"]},
+        "output": {"$ref": "#/$defs/LooseObject"},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "artifact_refs": {"type": "array", "items": {"$ref": "#/$defs/ArtifactRef"}},
+        "diagnostic_refs": {"type": "array", "items": {"$ref": "#/$defs/ArtifactRef"}}
+      },
+      "additionalProperties": true
+    },
+    "GraphNode": {
+      "type": "object",
+      "required": ["node_id", "kind"],
+      "properties": {
+        "node_id": {"$ref": "#/$defs/Identifier"},
+        "kind": {"type": "string", "minLength": 1},
+        "graph_id": {"$ref": "#/$defs/Identifier"},
+        "label": {"type": "string"},
+        "schema_ref": {"$ref": "#/$defs/SchemaRef"},
+        "machine_result_schema_ref": {"$ref": "#/$defs/SchemaRef"},
+        "ports": {
+          "type": "object",
+          "properties": {
+            "inputs": {"type": "array", "items": {"$ref": "#/$defs/PortDefinition"}},
+            "outputs": {"type": "array", "items": {"$ref": "#/$defs/PortDefinition"}}
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "GraphEdge": {
+      "type": "object",
+      "required": ["edge_id", "from_node_id", "to_node_id"],
+      "properties": {
+        "edge_id": {"$ref": "#/$defs/Identifier"},
+        "from_node_id": {"$ref": "#/$defs/Identifier"},
+        "to_node_id": {"$ref": "#/$defs/Identifier"},
+        "edge_type": {"type": "string", "minLength": 1},
+        "schema_ref": {"$ref": "#/$defs/SchemaRef"}
+      },
+      "additionalProperties": true
+    },
+    "Migration": {
+      "type": "object",
+      "required": ["source_schema", "target_schema", "idempotency_key"],
+      "properties": {
+        "source_schema": {"type": "string", "minLength": 1},
+        "target_schema": {"$ref": "#/$defs/SchemaVersion"},
+        "idempotency_key": {"$ref": "#/$defs/Identifier"},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "legacy_projection": {"$ref": "#/$defs/LooseObject"}
+      },
+      "additionalProperties": true
+    },
+    "GraphDefinition": {
+      "type": "object",
+      "required": ["schema_version", "graph_id", "task_id", "title", "nodes", "edges", "entry_node_ids", "state_version", "migration"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/SchemaVersion"},
+        "graph_id": {"$ref": "#/$defs/Identifier"},
+        "task_id": {"$ref": "#/$defs/Identifier"},
+        "title": {"type": "string", "minLength": 1},
+        "nodes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/GraphNode"}},
+        "edges": {"type": "array", "items": {"$ref": "#/$defs/GraphEdge"}},
+        "entry_node_ids": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Identifier"}},
+        "state_version": {"type": "integer", "minimum": 1},
+        "migration": {"$ref": "#/$defs/Migration"},
+        "graph_policy": {"$ref": "#/$defs/LooseObject"}
+      },
+      "additionalProperties": true
+    },
+    "CompiledPlan": {
+      "type": "object",
+      "required": ["schema_version", "graph_id", "task_id", "graph_schema_version", "compiled_at", "entry_node_ids", "topology", "nodes", "edges"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/SchemaVersion"},
+        "graph_id": {"$ref": "#/$defs/Identifier"},
+        "task_id": {"$ref": "#/$defs/Identifier"},
+        "graph_schema_version": {"type": "string", "minLength": 1},
+        "compiled_at": {"$ref": "#/$defs/Timestamp"},
+        "entry_node_ids": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Identifier"}},
+        "topology": {"$ref": "#/$defs/LooseObject"},
+        "nodes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/LooseObject"}},
+        "edges": {"type": "array", "items": {"$ref": "#/$defs/LooseObject"}},
+        "migration": {"$ref": "#/$defs/Migration"}
+      },
+      "additionalProperties": true
+    },
+    "MigrationManifest": {
+      "type": "object",
+      "required": ["manifest_version", "source_schema", "target_schema", "idempotent", "preserves", "adapters"],
+      "properties": {
+        "manifest_version": {"type": "string", "const": "astrabridge-protocol-compatibility-v1"},
+        "source_schema": {"type": "string", "minLength": 1},
+        "target_schema": {"$ref": "#/$defs/SchemaVersion"},
+        "idempotent": {"const": true},
+        "preserves": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "adapters": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": true
+    }
+  }
+}

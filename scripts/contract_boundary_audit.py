@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,11 @@ from astrabridge_sidecar.agent_orchestration_contract import (  # noqa: E402
     validate_agent_orchestration_graph,
 )
 from astrabridge_sidecar.agent_orchestration_file_format import agent_orchestration_example_catalog  # noqa: E402
+from astrabridge_sidecar.protocol.compatibility import compatibility_manifest  # noqa: E402
+from astrabridge_sidecar.protocol.generated.v1 import (  # noqa: E402
+    SCHEMA_VERSION,
+    validation_verdict,
+)
 from astrabridge_sidecar.providers.transports import (  # noqa: E402
     ACTIVE_PROVIDER_FAMILY_TRANSPORTS,
     WIRE_API_FALLBACK_TRANSPORTS,
@@ -40,6 +46,12 @@ STABILITY_PLAN_PATH = REPO_ROOT / "PLAN" / "ASTRABRIDGE_STABILITY_PROTOCOL_AND_A
 CAPABILITY_PLAN_PATH = REPO_ROOT / "PLAN" / "CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md"
 OWNERSHIP_DOC_PATH = REPO_ROOT / "docs" / "CODE_OWNERSHIP_AND_CONTRACTS.md"
 PROTOCOL_PACKAGE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "protocol" / "__init__.py"
+PROTOCOL_SCHEMA_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "protocol" / "schema" / "v1" / "protocol.json"
+PROTOCOL_MANIFEST_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "protocol" / "compatibility_manifest.json"
+PROTOCOL_GENERATOR_PATH = REPO_ROOT / "scripts" / "generate_protocol_types.py"
+PROTOCOL_PY_GENERATED_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "protocol" / "generated" / "v1.py"
+PROTOCOL_TS_GENERATED_PATH = REPO_ROOT / "apps" / "astrabridge-desktop" / "src" / "astrabridge_protocol" / "generated" / "v1.ts"
+PROTOCOL_FIXTURE_PATH = REPO_ROOT / "apps" / "astrabridge-desktop" / "src" / "astrabridge_protocol" / "fixtures" / "protocol_v1.json"
 RUNTIME_CLIENT_POOL_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "runtime_client_pool.py"
 
 EXPECTED_PROVIDER_TRANSPORTS = {
@@ -138,6 +150,83 @@ def _audit_provider_transport_registry() -> dict[str, Any]:
         "status": "pass" if not errors else "fail",
         "active_provider_transports": active,
         "wire_api_fallback_transports": fallback,
+        "errors": errors,
+    }
+
+
+def _audit_protocol_schema_generation() -> dict[str, Any]:
+    """Verify the canonical schema, projections, fixtures, and compatibility manifest."""
+
+    required_paths = {
+        "schema": PROTOCOL_SCHEMA_PATH,
+        "manifest": PROTOCOL_MANIFEST_PATH,
+        "generator": PROTOCOL_GENERATOR_PATH,
+        "python_projection": PROTOCOL_PY_GENERATED_PATH,
+        "typescript_projection": PROTOCOL_TS_GENERATED_PATH,
+        "fixtures": PROTOCOL_FIXTURE_PATH,
+    }
+    errors: list[str] = []
+    missing = [name for name, path in required_paths.items() if not path.exists()]
+    if missing:
+        errors.append(f"missing canonical protocol inputs: {', '.join(sorted(missing))}")
+    generator_result: subprocess.CompletedProcess[str] | None = None
+    fixture_counts = {"valid": 0, "invalid": 0}
+    definition_names: list[str] = []
+    if not missing:
+        generator_result = subprocess.run(
+            [sys.executable, str(PROTOCOL_GENERATOR_PATH), "--check"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if generator_result.returncode != 0:
+            errors.append("generated Python/TypeScript protocol projections are stale")
+        try:
+            schema = json.loads(PROTOCOL_SCHEMA_PATH.read_text(encoding="utf-8"))
+            manifest = compatibility_manifest()
+            fixtures = json.loads(PROTOCOL_FIXTURE_PATH.read_text(encoding="utf-8"))
+            definition_names = sorted(dict(schema.get("$defs") or {}))
+            required_definitions = {
+                "ArtifactRef",
+                "ContentPart",
+                "AgentEnvelope",
+                "AgentTask",
+                "RunEvent",
+                "CapabilityInput",
+                "CapabilityOutput",
+                "GraphDefinition",
+                "CompiledPlan",
+            }
+            missing_definitions = sorted(required_definitions.difference(definition_names))
+            if missing_definitions:
+                errors.append(f"canonical protocol schema missing definitions: {', '.join(missing_definitions)}")
+            if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+                errors.append("canonical protocol schema must declare JSON Schema 2020-12")
+            if schema.get("$id") != "https://astrabridge.dev/schemas/protocol/v1.json":
+                errors.append("canonical protocol schema id drifted")
+            if schema.get("x-astrabridge-schema-version") != SCHEMA_VERSION:
+                errors.append("canonical protocol schema version drifted")
+            if manifest.get("target_schema") != SCHEMA_VERSION or not bool(manifest.get("idempotent")):
+                errors.append("compatibility manifest does not declare current-write/idempotent migration rules")
+            for kind, payload in dict(fixtures.get("valid") or {}).items():
+                fixture_counts["valid"] += 1
+                if not validation_verdict(str(kind), payload):
+                    errors.append(f"canonical positive fixture rejected: {kind}")
+            for case_id, case in dict(fixtures.get("invalid") or {}).items():
+                fixture_counts["invalid"] += 1
+                if validation_verdict(str(case.get("kind") or ""), case.get("payload")):
+                    errors.append(f"canonical negative fixture accepted: {case_id}")
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            errors.append(f"canonical protocol schema audit could not load inputs: {exc}")
+    return {
+        "contract": "canonical_protocol_schema_and_codegen",
+        "owner": "astrabridge_sidecar.protocol.schema.v1 + scripts/generate_protocol_types.py",
+        "status": "pass" if not errors else "fail",
+        "schema_version": SCHEMA_VERSION,
+        "definition_names": definition_names,
+        "fixture_counts": fixture_counts,
+        "generator_returncode": None if generator_result is None else generator_result.returncode,
         "errors": errors,
     }
 
@@ -244,6 +333,7 @@ def _audit_orchestration_examples() -> dict[str, Any]:
 def audit_contract_boundaries() -> dict[str, Any]:
     checks = [
         _audit_stability_ownership(),
+        _audit_protocol_schema_generation(),
         _audit_provider_transport_registry(),
         _audit_task_graph_fixtures(),
         _audit_orchestration_examples(),

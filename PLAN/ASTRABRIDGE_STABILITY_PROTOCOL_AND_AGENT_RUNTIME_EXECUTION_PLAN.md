@@ -195,20 +195,20 @@ Then execute the revised highest-leverage work unit in the same turn when feasib
 ## Current Progress
 
 - Current status: In progress
-- Completed steps: Step 0, Create Durable Execution Plan; Step 1, Reconcile Plan And Contract Ownership; Step 2, Isolate Provider Runtime Client Lanes
-- Current step: Step 3, Establish Canonical Protocol Schemas And Code Generation
-- Next step: Step 3, Establish Canonical Protocol Schemas And Code Generation
+- Completed steps: Step 0, Create Durable Execution Plan; Step 1, Reconcile Plan And Contract Ownership; Step 2, Isolate Provider Runtime Client Lanes; Step 3, Establish Canonical Protocol Schemas And Code Generation
+- Current step: Step 4, Add The Workspace-Local Durable Run And Event Store
+- Next step: Step 4, Add The Workspace-Local Durable Run And Event Store
 - Last updated: 2026-07-16
 
 ## Current Work Unit
 
-- ID: STAB-03
-- Goal: Establish one canonical, versioned protocol schema source before cross-language Agent Envelope and durable run/event migration.
-- Inputs: `apps/astrabridge-sidecar/astrabridge_sidecar/protocol/`; `apps/astrabridge-sidecar/astrabridge_sidecar/agent_orchestration_contract.py`; `apps/astrabridge-desktop/src/types.ts`; `scripts/contract_boundary_audit.py`.
-- Expected output: backend-owned JSON Schema 2020-12 definitions plus deterministic Python/TypeScript generated or checked projections and freshness validation.
-- Acceptance check: valid fixtures pass in both languages; negative fixtures fail with stable diagnostics; generated output is deterministic and stale-generation checks fail; no provider credentials or raw secrets enter schemas or reports.
+- ID: STAB-04
+- Goal: Establish the workspace-local durable run/event source of truth while retaining current JSON/manifests as projections.
+- Inputs: `apps/astrabridge-sidecar/astrabridge_sidecar/task_service.py`; `apps/astrabridge-sidecar/astrabridge_sidecar/protocol/`; workspace-local `.astrabridge/` state; Step 3 generated protocol projections.
+- Expected output: versioned transactional run/event store with idempotent migration, compare-and-swap state transitions, ordered events, and projection rebuild hooks.
+- Acceptance check: empty/existing/repeated migration is deterministic; concurrent terminal writes yield one valid result; projections rebuild identically; no secrets are persisted or old evidence deleted.
 - Status: queued
-- Next action: Inspect existing protocol and graph contract types, choose the schema/code-generation boundary, and implement Step 3 as one bounded schema change.
+- Next action: Inspect current task/run persistence and workspace state boundaries, then define the smallest store schema and migration seam for Step 4.
 
 ## Execution Steps
 
@@ -297,7 +297,7 @@ Acceptance criteria:
 - Generation is deterministic and a freshness command fails when generated files drift.
 - Contract ownership documentation and boundary audit reflect the new schema owner.
 
-Status: not started
+Status: completed
 
 ### 4. Add The Workspace-Local Durable Run And Event Store
 
@@ -754,3 +754,14 @@ Status: not started
 - Security and preservation: lane IDs/snapshots are opaque digests; private provider environments are passed without mutating process-global configuration; no credential-bearing artifacts were staged; unrelated UI, graph, provider, diagnostics, and raw validation changes remain unstaged and preserved.
 - Blockers: None for Step 2. GitHub CLI authentication is still invalid (HTTP 401), but the Git remote credential path is available for the requested push; no merge conflict or unmerged path exists.
 - Next step: Step 3, Establish Canonical Protocol Schemas And Code Generation.
+
+### 2026-07-16 - Step 3
+
+- Completed: Established the backend-owned JSON Schema 2020-12 source at `apps/astrabridge-sidecar/astrabridge_sidecar/protocol/schema/v1/protocol.json` with stable `$id`, explicit `astrabridge-protocol-v1` version, shared definitions for ArtifactRef/ContentPart/AgentEnvelope/AgentTask/RunEvent/capability input-output/GraphDefinition/CompiledPlan, port and schema-reference constraints, and forbidden security fields.
+- Generated projections: `protocol/generated/v1.py` and `apps/astrabridge-desktop/src/astrabridge_protocol/generated/v1.ts` are produced only by `scripts/generate_protocol_types.py`; `--check` is the deterministic freshness gate and the AstraBridge directory is separate from the official app-server `src/protocol/generated` directory.
+- Compatibility: `protocol/compatibility.py` and `compatibility_manifest.json` define current-write/legacy-read rules, idempotent graph and compiled-plan migration, artifact URI adaptation, and preservation of graph IDs, topology, artifact lineage, and security policy.
+- Fixtures and ownership: shared positive/negative fixtures live at `apps/astrabridge-desktop/src/astrabridge_protocol/fixtures/protocol_v1.json`; Python and Vitest suites exercise the same fixture catalog; ownership docs and `scripts/contract_boundary_audit.py` now require the schema/codegen owner and freshness check.
+- Validation: `python -m unittest -v apps.astrabridge-sidecar.tests.test_protocol_schema` passed 8 tests; `cmd /c npm test -- --run src/astrabridge_protocol/generated/v1.test.ts` passed 3 tests; `python scripts/generate_protocol_types.py --check` passed; `python scripts/contract_boundary_audit.py` passed 5/5 checks; JSON Schema 2020-12 meta-schema validation and secret-field rejection passed; Desktop build passed earlier in this round.
+- Security and preservation: no provider credentials, raw secrets, cookies, or authorization headers were written to the schema, fixtures, generated outputs, or reports; preserved `.pnpm-store/`, `.tmp/`, and `tmp/` remain untracked and were not staged.
+- Blockers: None for Step 3.
+- Next step: Step 4, Add The Workspace-Local Durable Run And Event Store.

@@ -119,7 +119,7 @@ The following ownership boundaries are now explicit:
 
 | Interface family | Canonical owner | Current bridge or projection |
 | --- | --- | --- |
-| Versioned protocol schemas and generated types | `astrabridge_sidecar.protocol` | Existing inline Python/TypeScript contracts until schema migration completes |
+| Versioned protocol schemas and generated types | `astrabridge_sidecar.protocol.schema.v1/protocol.json` + `scripts/generate_protocol_types.py` | Generated Python/TypeScript projections under AstraBridge-specific directories; existing inline contracts remain compatibility bridges |
 | Agent Envelope, delivery events, and artifact references | `astrabridge_sidecar.protocol` | Task-graph input/output envelopes and UI summaries |
 | MCP configuration and preset policy | `mcp_config_service.py` | Existing MCP server adapters |
 | MCP protocol core/broker | `astrabridge_sidecar.protocol` migration target | Current named MCP servers and direct capability paths, explicitly temporary |
@@ -131,7 +131,7 @@ The stability plan must update this table when a migration step changes an owner
 
 ## Current Limits
 
-- Request and response schemas are still often inline Python/TypeScript compatibility contracts rather than generated JSON Schema. The stability plan's schema/codegen step is the migration path; until it completes, inline definitions are not allowed to become new canonical owners.
+- Existing request/response consumers still expose inline compatibility fields, but new cross-provider writes must use the generated v1 projections. The JSON Schema source and freshness gate are now active; inline definitions are not allowed to become new canonical owners.
 - Consumer search covers this repository. It cannot see uncommitted external clients, manually entered URLs, or a third-party integration outside the workspace.
 - HTTP method inference comes from the current Python handler definitions; Desktop evidence is path-based because TypeScript helper wrappers centralize method selection.
 - This step did not call providers, mutate Vault state, remove routes, or rewrite compatibility behavior.
