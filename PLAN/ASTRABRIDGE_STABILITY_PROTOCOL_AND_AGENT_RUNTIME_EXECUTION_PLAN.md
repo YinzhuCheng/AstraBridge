@@ -195,20 +195,20 @@ Then execute the revised highest-leverage work unit in the same turn when feasib
 ## Current Progress
 
 - Current status: In progress
-- Completed steps: Step 0, Create Durable Execution Plan
-- Current step: Step 1, Reconcile Plan And Contract Ownership
-- Next step: Step 1, Reconcile Plan And Contract Ownership
+- Completed steps: Step 0, Create Durable Execution Plan; Step 1, Reconcile Plan And Contract Ownership
+- Current step: Step 2, Isolate Provider Runtime Client Lanes
+- Next step: Step 2, Isolate Provider Runtime Client Lanes
 - Last updated: 2026-07-16
 
 ## Current Work Unit
 
-- ID: STAB-01
-- Goal: Make this plan the unambiguous execution entry point and reconcile the only known routing conflict before implementation begins.
-- Inputs: this plan; `AGENTS.md`; `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md`; stale Step-0-only overlapping plans; `docs/CODE_OWNERSHIP_AND_CONTRACTS.md`; `docs/INTERFACE_GOVERNANCE.md`; `scripts/contract_boundary_audit.py`.
-- Expected output: a checked-in ownership/delegation update that preserves historical plans, names one canonical owner for every protocol/runtime concern in scope, and prevents an old plan from scheduling a second implementation.
-- Acceptance check: the ownership table is current; the capability-runtime conflict is explicitly delegated; canonical owners and bridge rules are documented and covered by the boundary audit; no completed plan or evidence is deleted or reset; the next entry point is Step 2.
+- ID: STAB-02
+- Goal: Eliminate cross-provider client lifecycle interference before adding durable scheduling and protocol migration.
+- Inputs: `apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py`; `apps/astrabridge-sidecar/astrabridge_sidecar/app_server_client.py`; `apps/astrabridge-sidecar/tests/test_sidecar_services.py`; `apps/astrabridge-sidecar/tests/test_task_graph_worker_runtime.py`.
+- Expected output: a runtime client pool keyed by a redacted immutable signature, with per-lane lifecycle/lease isolation and no process-global provider environment mutation.
+- Acceptance check: different provider/model signatures can execute concurrently without client closure or configuration contamination; equal signatures reuse safely; existing single-lane tests remain green; secrets are not logged or persisted.
 - Status: queued
-- Next action: Execute Step 1 as a bounded ownership reconciliation, then stop after updating this plan.
+- Next action: Inspect current runtime client lifecycle and implement Step 2 as one bounded isolation change, then stop after updating this plan.
 
 ## Execution Steps
 
@@ -252,7 +252,7 @@ Acceptance criteria:
 - The boundary audit covers the newly named owners and passes.
 - Completed plans, reports, fixtures, and validation evidence remain intact.
 
-Status: not started
+Status: completed
 
 ### 2. Isolate Provider Runtime Client Lanes
 
@@ -736,3 +736,12 @@ Status: not started
 - Validation: required durable-plan sections, one active work unit, 23 numbered steps including Step 0, per-step acceptance criteria, explicit next entry point, and preservation/adjustment rules checked.
 - Blockers: None.
 - Next step: Step 1, Reconcile Plan And Contract Ownership.
+
+### 2026-07-16 - Step 1
+
+- Completed: Reconciled plan and contract ownership for the stability/protocol scope.
+- Files changed: `apps/astrabridge-sidecar/astrabridge_sidecar/protocol/__init__.py`, `docs/CODE_OWNERSHIP_AND_CONTRACTS.md`, `docs/INTERFACE_GOVERNANCE.md`, `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md`, `scripts/contract_boundary_audit.py`, and this plan's progress/current-work sections.
+- Validation: `python scripts/contract_boundary_audit.py` passed all four checks; focused `test_contract_boundary_audit.py` passed 3 tests; trailing-whitespace and secret-pattern scans were run before staging; existing provider and graph fixture checks remained passing.
+- Preserved: completed plans, stale plan histories, fixtures, raw reports, and unrelated working-tree changes were not deleted or staged.
+- Blockers: None for Step 1. No pull request was attempted because the user requested commit/push only.
+- Next step: Step 2, Isolate Provider Runtime Client Lanes.

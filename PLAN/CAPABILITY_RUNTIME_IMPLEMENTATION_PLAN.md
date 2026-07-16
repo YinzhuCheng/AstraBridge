@@ -231,3 +231,9 @@ Last updated: 2026-06-24
 ## 完成记录
 
 - 2026-06-24：完成步骤 `1`。重写 `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md`，把 capability runtime 后续工作整理为新的 10 步执行计划，明确了总目标、注意事项、分层细节、顺序步骤、当前进度，以及“每轮从下一未完成步骤开始且每轮只完成一步”的执行约束。
+
+## Stability Plan Delegation (2026-07-16)
+
+The capability runtime plan remains the capability-specific reference for capability schemas, provider eligibility, modality adapters, smoke coverage, and the standalone web-lane boundary. Its historical `2..10` steps must not be used to schedule work that changes the shared MCP protocol, cross-provider Agent Envelope, artifact contract, durable graph scheduler, or run-state semantics.
+
+Those overlapping concerns are now owned by `PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md`, which is the single active execution source for the stability/protocol upgrade. Capability-specific work may continue only when it does not create a second MCP, envelope, artifact, scheduler, or run-state contract. This is a routing clarification, not a reset of the completed capability step or its preserved evidence.
