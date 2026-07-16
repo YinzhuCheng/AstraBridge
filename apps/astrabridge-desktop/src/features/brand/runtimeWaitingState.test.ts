@@ -99,6 +99,26 @@ describe("runtimeWaitingState", () => {
     expect(state.title).toContain("Preparing the next turn");
   });
 
+  it("prioritizes a new task creation over stale activity from the current task", () => {
+    const state = resolveRuntimeWaitingState({
+      locale: "en",
+      routeLabel: "DeepSeek · deepseek-v4-pro",
+      waitingOnApproval: false,
+      activeStatusType: "active",
+      liveActivity: {
+        kind: "thinking",
+        label: "Thinking",
+        status: "active",
+      },
+      creatingTaskName: "DG Multimodal UI 01 Retry 3",
+    });
+
+    expect(state.label).toBe("New task");
+    expect(state.title).toBe("Creating new task");
+    expect(state.detail).toContain("DG Multimodal UI 01 Retry 3");
+    expect(state.detail).toContain("current task");
+  });
+
   it("builds replay payloads with the expected runtime shape", () => {
     const replay = buildRuntimeWaitingReplayState("files", "en");
 

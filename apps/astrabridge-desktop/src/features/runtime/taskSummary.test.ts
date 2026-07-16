@@ -28,13 +28,17 @@ function buildTask(overrides: Partial<ProjectTask> = {}): ProjectTask {
 }
 
 describe("task summary", () => {
-  it("shows route, fork, checkpoint, and missing status", () => {
+  it("shows active and previous lanes after a handoff", () => {
     const summary = summarizeTaskCard(
       buildTask({
         handoff_events: [
           {
             event_id: "handoff-1",
             type: "provider_handoff",
+            from_thread_id: "thread-openai",
+            from_profile_id: "openai-default",
+            from_provider_id: "openai",
+            from_model: "gpt-5.5",
             to_thread_id: "thread-1",
             profile_id: "deepseek-default",
             provider_id: "deepseek",
@@ -51,7 +55,8 @@ describe("task summary", () => {
       }),
     );
 
-    expect(summary.subtitle).toContain("已切换到 deepseek");
+    expect(summary.subtitle).toContain("已切换到 deepseek / deepseek-v4-pro");
+    expect(summary.subtitle).toContain("from openai / gpt-5.5");
     expect(summary.routeProvider).toBe("deepseek");
     expect(summary.routeModel).toBe("deepseek-v4-pro");
     expect(summary.routeEffort).toBe("high");
@@ -59,7 +64,7 @@ describe("task summary", () => {
     expect(summary.tone).toBe("warning");
   });
 
-  it("falls back to execution thread count when no handoff exists", () => {
+  it("falls back to execution lane count when no handoff exists", () => {
     const summary = summarizeTaskCard(buildTask());
     expect(summary.subtitle).toBe("1 条执行线路");
     expect(summary.routeProvider).toBe("deepseek");

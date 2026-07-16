@@ -9,10 +9,8 @@ import {
   FilesInspectorPanel,
   ReviewInspectorPanel,
   WorkflowEvidencePanel,
-  browserStageAspectRatio,
-  desiredBrowserLayoutMode,
-  shouldUseBrowserTwoPageStack,
 } from "./InspectorPanels";
+import { browserStageAspectRatio, desiredBrowserLayoutMode, shouldUseBrowserTwoPageStack } from "./browserLayout";
 import type { TaskWorkflowFacts } from "./taskWorkflowFacts";
 
 afterEach(() => {
@@ -522,6 +520,45 @@ describe("InspectorPanels", () => {
     expect(screen.getByText("Heading")).toBeInTheDocument();
     expect(screen.getByText("First item")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open raw" })).toHaveAttribute("href", expect.stringContaining("notes%2Fdemo.md"));
+  });
+
+  it("does not override an explicit selected file path that is outside the sidebar item list", () => {
+    const onSelectPath = vi.fn();
+    render(
+      <FilesInspectorPanel
+        locale="en"
+        project={project}
+        tree={{
+          workspace_root: "D:/AstraBridge",
+          items: [
+            {
+              path: "README.md",
+              name: "README.md",
+              kind: "markdown",
+              size: 24,
+              updated_at: 1,
+            },
+          ],
+          truncated: false,
+          updated_at: "2026-06-26T00:00:00Z",
+        }}
+        preview={{
+          path: "PRIVATE/task-graph/fixture-run/report.md",
+          name: "report.md",
+          kind: "markdown",
+          size: 32,
+          updated_at: 2,
+          content: "# Run summary",
+        }}
+        query=""
+        selectedPath="PRIVATE/task-graph/fixture-run/report.md"
+        onQueryChange={vi.fn()}
+        onSelectPath={onSelectPath}
+      />,
+    );
+
+    expect(onSelectPath).not.toHaveBeenCalled();
+    expect(screen.getByText("Run summary")).toBeInTheDocument();
   });
 
   it("renders pdf project files through the media endpoint", () => {

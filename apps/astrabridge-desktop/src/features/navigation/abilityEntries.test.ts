@@ -68,6 +68,7 @@ describe("ABILITY_ENTRY_DEFINITIONS", () => {
       "runtime",
       "saves",
       "reports",
+      "updates",
       "dogfood",
     ]);
   });

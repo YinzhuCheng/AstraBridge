@@ -16,19 +16,27 @@ import {
   Pencil,
   PlayCircle,
   Trash2,
+  Workflow,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
   Save,
   Settings,
+  ShieldCheck,
   Unlock,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { api, projectFileMediaHref } from "./api";
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { ApiRequestError, api, projectFileMediaHref, projectFileReadHref } from "./api";
 import { t, permissionLabel } from "./features/i18n/catalog";
 import { AutomationsPanel, type AutomationMcpPresetOption, type AutomationPluginSkillPresetOption } from "./features/automations/AutomationsPanel";
+import {
+  updateAutomationSchedulerAfterRun,
+  upsertAutomationInboxResponse,
+  upsertAutomationListResponse,
+  upsertAutomationRunsResponse,
+} from "./features/automations/automationQueryCache";
 import { ComposerStarTrack } from "./features/brand/ComposerStarTrack";
 import { StarbridgeCornerConstellation } from "./features/brand/StarbridgeCornerConstellation";
 import { StarbridgeCursorOverlay } from "./features/brand/StarbridgeCursorOverlay";
@@ -68,6 +76,11 @@ import {
   type SetupRouteTab,
 } from "./features/navigation/abilityEntries";
 import { ProjectTaskTree, sidebarProjectKey } from "./features/navigation/ProjectTaskTree";
+import { RecentProjectButton } from "./features/navigation/RecentProjectButton";
+import { isSidebarTaskAlreadySelected } from "./features/navigation/sidebarTaskSelection";
+import { launcherSidecarGateMessage } from "./features/navigation/launcherSidecarGate";
+import { visibleTaskTitle, visibleThreadTitle } from "./features/navigation/displayTitle";
+import { isCompactShellViewport, resolveSidebarVisible } from "./features/navigation/shellLayout";
 import { SetupLandingPanel, type SetupLandingAction, type SetupLandingMetric } from "./features/navigation/SetupLandingPanel";
 import { ViewWorkspacePanel } from "./features/navigation/ViewWorkspacePanel";
 import { WebToolsPanel } from "./features/web/WebToolsPanel";
@@ -85,6 +98,46 @@ import { QueuedInstructionQueue } from "./features/runtime/QueuedInstructionQueu
 import { RuntimeKernelStatusPanel } from "./features/runtime/RuntimeKernelStatusPanel";
 import { McpToolDiagnosticsPanel } from "./features/runtime/McpToolDiagnosticsPanel";
 import { RuntimeActivityRow } from "./features/runtime/RuntimeActivityRow";
+import { mergeComposerCatalogModels } from "./features/runtime/composerModelCatalog";
+import { imageAttachmentRouteState } from "./features/runtime/attachmentRoute";
+import { TaskGraphWorkspace } from "./features/runtime/TaskGraphWorkspace";
+import {
+  hasTaskGraphLiveDispatchTimedOut,
+  resolveTaskGraphRunPrecondition,
+  shouldPromoteDryRunToLiveRun,
+  type TaskGraphRequestedRunIntent,
+} from "./features/runtime/taskGraphRunDispatch";
+import { summarizeManagedKeyTest, summarizeManagedKeyTestError, type ManagedKeyTestFeedback } from "./features/runtime/managedKeyTestFeedback";
+import {
+  buildFallbackTaskGraphFromTemplate,
+  createFallbackTaskGraphNode,
+  isFallbackTaskGraph,
+  readFallbackTaskGraph,
+  removeFallbackTaskGraphEdge,
+  taskGraphNeedsServerPersistence,
+  upsertFallbackTaskGraphEdge,
+  writeFallbackTaskGraph,
+  updateFallbackTaskGraphNodeConfiguration,
+  updateFallbackTaskGraphNodePosition,
+} from "./features/runtime/taskGraphFallbackState";
+import {
+  createOptimisticTaskGraphLiveRunRef,
+  selectCurrentTaskGraphRunRef,
+  selectLatestTaskGraphRunRef,
+} from "./features/runtime/taskGraphRunRefs";
+import { hasRenderableTaskGraphStructure, resolvePreferredTaskGraphId } from "./features/runtime/taskGraphSelection";
+import { resolveTaskGraphRouteUnavailable } from "./features/runtime/taskGraphSelection";
+import { FALLBACK_TASK_GRAPH_TEMPLATES } from "./features/runtime/taskGraphTemplateFallbacks";
+import {
+  fallbackThreadIdForEmptyTaskContext,
+  resolveCurrentProjectTask,
+  resolveSelectedThreadProfileId,
+  resolveTaskIdForNewThread,
+  resolveTaskSendTargetThreadId,
+  resolveVisibleCurrentProjectTask,
+  shouldUseSelectedRuntimeThread,
+} from "./features/runtime/taskThreadRestore";
+import { AgenticUpdateReviewPanel } from "./features/updates/AgenticUpdateReviewPanel";
 import { evaluateLaunchIsolation } from "./features/runtime/launchIsolation";
 import { normalizeRuntimeActivity } from "./features/runtime/runtimeActivity";
 import { summarizeTaskInspectorEvidence } from "./features/runtime/taskInspectorEvidence";
@@ -93,7 +146,8 @@ import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, pars
 import { resolveRecoveryComposerPatch } from "./features/runtime/runtimeRecoveryPlan";
 import { formatResponseDiagnostics, summarizeResponseDiagnosticsInline } from "./features/runtime/responseDiagnostics";
 import { composerReasoningOptions, preferredProviderReasoningEffort, preferredReasoningEffort, providerModelDraftDefaults, providerReasoningOptions } from "./features/runtime/reasoningOptions";
-import { runtimeErrorNoticeActions, runtimeErrorNoticeInline, runtimeErrorNoticeText, type RuntimeErrorAction } from "./features/runtime/runtimeErrorNotice";
+import { shouldShowGoalDock as resolveGoalDockVisibility } from "./features/runtime/goalDockVisibility";
+import { composerFailureNoticeText, latestCompletedTurnSuppressesRuntimeError, runtimeErrorNoticeActions, runtimeErrorNoticeInline, runtimeErrorNoticeText, type RuntimeErrorAction } from "./features/runtime/runtimeErrorNotice";
 import { invalidateRestoreStateQueries } from "./features/runtime/restoreInvalidation";
 import { summarizeTaskWorkflowFacts, type TaskWorkflowFacts } from "./features/runtime/taskWorkflowFacts";
 import {
@@ -107,6 +161,13 @@ import {
 import { useAppStore } from "./store";
 import { chooseProjectSavePath, selectAttachmentDirectory, selectAttachmentFiles, selectDirectory, selectExistingProject, selectFiles } from "./tauriDialog";
 import type {
+  AutomationInboxItem,
+  AutomationInboxResponse,
+  AutomationListResponse,
+  AutomationRun,
+  AutomationRunsResponse,
+  AutomationSchedulerStatus,
+  AutomationSpec,
   AppearancePreset,
   AssetRegistryEntry,
   AttachmentDiagnostics,
@@ -123,6 +184,7 @@ import type {
   LocaleCode,
   McpServerConfig,
   PermissionMode,
+  TurnExecutionPolicy,
   Profile,
   ProjectCheckpoint,
   ProjectFile,
@@ -131,6 +193,9 @@ import type {
   ProjectReviewDiff,
   ProjectReviewStatus,
   ProjectTasksResponse,
+  TaskGraphDefinition,
+  TaskGraphDryRunResult,
+  TaskGraphRunRef,
   ReasoningConfig,
   RuntimeFailureNotice,
   RouterConfigResponse,
@@ -169,11 +234,16 @@ type SetupTab = SetupRouteTab;
 type ExtensionInventoryInitialKind = "all" | "plugins" | "skills";
 type GoalDockTab = "goal" | "plan";
 type ComposerWorkflowMode = "default" | "goal" | "plan";
+type ComposerExecutionPolicy = TurnExecutionPolicy;
 type VoiceRecorderState = "idle" | "recording" | "transcribing";
+type ThreadCreateRecovery = { operationId: string; profileId: string };
+const THREAD_CREATE_RECOVERY_MAX_ATTEMPTS = 12;
+const THREAD_CREATE_RECOVERY_DELAY_MS = 750;
 type QueuedInstruction = {
   id: string;
   text: string;
   attachments: AttachmentDraft[];
+  targetThreadId: string | null;
 };
 type DisplayGoal = {
   objective: string;
@@ -213,9 +283,15 @@ type StatusEvidenceItem = {
   value: string;
   detail?: string;
 };
+type AutomationOperationNotice = {
+  tone: "info" | "success";
+  title: string;
+  detail: string;
+};
 
 const SIDEBAR_EXPANDED_PROJECTS_KEY = "astrabridge.sidebar.expandedProjects";
 const TITLE_SUGGESTION_PREFIX = "astrabridge.titleSuggestion.";
+const TASK_GRAPH_SELECTION_PREFIX = "astrabridge.taskGraphSelection.";
 const GENERIC_PROJECT_TITLES = new Set(["", "untitled", "untitled project", "new project", "default project", "project", "astrabridge-project", "codex-workspace"]);
 const GENERIC_TASK_TITLES = new Set(["", "untitled", "untitled task", "new task", "default task", "task"]);
 const COMPOSER_INPUT_HEIGHT_KEY = "astrabridge.composer.inputHeight";
@@ -257,13 +333,39 @@ function markTitleSuggestionAttempted(key: string) {
   window.localStorage.setItem(`${TITLE_SUGGESTION_PREFIX}${key}`, "1");
 }
 
+function newThreadCreateOperationId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `thread-create-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function loadStoredString(key: string) {
+  if (typeof window === "undefined") return null;
+  const value = window.localStorage.getItem(key);
+  return value ? String(value) : null;
+}
+
+function saveStoredString(key: string, value: string | null) {
+  if (typeof window === "undefined") return;
+  if (!value) {
+    window.localStorage.removeItem(key);
+    return;
+  }
+  window.localStorage.setItem(key, value);
+}
+
+function taskGraphSelectionStorageKey(projectId: string, taskId: string) {
+  return `${TASK_GRAPH_SELECTION_PREFIX}${projectId}:${taskId}`;
+}
+
 function looksGenericProjectTitle(project: Pick<SidebarProjectNode, "name" | "project_id">) {
   const title = String(project.name || "").trim();
   return GENERIC_PROJECT_TITLES.has(title.toLowerCase()) || Boolean(title && title === String(project.project_id || "").trim());
 }
 
 function looksGenericTaskTitle(task: Pick<SidebarTaskNode, "title">, project: Pick<SidebarProjectNode, "name">) {
-  const title = String(task.title || "").trim();
+  const title = visibleTaskTitle(task.title);
   return GENERIC_TASK_TITLES.has(title.toLowerCase()) || Boolean(title && title === String(project.name || "").trim());
 }
 
@@ -378,8 +480,9 @@ function taskVisibleThreadId(task: ProjectTask | null | undefined) {
   if (!task) return null;
   const active = String(task.active_provider_thread_id ?? "").trim();
   if (active) return active;
-  const liveProvider = task.provider_threads.find((thread) => !thread.missing_at)?.thread_id;
-  return liveProvider ?? task.provider_threads[0]?.thread_id ?? null;
+  const providerThreads = Array.isArray(task.provider_threads) ? task.provider_threads : [];
+  const liveProvider = providerThreads.find((thread) => !thread.missing_at)?.thread_id;
+  return liveProvider ?? providerThreads[0]?.thread_id ?? null;
 }
 
 function mergeProjectTaskResponse(current: ProjectTasksResponse | undefined, task: ProjectTask): ProjectTasksResponse {
@@ -390,6 +493,43 @@ function mergeProjectTaskResponse(current: ProjectTasksResponse | undefined, tas
     current_task: task,
     tasks: nextTasks,
     updated_at: task.updated_at ?? current?.updated_at,
+  };
+}
+
+function optimisticSidebarTask(project: SidebarProjectNode, task: SidebarTaskNode): ProjectTask {
+  return {
+    schema_version: "astrabridge-task-state-v1",
+    task_id: task.task_id,
+    project_id: project.project_id,
+    title: visibleTaskTitle(task.title),
+    status: task.status || "active",
+    handoff_policy: "multi_provider_handoff",
+    active_provider_thread_id: String(task.active_provider_thread_id ?? "").trim() || null,
+    provider_threads: [],
+    fork_threads: [],
+    handoff_events: [],
+    goal: null,
+    plan: null,
+    checkpoint_refs: [],
+    verification_refs: [],
+    diagnostic_refs: [],
+    asset_context_refs: [],
+    context_pack_refs: [],
+    graph_definitions: [],
+    graph_run_refs: [],
+    graph_snapshot_refs: [],
+    graph_activity_summary: {
+      graph_count: 0,
+      run_count: 0,
+      latest_graph_id: null,
+      latest_run_id: null,
+      latest_run_status: null,
+      latest_updated_at: null,
+      graph_status_counts: {},
+      run_status_counts: {},
+    },
+    created_at: String(task.updated_at || ""),
+    updated_at: String(task.updated_at || ""),
   };
 }
 
@@ -413,6 +553,69 @@ function goalStatusLabel(locale: "en" | "zh-CN", status: string, source?: Displa
 function goalCanAutoContinue(status: string) {
   return status === "active";
 }
+
+function taskGraphNodeOverrideKey(_graphId: string, nodeId: string) {
+  return `${_graphId}::${nodeId}`;
+}
+
+function applyTaskGraphNodeOverrides(
+  graph: TaskGraphDefinition | null,
+  overrides: Record<string, Partial<TaskGraphDefinition["nodes"][number]>>,
+): TaskGraphDefinition | null {
+  if (!graph) return null;
+  if (!Object.keys(overrides).length) return graph;
+  let changed = false;
+  const nodes = graph.nodes.map((node) => {
+    const override = overrides[taskGraphNodeOverrideKey(graph.graph_id, node.node_id)];
+    if (!override) return node;
+    changed = true;
+    return {
+      ...node,
+      ...override,
+      position: override.position ?? node.position,
+      ui_hints: override.ui_hints ?? node.ui_hints,
+    };
+  });
+  if (!changed) return graph;
+  return {
+    ...graph,
+    nodes,
+  };
+}
+
+function taskGraphTimestamp(value: string | null | undefined) {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function latestTaskGraphDefinition(graphs: TaskGraphDefinition[] | null | undefined) {
+  if (!graphs?.length) return null;
+  return graphs.reduce<TaskGraphDefinition | null>((latest, candidate) => {
+    if (!latest) return candidate;
+    const candidateTime = Math.max(taskGraphTimestamp(candidate.updated_at), taskGraphTimestamp(candidate.created_at));
+    const latestTime = Math.max(taskGraphTimestamp(latest.updated_at), taskGraphTimestamp(latest.created_at));
+    return candidateTime >= latestTime ? candidate : latest;
+  }, null);
+}
+
+function isTaskGraphNewer(candidate: TaskGraphDefinition | null | undefined, baseline: TaskGraphDefinition | null | undefined) {
+  if (!candidate) return false;
+  if (!baseline) return true;
+  if (candidate.graph_id !== baseline.graph_id) return false;
+  const candidateVersion = Number(candidate.state_version ?? 0);
+  const baselineVersion = Number(baseline.state_version ?? 0);
+  if (candidateVersion !== baselineVersion) return candidateVersion > baselineVersion;
+  const candidateTime = Math.max(taskGraphTimestamp(candidate.updated_at), taskGraphTimestamp(candidate.created_at));
+  const baselineTime = Math.max(taskGraphTimestamp(baseline.updated_at), taskGraphTimestamp(baseline.created_at));
+  return candidateTime > baselineTime;
+}
+
+const TASK_GRAPH_DEBUG_DATASET_KEY = "taskGraphDebug";
+const TASK_GRAPH_STATE_DATASET_KEY = "taskGraphState";
+const TASK_GRAPH_FIXTURE_PENDING_MIN_MS = 1500;
+const TASK_GRAPH_LIVE_RUN_PENDING_REFRESH_MS = 2500;
+const TASK_GRAPH_LIVE_DISPATCH_CONFIRMATION_TIMEOUT_MS = 4000;
 
 function countDiffLines(diff: string | null | undefined): RuntimeDiffSummary {
   const text = String(diff || "");
@@ -704,16 +907,26 @@ async function filesFromWebkitEntry(entry: WebkitFileSystemEntry, prefix = ""): 
 }
 
 async function filesFromDataTransfer(dataTransfer: DataTransfer): Promise<BrowserAttachmentCandidate[]> {
-  const entries = [...dataTransfer.items]
-    .filter((item) => item.kind === "file")
-    .map((item) => {
-      const getAsEntry = (item as unknown as { webkitGetAsEntry?: () => WebkitFileSystemEntry | null }).webkitGetAsEntry;
-      return getAsEntry ? getAsEntry.call(item) : null;
-    })
-    .filter((entry): entry is WebkitFileSystemEntry => entry !== null);
-  if (entries.length > 0) {
-    const nested = await Promise.all(entries.map((entry) => filesFromWebkitEntry(entry)));
-    return nested.flat();
+  const directFiles: BrowserAttachmentCandidate[] = [];
+  const directoryEntries: WebkitFileSystemEntry[] = [];
+  for (const item of [...dataTransfer.items].filter((entry) => entry.kind === "file")) {
+    const getAsEntry = (item as unknown as { webkitGetAsEntry?: () => WebkitFileSystemEntry | null }).webkitGetAsEntry;
+    const entry = getAsEntry ? getAsEntry.call(item) : null;
+    if (entry?.isDirectory) {
+      directoryEntries.push(entry);
+      continue;
+    }
+    const file = item.getAsFile();
+    if (file) {
+      directFiles.push({ file, relativePath: entry?.name || undefined });
+    }
+  }
+  if (directoryEntries.length > 0) {
+    const nested = await Promise.all(directoryEntries.map((entry) => filesFromWebkitEntry(entry)));
+    return [...directFiles, ...nested.flat()];
+  }
+  if (directFiles.length > 0) {
+    return directFiles;
   }
   return [...dataTransfer.files].map((file) => ({
     file,
@@ -939,7 +1152,7 @@ function buildStatusAttentionItems({
     });
   }
   if (workflowFacts.failedCommandCount > 0) {
-    const failedCommands = workflowFacts.commandRefs.filter((item) => String(item.status ?? "").toLowerCase() === "failed");
+    const failedCommands = (workflowFacts.commandRefs ?? []).filter((item) => String(item.status ?? "").toLowerCase() === "failed");
     items.push({
       id: "failed-commands",
       severity: "warning",
@@ -1229,6 +1442,80 @@ function PermissionModePicker({
   );
 }
 
+function executionPolicyCopy(locale: LocaleCode, policy: ComposerExecutionPolicy) {
+  if (policy === "patch_only") {
+    return locale === "zh-CN"
+      ? { label: "仅补丁", detail: "只允许经验证的原生 apply_patch 路径；当前运行时若无法证明该约束，会在请求模型前拒绝执行。" }
+      : { label: "Patch only", detail: "Requires a verified native apply_patch-only boundary. AstraBridge refuses the turn before dispatch if it cannot prove that boundary." };
+  }
+  return locale === "zh-CN"
+    ? { label: "标准执行", detail: "使用当前权限模式。命令与文件变更仍会遵循审批与运行时审计。" }
+    : { label: "Standard", detail: "Uses the selected permission mode. Commands and file changes remain subject to approval and runtime audit." };
+}
+
+function ExecutionPolicyPicker({
+  locale,
+  value,
+  onChange,
+}: {
+  locale: LocaleCode;
+  value: ComposerExecutionPolicy;
+  onChange: (value: ComposerExecutionPolicy) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const policies: ComposerExecutionPolicy[] = ["standard", "patch_only"];
+  const selected = executionPolicyCopy(locale, value);
+  const label = locale === "zh-CN" ? "执行约束" : "Execution policy";
+  return (
+    <div
+      className={`execution-policy-picker ${open ? "execution-policy-picker-open" : ""}`}
+      onBlur={(event) => {
+        const nextTarget = event.relatedTarget;
+        if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) setOpen(false);
+      }}
+    >
+      <button
+        type="button"
+        className="execution-policy-trigger"
+        data-composer="execution-policy"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`${label}: ${selected.label}`}
+        title={`${selected.label}: ${selected.detail}`}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <ShieldCheck size={14} strokeWidth={1.9} aria-hidden="true" />
+        <span>{selected.label}</span>
+        <ChevronDown size={13} strokeWidth={1.8} aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="execution-policy-menu" role="menu" aria-label={label}>
+          {policies.map((policy) => {
+            const copy = executionPolicyCopy(locale, policy);
+            return (
+              <button
+                type="button"
+                key={policy}
+                role="menuitemradio"
+                aria-checked={policy === value}
+                title={copy.detail}
+                onClick={() => {
+                  onChange(policy);
+                  setOpen(false);
+                }}
+              >
+                <ShieldCheck size={13} strokeWidth={1.9} aria-hidden="true" />
+                <span>{copy.label}</span>
+                {policy === value ? <CheckCircle2 size={13} strokeWidth={1.8} aria-hidden="true" /> : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function workflowModeCopy(locale: LocaleCode, mode: ComposerWorkflowMode) {
   if (locale === "zh-CN") {
     if (mode === "plan") {
@@ -1429,6 +1716,8 @@ function clippedCommand(command: string) {
   return clean.length > 220 ? `${clean.slice(0, 220)}...` : clean;
 }
 
+const STATUS_NOTICE_PREVIEW_ITEMS = 3;
+
 function ConversationNoticeBar({
   locale,
   notices,
@@ -1441,8 +1730,12 @@ function ConversationNoticeBar({
   const [expanded, setExpanded] = useState(false);
   if (notices.length === 0) return null;
   const primaryNotice = notices.find((notice) => notice.tone === "danger") ?? notices[0];
-  const visibleNotices = expanded ? notices : [primaryNotice];
-  const hiddenCount = Math.max(notices.length - 1, 0);
+  const collapsedNotices = [primaryNotice, ...notices.filter((notice) => notice.key !== primaryNotice.key)].slice(
+    0,
+    STATUS_NOTICE_PREVIEW_ITEMS,
+  );
+  const visibleNotices = expanded ? notices : collapsedNotices;
+  const hiddenCount = Math.max(notices.length - visibleNotices.length, 0);
   const toggleLabel =
     locale === "zh-CN"
       ? expanded
@@ -2347,7 +2640,7 @@ function RuntimeAttentionPanel({
 }) {
   const [expanded, setExpanded] = useState(false);
   if (!items.length) return null;
-  const visibleItems = expanded ? items : items.slice(0, 1);
+  const visibleItems = expanded ? items : items.slice(0, STATUS_NOTICE_PREVIEW_ITEMS);
   const hiddenCount = Math.max(items.length - visibleItems.length, 0);
   return (
     <section className="pane-section inspector-section compact-status-section" data-testid="runtime-attention-panel">
@@ -2610,6 +2903,22 @@ function useResizablePane(kind: "left" | "right") {
   };
 }
 
+function useCompactShellViewport() {
+  const [compact, setCompact] = useState(() => typeof window !== "undefined" && isCompactShellViewport(window.innerWidth));
+
+  useEffect(() => {
+    function syncViewport() {
+      setCompact(isCompactShellViewport(window.innerWidth));
+    }
+
+    syncViewport();
+    window.addEventListener("resize", syncViewport);
+    return () => window.removeEventListener("resize", syncViewport);
+  }, []);
+
+  return compact;
+}
+
 function useComposerInputResize() {
   const [height, setHeight] = useState(() => clampComposerInputHeight(loadStoredNumber(COMPOSER_INPUT_HEIGHT_KEY, 112)));
   const draggingRef = useRef<null | { startY: number; startHeight: number }>(null);
@@ -2734,6 +3043,13 @@ function RouterControlCenter({
     enabled: Boolean(project?.project_id),
     refetchInterval: 7000,
   });
+  const appHealth = useQuery({
+    queryKey: ["app-health", project?.project_id],
+    queryFn: api.health,
+    enabled: Boolean(project?.project_id),
+    refetchInterval: 15000,
+    staleTime: 10000,
+  });
   const [tab, setTab] = useState<SetupTab>(initialTab);
   const [extensionKind, setExtensionKind] = useState<ExtensionInventoryInitialKind>(initialExtensionsKind);
   const selectSetupTab = (nextTab: SetupTab, options?: { extensionKind?: ExtensionInventoryInitialKind }) => {
@@ -2754,7 +3070,7 @@ function RouterControlCenter({
   const [reasoningDraft, setReasoningDraft] = useState<ReasoningConfig | null>(null);
   const [importDraft, setImportDraft] = useState("");
   const [secretValue, setSecretValue] = useState("");
-  const [managerUsername, setManagerUsername] = useState("user");
+  const [managerUsername, setManagerUsername] = useState("");
   const [managerPassword, setManagerPassword] = useState("");
   const [managerNewPassword, setManagerNewPassword] = useState("");
   const [managerOldPassword, setManagerOldPassword] = useState("");
@@ -2763,6 +3079,11 @@ function RouterControlCenter({
   const [managedKeyDraft, setManagedKeyDraft] = useState({ label: "", secret: "", env_key: "" });
   const [selectedKeyId, setSelectedKeyId] = useState("");
   const [selectedProviderId, setSelectedProviderId] = useState("");
+  useEffect(() => {
+    if (managerUsername.trim()) return;
+    const preferred = llmSession.data?.preferred_username ?? llmSession.data?.users?.[0]?.username ?? "";
+    if (preferred) setManagerUsername(preferred);
+  }, [llmSession.data?.preferred_username, llmSession.data?.users, managerUsername]);
   const [capabilityRouteDrafts, setCapabilityRouteDrafts] = useState<Record<string, { mode: "auto" | "pinned"; provider_id?: string | null; model?: string | null }>>({});
   const [capabilitySmokeResults, setCapabilitySmokeResults] = useState<Record<string, CapabilitySmokeResult>>({});
   const mcpStatus = useQuery({ queryKey: ["mcp-status", selectedProviderId], queryFn: () => api.mcpStatus({ profile_id: selectedProviderId ? `${selectedProviderId}-default` : undefined, detail: "toolsAndAuthOnly" }), enabled: (tab === "mcp" || tab === "capabilities") && Boolean(selectedProviderId), refetchInterval: 7000, retry: false });
@@ -2784,8 +3105,9 @@ function RouterControlCenter({
   });
   const [modelSearch, setModelSearch] = useState("");
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
-  const [testOutput, setTestOutput] = useState<string>("");
+  const [managedKeyTestFeedback, setManagedKeyTestFeedback] = useState<ManagedKeyTestFeedback | null>(null);
   const [metadataOutput, setMetadataOutput] = useState<string>("");
+  const [healthResultsExpanded, setHealthResultsExpanded] = useState(false);
   const [metadataRefreshJobId, setMetadataRefreshJobId] = useState<string | null>(null);
   const [mcpOutput, setMcpOutput] = useState<string>("");
   const [wslSetupOutput, setWslSetupOutput] = useState("");
@@ -2873,6 +3195,8 @@ function RouterControlCenter({
       queryClient.invalidateQueries({ queryKey: ["capability-management"] });
     },
   });
+  const [automationOperationNotice, setAutomationOperationNotice] = useState<AutomationOperationNotice | null>(null);
+
   const invalidateAutomationQueries = () => {
     queryClient.invalidateQueries({ queryKey: ["automations", project?.project_id] });
     queryClient.invalidateQueries({ queryKey: ["automations-runs", project?.project_id] });
@@ -2880,23 +3204,74 @@ function RouterControlCenter({
     queryClient.invalidateQueries({ queryKey: ["automations-scheduler", project?.project_id] });
     queryClient.invalidateQueries({ queryKey: ["runtime-supervisor"] });
   };
-  const createAutomation = useMutation({ mutationFn: api.createAutomation, onSuccess: invalidateAutomationQueries });
+  const createAutomation = useMutation({ mutationFn: api.createAutomation });
   const updateAutomation = useMutation({
     mutationFn: ({ automationId, patch }: { automationId: string; patch: Record<string, unknown> }) => api.updateAutomation(automationId, patch),
-    onSuccess: invalidateAutomationQueries,
   });
-  const deleteAutomation = useMutation({ mutationFn: (automationId: string) => api.deleteAutomation(automationId), onSuccess: invalidateAutomationQueries });
-  const pauseAutomation = useMutation({ mutationFn: (automationId: string) => api.pauseAutomation(automationId), onSuccess: invalidateAutomationQueries });
-  const resumeAutomation = useMutation({ mutationFn: (automationId: string) => api.resumeAutomation(automationId), onSuccess: invalidateAutomationQueries });
-  const runAutomationNow = useMutation({ mutationFn: (automationId: string) => api.runAutomationNow(automationId), onSuccess: invalidateAutomationQueries });
-  const cancelAutomationRun = useMutation({ mutationFn: (runId: string) => api.cancelAutomationRun(runId), onSuccess: invalidateAutomationQueries });
+  const deleteAutomation = useMutation({ mutationFn: (automationId: string) => api.deleteAutomation(automationId) });
+  const pauseAutomation = useMutation({ mutationFn: (automationId: string) => api.pauseAutomation(automationId) });
+  const resumeAutomation = useMutation({ mutationFn: (automationId: string) => api.resumeAutomation(automationId) });
+  const runAutomationNow = useMutation({ mutationFn: (automationId: string) => api.runAutomationNow(automationId) });
+  const cancelAutomationRun = useMutation({ mutationFn: (runId: string) => api.cancelAutomationRun(runId) });
   const updateAutomationInboxItem = useMutation({
     mutationFn: ({ itemId, patch }: { itemId: string; patch: Record<string, unknown> }) => api.updateAutomationInboxItem(itemId, patch),
-    onSuccess: invalidateAutomationQueries,
   });
   const promoteAutomationInboxItem = useMutation({
     mutationFn: ({ itemId, promotionRef }: { itemId: string; promotionRef: string }) => api.promoteAutomationInboxItem(itemId, promotionRef),
-    onSuccess: invalidateAutomationQueries,
+  });
+  const resetAutomationMutationState = () => {
+    createAutomation.reset();
+    updateAutomation.reset();
+    deleteAutomation.reset();
+    pauseAutomation.reset();
+    resumeAutomation.reset();
+    runAutomationNow.reset();
+    cancelAutomationRun.reset();
+    updateAutomationInboxItem.reset();
+    promoteAutomationInboxItem.reset();
+  };
+  const clearAutomationOperationState = () => {
+    setAutomationOperationNotice(null);
+    resetAutomationMutationState();
+  };
+  const syncAutomationRecord = (automation: AutomationSpec) => {
+    queryClient.setQueryData<AutomationListResponse>(["automations", project?.project_id], (current) =>
+      upsertAutomationListResponse(current, automation),
+    );
+  };
+  const syncAutomationRun = (run: AutomationRun, scheduler?: AutomationSchedulerStatus | null) => {
+    queryClient.setQueryData<AutomationRunsResponse>(["automations-runs", project?.project_id], (current) =>
+      upsertAutomationRunsResponse(current, run),
+    );
+    queryClient.setQueryData<{ scheduler: AutomationSchedulerStatus }>(["automations-scheduler", project?.project_id], (current) => ({
+      scheduler: scheduler ?? updateAutomationSchedulerAfterRun(current?.scheduler, run),
+    }));
+  };
+  const syncAutomationInboxItem = (item: AutomationInboxItem) => {
+    queryClient.setQueryData<AutomationInboxResponse>(["automations-inbox", project?.project_id], (current) =>
+      upsertAutomationInboxResponse(current, item),
+    );
+  };
+  const savedAutomationNotice = (automation: AutomationSpec): AutomationOperationNotice => ({
+    tone: "success",
+    title: locale === "zh-CN" ? "自动化已保存" : "Automation saved",
+    detail: automation.name || automation.automation_id,
+  });
+  const runAutomationNotice = (run: AutomationRun): AutomationOperationNotice => ({
+    tone: run.status === "failed" || run.status === "cancelled" ? "info" : "success",
+    title:
+      locale === "zh-CN"
+        ? run.status === "completed"
+          ? "自动化已完成"
+          : run.status === "running" || run.status === "queued"
+            ? "自动化已启动"
+            : "自动化已记录"
+        : run.status === "completed"
+          ? "Automation completed"
+          : run.status === "running" || run.status === "queued"
+            ? "Automation started"
+            : "Automation updated",
+    detail: run.summary || run.run_id,
   });
   const automationErrorMessage = useMemo(() => {
     const mutationError =
@@ -3055,8 +3430,9 @@ function RouterControlCenter({
   });
   const loginManager = useMutation({
     mutationFn: api.llmManagerLogin,
-    onSuccess: () => {
+    onSuccess: (data) => {
       setManagerPassword("");
+      if (data.session.username) setManagerUsername(data.session.username);
       queryClient.invalidateQueries({ queryKey: ["llm-manager-session"] });
       queryClient.invalidateQueries({ queryKey: ["llm-manager-keys"] });
       queryClient.invalidateQueries({ queryKey: ["llm-manager-catalog"] });
@@ -3104,13 +3480,22 @@ function RouterControlCenter({
   });
   const testManagedKey = useMutation({
     mutationFn: api.llmManagerTestKey,
+    onMutate: () => {
+      setManagedKeyTestFeedback(null);
+    },
     onSuccess: (data) => {
       const diagnosticsText = formatResponseDiagnostics(data.result.response_diagnostics);
       const failureText = runtimeErrorNoticeText(data.result.failure_notice ?? null);
-      setTestOutput(diagnosticsText ?? (failureText || data.result.response_excerpt || JSON.stringify(data.result, null, 2)));
+      setManagedKeyTestFeedback(summarizeManagedKeyTest(data.result, diagnosticsText ?? failureText));
       queryClient.invalidateQueries({ queryKey: ["llm-manager-keys"] });
       queryClient.invalidateQueries({ queryKey: ["llm-manager-catalog"] });
       queryClient.invalidateQueries({ queryKey: ["runtime-environment"] });
+    },
+    onError: (error, variables) => {
+      setManagedKeyTestFeedback(summarizeManagedKeyTestError(
+        variables.provider_id,
+        error instanceof Error ? error.message : "The app did not receive a usable health-test result.",
+      ));
     },
   });
   const runHealth = useMutation({
@@ -3216,6 +3601,20 @@ function RouterControlCenter({
   );
   const pluginListStatus = String(pluginInventoryNoteMap.plugin_list_status ?? (pluginInventory ? "supported" : "unknown"));
   const skillListStatus = String(pluginInventoryNoteMap.skill_list_status ?? (pluginInventory ? "supported" : "unknown"));
+  const latestHealthResults = useMemo(
+    () => (llmHealth.data?.results ?? []).slice(-12).reverse(),
+    [llmHealth.data?.results],
+  );
+  const visibleHealthResults = healthResultsExpanded
+    ? latestHealthResults
+    : latestHealthResults.slice(0, 3);
+  const hiddenHealthResultsCount = Math.max(
+    latestHealthResults.length - visibleHealthResults.length,
+    0,
+  );
+  useEffect(() => {
+    setHealthResultsExpanded(false);
+  }, [llmHealth.data?.updated_at, llmHealth.data?.results?.length]);
   const fileLandingMetrics: SetupLandingMetric[] = [
     {
       id: "tasks",
@@ -3547,12 +3946,50 @@ function RouterControlCenter({
   async function handleProviderTest(stream: boolean) {
     const sourceProvider = providerDraft ?? selectedProvider;
     if (!sourceProvider) return;
-    const result = await api.testProvider({ provider_id: sourceProvider.id, model_id: modelDraft?.id, stream });
-    const diagnosticsText = formatResponseDiagnostics(result.response_diagnostics);
-    const failureText = runtimeErrorNoticeText(result.failure_notice ?? null);
-    setTestOutput(diagnosticsText ?? (failureText || result.response_excerpt));
-    queryClient.invalidateQueries({ queryKey: ["router-config"] });
-    queryClient.invalidateQueries({ queryKey: ["runtime-environment"] });
+    setManagedKeyTestFeedback(null);
+    try {
+      const result = await api.testProvider({ provider_id: sourceProvider.id, model_id: modelDraft?.id, stream });
+      const diagnosticsText = formatResponseDiagnostics(result.response_diagnostics);
+      const failureText = runtimeErrorNoticeText(result.failure_notice ?? null);
+      setManagedKeyTestFeedback(summarizeManagedKeyTest(result, diagnosticsText ?? failureText));
+      queryClient.invalidateQueries({ queryKey: ["router-config"] });
+      queryClient.invalidateQueries({ queryKey: ["runtime-environment"] });
+    } catch (error) {
+      setManagedKeyTestFeedback(summarizeManagedKeyTestError(
+        sourceProvider.id,
+        error instanceof Error ? error.message : "The app did not receive a usable provider-test result.",
+      ));
+    }
+  }
+
+  async function handleProviderVisionTest() {
+    const sourceProvider = (routerConfig.data?.providers ?? []).find((provider) => provider.id === modelDraft?.provider) ?? providerDraft ?? selectedProvider;
+    if (!sourceProvider) return;
+    const sourceProfileId =
+      (profiles.data?.profiles ?? []).find((profile) => {
+        const providerId = profile.provider_id || profile.profile_id.replace(/-default$/, "");
+        return providerId === sourceProvider.id;
+      })?.profile_id ??
+      `${sourceProvider.id}-default`;
+    setManagedKeyTestFeedback(null);
+    try {
+      const result = await api.verifyAppServerImageRoute({
+        provider_id: sourceProvider.id,
+        model_id: modelDraft?.id,
+        profile_id: sourceProfileId || undefined,
+      });
+      const diagnosticsText = formatResponseDiagnostics(result.response_diagnostics);
+      const failureText = runtimeErrorNoticeText(result.failure_notice ?? null);
+      setManagedKeyTestFeedback(summarizeManagedKeyTest(result, diagnosticsText ?? failureText));
+      queryClient.invalidateQueries({ queryKey: ["router-config"] });
+      queryClient.invalidateQueries({ queryKey: ["runtime-environment"] });
+      queryClient.invalidateQueries({ queryKey: ["effective-catalog"] });
+    } catch (error) {
+      setManagedKeyTestFeedback(summarizeManagedKeyTestError(
+        sourceProvider.id,
+        error instanceof Error ? error.message : "The app did not receive a usable vision-test result.",
+      ));
+    }
   }
 
   async function handleExport() {
@@ -3620,7 +4057,19 @@ function RouterControlCenter({
     skill_count: (preset.skill_refs ?? []).length,
     active: preset.preset_id === project?.plugin_skill_presets?.active_preset_id,
   }));
-
+  const automationProfiles = useMemo(() => {
+    const loadedProviders = new Set(
+      (appHealth.data?.runtime.router?.providers ?? [])
+        .filter((provider) => provider.secret_loaded)
+        .map((provider) => provider.provider_id),
+    );
+    return [...(profiles.data?.profiles ?? [])].sort((left, right) => {
+      const rightLoaded = loadedProviders.has(String(right.provider_id || "")) ? 1 : 0;
+      const leftLoaded = loadedProviders.has(String(left.provider_id || "")) ? 1 : 0;
+      if (rightLoaded !== leftLoaded) return rightLoaded - leftLoaded;
+      return String(left.label || left.profile_id || "").localeCompare(String(right.label || right.profile_id || ""));
+    });
+  }, [appHealth.data?.runtime.router?.providers, profiles.data?.profiles]);
   const activeDogfood = dogfoodDraft ?? dogfoodRun.data?.run ?? null;
   const dogfoodBudgetRows = activeDogfood
     ? [
@@ -3660,40 +4109,6 @@ function RouterControlCenter({
             </button>
           ))}
         </div>
-        <section className="settings-nav-preferences" aria-label={t(locale, "user_settings")}>
-          <div className="settings-strip-section">
-            <strong>{t(locale, "locale")}</strong>
-            <div className="segmented">
-              <button type="button" className={locale === "zh-CN" ? "segmented-active" : ""} onClick={() => setLocale("zh-CN")}>
-                {t(locale, "locale_zh")}
-              </button>
-              <button type="button" className={locale === "en" ? "segmented-active" : ""} onClick={() => setLocale("en")}>
-                {t(locale, "locale_en")}
-              </button>
-            </div>
-          </div>
-          <div className="settings-strip-section">
-            <strong>{t(locale, "appearance")}</strong>
-            <div className="segmented segmented-wrap">
-              {(["codex", "paper", "slate", "cobalt", "sunrise"] as AppearancePreset[]).map((item) => (
-                <button key={item} type="button" className={appearance === item ? "segmented-active" : ""} onClick={() => setAppearance(item)}>
-                  {t(locale, `appearance_${item}`)}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="settings-strip-section">
-            <strong>{t(locale, "cursor_enhancement")}</strong>
-            <div className="segmented">
-              {(["auto", "off"] as CursorEnhancementPreference[]).map((item) => (
-                <button key={item} type="button" className={cursorEnhancement === item ? "segmented-active" : ""} onClick={() => setCursorEnhancement(item)}>
-                  {t(locale, `cursor_enhancement_${item}`)}
-                </button>
-              ))}
-            </div>
-            <p className="muted compact-copy">{t(locale, cursorEnhancement === "off" ? "cursor_enhancement_hint_off" : "cursor_enhancement_hint_auto")}</p>
-          </div>
-        </section>
       </aside>
       ) : null}
       <div className="settings-content">
@@ -3814,12 +4229,10 @@ function RouterControlCenter({
           <div className="manager-grid">
             <section className="manager-section">
               <h4>{t(locale, "manager_login_managed_title")}</h4>
-              <label className="field"><span>{t(locale, "manager_login_username")}</span><input value={managerUsername} onChange={(event) => setManagerUsername(event.target.value)} placeholder="user" /></label>
-              <label className="field"><span>{t(locale, "manager_login_password")}</span><input type="password" value={managerPassword} onChange={(event) => setManagerPassword(event.target.value)} placeholder={t(locale, "manager_login_password_placeholder")} /></label>
+              <label className="field"><span>{t(locale, "manager_login_username")}</span><select value={managerUsername} onChange={(event) => setManagerUsername(event.target.value)} disabled={(llmSession.data?.users ?? []).length === 0}><option value="" disabled>{locale === "zh-CN" ? "选择托管用户" : "Choose a managed user"}</option>{(llmSession.data?.users ?? []).map((user) => <option key={user.username} value={user.username}>{user.display_name || user.username}</option>)}</select></label>
+              <label className="field"><span>{t(locale, "manager_login_password")}</span><input type="password" autoComplete="current-password" data-sensitive-field="true" value={managerPassword} onChange={(event) => setManagerPassword(event.target.value)} placeholder={t(locale, "manager_login_password_placeholder")} /></label>
               <div className="field-row">
                 <button type="button" className="primary-button" disabled={!managerUsername.trim() || !managerPassword.trim() || loginManager.isPending} onClick={() => loginManager.mutate({ mode: "managed_user", username: managerUsername, password: managerPassword })}>{t(locale, "manager_login_button")}</button>
-                <button type="button" className="ghost-button" disabled={!managerUsername.trim() || loginManager.isPending} onClick={() => loginManager.mutate({ mode: "managed_user", username: managerUsername, use_desktop_key_file: true })}>{t(locale, "manager_login_desktop_key")}</button>
-                <button type="button" className="ghost-button" disabled={createManagerUser.isPending} onClick={() => createManagerUser.mutate({ username: "user", use_desktop_key_file: true })}>{t(locale, "manager_login_init_desktop")}</button>
               </div>
               {loginManager.error || createManagerUser.error ? <p className="error-text">{String((loginManager.error || createManagerUser.error) as Error)}</p> : null}
             </section>
@@ -3863,7 +4276,7 @@ function RouterControlCenter({
                 {(llmSession.data?.users ?? []).length === 0 ? <p className="muted compact-copy">{t(locale, "manager_users_empty")}</p> : null}
               </div>
               <label className="field"><span>{t(locale, "manager_user_new_username")}</span><input value={managerUsername} onChange={(event) => setManagerUsername(event.target.value)} /></label>
-              <label className="field"><span>{t(locale, "manager_user_new_password")}</span><input type="password" value={managerPassword} onChange={(event) => setManagerPassword(event.target.value)} /></label>
+              <label className="field"><span>{t(locale, "manager_user_new_password")}</span><input type="password" autoComplete="new-password" data-sensitive-field="true" value={managerPassword} onChange={(event) => setManagerPassword(event.target.value)} /></label>
               <button type="button" className="primary-button" disabled={!managerUsername.trim() || !managerPassword.trim()} onClick={() => createManagerUser.mutate({ username: managerUsername, password: managerPassword })}>{t(locale, "manager_user_create")}</button>
             </section>
             <section className="manager-section">
@@ -3884,8 +4297,8 @@ function RouterControlCenter({
             <section className="manager-section">
               <h4>{t(locale, "manager_password_title")}</h4>
               <p className="muted compact-copy">{t(locale, "manager_password_summary")}</p>
-              <label className="field"><span>{t(locale, "manager_password_old")}</span><input type="password" value={managerOldPassword} onChange={(event) => setManagerOldPassword(event.target.value)} /></label>
-              <label className="field"><span>{t(locale, "manager_password_new")}</span><input type="password" value={managerNewPassword} onChange={(event) => setManagerNewPassword(event.target.value)} /></label>
+              <label className="field"><span>{t(locale, "manager_password_old")}</span><input type="password" autoComplete="current-password" data-sensitive-field="true" value={managerOldPassword} onChange={(event) => setManagerOldPassword(event.target.value)} /></label>
+              <label className="field"><span>{t(locale, "manager_password_new")}</span><input type="password" autoComplete="new-password" data-sensitive-field="true" value={managerNewPassword} onChange={(event) => setManagerNewPassword(event.target.value)} /></label>
               <button type="button" className="primary-button" disabled={!managerOldPassword.trim() || !managerNewPassword.trim()} onClick={() => changeManagerPassword.mutate({ username: managerUsername, old_password: managerOldPassword, new_password: managerNewPassword })}>{t(locale, "manager_password_change")}</button>
               {changeManagerPassword.error ? <p className="error-text">{String(changeManagerPassword.error as Error)}</p> : null}
             </section>
@@ -4084,13 +4497,39 @@ function RouterControlCenter({
               </div>
             </div>
             {modelDraft ? (
-              <div className="metadata-detail-pane">
+              <div
+                className="metadata-detail-pane"
+                data-testid="metadata-model-detail-pane"
+                tabIndex={0}
+                aria-label={locale === "zh-CN" ? "模型契约编辑器，可滚动" : "Scrollable model contract editor"}
+              >
               <div className="metadata-detail-header">
                 <div>
                   <span className="eyebrow">{t(locale, "manager_model_contract")}</span>
                   <h3>{modelDraft.display_name || modelDraft.id || t(locale, "manager_model_new")}</h3>
                 </div>
                 <div className="field-row">
+                  {modelDraft.input_modalities?.includes("image") ? (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={locale === "zh-CN" ? "验证图片输入路由" : "Verify image input route"}
+                      title={locale === "zh-CN" ? "验证图片输入路由" : "Verify image input route"}
+                      onClick={handleProviderVisionTest}
+                    >
+                      <ImageIcon aria-hidden="true" size={15} />
+                    </button>
+                  ) : null}
+                  {managedKeyTestFeedback ? (
+                    <span
+                      className={`session-badge session-badge-${managedKeyTestFeedback.tone === "success" ? "managed_user" : "anonymous"}`}
+                      title={`${managedKeyTestFeedback.title}\n${managedKeyTestFeedback.diagnostic}\n${managedKeyTestFeedback.nextAction}`}
+                    >
+                      {managedKeyTestFeedback.tone === "success"
+                        ? (locale === "zh-CN" ? "视觉通过" : "Vision passed")
+                        : (locale === "zh-CN" ? "视觉失败" : "Vision failed")}
+                    </span>
+                  ) : null}
                   <button type="button" className="primary-button" onClick={() => saveModel.mutate(modelDraft)}>{t(locale, "manager_model_save")}</button>
                   {modelDraft.id ? <button type="button" className="ghost-button" onClick={() => api.deleteModelCatalogEntry(modelDraft.id).then(() => queryClient.invalidateQueries({ queryKey: ["router-config"] }))}>{t(locale, "manager_delete")}</button> : null}
                 </div>
@@ -4491,7 +4930,7 @@ function RouterControlCenter({
         <AutomationsPanel
           locale={locale}
           projectId={project?.project_id ?? ""}
-          profiles={profiles.data?.profiles ?? []}
+          profiles={automationProfiles}
           automations={automations.data?.automations ?? []}
           runs={automationRuns.data?.runs ?? []}
           inboxItems={automationInbox.data?.items ?? []}
@@ -4499,6 +4938,8 @@ function RouterControlCenter({
           supervisorAutomations={null}
           mcpPresetOptions={automationMcpPresetOptions}
           pluginSkillPresetOptions={automationPluginSkillPresetOptions}
+          catalogModels={mergeComposerCatalogModels(llmSession.data?.mode, llmCatalog.data?.models ?? [], routerConfig.data?.models ?? [])}
+          runtimeProviders={appHealth.data?.runtime.router?.providers ?? []}
           isBusy={
             createAutomation.isPending ||
             updateAutomation.isPending ||
@@ -4510,17 +4951,161 @@ function RouterControlCenter({
             updateAutomationInboxItem.isPending ||
             promoteAutomationInboxItem.isPending
           }
+          operationNotice={automationOperationNotice}
           errorMessage={automationErrorMessage}
-          onCreate={(payload) => createAutomation.mutate(payload)}
-          onUpdate={(automationId, patch) => updateAutomation.mutate({ automationId, patch })}
-          onDelete={(automationId) => deleteAutomation.mutate(automationId)}
-          onPause={(automationId) => pauseAutomation.mutate(automationId)}
-          onResume={(automationId) => resumeAutomation.mutate(automationId)}
-          onRunNow={(automationId) => runAutomationNow.mutate(automationId)}
-          onCancelRun={(runId) => cancelAutomationRun.mutate(runId)}
-          onMarkReviewed={(itemId) => updateAutomationInboxItem.mutate({ itemId, patch: { state: "reviewed" } })}
-          onArchive={(itemId) => updateAutomationInboxItem.mutate({ itemId, patch: { state: "archived" } })}
-          onPromote={(itemId, promotionRef) => promoteAutomationInboxItem.mutate({ itemId, promotionRef })}
+          onCreate={(payload) => {
+            clearAutomationOperationState();
+            createAutomation.mutate(payload, {
+              onSuccess: (response) => {
+                syncAutomationRecord(response.automation);
+                invalidateAutomationQueries();
+                resetAutomationMutationState();
+                setAutomationOperationNotice(savedAutomationNotice(response.automation));
+              },
+            });
+          }}
+          onUpdate={(automationId, patch) => {
+            clearAutomationOperationState();
+            updateAutomation.mutate(
+              { automationId, patch },
+              {
+                onSuccess: (response) => {
+                  syncAutomationRecord(response.automation);
+                  invalidateAutomationQueries();
+                  resetAutomationMutationState();
+                  setAutomationOperationNotice(savedAutomationNotice(response.automation));
+                },
+              },
+            );
+          }}
+          onDelete={(automationId) => {
+            clearAutomationOperationState();
+            deleteAutomation.mutate(automationId, {
+              onSuccess: (response) => {
+                syncAutomationRecord(response.automation);
+                invalidateAutomationQueries();
+                resetAutomationMutationState();
+                setAutomationOperationNotice({
+                  tone: "success",
+                  title: locale === "zh-CN" ? "自动化已归档" : "Automation archived",
+                  detail: response.automation.name || response.automation.automation_id,
+                });
+              },
+            });
+          }}
+          onPause={(automationId) => {
+            clearAutomationOperationState();
+            pauseAutomation.mutate(automationId, {
+              onSuccess: (response) => {
+                syncAutomationRecord(response.automation);
+                invalidateAutomationQueries();
+                resetAutomationMutationState();
+                setAutomationOperationNotice({
+                  tone: "success",
+                  title: locale === "zh-CN" ? "自动化已暂停" : "Automation paused",
+                  detail: response.automation.name || response.automation.automation_id,
+                });
+              },
+            });
+          }}
+          onResume={(automationId) => {
+            clearAutomationOperationState();
+            resumeAutomation.mutate(automationId, {
+              onSuccess: (response) => {
+                syncAutomationRecord(response.automation);
+                invalidateAutomationQueries();
+                resetAutomationMutationState();
+                setAutomationOperationNotice({
+                  tone: "success",
+                  title: locale === "zh-CN" ? "自动化已恢复" : "Automation resumed",
+                  detail: response.automation.name || response.automation.automation_id,
+                });
+              },
+            });
+          }}
+          onRunNow={(automationId) => {
+            clearAutomationOperationState();
+            runAutomationNow.mutate(automationId, {
+              onSuccess: (response) => {
+                syncAutomationRun(response.run, response.scheduler);
+                if (response.inbox_item) {
+                  syncAutomationInboxItem(response.inbox_item);
+                }
+                invalidateAutomationQueries();
+                resetAutomationMutationState();
+                setAutomationOperationNotice(runAutomationNotice(response.run));
+              },
+            });
+          }}
+          onCancelRun={(runId) => {
+            clearAutomationOperationState();
+            cancelAutomationRun.mutate(runId, {
+              onSuccess: (response) => {
+                syncAutomationRun(response.run);
+                invalidateAutomationQueries();
+                resetAutomationMutationState();
+                setAutomationOperationNotice({
+                  tone: "success",
+                  title: locale === "zh-CN" ? "运行已取消" : "Run cancelled",
+                  detail: response.run.summary || response.run.run_id,
+                });
+              },
+            });
+          }}
+          onMarkReviewed={(itemId) => {
+            clearAutomationOperationState();
+            updateAutomationInboxItem.mutate(
+              { itemId, patch: { state: "reviewed" } },
+              {
+                onSuccess: (response) => {
+                  syncAutomationInboxItem(response.item);
+                  invalidateAutomationQueries();
+                  resetAutomationMutationState();
+                  setAutomationOperationNotice({
+                    tone: "success",
+                    title: locale === "zh-CN" ? "收件箱已标记" : "Inbox item updated",
+                    detail: response.item.title || response.item.item_id,
+                  });
+                },
+              },
+            );
+          }}
+          onArchive={(itemId) => {
+            clearAutomationOperationState();
+            updateAutomationInboxItem.mutate(
+              { itemId, patch: { state: "archived" } },
+              {
+                onSuccess: (response) => {
+                  syncAutomationInboxItem(response.item);
+                  invalidateAutomationQueries();
+                  resetAutomationMutationState();
+                  setAutomationOperationNotice({
+                    tone: "success",
+                    title: locale === "zh-CN" ? "收件箱已归档" : "Inbox item archived",
+                    detail: response.item.title || response.item.item_id,
+                  });
+                },
+              },
+            );
+          }}
+          onPromote={(itemId, promotionRef) => {
+            clearAutomationOperationState();
+            promoteAutomationInboxItem.mutate(
+              { itemId, promotionRef },
+              {
+                onSuccess: (response) => {
+                  syncAutomationInboxItem(response.item);
+                  invalidateAutomationQueries();
+                  resetAutomationMutationState();
+                  setAutomationOperationNotice({
+                    tone: "success",
+                    title: locale === "zh-CN" ? "条目已提升" : "Inbox item promoted",
+                    detail: response.item.promotion_ref || response.item.title || response.item.item_id,
+                  });
+                },
+              },
+            );
+          }}
         />
       ) : null}
 
@@ -4778,6 +5363,13 @@ function RouterControlCenter({
         </div>
       ) : null}
 
+      {tab === "updates" ? (
+        <AgenticUpdateReviewPanel
+          locale={locale}
+          providers={routerConfig.data?.providers ?? []}
+        />
+      ) : null}
+
       {tab === "reports" ? (
         <div className="metadata-dashboard">
           <div className="metadata-actions">
@@ -4897,20 +5489,40 @@ function RouterControlCenter({
               {metadataOutput ? <pre className="modal-json">{metadataOutput}</pre> : null}
             </section>
             <section className="manager-section">
-              <h4>Latest results</h4>
-              <div className="manager-list manager-list-tall">
-                {(llmHealth.data?.results ?? []).slice(-12).reverse().map((result, index) => {
+              <div className="section-header manager-section-header">
+                <h4>Latest results</h4>
+                {hiddenHealthResultsCount > 0 ? (
+                  <button
+                    type="button"
+                    className="ghost-button compact-inline-button"
+                    onClick={() => setHealthResultsExpanded((value) => !value)}
+                    aria-expanded={healthResultsExpanded}
+                  >
+                    {healthResultsExpanded
+                      ? (locale === "zh-CN" ? "收起" : "Collapse")
+                      : (locale === "zh-CN"
+                        ? `还有 ${hiddenHealthResultsCount} 条`
+                        : `${hiddenHealthResultsCount} more`)}
+                  </button>
+                ) : null}
+              </div>
+              <div className="manager-list manager-list-tall health-result-list">
+                {visibleHealthResults.map((result, index) => {
                   const diagnosticsSummary = summarizeResponseDiagnosticsInline(result.response_diagnostics);
                   const failureSummary = runtimeErrorNoticeInline((result.failure_notice as RuntimeFailureNotice | null | undefined) ?? null);
+                  const status = result.ok ? "pass" : result.skipped ? "blocked" : "fail";
+                  const model = String(result.model ?? "-");
+                  const meta = `${String(result.provider ?? "")} / ${String(result.effort ?? "")} / web ${String(result.web_smoke_status ?? "n/a")} / ${String(result.connectivity ?? result.reason ?? "")}`;
+                  const detail = diagnosticsSummary || failureSummary;
+                  const tooltip = [model, meta, detail].filter(Boolean).join("\n");
                   return (
-                    <div className="manager-row" key={`${String(result.run_id ?? "run")}-${index}`}>
-                      <span>
-                        <strong>{String(result.model ?? "-")}</strong>
-                        <small>{String(result.provider ?? "")} / {String(result.effort ?? "")} / web {String(result.web_smoke_status ?? "n/a")} / {String(result.connectivity ?? result.reason ?? "")}</small>
-                        {diagnosticsSummary ? <small>{diagnosticsSummary}</small> : failureSummary ? <small>{failureSummary}</small> : null}
+                    <div className="manager-row health-result-row" key={`${String(result.run_id ?? "run")}-${index}`} title={tooltip || undefined}>
+                      <span className="health-result-copy">
+                        <strong className="health-result-model">{model}</strong>
+                        <small className="health-result-meta">{meta}</small>
                       </span>
                       <span className="manager-row-side">
-                        <small>{result.ok ? "pass" : result.skipped ? "blocked" : "fail"}</small>
+                        <small className={`health-result-status health-result-status-${status}`}>{status}</small>
                       </span>
                     </div>
                   );
@@ -4938,7 +5550,7 @@ function RouterControlCenter({
               <label className="field"><span>{t(locale, "title_provider")}</span><select value={selectedProviderId} onChange={(event) => setSelectedProviderId(event.target.value)}>{(routerConfig.data?.providers ?? []).map((provider) => <option key={provider.id} value={provider.id}>{provider.display_name || provider.id}</option>)}</select></label>
               <label className="field"><span>Key label</span><input value={managedKeyDraft.label} onChange={(event) => setManagedKeyDraft({ ...managedKeyDraft, label: event.target.value })} placeholder={`${selectedProviderId || "provider"} primary`} /></label>
               <label className="field"><span>Env var name</span><input value={managedKeyDraft.env_key || selectedProvider?.env_key || ""} onChange={(event) => setManagedKeyDraft({ ...managedKeyDraft, env_key: event.target.value })} placeholder={selectedProvider?.env_key ?? "PROVIDER_API_KEY"} /></label>
-              <label className="field"><span>Provider API key</span><input type="password" value={managedKeyDraft.secret} onChange={(event) => setManagedKeyDraft({ ...managedKeyDraft, secret: event.target.value })} placeholder={managerMode === "managed_user" ? "Stored encrypted in this user's vault" : "Login first to save in the vault"} /></label>
+              <label className="field"><span>Provider API key</span><input type="password" autoComplete="off" data-sensitive-field="true" value={managedKeyDraft.secret} onChange={(event) => setManagedKeyDraft({ ...managedKeyDraft, secret: event.target.value })} placeholder={managerMode === "managed_user" ? "Stored encrypted in this user's vault" : "Login first to save in the vault"} /></label>
               <div className="field-row">
                 <button
                   type="button"
@@ -4954,10 +5566,31 @@ function RouterControlCenter({
                 >
                   Save encrypted key
                 </button>
-                <button type="button" className="ghost-button" disabled={!selectedManagedKey} onClick={() => testManagedKey.mutate({ key_id: selectedManagedKey?.key_id, provider_id: selectedManagedKey?.provider_id })}>Test selected</button>
+                <button type="button" className="ghost-button" disabled={!selectedManagedKey || testManagedKey.isPending} onClick={() => testManagedKey.mutate({ key_id: selectedManagedKey?.key_id, provider_id: selectedManagedKey?.provider_id })}>{testManagedKey.isPending ? "Testing selected" : "Test selected"}</button>
               </div>
-              {saveManagedKey.error || testManagedKey.error ? <p className="error-text">{String((saveManagedKey.error || testManagedKey.error) as Error)}</p> : null}
-              {testOutput ? <pre className="modal-json">{testOutput}</pre> : null}
+              {saveManagedKey.error ? <p className="error-text">{String(saveManagedKey.error)}</p> : null}
+              {managedKeyTestFeedback ? (
+                <section
+                  className={`managed-key-test-result managed-key-test-result-${managedKeyTestFeedback.tone}`}
+                  data-testid="managed-key-test-result"
+                  role={managedKeyTestFeedback.tone === "danger" ? "alert" : "status"}
+                  aria-live={managedKeyTestFeedback.tone === "danger" ? "assertive" : "polite"}
+                  aria-atomic="true"
+                >
+                  <div className="managed-key-test-result-head">
+                    {managedKeyTestFeedback.tone === "success" ? <CheckCircle2 aria-hidden="true" size={15} /> : <AlertTriangle aria-hidden="true" size={15} />}
+                    <strong>{managedKeyTestFeedback.title}</strong>
+                    <span>{managedKeyTestFeedback.provider} / {managedKeyTestFeedback.model}</span>
+                  </div>
+                  <p>{managedKeyTestFeedback.diagnostic}</p>
+                  <dl className="managed-key-test-result-meta">
+                    <div><dt>HTTP</dt><dd>{managedKeyTestFeedback.status ?? "not available"}</dd></div>
+                    <div><dt>Usage</dt><dd>not available</dd></div>
+                    <div><dt>Cost</dt><dd>not available</dd></div>
+                  </dl>
+                  <small>{managedKeyTestFeedback.nextAction}</small>
+                </section>
+              ) : null}
             </section>
             <section className="manager-section">
               <h4>Managed keys</h4>
@@ -4985,7 +5618,7 @@ function RouterControlCenter({
           <section className="manager-section">
             <h4>Anonymous/session key fallback</h4>
             <p className="muted">{t(locale, "key_setup_summary_compact")}</p>
-            <label className="field"><span>{t(locale, "runtime_secret")}</span><input type="password" value={secretValue} onChange={(event) => setSecretValue(event.target.value)} placeholder={t(locale, "key_setup_input_placeholder")} /></label>
+            <label className="field"><span>{t(locale, "runtime_secret")}</span><input type="password" autoComplete="off" data-sensitive-field="true" value={secretValue} onChange={(event) => setSecretValue(event.target.value)} placeholder={t(locale, "key_setup_input_placeholder")} /></label>
             <div className="field-row">
               <button type="button" className="ghost-button" disabled={!selectedProviderId || !secretValue.trim()} onClick={() => loadSecret.mutate({ profileId: `${selectedProviderId}-default`, payload: { session_key: secretValue, persist_to_keychain: false } })}>{t(locale, "key_setup_use")}</button>
               <button type="button" className="ghost-button" disabled={!selectedProviderId} onClick={() => handleProviderTest(false)}>{t(locale, "key_setup_test")}</button>
@@ -5008,6 +5641,21 @@ function Launcher() {
   const cursorEnhancement = useAppStore((store) => store.cursorEnhancement);
   const setCursorEnhancement = useAppStore((store) => store.setCursorEnhancement);
   const setProject = useAppStore((store) => store.setProject);
+  const project = useAppStore((store) => store.project);
+  const health = useQuery({
+    queryKey: ["launcher-health"],
+    queryFn: api.health,
+    retry: false,
+    refetchInterval: 15000,
+    staleTime: 5000,
+  });
+  const current = useQuery({
+    queryKey: ["project"],
+    queryFn: api.currentProject,
+    retry: false,
+    refetchInterval: project ? false : 5000,
+    staleTime: project ? 60_000 : 0,
+  });
   const recent = useQuery({ queryKey: ["recent-projects"], queryFn: api.recentProjects });
   const [name, setName] = useState("Codex Workspace");
   const [projectFile, setProjectFile] = useState("");
@@ -5015,6 +5663,18 @@ function Launcher() {
   const [entryMode, setEntryMode] = useState<ProjectFile["entry_mode"]>("existing");
   const [openPath, setOpenPath] = useState("");
   const [settingsExpanded, setSettingsExpanded] = useState(false);
+  useEffect(() => {
+    if (current.data?.project) {
+      setProject(current.data.project);
+    }
+  }, [current.data?.project, setProject]);
+
+  const launcherSidecarGateText = launcherSidecarGateMessage(locale, {
+    error: health.error,
+    pending: health.isPending,
+  });
+  const launcherSidecarUnavailable =
+    !current.data?.project && (health.isPending || Boolean(health.error));
 
   const createProject = useMutation({
     mutationFn: api.createProject,
@@ -5037,6 +5697,39 @@ function Launcher() {
       queryClient.invalidateQueries({ queryKey: ["recent-projects"] });
     },
   });
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.dataset.appBootstrapDebug = JSON.stringify({
+      surface: "launcher",
+      storeProjectId: project?.project_id ?? null,
+      currentProjectId: current.data?.project?.project_id ?? null,
+      currentStatus: current.status,
+      currentFetchStatus: current.fetchStatus,
+      currentError: current.error instanceof Error ? current.error.message : current.error ? String(current.error) : null,
+      healthStatus: health.status,
+      healthFetchStatus: health.fetchStatus,
+      healthError: health.error instanceof Error ? health.error.message : health.error ? String(health.error) : null,
+      recentStatus: recent.status,
+      recentFetchStatus: recent.fetchStatus,
+      recentCount: recent.data?.projects?.length ?? null,
+      openProjectPending: openProject.isPending,
+      at: Date.now(),
+    });
+  }, [
+    current.data?.project?.project_id,
+    current.error,
+    current.fetchStatus,
+    current.status,
+    health.error,
+    health.fetchStatus,
+    health.status,
+    openProject.isPending,
+    project?.project_id,
+    recent.data?.projects?.length,
+    recent.fetchStatus,
+    recent.status,
+  ]);
 
   useEffect(() => {
     document.documentElement.dataset.appearance = appearance;
@@ -5064,8 +5757,17 @@ function Launcher() {
         <p className="eyebrow">{t(locale, "app_title")}</p>
         <h1>{t(locale, "create_project")}</h1>
         <p>{t(locale, "launcher_summary")}</p>
-        <p className="muted">{t(locale, "setup_first")}</p>
-        <p className="muted">{t(locale, "project_suffix_note")}</p>
+        <div className="launcher-hero-meta muted">
+          <span>{t(locale, "setup_first")}</span>
+          <button
+            type="button"
+            className="icon-button launcher-inline-help"
+            title={t(locale, "project_suffix_note")}
+            aria-label={t(locale, "project_suffix_note")}
+          >
+            <CircleHelp size={14} strokeWidth={1.8} aria-hidden="true" />
+          </button>
+        </div>
         <div className="topbar-actions">
           <button type="button" className="ghost-button" onClick={() => setSettingsExpanded((value) => !value)}>
             {t(locale, "user_settings")}
@@ -5110,19 +5812,26 @@ function Launcher() {
       <section className="launcher-panel">
         <div className="launcher-recent-column">
           <h2>{t(locale, "recent_projects")}</h2>
+          {launcherSidecarGateText ? (
+            <p
+              className={health.error ? "error-text launcher-sidecar-gate" : "muted launcher-sidecar-gate"}
+              data-testid="launcher-sidecar-gate"
+            >
+              {launcherSidecarGateText}
+            </p>
+          ) : null}
           <div className="launcher-recent">
-            {(recent.data?.projects ?? []).map((project) => (
-              <button
-                type="button"
-                key={project.project_file}
-                className="recent-project"
-                onClick={() => openProject.mutate(project.project_file)}
-              >
-                <strong>{project.name}</strong>
-                <span>{project.workspace_root}</span>
-                <time>{summarizeRelativeTime(project.updated_at)}</time>
-              </button>
-            ))}
+            {(recent.data?.projects ?? []).map((project) => {
+              return (
+                <RecentProjectButton
+                  key={project.project_file}
+                  project={project}
+                  relativeTimeLabel={summarizeRelativeTime(project.updated_at)}
+                  disabled={openProject.isPending}
+                  onOpen={(projectFile) => openProject.mutate(projectFile)}
+                />
+              );
+            })}
             {!recent.isLoading && (recent.data?.projects ?? []).length === 0 ? <p className="muted">{t(locale, "project_none")}</p> : null}
           </div>
         </div>
@@ -5213,9 +5922,9 @@ function Launcher() {
   );
 }
 
-function AppShell() {
+function AppShell({ bootstrapProject = null }: { bootstrapProject?: ProjectFile | null } = {}) {
   const queryClient = useQueryClient();
-  const project = useAppStore((store) => store.project)!;
+  const project = useAppStore((store) => store.project) ?? bootstrapProject!;
   const locale = useAppStore((store) => store.locale);
   const appearance = useAppStore((store) => store.appearance);
   const cursorEnhancement = useAppStore((store) => store.cursorEnhancement);
@@ -5249,8 +5958,32 @@ function AppShell() {
   const leftPane = useResizablePane("left");
   const rightPane = useResizablePane("right");
   const composerInputResize = useComposerInputResize();
+  const compactShellViewport = useCompactShellViewport();
+  const [compactSidebarOpen, setCompactSidebarOpen] = useState(false);
+  const sidebarVisible = resolveSidebarVisible({
+    compactViewport: compactShellViewport,
+    compactSidebarOpen,
+    desktopSidebarOpen: leftSidebarOpen,
+  });
+
+  useEffect(() => {
+    if (!compactShellViewport) setCompactSidebarOpen(false);
+  }, [compactShellViewport]);
+
+  function toggleNavigationSidebar() {
+    if (compactShellViewport) {
+      setCompactSidebarOpen((current) => !current);
+      return;
+    }
+    toggleLeftSidebar();
+  }
+
+  function closeCompactNavigation() {
+    if (compactShellViewport) setCompactSidebarOpen(false);
+  }
 
   const [composerText, setComposerText] = useState("");
+  const [composerExecutionPolicy, setComposerExecutionPolicy] = useState<ComposerExecutionPolicy>("standard");
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [attachmentDropActive, setAttachmentDropActive] = useState(false);
@@ -5281,6 +6014,7 @@ function AppShell() {
   const [topMenuOpen, setTopMenuOpen] = useState<string | null>(null);
   const [sendStage, setSendStage] = useState<string | null>(null);
   const [sendFailure, setSendFailure] = useState<string | null>(null);
+  const runtimeErrorsByTurnRef = useRef<Record<string, string>>({});
   const [executionHostDraft, setExecutionHostDraft] = useState<ExecutionHost>((project.ui_preferences.execution_host as ExecutionHost) ?? "windows");
   const [wslDistroDraft, setWslDistroDraft] = useState(project.ui_preferences.wsl_distro ?? "");
   const [guardDismissedFor, setGuardDismissedFor] = useState<string | null>(null);
@@ -5292,9 +6026,44 @@ function AppShell() {
   const [inspectorFileQuery, setInspectorFileQuery] = useState("");
   const [inspectorFilePath, setInspectorFilePath] = useState("");
   const [statusPlanExpanded, setStatusPlanExpanded] = useState(false);
+  const [graphWorkspaceOpen, setGraphWorkspaceOpen] = useState(false);
+  const chatCanvasRef = useRef<HTMLDivElement | null>(null);
+  const [selectedTaskGraphId, setSelectedTaskGraphId] = useState<string | null>(null);
+  const [selectedTaskGraphNodeId, setSelectedTaskGraphNodeId] = useState<string | null>(null);
+  const [selectedTaskGraphEdgeId, setSelectedTaskGraphEdgeId] = useState<string | null>(null);
+  const [fallbackTaskGraph, setFallbackTaskGraph] = useState<TaskGraphDefinition | null>(null);
+  const [taskGraphNodeOverrides, setTaskGraphNodeOverrides] = useState<Record<string, Partial<TaskGraphDefinition["nodes"][number]>>>({});
+  const [taskGraphNodeSaveError, setTaskGraphNodeSaveError] = useState<string | null>(null);
+  const [taskGraphEdgeSaveError, setTaskGraphEdgeSaveError] = useState<string | null>(null);
+const [taskGraphDryRunResult, setTaskGraphDryRunResult] = useState<TaskGraphDryRunResult | null>(null);
+const [taskGraphDryRunError, setTaskGraphDryRunError] = useState<string | null>(null);
+const [taskGraphFixtureRunError, setTaskGraphFixtureRunError] = useState<string | null>(null);
+const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null>(null);
+  const [taskGraphLiveDispatchStarted, setTaskGraphLiveDispatchStarted] = useState(false);
+  const [taskGraphOptimisticLiveRunRefs, setTaskGraphOptimisticLiveRunRefs] = useState<Record<string, TaskGraphRunRef>>({});
+  const [taskGraphLiveRunRefs, setTaskGraphLiveRunRefs] = useState<Record<string, TaskGraphRunRef>>({});
+  const [taskGraphImportExportError, setTaskGraphImportExportError] = useState<string | null>(null);
+  const [taskGraphLastImportedPath, setTaskGraphLastImportedPath] = useState<string | null>(null);
+  const [taskGraphLastExportedPath, setTaskGraphLastExportedPath] = useState<string | null>(null);
+  const [taskGraphLastExportPreview, setTaskGraphLastExportPreview] = useState<string | null>(null);
+  const [taskGraphSnapshotError, setTaskGraphSnapshotError] = useState<string | null>(null);
+  const [taskGraphSnapshotStatus, setTaskGraphSnapshotStatus] = useState<string | null>(null);
+  const [taskGraphSnapshotDiffMarkdown, setTaskGraphSnapshotDiffMarkdown] = useState<string | null>(null);
+  const [selectedTaskGraphSnapshotId, setSelectedTaskGraphSnapshotId] = useState<string | null>(null);
+  const taskGraphSelectionHydrationKeyRef = useRef<string | null>(null);
+  const [taskGraphFixturePendingVisible, setTaskGraphFixturePendingVisible] = useState(false);
+  const taskGraphFixturePendingStartedAtRef = useRef<number | null>(null);
+  const taskGraphFixturePendingTimerRef = useRef<number | null>(null);
   const smokeMode = useMemo(() => browserSmokeMode(), []);
   const [expandedSidebarProjects, setExpandedSidebarProjects] = useState<Set<string>>(() => loadStringSet(SIDEBAR_EXPANDED_PROJECTS_KEY));
   const [sidebarSelectionBusy, setSidebarSelectionBusy] = useState(false);
+  const [sidebarSelectionError, setSidebarSelectionError] = useState<string | null>(null);
+  const [pendingSidebarProjectKey, setPendingSidebarProjectKey] = useState<string | null>(null);
+  const [pendingSidebarTask, setPendingSidebarTask] = useState<ProjectTask | null>(null);
+  const [taskSelectionGuard, setTaskSelectionGuard] = useState<ProjectTask | null>(null);
+  const selectedTaskScopeRef = useRef<string | null>(null);
+  const [threadCreateRecovery, setThreadCreateRecovery] = useState<ThreadCreateRecovery | null>(null);
+  const [taskCreationPending, setTaskCreationPending] = useState<{ name: string; operationId: string; recoveryAttempts: number } | null>(null);
 
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles, refetchInterval: 5000 });
   const routerConfig = useQuery({ queryKey: ["router-config"], queryFn: api.routerConfig, refetchInterval: 5000 });
@@ -5353,21 +6122,276 @@ function AppShell() {
     retry: false,
     staleTime: 15000,
   });
+  useEffect(() => {
+    if (!project.project_id) return;
+    void api.ensureAdminSession().catch(() => {
+      // Keep mutations as the authoritative error surface. This prewarm path
+      // only reduces first-click latency and browser dogfood timeout races.
+    });
+  }, [project.project_id]);
 
-  const currentTask = projectTasks.data?.current_task ?? null;
+  const resolvedCurrentTask = useMemo(
+    () => resolveCurrentProjectTask(project, projectTasks.data),
+    [project, projectTasks.data],
+  );
+  const currentTask = useMemo(
+    () =>
+      resolveVisibleCurrentProjectTask({
+        pendingSidebarTask,
+        taskSelectionGuard,
+        resolvedCurrentTask,
+      }),
+    [pendingSidebarTask, resolvedCurrentTask, taskSelectionGuard],
+  );
+  const taskGraphHydrationTaskId = currentTask?.task_id ?? project.current_task_id ?? null;
+  useEffect(() => {
+    if (!selectedTaskScopeRef.current && currentTask?.task_id) {
+      selectedTaskScopeRef.current = currentTask.task_id;
+    }
+  }, [currentTask?.task_id]);
+  useEffect(() => {
+    if (!pendingSidebarTask) return;
+    const reconciledTask = resolvedCurrentTask;
+    if (project.current_task_id !== pendingSidebarTask.task_id || reconciledTask?.task_id !== pendingSidebarTask.task_id) return;
+    setPendingSidebarProjectKey(null);
+    setPendingSidebarTask(null);
+  }, [pendingSidebarTask, project.current_task_id, resolvedCurrentTask]);
+  useEffect(() => {
+    if (!taskSelectionGuard) return;
+    const reconciledTask = resolvedCurrentTask;
+    if (project.current_task_id !== taskSelectionGuard.task_id || reconciledTask?.task_id !== taskSelectionGuard.task_id) return;
+    setTaskSelectionGuard(null);
+  }, [project.current_task_id, resolvedCurrentTask, taskSelectionGuard]);
   function cacheProjectTask(task: ProjectTask | null | undefined) {
     if (!task) return;
+    setTaskSelectionGuard((current) => (current?.task_id === task.task_id ? task : current));
     queryClient.setQueryData<ProjectTasksResponse>(["project-tasks", project.project_id], (current) => mergeProjectTaskResponse(current, task));
   }
+  const activeTaskGraphId =
+    selectedTaskGraphId ??
+    latestTaskGraphDefinition(currentTask?.graph_definitions)?.graph_id ??
+    fallbackTaskGraph?.graph_id ??
+    null;
+  const taskGraphTemplates = useQuery({
+    queryKey: ["task-graph-templates"],
+    queryFn: api.taskGraphTemplates,
+    enabled: mainView === "chat",
+    staleTime: 30000,
+  });
+  const taskGraph = useQuery({
+    queryKey: ["task-graph", project.project_id, taskGraphHydrationTaskId, activeTaskGraphId],
+    queryFn: () => api.taskGraph(activeTaskGraphId),
+    enabled: Boolean(graphWorkspaceOpen && taskGraphHydrationTaskId && activeTaskGraphId),
+    refetchInterval: smokeMode ? false : graphWorkspaceOpen ? 4000 : false,
+    retry: smokeMode ? false : undefined,
+  });
+  const taskGraphTemplateList =
+    taskGraphTemplates.data?.templates?.length
+      ? taskGraphTemplates.data.templates
+      : taskGraphTemplates.error
+        ? FALLBACK_TASK_GRAPH_TEMPLATES
+        : taskGraphTemplates.data?.templates ?? [];
+  const taskGraphTemplatesLoading = taskGraphTemplateList.length === 0 && taskGraphTemplates.isLoading;
+  const taskGraphLoading = taskGraph.isLoading && !taskGraph.error;
+  const taskGraphRouteUnavailable = resolveTaskGraphRouteUnavailable({
+    templatesError: Boolean(taskGraphTemplates.error),
+    taskGraphErrorMessage: (taskGraph.error as Error | null)?.message ?? null,
+    routeGraph: taskGraph.data?.graph ?? null,
+    persistedGraphs: currentTask?.graph_definitions ?? [],
+    fallbackGraph: fallbackTaskGraph,
+  });
+  const clearTaskGraphFixturePendingTimer = () => {
+    if (typeof window !== "undefined" && taskGraphFixturePendingTimerRef.current != null) {
+      window.clearTimeout(taskGraphFixturePendingTimerRef.current);
+      taskGraphFixturePendingTimerRef.current = null;
+    }
+  };
+  const startVisibleTaskGraphFixturePending = () => {
+    clearTaskGraphFixturePendingTimer();
+    taskGraphFixturePendingStartedAtRef.current = Date.now();
+    setTaskGraphFixturePendingVisible(true);
+  };
+  const settleVisibleTaskGraphFixturePending = () => {
+    const startedAt = taskGraphFixturePendingStartedAtRef.current;
+    if (startedAt == null) {
+      setTaskGraphFixturePendingVisible(false);
+      return;
+    }
+    const elapsed = Date.now() - startedAt;
+    const remaining = Math.max(0, TASK_GRAPH_FIXTURE_PENDING_MIN_MS - elapsed);
+    clearTaskGraphFixturePendingTimer();
+    if (remaining === 0) {
+      taskGraphFixturePendingStartedAtRef.current = null;
+      setTaskGraphFixturePendingVisible(false);
+      return;
+    }
+    if (typeof window !== "undefined") {
+      taskGraphFixturePendingTimerRef.current = window.setTimeout(() => {
+        taskGraphFixturePendingStartedAtRef.current = null;
+        taskGraphFixturePendingTimerRef.current = null;
+        setTaskGraphFixturePendingVisible(false);
+      }, remaining);
+    }
+  };
+  useEffect(
+    () => () => {
+      clearTaskGraphFixturePendingTimer();
+    },
+    [],
+  );
+  const taskGraphProviderOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (profiles.data?.profiles ?? [])
+            .map((profile) => profile.provider_id?.trim())
+            .filter((value): value is string => Boolean(value)),
+        ),
+      ).sort(),
+    [profiles.data?.profiles],
+  );
+  const taskGraphModelSuggestions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (profiles.data?.profiles ?? [])
+            .map((profile) => profile.model?.trim())
+            .filter((value): value is string => Boolean(value)),
+        ),
+      ).sort(),
+    [profiles.data?.profiles],
+  );
+  useEffect(() => {
+    if (!taskGraphHydrationTaskId) {
+      setFallbackTaskGraph(null);
+      setTaskGraphNodeOverrides({});
+      setSelectedTaskGraphEdgeId(null);
+      setTaskGraphDryRunResult(null);
+      setTaskGraphDryRunError(null);
+      setTaskGraphFixtureRunError(null);
+      setTaskGraphImportExportError(null);
+      setTaskGraphLastImportedPath(null);
+      setTaskGraphLastExportedPath(null);
+      setTaskGraphLastExportPreview(null);
+      setTaskGraphSnapshotError(null);
+      setTaskGraphSnapshotStatus(null);
+      setTaskGraphSnapshotDiffMarkdown(null);
+      setSelectedTaskGraphSnapshotId(null);
+      return;
+    }
+    setFallbackTaskGraph(readFallbackTaskGraph(project.project_id, taskGraphHydrationTaskId));
+    setTaskGraphNodeOverrides({});
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    setTaskGraphImportExportError(null);
+    setTaskGraphLastImportedPath(null);
+    setTaskGraphLastExportedPath(null);
+    setTaskGraphLastExportPreview(null);
+    setTaskGraphSnapshotError(null);
+    setTaskGraphSnapshotStatus(null);
+    setTaskGraphSnapshotDiffMarkdown(null);
+    setSelectedTaskGraphSnapshotId(null);
+  }, [project.project_id, taskGraphHydrationTaskId]);
+  useEffect(() => {
+    if (!taskGraphHydrationTaskId) {
+      taskGraphSelectionHydrationKeyRef.current = null;
+      setSelectedTaskGraphId(null);
+      setSelectedTaskGraphNodeId(null);
+      setSelectedTaskGraphEdgeId(null);
+      return;
+    }
+    const selectionKey = taskGraphSelectionStorageKey(project.project_id, taskGraphHydrationTaskId);
+    const firstHydrationForTask = taskGraphSelectionHydrationKeyRef.current !== selectionKey;
+    taskGraphSelectionHydrationKeyRef.current = selectionKey;
+    const persistedGraphId = loadStoredString(taskGraphSelectionStorageKey(project.project_id, taskGraphHydrationTaskId));
+    const latestGraphDefinition = latestTaskGraphDefinition(currentTask?.graph_definitions);
+    const latestGraphId = taskGraphRouteUnavailable
+      ? fallbackTaskGraph?.graph_id ?? latestGraphDefinition?.graph_id ?? null
+      : taskGraph.data?.graph?.graph_id ?? latestGraphDefinition?.graph_id ?? fallbackTaskGraph?.graph_id ?? null;
+    setSelectedTaskGraphId((current) => {
+      return resolvePreferredTaskGraphId({
+        currentGraphId: current,
+        persistedGraphId,
+        routeGraphId: taskGraph.data?.graph?.graph_id ?? null,
+        latestGraphId,
+        fallbackGraphId: fallbackTaskGraph?.graph_id ?? null,
+        taskGraphIds: [
+          ...(currentTask?.graph_definitions ?? []).map((graph) => graph.graph_id),
+          ...(fallbackTaskGraph?.graph_id ? [fallbackTaskGraph.graph_id] : []),
+        ],
+        taskGraphRouteUnavailable,
+        firstHydrationForTask,
+      });
+    });
+  }, [currentTask, fallbackTaskGraph?.graph_id, project.project_id, taskGraph.data?.graph?.graph_id, taskGraphHydrationTaskId, taskGraphRouteUnavailable]);
+  useEffect(() => {
+    if (!taskGraphHydrationTaskId) return;
+    saveStoredString(taskGraphSelectionStorageKey(project.project_id, taskGraphHydrationTaskId), selectedTaskGraphId);
+  }, [project.project_id, selectedTaskGraphId, taskGraphHydrationTaskId]);
+  useEffect(() => {
+    const snapshotRefs = currentTask?.graph_snapshot_refs ?? [];
+    if (!snapshotRefs.length) {
+      setSelectedTaskGraphSnapshotId(null);
+      return;
+    }
+    setSelectedTaskGraphSnapshotId((current) => {
+      if (current && snapshotRefs.some((item) => item.snapshot_id === current)) {
+        return current;
+      }
+      return snapshotRefs[0]?.snapshot_id ?? null;
+    });
+  }, [currentTask?.graph_snapshot_refs]);
+  useEffect(() => {
+    if (mainView !== "chat" || !graphWorkspaceOpen) return;
+    chatCanvasRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [graphWorkspaceOpen, mainView, currentTask?.task_id, activeTaskGraphId]);
+  useEffect(() => {
+    const nodes =
+      (taskGraphRouteUnavailable
+        ? fallbackTaskGraph?.nodes
+        : taskGraph.data?.graph?.nodes ??
+          currentTask?.graph_definitions?.find((graph) => graph.graph_id === activeTaskGraphId)?.nodes ??
+          latestTaskGraphDefinition(currentTask?.graph_definitions)?.nodes) ??
+      fallbackTaskGraph?.nodes ??
+      [];
+    if (!nodes.length) {
+      setSelectedTaskGraphNodeId(null);
+      return;
+    }
+    setSelectedTaskGraphNodeId((current) => (current && nodes.some((node) => node.node_id === current) ? current : nodes[0]?.node_id ?? null));
+  }, [activeTaskGraphId, currentTask?.graph_definitions, fallbackTaskGraph?.nodes, taskGraph.data?.graph, taskGraphRouteUnavailable]);
+  useEffect(() => {
+    const edges =
+      (taskGraphRouteUnavailable
+        ? fallbackTaskGraph?.edges
+        : taskGraph.data?.graph?.edges ??
+          currentTask?.graph_definitions?.find((graph) => graph.graph_id === activeTaskGraphId)?.edges ??
+          latestTaskGraphDefinition(currentTask?.graph_definitions)?.edges) ??
+      fallbackTaskGraph?.edges ??
+      [];
+    if (!edges.length) {
+      setSelectedTaskGraphEdgeId(null);
+      return;
+    }
+    setSelectedTaskGraphEdgeId((current) => (current && edges.some((edge) => edge.edge_id === current) ? current : edges[0]?.edge_id ?? null));
+  }, [activeTaskGraphId, currentTask?.graph_definitions, fallbackTaskGraph?.edges, taskGraph.data?.graph, taskGraphRouteUnavailable]);
   const selectedThreadId = taskVisibleThreadId(currentTask) ?? (!currentTask ? project.current_thread_id ?? threads.data?.threads[0]?.id ?? null : null);
-  const sendTargetThreadId = currentTask?.active_provider_thread_id ?? selectedThreadId;
+  const sendTargetThreadId = resolveTaskSendTargetThreadId({
+    currentTask,
+    selectedThreadId,
+  });
   const selectedThreadSummary = threads.data?.threads.find((thread) => thread.id === selectedThreadId);
-  const selectedTaskProviderThread = currentTask?.provider_threads.find((thread) => thread.thread_id === selectedThreadId) ?? null;
-  const selectedThreadProfileId =
-    selectedTaskProviderThread?.profile_id ??
-    threadSettingsDraft[selectedThreadId ?? ""]?.profile_id ??
-    selectedThreadSummary?.shellSettings?.profile_id ??
-    (!selectedThreadId ? listProfileId : null);
+  const currentTaskProviderThreads = Array.isArray(currentTask?.provider_threads) ? currentTask.provider_threads : [];
+  const selectedTaskProviderThread = currentTaskProviderThreads.find((thread) => thread.thread_id === selectedThreadId) ?? null;
+  const selectedThreadProfileId = resolveSelectedThreadProfileId({
+    currentTask,
+    selectedThreadId,
+    threadSettingsProfileId: threadSettingsDraft[selectedThreadId ?? ""]?.profile_id ?? null,
+    selectedThreadSummary,
+    projectDefaultProfileId: project.default_profile_id,
+    listProfileId,
+  });
   const selectedThreadProfileReady = !selectedThreadId || Boolean(selectedThreadProfileId);
   const selectedThread = useQuery({
     queryKey: ["thread", selectedThreadId, selectedThreadProfileId],
@@ -5442,6 +6466,1180 @@ function AppShell() {
       queryClient.invalidateQueries({ queryKey: ["task-conversation"] });
     },
   });
+  const instantiateTaskGraph = useMutation({
+    mutationFn: ({ templateId, title }: { templateId: string; title?: string | null }) =>
+      api.instantiateTaskGraph({ template_id: templateId, title }),
+    onSuccess: (data) => {
+      setTaskGraphNodeSaveError(null);
+      setTaskGraphEdgeSaveError(null);
+      setTaskGraphDryRunResult(null);
+      setTaskGraphDryRunError(null);
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        setFallbackTaskGraph(data.graph);
+        persistFallbackTaskGraph(data.graph);
+        setGraphWorkspaceOpen(true);
+        setSelectedTaskGraphId(data.graph.graph_id);
+        setSelectedTaskGraphNodeId(data.graph.nodes[0]?.node_id ?? null);
+        setSelectedTaskGraphEdgeId(data.graph.edges[0]?.edge_id ?? null);
+        if (data.task?.task_id) {
+          saveStoredString(taskGraphSelectionStorageKey(project.project_id, data.task.task_id), data.graph.graph_id);
+        }
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+  });
+  const updateTaskGraphNode = useMutation({
+    mutationFn: api.updateTaskGraphNode,
+    onSuccess: (data) => {
+      setTaskGraphNodeSaveError(null);
+      setTaskGraphDryRunResult(null);
+      setTaskGraphDryRunError(null);
+      if (data.graph && data.node?.node_id) {
+        setTaskGraphNodeOverrides((current) => {
+          const next = { ...current };
+          delete next[taskGraphNodeOverrideKey(data.graph.graph_id, data.node.node_id)];
+          return next;
+        });
+      }
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        setFallbackTaskGraph(data.graph);
+        persistFallbackTaskGraph(data.graph);
+        setSelectedTaskGraphId(data.graph.graph_id);
+        setSelectedTaskGraphNodeId(data.node?.node_id ?? null);
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      setTaskGraphNodeSaveError(error instanceof Error ? error.message : "Failed to save the selected node.");
+    },
+  });
+  const updateTaskGraphEdge = useMutation({
+    mutationFn: api.updateTaskGraphEdge,
+    onSuccess: (data) => {
+      setTaskGraphEdgeSaveError(null);
+      setTaskGraphDryRunResult(null);
+      setTaskGraphDryRunError(null);
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        setFallbackTaskGraph(data.graph);
+        persistFallbackTaskGraph(data.graph);
+        setSelectedTaskGraphId(data.graph.graph_id);
+        setSelectedTaskGraphEdgeId(data.edge?.edge_id ?? null);
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      setTaskGraphEdgeSaveError(error instanceof Error ? error.message : "Failed to save the selected edge.");
+    },
+  });
+  const saveTaskGraphDefinition = useMutation({
+    mutationFn: api.saveTaskGraph,
+    onSuccess: (data) => {
+      setTaskGraphEdgeSaveError(null);
+      setTaskGraphDryRunResult(null);
+      setTaskGraphDryRunError(null);
+      if (data.graph) {
+        setTaskGraphNodeOverrides((current) => {
+          const next = { ...current };
+          for (const node of data.graph.nodes ?? []) {
+            delete next[taskGraphNodeOverrideKey(data.graph.graph_id, node.node_id)];
+          }
+          return next;
+        });
+      }
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        setFallbackTaskGraph(data.graph);
+        persistFallbackTaskGraph(data.graph);
+        setSelectedTaskGraphId(data.graph.graph_id);
+        setSelectedTaskGraphEdgeId((current) => (current && data.graph.edges.some((edge) => edge.edge_id === current) ? current : data.graph.edges[0]?.edge_id ?? null));
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      setTaskGraphEdgeSaveError(error instanceof Error ? error.message : "Failed to save the task graph.");
+    },
+  });
+  const dryRunTaskGraph = useMutation({
+    mutationFn: api.dryRunTaskGraph,
+    onSuccess: (data) => {
+      setTaskGraphDryRunError(null);
+      setTaskGraphDryRunResult(data.dry_run);
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+      const fallbackLiveRun = shouldPromoteDryRunToLiveRun({
+        intent: taskGraphRequestedRunIntentRef.current,
+        dryRunGraphId: data.graph?.graph_id,
+        dryRunOverallStatus: data.dry_run?.overall_status,
+        liveRunPending: runTaskGraph.isPending,
+      });
+      if (fallbackLiveRun) {
+        taskGraphRequestedRunIntentRef.current = {
+          kind: "live",
+          graphId: fallbackLiveRun.graphId,
+          tokenBudget: fallbackLiveRun.tokenBudget,
+          fallbackTriggered: true,
+        };
+        primeTaskGraphOptimisticLiveRunRef({
+          graphId: fallbackLiveRun.graphId,
+          taskId: String(data.task?.task_id ?? currentTask?.task_id ?? "").trim(),
+          entryNodeIds: data.graph?.graph_policy?.entry_node_ids,
+          budget: { status: "pending", run: { limits: { total_tokens: fallbackLiveRun.tokenBudget } } },
+          templateId: data.graph?.template_id,
+        });
+        runTaskGraph.mutate({
+          graph_id: fallbackLiveRun.graphId,
+          budget: { limits: { total_tokens: fallbackLiveRun.tokenBudget } },
+        });
+        return;
+      }
+      taskGraphRequestedRunIntentRef.current = null;
+    },
+    onError: (error) => {
+      taskGraphRequestedRunIntentRef.current = null;
+      setTaskGraphDryRunError(error instanceof Error ? error.message : "Dry-run failed.");
+    },
+  });
+  const runTaskGraph = useMutation({
+    mutationFn: (payload: { graph_id: string; budget: { limits: { total_tokens: number } } }) =>
+      api.runTaskGraph(payload, {
+        onRequestStage: (stage) => {
+          if (
+            stage === "run_fetch_started" ||
+            stage === "run_response_received" ||
+            stage === "run_fetch_threw"
+          ) {
+            setTaskGraphLiveDispatchStarted(true);
+          }
+        },
+      }),
+    onSuccess: (data) => {
+      taskGraphRequestedRunIntentRef.current = null;
+      setTaskGraphLiveDispatchStarted(false);
+      setTaskGraphFixtureRunError(null);
+      clearTaskGraphOptimisticLiveRunRef(data.graph?.graph_id ?? data.live_run?.run_ref?.graph_id);
+      cacheTaskGraphLiveRunRef(data.live_run?.run_ref);
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      taskGraphRequestedRunIntentRef.current = null;
+      setTaskGraphLiveDispatchStarted(false);
+      applyTaskGraphRunFailurePayload(error, activeTaskGraphId);
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task-graph", project.project_id, currentTask?.task_id, activeTaskGraphId] });
+      setTaskGraphFixtureRunError(error instanceof Error ? error.message : "Live run failed.");
+    },
+  });
+  const taskGraphLiveRunUiPending =
+    runTaskGraph.isPending && taskGraphLiveDispatchStarted;
+  useEffect(() => {
+    if (!taskGraphLiveRunUiPending) return undefined;
+    const refresh = () => {
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+      if (activeTaskGraphId) {
+        queryClient.invalidateQueries({
+          queryKey: [
+            "task-graph",
+            project.project_id,
+            currentTask?.task_id ?? null,
+            activeTaskGraphId,
+          ],
+        });
+      }
+    };
+    refresh();
+    const timer = window.setInterval(
+      refresh,
+      TASK_GRAPH_LIVE_RUN_PENDING_REFRESH_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [
+    activeTaskGraphId,
+    currentTask?.task_id,
+    project.project_id,
+    queryClient,
+    taskGraphLiveRunUiPending,
+  ]);
+  const importTaskGraphFile = useMutation({
+    mutationFn: api.importTaskGraphFile,
+    onSuccess: (data) => {
+      setTaskGraphImportExportError(null);
+      setTaskGraphNodeSaveError(null);
+      setTaskGraphEdgeSaveError(null);
+      setTaskGraphDryRunResult(null);
+      setTaskGraphDryRunError(null);
+      setTaskGraphFixtureRunError(null);
+      setTaskGraphLastImportedPath(data.import_path ?? null);
+      setTaskGraphLastExportedPath(null);
+      setTaskGraphLastExportPreview(null);
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        setFallbackTaskGraph(data.graph);
+        persistFallbackTaskGraph(data.graph);
+        setGraphWorkspaceOpen(true);
+        setSelectedTaskGraphId(data.graph.graph_id);
+        setSelectedTaskGraphNodeId(data.graph.nodes[0]?.node_id ?? null);
+        setSelectedTaskGraphEdgeId(data.graph.edges[0]?.edge_id ?? null);
+        if (data.task?.task_id) {
+          saveStoredString(taskGraphSelectionStorageKey(project.project_id, data.task.task_id), data.graph.graph_id);
+        }
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      setTaskGraphImportExportError(error instanceof Error ? error.message : "Failed to import the graph file.");
+    },
+  });
+  const exportTaskGraphFile = useMutation({
+    mutationFn: api.exportTaskGraphFile,
+    onSuccess: (data) => {
+      setTaskGraphImportExportError(null);
+      setTaskGraphLastImportedPath(null);
+      setTaskGraphLastExportedPath(data.export_path ?? null);
+      setTaskGraphLastExportPreview(data.serialized_text ?? null);
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      setTaskGraphImportExportError(error instanceof Error ? error.message : "Failed to export the graph file.");
+    },
+  });
+  const createTaskGraphSnapshot = useMutation({
+    mutationFn: api.createTaskGraphSnapshot,
+    onSuccess: (data) => {
+      setTaskGraphSnapshotError(null);
+      setTaskGraphSnapshotStatus(`Snapshot created: ${data.snapshot.label ?? data.snapshot.snapshot_id}`);
+      setSelectedTaskGraphSnapshotId(data.snapshot.snapshot_id);
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        setFallbackTaskGraph(data.graph);
+        persistFallbackTaskGraph(data.graph);
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      setTaskGraphSnapshotError(error instanceof Error ? error.message : "Failed to create a graph snapshot.");
+    },
+  });
+  const diffTaskGraphSnapshot = useMutation({
+    mutationFn: api.diffTaskGraphSnapshot,
+    onSuccess: (data) => {
+      setTaskGraphSnapshotError(null);
+      setTaskGraphSnapshotStatus(
+        `Compared ${data.snapshot.label ?? data.snapshot.snapshot_id} with ${data.compared_label ?? "current graph"}.`,
+      );
+      setTaskGraphSnapshotDiffMarkdown(data.diff_markdown);
+      setSelectedTaskGraphSnapshotId(data.snapshot.snapshot_id);
+      cacheProjectTask(data.task);
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      setTaskGraphSnapshotError(error instanceof Error ? error.message : "Failed to compare the selected graph snapshot.");
+    },
+  });
+  const rollbackTaskGraphToSnapshot = useMutation({
+    mutationFn: api.rollbackTaskGraphToSnapshot,
+    onSuccess: (data) => {
+      setTaskGraphSnapshotError(null);
+      setTaskGraphSnapshotStatus(`Rolled back to ${data.rolled_back_to_snapshot.label ?? data.rolled_back_to_snapshot.snapshot_id}.`);
+      setTaskGraphSnapshotDiffMarkdown(null);
+      setSelectedTaskGraphSnapshotId(data.snapshot.snapshot_id);
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        setFallbackTaskGraph(data.graph);
+        persistFallbackTaskGraph(data.graph);
+        setSelectedTaskGraphId(data.graph.graph_id);
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      setTaskGraphSnapshotError(error instanceof Error ? error.message : "Failed to roll back to the selected graph snapshot.");
+    },
+  });
+  const cacheTaskGraphLiveRunRef = (runRef: TaskGraphRunRef | null | undefined) => {
+    if (!runRef) return;
+    const graphId = String(runRef.graph_id ?? "").trim();
+    if (!graphId) return;
+    setTaskGraphOptimisticLiveRunRefs((current) => {
+      if (!(graphId in current)) return current;
+      const next = { ...current };
+      delete next[graphId];
+      return next;
+    });
+    setTaskGraphLiveRunRefs((current) => {
+      const existing = current[graphId];
+      const next =
+        selectLatestTaskGraphRunRef(graphId, [[runRef], existing ? [existing] : []]) ?? runRef;
+      if (existing === next) return current;
+      return {
+        ...current,
+        [graphId]: next,
+      };
+    });
+  };
+  const primeTaskGraphOptimisticLiveRunRef = ({
+    graphId,
+    taskId,
+    entryNodeIds,
+    budget,
+    templateId,
+  }: {
+    graphId: string;
+    taskId: string;
+    entryNodeIds?: readonly string[] | null | undefined;
+    budget?: TaskGraphRunRef["budget"];
+    templateId?: string | null | undefined;
+  }) => {
+    const cleanGraphId = String(graphId ?? "").trim();
+    const cleanTaskId = String(taskId ?? "").trim();
+    if (!cleanGraphId || !cleanTaskId) return;
+    const optimistic = createOptimisticTaskGraphLiveRunRef({
+      graphId: cleanGraphId,
+      taskId: cleanTaskId,
+      entryNodeIds,
+      budget,
+      templateId,
+    });
+    setTaskGraphOptimisticLiveRunRefs((current) => ({
+      ...current,
+      [cleanGraphId]: optimistic,
+    }));
+  };
+  const clearTaskGraphOptimisticLiveRunRef = (graphId: string | null | undefined) => {
+    const cleanGraphId = String(graphId ?? "").trim();
+    if (!cleanGraphId) return;
+    setTaskGraphOptimisticLiveRunRefs((current) => {
+      if (!(cleanGraphId in current)) return current;
+      const next = { ...current };
+      delete next[cleanGraphId];
+      return next;
+    });
+  };
+  const applyTaskGraphRunFailurePayload = (
+    error: unknown,
+    fallbackGraphId: string | null | undefined,
+  ) => {
+    clearTaskGraphOptimisticLiveRunRef(fallbackGraphId);
+    if (!(error instanceof ApiRequestError) || !error.data || typeof error.data !== "object") {
+      return;
+    }
+    const payload = error.data as {
+      task?: ProjectTask | null;
+      graph?: TaskGraphDefinition | null;
+      live_run?: {
+        run_ref?: TaskGraphRunRef | null;
+      } | null;
+    };
+    cacheTaskGraphLiveRunRef(payload.live_run?.run_ref);
+    cacheProjectTask(payload.task);
+    const graphId = String(payload.graph?.graph_id ?? fallbackGraphId ?? "").trim();
+    if (graphId && payload.graph) {
+      queryClient.setQueryData(
+        ["task-graph", project.project_id, payload.task?.task_id ?? currentTask?.task_id ?? null, graphId],
+        {
+          graph: payload.graph,
+          task: payload.task ?? currentTask,
+        },
+      );
+    }
+  };
+  const fixtureRunTaskGraph = useMutation({
+    mutationFn: api.fixtureRunTaskGraph,
+    onSuccess: (data) => {
+      if (typeof window !== "undefined") {
+        document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+          stage: "fixture_run_success",
+          graphId: data.graph?.graph_id ?? null,
+          runId: String((data.fixture_run as { run_id?: string } | null)?.run_id ?? ""),
+          taskGraphCount: data.task?.graph_definitions?.length ?? null,
+          at: Date.now(),
+        });
+      }
+      setTaskGraphFixtureRunError(null);
+      cacheTaskGraphLiveRunRef(data.fixture_run?.run_ref);
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      if (typeof window !== "undefined") {
+        document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+          stage: "fixture_run_error",
+          error: error instanceof Error ? error.message : String(error),
+          at: Date.now(),
+        });
+      }
+      setTaskGraphFixtureRunError(error instanceof Error ? error.message : "Fixture run failed.");
+    },
+    onSettled: () => {
+      settleVisibleTaskGraphFixturePending();
+    },
+  });
+  const cancelTaskGraphRun = useMutation({
+    mutationFn: api.cancelTaskGraphRun,
+    onSuccess: (data) => {
+      setTaskGraphFixtureRunError(null);
+      cacheTaskGraphLiveRunRef(data.run_ref);
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      setTaskGraphFixtureRunError(error instanceof Error ? error.message : "Run cancellation failed.");
+    },
+  });
+  const recoverTaskGraphRun = useMutation({
+    mutationFn: api.recoverTaskGraphRun,
+    onSuccess: (data) => {
+      if (typeof window !== "undefined") {
+        document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+          stage: "recover_run_success",
+          runId: String(data.fixture_run?.run_ref?.run_id ?? ""),
+          strategy: String(data.recovery?.strategy ?? ""),
+          sourceRunId: String(data.recovery?.source_run_id ?? ""),
+          at: Date.now(),
+        });
+      }
+      setTaskGraphFixtureRunError(null);
+      cacheTaskGraphLiveRunRef(data.fixture_run?.run_ref);
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      if (typeof window !== "undefined") {
+        document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+          stage: "recover_run_error",
+          error: error instanceof Error ? error.message : String(error),
+          at: Date.now(),
+        });
+      }
+      setTaskGraphFixtureRunError(error instanceof Error ? error.message : "Run recovery failed.");
+    },
+  });
+  const resolveTaskGraphApproval = useMutation({
+    mutationFn: api.resolveTaskGraphApproval,
+    onSuccess: (data) => {
+      setTaskGraphFixtureRunError(null);
+      cacheTaskGraphLiveRunRef(data.run_ref);
+      cacheProjectTask(data.task);
+      if (data.graph) {
+        queryClient.setQueryData(["task-graph", project.project_id, data.task?.task_id ?? currentTask?.task_id ?? null, data.graph.graph_id], {
+          graph: data.graph,
+          task: data.task ?? currentTask,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+    },
+    onError: (error) => {
+      setTaskGraphFixtureRunError(error instanceof Error ? error.message : "Approval decision failed.");
+    },
+  });
+  const persistFallbackTaskGraph = (graph: TaskGraphDefinition | null) => {
+    if (!currentTask?.task_id) return;
+    setFallbackTaskGraph(graph);
+    writeFallbackTaskGraph(project.project_id, currentTask.task_id, graph);
+  };
+  const instantiateFallbackTaskGraph = (templateId: string) => {
+    if (!currentTask?.task_id) return;
+    const template = taskGraphTemplateList.find((item) => item.template_id === templateId);
+    if (!template) return;
+    const graph = buildFallbackTaskGraphFromTemplate({
+      projectId: project.project_id,
+      taskId: currentTask.task_id,
+      template,
+    });
+    persistFallbackTaskGraph(graph);
+    setTaskGraphNodeSaveError(null);
+    setTaskGraphEdgeSaveError(null);
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setGraphWorkspaceOpen(true);
+    setSelectedTaskGraphId(graph.graph_id);
+    setSelectedTaskGraphNodeId(graph.nodes[0]?.node_id ?? null);
+    setSelectedTaskGraphEdgeId(graph.edges[0]?.edge_id ?? null);
+  };
+  const saveTaskGraphNodeConfiguration = (nodeId: string, configuration: {
+    label: string;
+    provider_id: string;
+    model_id: string;
+    reasoning_effort: string;
+    permission_mode: string;
+    collaboration_mode: string;
+    execution_backend: string;
+    human_summary_template: string;
+    machine_result_schema: Record<string, unknown>;
+    execution_policy: Record<string, unknown>;
+    output_contract: Record<string, unknown>;
+    approval_gate?: Record<string, unknown>;
+    ui_hints: Record<string, unknown>;
+  }) => {
+    if (!currentTaskGraph) return;
+    const optimisticGraph = updateFallbackTaskGraphNodeConfiguration(currentTaskGraph, nodeId, configuration);
+    persistFallbackTaskGraph(optimisticGraph);
+    setTaskGraphNodeOverrides((current) => ({
+      ...current,
+      [taskGraphNodeOverrideKey(optimisticGraph.graph_id, nodeId)]: {
+        ...(current[taskGraphNodeOverrideKey(optimisticGraph.graph_id, nodeId)] ?? {}),
+        ...configuration,
+      },
+    }));
+    setSelectedTaskGraphId(optimisticGraph.graph_id);
+    setSelectedTaskGraphNodeId(nodeId);
+    setTaskGraphNodeSaveError(null);
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    if (isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable) {
+      return;
+    }
+    updateTaskGraphNode.mutate({
+      graph_id: currentTaskGraph.graph_id,
+      node_id: nodeId,
+      configuration,
+    });
+  };
+  const createTaskGraphNode = (payload: {
+    kind: string;
+    position?: { x: number; y: number } | null;
+  }) => {
+    if (!currentTaskGraph) return;
+    const runtimeKind =
+      payload.kind === "planner"
+        ? "supervisor"
+        : payload.kind === "coder"
+          ? "worker"
+          : payload.kind === "researcher"
+            ? "extractor"
+            : payload.kind === "custom"
+              ? "artifact_source"
+              : payload.kind;
+    const uiHints = {
+      context_policy_preset: "task_digest",
+      palette_role: payload.kind,
+    };
+    const fallbackCreated = createFallbackTaskGraphNode(currentTaskGraph, {
+      kind: runtimeKind,
+      position: payload.position,
+      ui_hints: uiHints,
+    });
+    persistFallbackTaskGraph(fallbackCreated.graph);
+    setSelectedTaskGraphId(fallbackCreated.graph.graph_id);
+    setSelectedTaskGraphNodeId(fallbackCreated.node.node_id);
+    setSelectedTaskGraphEdgeId(null);
+    setTaskGraphNodeSaveError(null);
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    if (isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable) {
+      return;
+    }
+    updateTaskGraphNode.mutate({
+      graph_id: currentTaskGraph.graph_id,
+      node_id: fallbackCreated.node.node_id,
+      create: {
+        kind: runtimeKind,
+        position: payload.position ?? null,
+      },
+      configuration: {
+        ui_hints: uiHints,
+      },
+    });
+  };
+  const moveTaskGraphNode = (nodeId: string, position: { x: number; y: number }) => {
+    if (!currentTaskGraph) return;
+    const optimisticGraph = updateFallbackTaskGraphNodePosition(currentTaskGraph, nodeId, position);
+    persistFallbackTaskGraph(optimisticGraph);
+    setTaskGraphNodeOverrides((current) => ({
+      ...current,
+      [taskGraphNodeOverrideKey(optimisticGraph.graph_id, nodeId)]: {
+        ...(current[taskGraphNodeOverrideKey(optimisticGraph.graph_id, nodeId)] ?? {}),
+        position,
+      },
+    }));
+    setSelectedTaskGraphId(optimisticGraph.graph_id);
+    setSelectedTaskGraphNodeId(nodeId);
+    setTaskGraphNodeSaveError(null);
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    if (isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable) {
+      return;
+    }
+    updateTaskGraphNode.mutate({
+      graph_id: currentTaskGraph.graph_id,
+      node_id: nodeId,
+      position,
+    });
+  };
+  const saveTaskGraphEdgeConfiguration = (payload: {
+    edge_id?: string;
+    from_node_id: string;
+    to_node_id: string;
+    edge_type: string;
+    handoff_contract?: TaskGraphDefinition["edges"][number]["handoff_contract"];
+    context_policy: TaskGraphDefinition["edges"][number]["context_policy"];
+    status?: string;
+  }) => {
+    if (!currentTaskGraph) return;
+    const optimisticGraph = upsertFallbackTaskGraphEdge(currentTaskGraph, {
+      edge_id: payload.edge_id,
+      from_node_id: payload.from_node_id,
+      to_node_id: payload.to_node_id,
+      edge_type: payload.edge_type,
+      handoff_contract: payload.handoff_contract,
+      context_policy: payload.context_policy,
+      status: payload.status,
+    });
+    persistFallbackTaskGraph(optimisticGraph);
+    const nextEdge =
+      optimisticGraph.edges.find((edge) => edge.edge_id === (payload.edge_id || "")) ??
+      optimisticGraph.edges[optimisticGraph.edges.length - 1] ??
+      null;
+    if (nextEdge) {
+      setSelectedTaskGraphEdgeId(nextEdge.edge_id);
+    }
+    setSelectedTaskGraphId(optimisticGraph.graph_id);
+    setTaskGraphEdgeSaveError(null);
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    if (isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable) {
+      return;
+    }
+    queryClient.setQueryData(["task-graph", project.project_id, currentTask?.task_id ?? null, optimisticGraph.graph_id], {
+      graph: optimisticGraph,
+      task: currentTask,
+    });
+    updateTaskGraphEdge.mutate({
+      graph_id: currentTaskGraph.graph_id,
+      edge_id: payload.edge_id,
+      from_node_id: payload.from_node_id,
+      to_node_id: payload.to_node_id,
+      edge_type: payload.edge_type,
+      handoff_contract: payload.handoff_contract,
+      context_policy: payload.context_policy,
+      status: payload.status,
+    });
+  };
+  const deleteTaskGraphEdge = (edgeId: string) => {
+    if (!currentTaskGraph) return;
+    const optimisticGraph = removeFallbackTaskGraphEdge(currentTaskGraph, edgeId);
+    if (optimisticGraph === currentTaskGraph) {
+      return;
+    }
+    persistFallbackTaskGraph(optimisticGraph);
+    setSelectedTaskGraphId(optimisticGraph.graph_id);
+    setSelectedTaskGraphEdgeId(optimisticGraph.edges[0]?.edge_id ?? null);
+    setTaskGraphEdgeSaveError(null);
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    if (isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable) {
+      return;
+    }
+    queryClient.setQueryData(["task-graph", project.project_id, currentTask?.task_id ?? null, optimisticGraph.graph_id], {
+      graph: optimisticGraph,
+      task: currentTask,
+    });
+    saveTaskGraphDefinition.mutate({
+      graph: optimisticGraph,
+    });
+  };
+  const openTaskGraphTemplate = (templateId: string) => {
+    if (typeof window !== "undefined") {
+      document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+        stage: "open_template_requested",
+        templateId,
+        taskGraphRouteUnavailable,
+        currentGraphId: currentTaskGraph?.graph_id ?? null,
+        currentTemplateId: currentTaskGraph?.template_id ?? null,
+        at: Date.now(),
+      });
+    }
+    console.warn("[task-graph] open template requested", {
+      templateId,
+      taskGraphRouteUnavailable,
+      currentGraphId: currentTaskGraph?.graph_id ?? null,
+      currentTemplateId: currentTaskGraph?.template_id ?? null,
+    });
+    setTaskGraphNodeSaveError(null);
+    setTaskGraphEdgeSaveError(null);
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphImportExportError(null);
+    if (taskGraphRouteUnavailable) {
+      instantiateFallbackTaskGraph(templateId);
+      return;
+    }
+    instantiateTaskGraph.mutate(
+      { templateId },
+      {
+        onSuccess: (data) => {
+          if (typeof window !== "undefined") {
+            document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+              stage: "open_template_success",
+              templateId,
+              graphId: data.graph?.graph_id ?? null,
+              graphTemplateId: data.graph?.template_id ?? null,
+              taskGraphCount: data.task?.graph_definitions?.length ?? null,
+              at: Date.now(),
+            });
+          }
+          console.warn("[task-graph] open template mutate success", {
+            templateId,
+            graphId: data.graph?.graph_id ?? null,
+            graphTemplateId: data.graph?.template_id ?? null,
+            taskGraphCount: data.task?.graph_definitions?.length ?? null,
+          });
+        },
+        onError: (error) => {
+          if (typeof window !== "undefined") {
+            document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+              stage: "open_template_error",
+              templateId,
+              error: error instanceof Error ? error.message : String(error),
+              at: Date.now(),
+            });
+          }
+          console.error("[task-graph] open template mutate error", {
+            templateId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          if (error instanceof Error && error.message.includes("Not found")) {
+            instantiateFallbackTaskGraph(templateId);
+            return;
+          }
+          setTaskGraphNodeSaveError(error instanceof Error ? error.message : "Failed to instantiate the selected template.");
+        },
+      },
+    );
+  };
+  const ensurePersistedCurrentTaskGraph = async () => {
+    const graphId = currentTaskGraph?.graph_id ?? activeTaskGraphId ?? null;
+    if (!graphId || !currentTaskGraph || taskGraphRouteUnavailable) {
+      return {
+        graphId,
+        graph: currentTaskGraph,
+      };
+    }
+    const persistedGraph =
+      currentTask?.graph_definitions?.find((graph) => graph.graph_id === graphId) ?? null;
+    const persistedGraphIds = (currentTask?.graph_definitions ?? [])
+      .map((graph) => graph?.graph_id)
+      .filter((value): value is string => Boolean(value));
+    const routeGraphId = taskGraph.data?.graph?.graph_id ?? null;
+    if (
+      !taskGraphNeedsServerPersistence({
+        graph: currentTaskGraph,
+        persistedGraphIds,
+        persistedGraph,
+        routeGraphId,
+        routeUnavailable: taskGraphRouteUnavailable,
+      })
+    ) {
+      return {
+        graphId,
+        graph: currentTaskGraph,
+      };
+    }
+    const saved = await saveTaskGraphDefinition.mutateAsync({
+      graph: currentTaskGraph,
+    });
+    return {
+      graphId: saved.graph.graph_id,
+      graph: saved.graph,
+    };
+  };
+  const runTaskGraphDryRun = async ({ tokenBudget }: { tokenBudget: number }) => {
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    const blockedReason = resolveTaskGraphRunPrecondition({
+      actionLabel: "Dry-run",
+      currentTaskGraph,
+      graphId: currentTaskGraph?.graph_id ?? activeTaskGraphId ?? null,
+      routeUnavailable: taskGraphRouteUnavailable,
+    });
+    if (blockedReason) {
+      setTaskGraphDryRunError(blockedReason);
+      return;
+    }
+    try {
+      const ensured = await ensurePersistedCurrentTaskGraph();
+      if (!ensured.graphId) {
+        setTaskGraphDryRunError(
+          resolveTaskGraphRunPrecondition({
+            actionLabel: "Dry-run",
+            currentTaskGraph: ensured.graph,
+            graphId: ensured.graphId,
+            routeUnavailable: taskGraphRouteUnavailable,
+          }) ?? "Dry-run failed.",
+        );
+        return;
+      }
+      taskGraphRequestedRunIntentRef.current = {
+        kind: "dry_run",
+        graphId: ensured.graphId,
+        tokenBudget,
+        fallbackTriggered: false,
+      };
+      dryRunTaskGraph.mutate({
+        graph_id: ensured.graphId,
+        validation_mode: "live",
+        budget: { limits: { total_tokens: tokenBudget } },
+      });
+    } catch (error) {
+      taskGraphRequestedRunIntentRef.current = null;
+      setTaskGraphDryRunError(error instanceof Error ? error.message : "Dry-run failed.");
+    }
+  };
+  const runTaskGraphLive = async ({ tokenBudget }: { tokenBudget: number }) => {
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    setTaskGraphLiveDispatchStarted(false);
+    const blockedReason = resolveTaskGraphRunPrecondition({
+      actionLabel: "直接运行",
+      currentTaskGraph,
+      graphId: currentTaskGraph?.graph_id ?? activeTaskGraphId ?? null,
+      routeUnavailable: taskGraphRouteUnavailable,
+    });
+    if (blockedReason) {
+      setTaskGraphFixtureRunError(blockedReason);
+      return;
+    }
+    try {
+      const ensured = await ensurePersistedCurrentTaskGraph();
+      if (!ensured.graphId) {
+        setTaskGraphFixtureRunError(
+          resolveTaskGraphRunPrecondition({
+            actionLabel: "直接运行",
+            currentTaskGraph: ensured.graph,
+            graphId: ensured.graphId,
+            routeUnavailable: taskGraphRouteUnavailable,
+          }) ?? "Live run failed.",
+        );
+        return;
+      }
+      taskGraphRequestedRunIntentRef.current = {
+        kind: "live",
+        graphId: ensured.graphId,
+        tokenBudget,
+        fallbackTriggered: false,
+      };
+      primeTaskGraphOptimisticLiveRunRef({
+        graphId: ensured.graphId,
+        taskId: String(currentTask?.task_id ?? "").trim(),
+        entryNodeIds: ensured.graph?.graph_policy?.entry_node_ids,
+        budget: { status: "pending", run: { limits: { total_tokens: tokenBudget } } },
+        templateId: ensured.graph?.template_id,
+      });
+      runTaskGraph.mutate({
+        graph_id: ensured.graphId,
+        budget: { limits: { total_tokens: tokenBudget } },
+      });
+    } catch (error) {
+      taskGraphRequestedRunIntentRef.current = null;
+      setTaskGraphLiveDispatchStarted(false);
+      clearTaskGraphOptimisticLiveRunRef(currentTaskGraph?.graph_id);
+      setTaskGraphFixtureRunError(error instanceof Error ? error.message : "Live run failed.");
+    }
+  };
+  const runTaskGraphFixture = async () => {
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    const blockedReason = resolveTaskGraphRunPrecondition({
+      actionLabel: "夹具运行",
+      currentTaskGraph,
+      graphId: currentTaskGraph?.graph_id ?? activeTaskGraphId ?? null,
+      routeUnavailable: taskGraphRouteUnavailable,
+    });
+    if (blockedReason) {
+      setTaskGraphFixtureRunError(blockedReason);
+      return;
+    }
+    try {
+      const ensured = await ensurePersistedCurrentTaskGraph();
+      if (!ensured.graphId || !ensured.graph) {
+        setTaskGraphFixtureRunError(
+          resolveTaskGraphRunPrecondition({
+            actionLabel: "夹具运行",
+            currentTaskGraph: ensured.graph,
+            graphId: ensured.graphId,
+            routeUnavailable: taskGraphRouteUnavailable,
+          }) ?? "Fixture run failed.",
+        );
+        return;
+      }
+      startVisibleTaskGraphFixturePending();
+      if (typeof window !== "undefined") {
+        document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+          stage: "fixture_run_requested",
+          graphId: ensured.graphId,
+          templateId: ensured.graph.template_id ?? null,
+          taskGraphRouteUnavailable,
+          at: Date.now(),
+        });
+      }
+      fixtureRunTaskGraph.mutate({
+        graph_id: ensured.graphId,
+        branch_behaviors:
+          ensured.graph.template_id === "fanout_fanin_research"
+            ? { node_research_a: "completed", node_research_b: "blocked" }
+            : undefined,
+      });
+    } catch (error) {
+      setTaskGraphFixtureRunError(error instanceof Error ? error.message : "Fixture run failed.");
+    }
+  };
+  const runTaskGraphCancellableFixture = async () => {
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    const blockedReason = resolveTaskGraphRunPrecondition({
+      actionLabel: "可取消夹具",
+      currentTaskGraph,
+      graphId: currentTaskGraph?.graph_id ?? activeTaskGraphId ?? null,
+      routeUnavailable: taskGraphRouteUnavailable,
+    });
+    if (blockedReason) {
+      setTaskGraphFixtureRunError(blockedReason);
+      return;
+    }
+    try {
+      const ensured = await ensurePersistedCurrentTaskGraph();
+      if (!ensured.graphId || !ensured.graph) {
+        setTaskGraphFixtureRunError(
+          resolveTaskGraphRunPrecondition({
+            actionLabel: "可取消夹具",
+            currentTaskGraph: ensured.graph,
+            graphId: ensured.graphId,
+            routeUnavailable: taskGraphRouteUnavailable,
+          }) ?? "Cancellable fixture run failed.",
+        );
+        return;
+      }
+      startVisibleTaskGraphFixturePending();
+      if (typeof window !== "undefined") {
+        document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+          stage: "fixture_run_requested",
+          graphId: ensured.graphId,
+          templateId: ensured.graph.template_id ?? null,
+          executionMode: "cancellable",
+          taskGraphRouteUnavailable,
+          at: Date.now(),
+        });
+      }
+      fixtureRunTaskGraph.mutate({
+        graph_id: ensured.graphId,
+        execution_mode: "cancellable",
+      });
+    } catch (error) {
+      setTaskGraphFixtureRunError(error instanceof Error ? error.message : "Fixture run failed.");
+    }
+  };
+  const importTaskGraphThroughWorkspace = async () => {
+    const graphPath = await promptForText({
+      title: "Import orchestration graph",
+      label: "Graph file path",
+      defaultValue: "examples/agent-orchestration/code_fix_review.json",
+      placeholder: "examples/agent-orchestration/code_fix_review.json",
+      description: "Use a workspace-relative JSON graph file. The imported graph will become the current task graph in this task.",
+      submitLabel: "Import",
+    });
+    if (graphPath === null) return;
+    setTaskGraphImportExportError(null);
+    importTaskGraphFile.mutate({ graph_path: graphPath.trim() });
+  };
+  const exportTaskGraphThroughWorkspace = async () => {
+    const ensured = await ensurePersistedCurrentTaskGraph().catch((error) => {
+      setTaskGraphImportExportError(error instanceof Error ? error.message : "Failed to prepare the current graph for export.");
+      return null;
+    });
+    const graphId = ensured?.graphId ?? null;
+    if (!graphId) return;
+    const exportPath = await promptForText({
+      title: "Export orchestration graph",
+      label: "Export file path",
+      defaultValue: `PRIVATE/agent-orchestration/productization/step7/20260707/${graphId}.json`,
+      placeholder: `PRIVATE/agent-orchestration/productization/step7/20260707/${graphId}.json`,
+      description: "Use a workspace-relative JSON path. The export preview summary will stay visible in the workspace after the file is written.",
+      submitLabel: "Export",
+    });
+    if (exportPath === null) return;
+    setTaskGraphImportExportError(null);
+    exportTaskGraphFile.mutate({ graph_id: graphId, export_path: exportPath.trim() });
+  };
+  const createTaskGraphSnapshotFromWorkspace = async () => {
+    setTaskGraphSnapshotError(null);
+    try {
+      const ensured = await ensurePersistedCurrentTaskGraph();
+      if (!ensured.graphId) return;
+      createTaskGraphSnapshot.mutate({
+        graph_id: ensured.graphId,
+        reason: "manual_snapshot",
+        source_action: "workspace_snapshot",
+      });
+    } catch (error) {
+      setTaskGraphSnapshotError(error instanceof Error ? error.message : "Failed to create a snapshot.");
+    }
+  };
+  const compareSelectedTaskGraphSnapshot = () => {
+    const snapshotId = selectedTaskGraphSnapshot?.snapshot_id ?? null;
+    if (!snapshotId) return;
+    setTaskGraphSnapshotError(null);
+    diffTaskGraphSnapshot.mutate({
+      snapshot_id: snapshotId,
+    });
+  };
+  const rollbackSelectedTaskGraphSnapshot = () => {
+    const snapshotId = selectedTaskGraphSnapshot?.snapshot_id ?? null;
+    if (!snapshotId) return;
+    setTaskGraphSnapshotError(null);
+    rollbackTaskGraphToSnapshot.mutate({
+      snapshot_id: snapshotId,
+    });
+  };
+  const cancelLatestTaskGraphRun = () => {
+    if (!currentTaskGraphRunRef || taskGraphRouteUnavailable) return;
+    setTaskGraphFixtureRunError(null);
+    cancelTaskGraphRun.mutate({
+      run_id: currentTaskGraphRunRef.run_id,
+      notes: "Cancelled from the task graph workspace.",
+    });
+  };
+  const recoverLatestTaskGraphRun = (payload: {
+    strategy:
+      | "resume_run"
+      | "retry_failed_nodes"
+      | "rerun_selected_nodes"
+      | "partial_execution";
+    selectedNodeIds?: string[];
+  }) => {
+    if (!currentTaskGraphRunRef || taskGraphRouteUnavailable) return;
+    if (typeof window !== "undefined") {
+      document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+        stage: "recover_run_requested",
+        runId: currentTaskGraphRunRef.run_id,
+        strategy: payload.strategy,
+        selectedNodeIds: payload.selectedNodeIds ?? [],
+        at: Date.now(),
+      });
+    }
+    setTaskGraphFixtureRunError(null);
+    recoverTaskGraphRun.mutate({
+      run_id: currentTaskGraphRunRef.run_id,
+      strategy: payload.strategy,
+      selected_node_ids: payload.selectedNodeIds ?? null,
+    });
+  };
+  const approveTaskGraphPendingRun = () => {
+    if (!currentTaskGraphRunRef || taskGraphRouteUnavailable) return;
+    setTaskGraphFixtureRunError(null);
+    resolveTaskGraphApproval.mutate({
+      run_id: currentTaskGraphRunRef.run_id,
+      decision: "approve",
+      notes: "Approved from the task graph review gate.",
+    });
+  };
+  const rejectTaskGraphPendingRun = () => {
+    if (!currentTaskGraphRunRef || taskGraphRouteUnavailable) return;
+    setTaskGraphFixtureRunError(null);
+    resolveTaskGraphApproval.mutate({
+      run_id: currentTaskGraphRunRef.run_id,
+      decision: "reject",
+      notes: "Rejected from the task graph review gate.",
+    });
+  };
+  const inspectTaskGraphArtifactPath = (path: string) => {
+    setInspectorTab("files");
+    setInspectorFileQuery("");
+    setInspectorFilePath(path);
+    if (!rightSidebarOpen) toggleRightSidebar();
+  };
   useEffect(() => {
     const currentProjectNode = projectSidebar.data?.projects.find((item) => item.is_current);
     if (!currentProjectNode || suggestProjectTitle.isPending || !looksGenericProjectTitle(currentProjectNode)) return;
@@ -5460,17 +7658,70 @@ function AppShell() {
     suggestTaskTitle.mutate();
   }, [projectSidebar.data?.projects, suggestTaskTitle]);
 
-  const createThread = useMutation({
-    mutationFn: api.createThread,
+  function applyCreatedThread(data: { thread: ShellThread; project?: ProjectFile; task?: ProjectTask }) {
+    if (data.task?.task_id) selectedTaskScopeRef.current = data.task.task_id;
+    if (data.task) setTaskSelectionGuard(data.task);
+    setProject(data.project ?? { ...project, current_thread_id: data.thread.id, recent_threads: [data.thread.id, ...project.recent_threads.filter((id) => id !== data.thread.id)].slice(0, 20) });
+    cacheProjectTask(data.task);
+    if (data.thread.shellSettings) {
+      setThreadSettingsDraft(data.thread.id, data.thread.shellSettings);
+    }
+    setThreadCreateRecovery(null);
+    setTaskCreationPending(null);
+    invalidateRestoreStateQueries(queryClient);
+  }
+
+  const createThread = useMutation({ mutationFn: api.createThread });
+
+  const beginThreadCreate = useMutation({
+    mutationFn: api.beginThreadCreate,
     onSuccess: (data) => {
-      setProject(data.project ?? { ...project, current_thread_id: data.thread.id, recent_threads: [data.thread.id, ...project.recent_threads.filter((id) => id !== data.thread.id)].slice(0, 20) });
-      cacheProjectTask(data.task);
-      if (data.thread.shellSettings) {
-        setThreadSettingsDraft(data.thread.id, data.thread.shellSettings);
+      if (data.status === "completed" && data.thread) {
+        applyCreatedThread({ thread: data.thread, project: data.project, task: data.task });
       }
-      invalidateRestoreStateQueries(queryClient);
     },
   });
+
+  const recoverThreadCreate = useMutation({
+    mutationFn: api.recoverThreadCreate,
+    onSuccess: (data) => {
+      if (data.status !== "completed" || !data.thread) return;
+      applyCreatedThread({ thread: data.thread, project: data.project, task: data.task });
+      createThread.reset();
+    },
+  });
+
+  useEffect(() => {
+    if (!taskCreationPending || beginThreadCreate.isPending || recoverThreadCreate.isPending) return;
+    if (!threadCreateRecovery || threadCreateRecovery.operationId !== taskCreationPending.operationId) return;
+    if (taskCreationPending.recoveryAttempts >= THREAD_CREATE_RECOVERY_MAX_ATTEMPTS) {
+      setTaskCreationPending(null);
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      void recoverThreadCreate
+        .mutateAsync({ profile_id: threadCreateRecovery.profileId, operation_id: taskCreationPending.operationId })
+        .then((data) => {
+          if (data.status === "failed") {
+            setTaskCreationPending(null);
+            return;
+          }
+          if (data.status === "pending") {
+            setTaskCreationPending((current) => {
+              if (!current || current.operationId !== taskCreationPending.operationId) return current;
+              return { ...current, recoveryAttempts: current.recoveryAttempts + 1 };
+            });
+          }
+        })
+        .catch(() => {
+          setTaskCreationPending((current) => {
+            if (!current || current.operationId !== taskCreationPending.operationId) return current;
+            return { ...current, recoveryAttempts: current.recoveryAttempts + 1 };
+          });
+        });
+    }, THREAD_CREATE_RECOVERY_DELAY_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [beginThreadCreate.isPending, recoverThreadCreate, taskCreationPending, threadCreateRecovery]);
 
   const forkThread = useMutation({
     mutationFn: api.forkThread,
@@ -5688,8 +7939,13 @@ function AppShell() {
       switchThread.mutate(currentTask.active_provider_thread_id);
       return;
     }
-    if (!selectedThreadId && threads.data?.threads?.[0]) {
-      switchThread.mutate(threads.data.threads[0].id);
+    const fallbackThreadId = fallbackThreadIdForEmptyTaskContext({
+      currentTask,
+      selectedThreadId,
+      threads: threads.data?.threads ?? null,
+    });
+    if (fallbackThreadId) {
+      switchThread.mutate(fallbackThreadId);
     }
   }, [currentTask?.active_provider_thread_id, selectedThreadId, switchThread, threads.data?.threads]);
 
@@ -5880,12 +8136,12 @@ function AppShell() {
     }
     return entries;
   }, [routerConfig.data?.providers]);
+  const mergedComposerCatalogModels = useMemo(
+    () => mergeComposerCatalogModels(llmSession.data?.mode, llmCatalog.data?.models ?? [], routerConfig.data?.models ?? []),
+    [llmCatalog.data?.models, llmSession.data?.mode, routerConfig.data?.models],
+  );
   const pickPreferredModelForProvider = (providerId: string) => {
-    const managerMode = llmSession.data?.mode ?? "anonymous";
-    const sourceModels = managerMode === "managed_user" && (llmCatalog.data?.models ?? []).length > 0
-      ? llmCatalog.data?.models ?? []
-      : routerConfig.data?.models ?? [];
-    const candidates = sourceModels
+    const candidates = mergedComposerCatalogModels
       .filter((model) => model.enabled && model.provider === providerId)
       .sort((left, right) => {
         const leftDeprecated = Number(Boolean(left.deprecated));
@@ -5914,9 +8170,7 @@ function AppShell() {
     const providerId = activeProfile?.provider_id ?? "";
     const values = new Map<string, string>();
     const managerMode = llmSession.data?.mode ?? "anonymous";
-    const catalogModels = llmCatalog.data?.models ?? [];
-    const sourceModels = managerMode === "managed_user" && catalogModels.length > 0 ? catalogModels : routerConfig.data?.models ?? [];
-    for (const model of sourceModels) {
+    for (const model of mergedComposerCatalogModels) {
       if (!model.enabled || model.provider !== providerId) continue;
       const verifiedPrefix = managerMode === "anonymous" && (model as { verified?: boolean }).verified ? "✓ " : "";
       values.set(model.native_model, `${verifiedPrefix}${model.display_name || model.native_model}`);
@@ -5930,15 +8184,14 @@ function AppShell() {
     if (activeProfile?.model && (values.size === 0 || values.has(activeProfile.model))) values.set(activeProfile.model, values.get(activeProfile.model) ?? activeProfile.model);
     if (activeSettings.model && (values.size === 0 || values.has(activeSettings.model))) values.set(activeSettings.model, values.get(activeSettings.model) ?? activeSettings.model);
     return Array.from(values, ([value, label]) => ({ value, label }));
-  }, [activeProfile?.model, activeProfile?.provider_id, activeSettings.model, llmCatalog.data?.models, llmSession.data?.mode, routerConfig.data?.models, runtimeModelList.data?.models]);
+  }, [activeProfile?.model, activeProfile?.provider_id, activeSettings.model, llmSession.data?.mode, mergedComposerCatalogModels, runtimeModelList.data?.models]);
   const activeModelEntry = useMemo(() => {
     const providerId = activeProfile?.provider_id ?? "";
     return (
-      (llmCatalog.data?.models ?? []).find((model) => model.provider === providerId && model.native_model === activeSettings.model) ??
-      (routerConfig.data?.models ?? []).find((model) => model.provider === providerId && model.native_model === activeSettings.model) ??
+      mergedComposerCatalogModels.find((model) => model.provider === providerId && model.native_model === activeSettings.model) ??
       null
     );
-  }, [activeProfile?.provider_id, activeSettings.model, llmCatalog.data?.models, routerConfig.data?.models]);
+  }, [activeProfile?.provider_id, activeSettings.model, mergedComposerCatalogModels]);
   const activeModelAuthority = useMemo(() => modelAuthorityState(activeModelEntry), [activeModelEntry]);
   const speechTranscribeRoute = useMemo(
     () => (routerConfig.data?.capability_routes ?? []).find((route) => route.capability_id === "speech.transcribe") ?? null,
@@ -5966,7 +8219,18 @@ function AppShell() {
     [activeModelEntry, activeProfile, activeSettings.reasoning_effort],
   );
   const sendableAttachments = attachments.filter((attachment) => !attachment.error && attachment.path.trim());
-  const imageAttachmentUnsupported = sendableAttachments.some((attachment) => attachment.kind === "image") && !(activeModelEntry?.input_modalities ?? ["text"]).includes("image");
+  const imageAttachmentRoute = imageAttachmentRouteState({
+    hasImageAttachments: sendableAttachments.some((attachment) => attachment.kind === "image"),
+    model: activeModelEntry,
+  });
+  const imageAttachmentUnsupported = imageAttachmentRoute !== "ready";
+  const imageAttachmentRouteMessage = imageAttachmentRoute === "runtime_unverified"
+    ? locale === "zh-CN"
+      ? "当前 App Server 路由尚未验证图片传输；请改用已验证视觉路由。"
+      : "The current App Server route has not verified image transport. Choose a verified vision route."
+    : locale === "zh-CN"
+      ? "当前模型不支持图片输入；请移除图片或切换视觉模型。"
+      : "The current model does not support image input. Remove images or choose a vision model.";
   const attachmentRouteLine = sendableAttachments.length
     ? [
         attachmentRouteSummary(locale, sendableAttachments),
@@ -5992,7 +8256,12 @@ function AppShell() {
       .slice(0, 2)
       .map((warning) => localizedAuthorityNotice(locale, warning))),
   ];
-  const runtimeRecoveryActions = runtimeErrorNoticeActions(supervisor.data?.runtime_error ?? null);
+  const suppressStaleRuntimeError = latestCompletedTurnSuppressesRuntimeError(selectedThread.data?.thread);
+  const displayedRuntimeError = suppressStaleRuntimeError ? null : supervisor.data?.runtime_error ?? null;
+  const supervisorForDisplay = suppressStaleRuntimeError && supervisor.data
+    ? { ...supervisor.data, runtime_error: null }
+    : supervisor.data;
+  const runtimeRecoveryActions = runtimeErrorNoticeActions(displayedRuntimeError);
   const runtimeRecoveryPendingAction = restartRuntime.isPending
     ? "restart_runtime_lane"
     : compactThread.isPending
@@ -6005,15 +8274,20 @@ function AppShell() {
   const managedKeyAvailable = managerMode === "managed_user" && Boolean((llmCatalog.data?.providers ?? []).find((provider) => provider.id === activeProfile?.provider_id)?.managed_key_available);
   const needsKeySetup = Boolean(activeProfile?.env_key) && !runtimeSecretLoaded && !managedKeyAvailable;
   const keySetupMessage = sendFailure && sendFailure.includes("runtime_secret_missing") ? sendFailure : null;
+  const runtimeErrorText = runtimeErrorNoticeText(displayedRuntimeError);
+  const composerFailureNotice = keySetupMessage
+    ? ""
+    : composerFailureNoticeText(sendFailure, displayedRuntimeError);
   const conversationNotices = [
     ...(needsKeySetup ? [{ key: "key-setup", text: t(locale, "key_setup_missing_inline"), tone: "danger" as const, action: "setup" as const }] : []),
     ...(keySetupMessage ? [{ key: "key-failure", text: keySetupMessage, tone: "danger" as const, action: "setup" as const }] : []),
     ...capabilityWarnings.map((warning, index) => ({ key: `capability-${index}`, text: warning, tone: "warning" as const })),
-    ...(supervisor.data?.runtime_error?.summary ? [{
+    ...(runtimeErrorText ? [{
       key: "runtime-error",
-      text: runtimeErrorNoticeText(supervisor.data.runtime_error),
+      text: runtimeErrorText,
       tone: "danger" as const,
     }] : []),
+    ...(composerFailureNotice ? [{ key: "composer-failure", text: composerFailureNotice, tone: "danger" as const }] : []),
     ...(supervisor.data?.guard.message ? [{ key: "context-guard", text: supervisor.data.guard.message, tone: supervisor.data.guard.level === "pause" ? "danger" as const : "warning" as const }] : []),
     ...(supervisor.data?.watchdog?.message ? [{ key: "turn-watchdog", text: supervisor.data.watchdog.message, tone: supervisor.data.watchdog.level === "pause" ? "danger" as const : "warning" as const }] : []),
   ];
@@ -6092,8 +8366,7 @@ function AppShell() {
       const nextModel = pickPreferredModelForProvider(activeProfile.provider_id) ?? composerModelOptions[0]?.value;
       if (!nextModel) return;
       const nextModelEntry =
-        (llmCatalog.data?.models ?? []).find((model) => model.provider === activeProfile.provider_id && model.native_model === nextModel) ??
-        (routerConfig.data?.models ?? []).find((model) => model.provider === activeProfile.provider_id && model.native_model === nextModel) ??
+        mergedComposerCatalogModels.find((model) => model.provider === activeProfile.provider_id && model.native_model === nextModel) ??
         null;
       const nextEfforts = composerReasoningOptions(nextModelEntry, activeProfile, activeSettings.reasoning_effort);
       updateComposerSettings({
@@ -6103,7 +8376,7 @@ function AppShell() {
           : preferredReasoningEffort(nextModelEntry, activeProfile, activeSettings.reasoning_effort),
       });
     }
-  }, [activeProfile, activeSettings.model, activeSettings.reasoning_effort, composerModelOptions, llmCatalog.data?.models, routerConfig.data?.models]);
+  }, [activeProfile, activeSettings.model, activeSettings.reasoning_effort, composerModelOptions, mergedComposerCatalogModels]);
 
   useEffect(() => {
     if (composerEffortOptions.length === 0) return;
@@ -6282,13 +8555,39 @@ function AppShell() {
         const status = (params.status as { type?: string; activeFlags?: string[] } | undefined) ?? {};
         setThreadStatus(threadId, { type: String(status.type ?? "unknown"), activeFlags: status.activeFlags ?? [] });
         queryClient.invalidateQueries({ queryKey: ["runtime-supervisor"] });
+      } else if (method === "error") {
+        const scopedThreadId = threadId || selectedThreadId || "";
+        const latestSnapshot = useAppStore.getState().eventSnapshot;
+        const scopedTurnId = turnId || (scopedThreadId ? latestSnapshot.latestTurnIdByThread[scopedThreadId] ?? "" : "");
+        const message = String(params.message ?? params.additionalDetails ?? "Model runtime ended with an error.")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 280);
+        if (scopedTurnId) runtimeErrorsByTurnRef.current[scopedTurnId] = message;
       } else if (method === "item/completed") {
         const item = (params.item as Record<string, unknown> | undefined) ?? {};
         const activity = itemActivityFromPayload(item, "completed");
         if (activity && threadId && turnId) setTurnActivity(threadId, turnId, activity);
         if (item.type === "contextCompaction") threadRefresh = true;
       } else if (method === "turn/completed") {
-        setThreadStatus(threadId, { type: "idle" });
+        const scopedThreadId = threadId || selectedThreadId || "";
+        const latestSnapshot = useAppStore.getState().eventSnapshot;
+        const latestLiveTurnId = scopedThreadId ? latestSnapshot.latestTurnIdByThread[scopedThreadId] ?? "" : "";
+        const scopedTurnId = turnId || latestLiveTurnId;
+        const isCurrentLiveTurn = Boolean(scopedThreadId && scopedTurnId && latestLiveTurnId === scopedTurnId);
+        const terminalError = scopedTurnId ? runtimeErrorsByTurnRef.current[scopedTurnId] : undefined;
+        if (scopedTurnId) delete runtimeErrorsByTurnRef.current[scopedTurnId];
+        if (scopedThreadId) {
+          setThreadStatus(scopedThreadId, { type: "idle" });
+          if (scopedTurnId && isCurrentLiveTurn) clearLiveTurn(scopedThreadId, scopedTurnId);
+        }
+        if (terminalError && isCurrentLiveTurn) {
+          setSendStage(null);
+          setSendFailure(locale === "zh-CN" ? `模型运行失败：${terminalError}` : `Model run failed: ${terminalError}`);
+        } else if (isCurrentLiveTurn) {
+          setSendStage(null);
+          setSendFailure(null);
+        }
         threadRefresh = true;
         goalRefresh = true;
       } else if (method === "thread/goal/updated" || method === "thread/goal/cleared") {
@@ -6463,6 +8762,7 @@ function AppShell() {
   }
 
   async function handleCreateThread() {
+    if (createThread.isPending || beginThreadCreate.isPending || taskCreationPending) return;
     const name = await promptForText({
       title: t(locale, "new_thread"),
       label: t(locale, "title_thread"),
@@ -6472,13 +8772,34 @@ function AppShell() {
     });
     if (name === null) return;
     const settings = currentComposerSettings();
-    createThread.mutate({
-      profile_id: settings.profile_id ?? project.default_profile_id,
-      model: settings.model,
-      effort: settings.reasoning_effort,
-      permission_mode: settings.permission_mode,
-      name: name.trim() || undefined,
-    });
+    const profileId = settings.profile_id ?? project.default_profile_id;
+    const operationId = newThreadCreateOperationId();
+    const taskName = name.trim() || t(locale, "new_thread");
+    // A new task must not race an auto-continuing goal from the task being left.
+    pauseGoalForUserInsertion();
+    createThread.reset();
+    beginThreadCreate.reset();
+    recoverThreadCreate.reset();
+    setThreadCreateRecovery({ operationId, profileId });
+    setTaskCreationPending({ name: taskName, operationId, recoveryAttempts: 0 });
+    try {
+      const started = await beginThreadCreate.mutateAsync({
+        profile_id: profileId,
+        model: settings.model,
+        effort: settings.reasoning_effort,
+        permission_mode: settings.permission_mode,
+        name: name.trim() || undefined,
+        operation_id: operationId,
+      });
+      if (started.status === "failed") {
+        setTaskCreationPending(null);
+      }
+    } catch {
+      // The start request can be interrupted after the sidecar accepted the
+      // operation. Keep the same idempotent operation pending so the existing
+      // recovery loop can read its terminal state without starting a second
+      // provider thread or returning the user to the old task context.
+    }
   }
 
   async function handleForkThread() {
@@ -6531,14 +8852,41 @@ function AppShell() {
   }
 
   async function selectSidebarTask(projectNode: SidebarProjectNode, taskNode: SidebarTaskNode) {
+    if (
+      isSidebarTaskAlreadySelected({
+        currentProject: project,
+        currentTask,
+        projectNode,
+        taskNode,
+      })
+    ) {
+      selectedTaskScopeRef.current = taskNode.task_id;
+      setSidebarSelectionError(null);
+      setPendingSidebarProjectKey(null);
+      setPendingSidebarTask(null);
+      setMainView("chat");
+      return;
+    }
+    const previousTaskScopeId = selectedTaskScopeRef.current;
+    selectedTaskScopeRef.current = taskNode.task_id;
     setSidebarSelectionBusy(true);
+    setSidebarSelectionError(null);
+    setPendingSidebarProjectKey(sidebarProjectKey(projectNode));
+    setPendingSidebarTask(optimisticSidebarTask(projectNode, taskNode));
     try {
       setMainView("chat");
       const openedProject = await ensureSidebarProjectOpen(projectNode);
       const switched = await api.switchTask(taskNode.task_id);
       setProject(switched.project);
+      setPendingSidebarTask(switched.task ?? optimisticSidebarTask(projectNode, taskNode));
+      setTaskSelectionGuard(switched.task);
       cacheSidebarTask(switched.project.project_id || openedProject.project_id, switched.task);
       invalidateSidebarSelection(switched.project.project_id || openedProject.project_id);
+    } catch (error) {
+      selectedTaskScopeRef.current = previousTaskScopeId;
+      setPendingSidebarProjectKey(null);
+      setPendingSidebarTask(null);
+      setSidebarSelectionError(error instanceof Error ? error.message : "Unable to switch tasks.");
     } finally {
       setSidebarSelectionBusy(false);
     }
@@ -6639,11 +8987,12 @@ function AppShell() {
 
   async function handleRenameThread(threadId: string) {
     const current = threads.data?.threads.find((item) => item.id === threadId);
+    const currentTitle = visibleThreadTitle(current?.displayName);
     const name = await promptForText({
       title: t(locale, "rename_thread"),
       label: t(locale, "title_thread"),
-      defaultValue: current?.displayName ?? "",
-      placeholder: current?.displayName ?? "",
+      defaultValue: currentTitle,
+      placeholder: currentTitle,
       submitLabel: t(locale, "rename_thread"),
     });
     if (name && name.trim()) {
@@ -6755,6 +9104,15 @@ function AppShell() {
     event.preventDefault();
     setAttachmentDropActive(false);
     const candidates = await filesFromDataTransfer(event.dataTransfer);
+    if (candidates.length === 0) return;
+    await stageBrowserAttachmentCandidates(candidates, directoryNameFromCandidates(candidates));
+  }
+
+  async function handleComposerPaste(event: ClipboardEvent<HTMLElement>) {
+    const clipboardData = event.clipboardData;
+    if (!clipboardData || !dataTransferHasFiles(clipboardData)) return;
+    event.preventDefault();
+    const candidates = await filesFromDataTransfer(clipboardData);
     if (candidates.length === 0) return;
     await stageBrowserAttachmentCandidates(candidates, directoryNameFromCandidates(candidates));
   }
@@ -6946,12 +9304,30 @@ function AppShell() {
       const settings = currentComposerSettings();
       try {
         setSendStage(currentStage);
+        const operationId = newThreadCreateOperationId();
+        const profileId = settings.profile_id ?? project.default_profile_id;
+        setThreadCreateRecovery({ operationId, profileId });
+        const selectedTaskId = resolveTaskIdForNewThread({
+          selectedTaskId: selectedTaskScopeRef.current,
+          conversationTaskId: taskConversation.data?.task?.task_id,
+          currentTask,
+        });
         const created = await createThread.mutateAsync({
-          profile_id: settings.profile_id ?? project.default_profile_id,
+          profile_id: profileId,
           model: settings.model,
           effort: settings.reasoning_effort,
           permission_mode: settings.permission_mode,
+          task_id: selectedTaskId,
+          operation_id: operationId,
         });
+        if (selectedTaskId && created.task?.task_id && created.task.task_id !== selectedTaskId) {
+          setSendFailure(locale === "zh-CN"
+            ? "新建执行线路未绑定到当前任务，已阻止发送。请重新选择任务后重试。"
+            : "The new execution lane was not bound to the selected task. Sending was blocked; select the task again and retry.");
+          setSendStage(null);
+          return false;
+        }
+        applyCreatedThread(created);
         currentStage = turnStage;
         setSendStage(currentStage);
         const result = await startTurn.mutateAsync({
@@ -6963,6 +9339,7 @@ function AppShell() {
           effort: settings.reasoning_effort,
           permission_mode: settings.permission_mode,
           collaboration_mode: settings.collaboration_mode,
+          execution_policy: composerExecutionPolicy,
         });
         const pendingNotice = result.background_start ? attachmentPendingNotice(locale, result.attachment_diagnostics, result.warning) : "";
         setSendStage(pendingNotice || null);
@@ -6986,6 +9363,7 @@ function AppShell() {
         effort: settings.reasoning_effort,
         permission_mode: settings.permission_mode,
         collaboration_mode: settings.collaboration_mode,
+        execution_policy: composerExecutionPolicy,
       });
       const pendingNotice = result.background_start ? attachmentPendingNotice(locale, result.attachment_diagnostics, result.warning) : "";
       setSendStage(pendingNotice || null);
@@ -7010,6 +9388,7 @@ function AppShell() {
           id: `${Date.now()}-${current.length}`,
           text,
           attachments: draftAttachments,
+          targetThreadId: sendTargetThreadId ?? selectedThreadId,
         },
       ]);
       setInstructionQueueExpanded(true);
@@ -7084,19 +9463,236 @@ function AppShell() {
   }
 
   const taskConversationThread = taskConversation.data?.thread ?? null;
-  const selectedRuntimeThread = selectedThread.data?.thread ?? null;
+  const selectedRuntimeThread = shouldUseSelectedRuntimeThread({ currentTask, selectedThreadId })
+    ? selectedThread.data?.thread ?? null
+    : null;
   const activeThread =
     hasRenderableThreadContent(taskConversationThread) || !hasRenderableThreadContent(selectedRuntimeThread)
       ? taskConversationThread ?? selectedRuntimeThread
       : selectedRuntimeThread;
   const activeExecutionThread = selectedThread.data?.thread;
+  const currentTaskGraphBase = useMemo(() => {
+    if (taskGraphRouteUnavailable) {
+      return fallbackTaskGraph ?? null;
+    }
+    const latestSelectedGraph = latestTaskGraphDefinition(currentTask?.graph_definitions);
+    const latestRenderableGraph = hasRenderableTaskGraphStructure(latestSelectedGraph)
+      ? latestSelectedGraph
+      : null;
+    const selectedTaskGraph = activeTaskGraphId
+      ? currentTask?.graph_definitions?.find((graph) => graph.graph_id === activeTaskGraphId) ?? null
+      : latestSelectedGraph ?? null;
+    const selectedRenderableGraph = hasRenderableTaskGraphStructure(selectedTaskGraph)
+      ? selectedTaskGraph
+      : null;
+    const routeGraph =
+      activeTaskGraphId == null
+        ? taskGraph.data?.graph ?? null
+        : taskGraph.data?.graph?.graph_id === activeTaskGraphId
+          ? taskGraph.data.graph
+          : null;
+    const preferredServerGraph =
+      routeGraph ?? selectedRenderableGraph ?? latestRenderableGraph ?? null;
+    if (isTaskGraphNewer(fallbackTaskGraph, preferredServerGraph)) {
+      return fallbackTaskGraph;
+    }
+    if (activeTaskGraphId) {
+      if (routeGraph?.graph_id === activeTaskGraphId) {
+        return routeGraph;
+      }
+      if (selectedRenderableGraph) {
+        return selectedRenderableGraph;
+      }
+      if (fallbackTaskGraph?.graph_id === activeTaskGraphId) {
+        return fallbackTaskGraph;
+      }
+      return preferredServerGraph ?? null;
+    }
+    return preferredServerGraph ?? fallbackTaskGraph ?? null;
+  }, [activeTaskGraphId, currentTask?.graph_definitions, fallbackTaskGraph, taskGraph.data?.graph, taskGraphRouteUnavailable]);
+  const currentTaskGraph = useMemo(
+    () => applyTaskGraphNodeOverrides(currentTaskGraphBase, taskGraphNodeOverrides),
+    [currentTaskGraphBase, taskGraphNodeOverrides],
+  );
+  const taskGraphRunActionBlockedReason = useMemo(
+    () =>
+      resolveTaskGraphRunPrecondition({
+        actionLabel: "任务图运行",
+        currentTaskGraph,
+        graphId: currentTaskGraph?.graph_id ?? activeTaskGraphId ?? null,
+        routeUnavailable: taskGraphRouteUnavailable,
+      }),
+    [activeTaskGraphId, currentTaskGraph, taskGraphRouteUnavailable],
+  );
+  const currentTaskGraphSnapshotRefs = useMemo(() => {
+    const graphId = currentTaskGraph?.graph_id ?? activeTaskGraphId;
+    if (!graphId) return [];
+    return (currentTask?.graph_snapshot_refs ?? []).filter((item) => item.graph_id === graphId);
+  }, [activeTaskGraphId, currentTask?.graph_snapshot_refs, currentTaskGraph?.graph_id]);
+  const selectedTaskGraphSnapshot = useMemo(
+    () => currentTaskGraphSnapshotRefs.find((item) => item.snapshot_id === selectedTaskGraphSnapshotId) ?? currentTaskGraphSnapshotRefs[0] ?? null,
+    [currentTaskGraphSnapshotRefs, selectedTaskGraphSnapshotId],
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const latestCurrentTaskGraph = latestTaskGraphDefinition(currentTask?.graph_definitions);
+    const routeGraphId = taskGraph.data?.graph?.graph_id ?? null;
+    const routeTaskGraphIds = (taskGraph.data?.task?.graph_definitions ?? []).map((graph) => graph.graph_id);
+    const currentTaskGraphIds = (currentTask?.graph_definitions ?? []).map((graph) => graph.graph_id);
+    document.documentElement.dataset[TASK_GRAPH_STATE_DATASET_KEY] = JSON.stringify({
+      at: Date.now(),
+      graphWorkspaceOpen,
+      selectedTaskGraphId,
+      activeTaskGraphId,
+      fallbackGraphId: fallbackTaskGraph?.graph_id ?? null,
+      routeGraphId,
+      routeTaskGraphIds,
+      currentTaskGraphIds,
+      latestCurrentTaskGraphId: latestCurrentTaskGraph?.graph_id ?? null,
+      currentTaskGraphBaseId: currentTaskGraphBase?.graph_id ?? null,
+      currentTaskGraphId: currentTaskGraph?.graph_id ?? null,
+      currentTaskGraphTemplateId: currentTaskGraph?.template_id ?? null,
+    });
+  }, [
+    activeTaskGraphId,
+    currentTask?.graph_definitions,
+    currentTaskGraph?.graph_id,
+    currentTaskGraph?.template_id,
+    currentTaskGraphBase?.graph_id,
+    fallbackTaskGraph?.graph_id,
+    graphWorkspaceOpen,
+    selectedTaskGraphId,
+    taskGraph.data?.graph?.graph_id,
+    taskGraph.data?.task?.graph_definitions,
+  ]);
+  const currentTaskGraphRunRef = useMemo(() => {
+    const graphId = currentTaskGraph?.graph_id ?? activeTaskGraphId;
+    return selectCurrentTaskGraphRunRef({
+      graphId,
+      optimisticRunRefs: Object.values(taskGraphOptimisticLiveRunRefs),
+      liveRunRefs: Object.values(taskGraphLiveRunRefs),
+      routeTaskRunRefs: taskGraph.data?.task?.graph_run_refs,
+      currentTaskRunRefs: currentTask?.graph_run_refs,
+      dryRunRunRef: taskGraphDryRunResult?.run_ref ?? null,
+      allowCachedActiveRunRef:
+        runTaskGraph.isPending && taskGraphLiveDispatchStarted,
+      allowOptimisticActiveRunRef: taskGraphLiveDispatchStarted,
+    });
+  }, [
+    activeTaskGraphId,
+    currentTask?.graph_run_refs,
+    currentTaskGraph?.graph_id,
+    runTaskGraph.isPending,
+    taskGraphLiveDispatchStarted,
+    taskGraphOptimisticLiveRunRefs,
+    taskGraph.data?.task?.graph_run_refs,
+    taskGraphDryRunResult?.run_ref,
+    taskGraphLiveRunRefs,
+  ]);
+  const authoritativeActiveTaskGraphRunRef = useMemo(() => {
+    const graphId = currentTaskGraph?.graph_id ?? activeTaskGraphId;
+    return selectLatestTaskGraphRunRef(graphId, [
+      (taskGraph.data?.task?.graph_run_refs ?? []).filter(
+        (item) =>
+          item &&
+          String(item.status ?? "").trim() !== "" &&
+          ["queued", "running", "paused_for_review"].includes(String(item.status ?? "").trim()),
+      ),
+      (currentTask?.graph_run_refs ?? []).filter(
+        (item) =>
+          item &&
+          String(item.status ?? "").trim() !== "" &&
+          ["queued", "running", "paused_for_review"].includes(String(item.status ?? "").trim()),
+      ),
+    ]);
+  }, [
+    activeTaskGraphId,
+    currentTask?.graph_run_refs,
+    currentTaskGraph?.graph_id,
+    taskGraph.data?.task?.graph_run_refs,
+  ]);
+  useEffect(() => {
+    if (!taskGraphLiveDispatchStarted) {
+      return undefined;
+    }
+    const intent = taskGraphRequestedRunIntentRef.current;
+    if (!intent || intent.kind !== "live") {
+      return undefined;
+    }
+    const optimisticRunRef = taskGraphOptimisticLiveRunRefs[intent.graphId];
+    if (!optimisticRunRef) {
+      return undefined;
+    }
+    if (
+      authoritativeActiveTaskGraphRunRef &&
+      String(authoritativeActiveTaskGraphRunRef.graph_id ?? "").trim() === intent.graphId
+    ) {
+      return undefined;
+    }
+    const createdAtMs = Date.parse(String(optimisticRunRef.created_at ?? ""));
+    if (!Number.isFinite(createdAtMs)) {
+      return undefined;
+    }
+    const timeoutAtMs =
+      createdAtMs + TASK_GRAPH_LIVE_DISPATCH_CONFIRMATION_TIMEOUT_MS;
+    const handleTimeout = () => {
+      const latestIntent = taskGraphRequestedRunIntentRef.current;
+      if (!hasTaskGraphLiveDispatchTimedOut({
+        intent: latestIntent,
+        optimisticRunCreatedAt: optimisticRunRef.created_at,
+        hasAuthoritativeActiveRun:
+          Boolean(authoritativeActiveTaskGraphRunRef) &&
+          String(authoritativeActiveTaskGraphRunRef?.graph_id ?? "").trim() === intent.graphId,
+        timeoutMs: TASK_GRAPH_LIVE_DISPATCH_CONFIRMATION_TIMEOUT_MS,
+      })) {
+        return;
+      }
+      taskGraphRequestedRunIntentRef.current = null;
+      setTaskGraphLiveDispatchStarted(false);
+      clearTaskGraphOptimisticLiveRunRef(intent.graphId);
+      queryClient.invalidateQueries({ queryKey: ["project-sidebar"] });
+      queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
+      queryClient.invalidateQueries({
+        queryKey: [
+          "task-graph",
+          project.project_id,
+          currentTask?.task_id ?? null,
+          intent.graphId,
+        ],
+      });
+      setTaskGraphFixtureRunError(
+        locale === "zh-CN"
+          ? "直接运行请求已发出，但在 4 秒内没有生成新的运行记录。已回退到最近一次已确认结果，请检查运行检查或 sidecar 日志。"
+          : "The live run request was sent, but no new run record appeared within 4 seconds. AstraBridge reverted to the latest confirmed result. Check run diagnostics or the sidecar log.",
+      );
+    };
+    const delayMs = Math.max(0, timeoutAtMs - Date.now());
+    if (delayMs === 0) {
+      handleTimeout();
+      return undefined;
+    }
+    const timer = window.setTimeout(handleTimeout, delayMs);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeTaskGraphId,
+    authoritativeActiveTaskGraphRunRef,
+    currentTask?.task_id,
+    locale,
+    project.project_id,
+    queryClient,
+    taskGraphLiveDispatchStarted,
+    taskGraphOptimisticLiveRunRefs,
+  ]);
+  const taskGraphDryRunReportHref = taskGraphDryRunResult?.artifact_paths?.report_md
+    ? projectFileReadHref(taskGraphDryRunResult.artifact_paths.report_md)
+    : null;
   const taskInspectorEvidence = useMemo(() => summarizeTaskInspectorEvidence(currentTask, activeThread), [activeThread, currentTask]);
   const workflowFacts = useMemo(
     () => summarizeTaskWorkflowFacts(currentTask, activeExecutionThread ?? null, taskInspectorEvidence),
     [activeExecutionThread, currentTask, taskInspectorEvidence],
   );
   const activeExecutionBackendLabel = workflowFacts.backend === "native_kernel" ? "native kernel" : "app server";
-  const activeThreadName = activeThread?.displayName ?? selectedThreadSummary?.displayName ?? t(locale, "title_thread");
+  const activeThreadName = visibleThreadTitle(activeThread?.displayName ?? selectedThreadSummary?.displayName) || t(locale, "title_thread");
   const checkpointDefaultDescription = `${project.name} / ${activeThreadName} · ${new Date().toLocaleString(undefined, {
     year: "numeric",
     month: "2-digit",
@@ -7119,7 +9715,7 @@ function AppShell() {
   const activeFlags = activeThreadStatus?.activeFlags ?? statusFromThread?.activeFlags ?? [];
   const waitingOnApproval = activeFlags.includes("waitingOnApproval") || Boolean(modal?.kind === "approval" && modal.thread_id === selectedThreadId);
   const canInterrupt = Boolean(liveTurnId && activeStatusType === "active");
-  const runtimeGuardVisible = Boolean(liveTurnId && activeStatusType === "active") || waitingOnApproval || startTurn.isPending || createThread.isPending;
+  const runtimeGuardVisible = Boolean(liveTurnId && activeStatusType === "active") || waitingOnApproval || startTurn.isPending || createThread.isPending || beginThreadCreate.isPending || Boolean(taskCreationPending);
   const runtimeRouteLabel = [activeProfile?.label, activeSettings.model].filter(Boolean).join(" · ");
   const runtimeWaitingState = useMemo(
     () =>
@@ -7131,19 +9727,20 @@ function AppShell() {
         waitingOnApproval,
         activeStatusType,
         startPending: startTurn.isPending,
-        createThreadPending: createThread.isPending,
+        createThreadPending: createThread.isPending || beginThreadCreate.isPending || Boolean(taskCreationPending),
+        creatingTaskName: taskCreationPending?.name,
       }),
-    [activeStatusType, createThread.isPending, liveActivity, liveDiff, locale, runtimeRouteLabel, startTurn.isPending, waitingOnApproval],
+    [activeStatusType, beginThreadCreate.isPending, createThread.isPending, liveActivity, liveDiff, locale, runtimeRouteLabel, startTurn.isPending, taskCreationPending, waitingOnApproval],
   );
   const runtimeGuardStateText = runtimeStateLabel(locale, {
     waitingOnApproval,
-    sending: startTurn.isPending || createThread.isPending,
+    sending: startTurn.isPending || createThread.isPending || beginThreadCreate.isPending || Boolean(taskCreationPending),
     activeStatusType,
   });
   const waitingReplayPhase = smokeMode ? brandWaitingReplayPhase() : null;
   const statusAttentionItems = useMemo(
-    () => buildStatusAttentionItems({ locale, supervisor: supervisor.data, workflowFacts, capabilityWarnings }),
-    [capabilityWarnings, locale, supervisor.data, workflowFacts],
+    () => buildStatusAttentionItems({ locale, supervisor: supervisorForDisplay, workflowFacts, capabilityWarnings }),
+    [capabilityWarnings, locale, supervisorForDisplay, workflowFacts],
   );
   const statusEvidenceItems = useMemo(
     () => buildStatusEvidenceItems({ locale, supervisor: supervisor.data, workflowFacts, goal: displayGoal }),
@@ -7159,7 +9756,7 @@ function AppShell() {
       for (const item of currentTask?.checkpoint_refs ?? []) {
           const saveId = String(item?.save_id ?? "").trim();
           if (!saveId) continue;
-          const providerThread = currentTask?.provider_threads.find((thread) => thread.thread_id === String(item?.thread_id ?? currentTask?.active_provider_thread_id ?? ""));
+          const providerThread = currentTaskProviderThreads.find((thread) => thread.thread_id === String(item?.thread_id ?? currentTask?.active_provider_thread_id ?? ""));
           const providerId = String(item?.provider_id ?? providerThread?.provider_id ?? "");
           const model = String(item?.model ?? providerThread?.model ?? "");
           checkpoints.push({
@@ -7196,9 +9793,13 @@ function AppShell() {
       setInstructionQueueEditingId(null);
       return;
     }
-    if (queuedInstructionInFlightRef.current || activeStatusType === "active" || waitingOnApproval || startTurn.isPending || createThread.isPending) return;
+    if (queuedInstructionInFlightRef.current || taskCreationPending || activeStatusType === "active" || waitingOnApproval || startTurn.isPending || createThread.isPending || beginThreadCreate.isPending) return;
     const [next] = instructionQueue;
     if (!next) return;
+    if (next.targetThreadId && next.targetThreadId !== sendTargetThreadId) {
+      setInstructionQueueBlockedId(next.id);
+      return;
+    }
     if (instructionQueueBlockedId === next.id) return;
     queuedInstructionInFlightRef.current = true;
     setInstructionQueueBusyId(next.id);
@@ -7213,12 +9814,12 @@ function AppShell() {
       }
       setInstructionQueueBlockedId(next.id);
     });
-  }, [activeStatusType, createThread.isPending, instructionQueue, instructionQueueBlockedId, startTurn.isPending, waitingOnApproval]);
+  }, [activeStatusType, beginThreadCreate.isPending, createThread.isPending, instructionQueue, instructionQueueBlockedId, sendTargetThreadId, startTurn.isPending, taskCreationPending, waitingOnApproval]);
 
   useEffect(() => {
     const threadGoal = goal.data?.goal;
     if (!threadGoal || !selectedThreadId || !goalRunnerArmed) return;
-    if (!goalCanAutoContinue(threadGoal.status) || instructionQueue.length > 0 || activeStatusType === "active" || waitingOnApproval || startTurn.isPending || createThread.isPending) return;
+    if (!goalCanAutoContinue(threadGoal.status) || taskCreationPending || instructionQueue.length > 0 || activeStatusType === "active" || waitingOnApproval || startTurn.isPending || createThread.isPending || beginThreadCreate.isPending) return;
     const key = `${selectedThreadId}:${threadGoal.updatedAt}:${threadGoal.tokensUsed}:${threadGoal.status}`;
     if (goalContinuationKeyRef.current === key) return;
     goalContinuationKeyRef.current = key;
@@ -7227,7 +9828,7 @@ function AppShell() {
         ? `继续推进当前目标：${threadGoal.objective}\n如果目标已经完成，请明确说明并将目标状态更新为 complete；如果需要用户确认，请先暂停并提出问题。`
         : `Continue working toward the active goal: ${threadGoal.objective}\nIf the goal is complete, say so and mark it complete; if user confirmation is needed, pause and ask first.`;
     void submitTurnText(prompt, []);
-  }, [activeStatusType, createThread.isPending, goal.data?.goal, goalRunnerArmed, instructionQueue.length, locale, selectedThreadId, startTurn.isPending, waitingOnApproval]);
+  }, [activeStatusType, beginThreadCreate.isPending, createThread.isPending, goal.data?.goal, goalRunnerArmed, instructionQueue.length, locale, selectedThreadId, startTurn.isPending, taskCreationPending, waitingOnApproval]);
 
   useEffect(() => {
     if (!selectedThreadId || !liveTurnId || !activeThread) return;
@@ -7283,7 +9884,11 @@ function AppShell() {
   const hasGoalContent = Boolean(displayGoal?.objective);
   const composerWorkflowMode: ComposerWorkflowMode =
     goalDockExpanded ? goalDockTab : activeSettings.collaboration_mode === "plan" ? "plan" : "default";
-  const shouldShowGoalDock = composerWorkflowMode === "goal" || composerWorkflowMode === "plan";
+  const shouldShowGoalDock = resolveGoalDockVisibility({
+    workflowMode: composerWorkflowMode,
+    hasPlan: Boolean(inspectorPlan),
+    hasProposedPlan: Boolean((livePlanText || proposedPlanText).trim()),
+  });
   const composerRailState =
     attachmentDropActive
       ? "drop"
@@ -7291,7 +9896,7 @@ function AppShell() {
         ? "error"
         : voiceRecorderState === "recording"
           ? "recording"
-          : voiceRecorderState === "transcribing" || startTurn.isPending || createThread.isPending
+          : voiceRecorderState === "transcribing" || startTurn.isPending || createThread.isPending || beginThreadCreate.isPending || Boolean(taskCreationPending)
             ? "sending"
             : "idle";
   const composerRailArmed = Boolean(composerText.trim() || attachments.length > 0);
@@ -7476,7 +10081,7 @@ function AppShell() {
         {
           id: "toggle-left-sidebar",
           label: leftSidebarOpen ? appMenuCopy.hideLeft : appMenuCopy.showLeft,
-          action: toggleLeftSidebar,
+          action: toggleNavigationSidebar,
         },
         {
           id: "toggle-inspector",
@@ -7612,22 +10217,22 @@ function AppShell() {
     runtime: "runtime_overview",
     settings: "settings_overview",
   };
-  const inspectorVisible = mainView === "chat" && rightSidebarOpen;
+  const inspectorVisible = mainView === "chat" && rightSidebarOpen && !compactShellViewport;
   const shellColumns = [
-    ...(leftSidebarOpen ? [`${leftPane.width}px`, "0px"] : []),
+    ...(sidebarVisible && !compactShellViewport ? [`${leftPane.width}px`, "0px"] : []),
     "minmax(0, 1fr)",
     ...(inspectorVisible ? ["0px", `${rightPane.width}px`] : []),
   ].join(" ");
   return (
     <div
       data-testid="app-shell"
-      className="shell-grid"
+      className={`shell-grid${compactShellViewport ? " shell-grid-compact" : ""}`}
       style={{
         gridTemplateColumns: shellColumns,
       }}
       >
-      {leftSidebarOpen ? (
-      <aside className="sidebar app-sidebar">
+      {sidebarVisible ? (
+      <aside className={`sidebar app-sidebar${compactShellViewport ? " app-sidebar-drawer" : ""}`}>
         <div className="sidebar-brandbar" aria-label="AstraBridge">
           <div className="sidebar-brandmark" aria-hidden="true">
             <span className="sidebar-brandmark-ring" />
@@ -7641,12 +10246,12 @@ function AppShell() {
           </div>
         </div>
         <nav className="sidebar-nav" aria-label="Primary">
-          <button type="button" className="nav-row nav-row-primary" onClick={() => { setMainView("chat"); handleCreateThread(); }}>
+          <button type="button" className="nav-row nav-row-primary" disabled={createThread.isPending || beginThreadCreate.isPending || Boolean(taskCreationPending)} onClick={() => { closeCompactNavigation(); setMainView("chat"); void handleCreateThread(); }}>
             <span className="nav-icon" aria-hidden="true"><StarbridgeTaskCreateIcon size={15} strokeWidth={1.95} /></span>
             <span>{t(locale, "new_thread")}</span>
             <kbd>{t(locale, "new_thread_hint")}</kbd>
           </button>
-          <button type="button" className="nav-row" onClick={() => setCommandPaletteOpen(true)}>
+          <button type="button" className="nav-row" onClick={() => { closeCompactNavigation(); setCommandPaletteOpen(true); }}>
             <span className="nav-icon" aria-hidden="true"><StarbridgeSearchIcon size={14} strokeWidth={1.95} /></span>
             <span>{t(locale, "search")}</span>
             <kbd>{t(locale, "command_k_hint")}</kbd>
@@ -7659,56 +10264,71 @@ function AppShell() {
             <span className="sidebar-count">{projectSidebar.isLoading && !projectSidebar.data ? "…" : sidebarTaskCount || threads.data?.threads.length || 0}</span>
           </div>
           <div className="official-thread-list">
+            {sidebarSelectionError ? (
+              <p className="sidebar-selection-error" role="alert" data-testid="sidebar-task-selection-error">
+                {locale === "zh-CN" ? `任务切换失败：${sidebarSelectionError}` : `Task switch failed: ${sidebarSelectionError}`}
+              </p>
+            ) : null}
             {sidebarProjects.length > 0 ? (
               <ProjectTaskTree
                 locale={locale}
                 projects={sidebarProjects}
                 expandedProjects={expandedSidebarProjects}
+                selectedProjectKey={pendingSidebarProjectKey}
+                selectedTaskId={pendingSidebarTask?.task_id ?? currentTask?.task_id ?? null}
                 formatTime={summarizeRelativeTime}
                 busy={sidebarSelectionBusy || openProjectFromSidebar.isPending}
                 onToggleProject={toggleSidebarProject}
-                onSelectProject={(projectNode) => { void selectSidebarProject(projectNode); }}
-                onSelectTask={(projectNode, taskNode) => { void selectSidebarTask(projectNode, taskNode); }}
+                onSelectProject={(projectNode) => { closeCompactNavigation(); void selectSidebarProject(projectNode); }}
+                onSelectTask={(projectNode, taskNode) => { closeCompactNavigation(); void selectSidebarTask(projectNode, taskNode); }}
               />
             ) : null}
-            {sidebarProjects.length === 0 ? (threads.data?.threads ?? []).map((thread) => (
-              <div key={thread.id} className={`codex-thread-item ${thread.id === selectedThreadId ? "codex-thread-item-active" : ""}`}>
-                <button type="button" className="thread-select-row" onClick={() => { setMainView("chat"); switchThread.mutate(thread.id); }}>
-                  <span className="row-icon" aria-hidden="true"><StarbridgeWorkflowDefaultIcon size={14} strokeWidth={1.9} /></span>
-                  <span className="thread-copy">
-                    <span className="thread-title-line">
-                      <strong>{thread.displayName}</strong>
-                      <time>{summarizeRelativeTime(thread.updatedAt)}</time>
+            {sidebarProjects.length === 0 ? (threads.data?.threads ?? []).map((thread) => {
+              const threadTitle = visibleThreadTitle(thread.displayName) || t(locale, "title_thread");
+              const threadPreview = visibleThreadTitle(thread.preview);
+              return (
+                <div key={thread.id} className={`codex-thread-item ${thread.id === selectedThreadId ? "codex-thread-item-active" : ""}`}>
+                  <button
+                    type="button"
+                    className="thread-select-row"
+                    title={[threadTitle, threadPreview, thread.id].filter(Boolean).join("\n")}
+                    onClick={() => { setMainView("chat"); switchThread.mutate(thread.id); }}
+                  >
+                    <span className="row-icon" aria-hidden="true"><StarbridgeWorkflowDefaultIcon size={14} strokeWidth={1.9} /></span>
+                    <span className="thread-copy">
+                      <span className="thread-title-line">
+                        <strong>{threadTitle}</strong>
+                        <time>{summarizeRelativeTime(thread.updatedAt)}</time>
+                      </span>
+                      <span className="thread-route-line">
+                        <span>{thread.shellSettings.model ?? thread.modelProvider}</span>
+                        <span>{thread.shellSettings.reasoning_effort ?? project.default_effort}</span>
+                      </span>
                     </span>
-                    <small>{thread.preview || thread.id}</small>
-                    <span className="thread-route-line">
-                      <span>{thread.shellSettings.model ?? thread.modelProvider}</span>
-                      <span>{thread.shellSettings.reasoning_effort ?? project.default_effort}</span>
-                    </span>
-                  </span>
-                </button>
-                <div className="thread-hover-actions" aria-label={locale === "zh-CN" ? "任务操作" : "Task actions"}>
-                  <button type="button" className="icon-button" title={t(locale, "rename_thread")} onClick={() => handleRenameThread(thread.id)}>
-                    <StarbridgeRenameIcon size={13} strokeWidth={1.85} aria-hidden="true" />
                   </button>
-                  <button type="button" className="icon-button" title={t(locale, "archive_thread")} onClick={() => archiveThread.mutate(thread.id)}>
-                    <StarbridgeArchiveIcon size={13} strokeWidth={1.85} aria-hidden="true" />
-                  </button>
+                  <div className="thread-hover-actions" aria-label={locale === "zh-CN" ? "任务操作" : "Task actions"}>
+                    <button type="button" className="icon-button" title={t(locale, "rename_thread")} onClick={() => handleRenameThread(thread.id)}>
+                      <StarbridgeRenameIcon size={13} strokeWidth={1.85} aria-hidden="true" />
+                    </button>
+                    <button type="button" className="icon-button" title={t(locale, "archive_thread")} onClick={() => archiveThread.mutate(thread.id)}>
+                      <StarbridgeArchiveIcon size={13} strokeWidth={1.85} aria-hidden="true" />
+                    </button>
+                  </div>
                 </div>
-              </div>
-            )) : null}
+              );
+            }) : null}
             {!projectSidebar.isLoading && !threads.isLoading && sidebarProjects.length === 0 && (threads.data?.threads ?? []).length === 0 ? <p className="muted">{t(locale, "no_threads")}</p> : null}
           </div>
         </section>
 
         <div className="sidebar-footer">
-          <button type="button" className="nav-row nav-row-session" onClick={() => openSetupTab("login")}>
+          <button type="button" className="nav-row nav-row-session" onClick={() => { closeCompactNavigation(); openSetupTab("login"); }}>
             <span className="nav-icon" aria-hidden="true"><StarbridgeSessionIcon size={15} strokeWidth={1.9} /></span>
             <span>
               {llmSession.data?.mode === "managed_user" ? t(locale, "manager_status_managed").replace("{user}", llmSession.data.username ?? "user") : t(locale, "manager_status_anonymous")}
             </span>
           </button>
-          <button type="button" className="nav-row nav-row-settings" onClick={() => openSetupTab("login")}>
+          <button type="button" className="nav-row nav-row-settings" onClick={() => { closeCompactNavigation(); openSetupTab("login"); }}>
             <span className="nav-icon" aria-hidden="true"><StarbridgeSettingsIcon size={15} strokeWidth={1.9} /></span>
             <span>{t(locale, "sidebar_group_settings")}</span>
           </button>
@@ -7716,19 +10336,31 @@ function AppShell() {
       </aside>
       ) : null}
 
-      {leftSidebarOpen ? <div className="resize-handle" {...leftPane.bind} /> : null}
+      {compactShellViewport && compactSidebarOpen ? (
+        <button
+          type="button"
+          className="sidebar-scrim"
+          aria-label={t(locale, "hide_sidebar")}
+          title={t(locale, "hide_sidebar")}
+          onClick={closeCompactNavigation}
+        />
+      ) : null}
 
-      <section className={`workspace ${mainView === "chat" ? "workspace-chat" : "workspace-setup"}`}>
+      {sidebarVisible && !compactShellViewport ? <div className="resize-handle" {...leftPane.bind} /> : null}
+
+      <section
+        className={`workspace ${mainView === "chat" ? "workspace-chat" : "workspace-setup"}${mainView === "chat" && graphWorkspaceOpen ? " workspace-chat-task-graph" : ""}`}
+      >
         <header className="workspace-topbar">
           <button
             type="button"
             className="icon-button pane-toggle-button"
             data-testid="topbar-toggle-left-sidebar"
-            title={leftSidebarOpen ? t(locale, "hide_sidebar") : t(locale, "show_sidebar")}
-            aria-label={leftSidebarOpen ? t(locale, "hide_sidebar") : t(locale, "show_sidebar")}
-            onClick={toggleLeftSidebar}
+            title={sidebarVisible ? t(locale, "hide_sidebar") : t(locale, "show_sidebar")}
+            aria-label={sidebarVisible ? t(locale, "hide_sidebar") : t(locale, "show_sidebar")}
+            onClick={toggleNavigationSidebar}
           >
-            {leftSidebarOpen ? <PanelLeftClose size={16} aria-hidden="true" /> : <PanelLeftOpen size={16} aria-hidden="true" />}
+            {sidebarVisible ? <PanelLeftClose size={16} aria-hidden="true" /> : <PanelLeftOpen size={16} aria-hidden="true" />}
           </button>
           <nav className="app-menu-bar" aria-label={locale === "zh-CN" ? "应用菜单" : "Application menu"}>
             {topMenuSections.map((section) => (
@@ -7775,25 +10407,13 @@ function AppShell() {
               </div>
             ))}
           </nav>
-          <div className="title-stack">
-            <p className="eyebrow">{mainView === "setup" ? setupEyebrow : t(locale, "title_thread")}</p>
-            <h2>{mainView === "setup" ? setupTitle : activeThread?.displayName ?? t(locale, "no_threads")}</h2>
-            {mainView === "chat" ? (
-              <>
-                <p className="route-subtitle" data-testid="route-summary">
-                  {activeProfile?.label ?? fallbackRouteLabel(locale)} · {activeSettings.model} · {activeSettings.reasoning_effort} · {permissionLabel(locale, activeSettings.permission_mode)} · {activeExecutionBackendLabel}
-                </p>
-                <div className="thread-stat-row" data-testid="task-workflow-facts">
-                  <span className="thread-stat-pill" data-testid="task-fact-lanes">{workflowFacts.laneCount} lanes</span>
-                  <span className="thread-stat-pill" data-testid="task-fact-handoffs">{workflowFacts.handoffCount} handoffs</span>
-                  <span className="thread-stat-pill" data-testid="task-fact-checkpoints">{workflowFacts.checkpointCount} checkpoints</span>
-                  <span className="thread-stat-pill" data-testid="task-fact-backend">{activeExecutionBackendLabel}</span>
-                </div>
-              </>
-            ) : (
+          {mainView === "setup" ? (
+            <div className="title-stack">
+              <p className="eyebrow">{setupEyebrow}</p>
+              <h2>{setupTitle}</h2>
               <p className="route-subtitle">{setupSubtitle}</p>
-            )}
-          </div>
+            </div>
+          ) : null}
           <div className="topbar-actions">
             {mainView === "chat" ? (
               <>
@@ -7810,6 +10430,17 @@ function AppShell() {
                 <button type="button" className="ghost-button topbar-action-with-icon" data-testid="topbar-fork" onClick={handleForkThread} disabled={!selectedThreadId}>
                   <span className="topbar-action-icon" aria-hidden="true"><StarbridgeForkTaskIcon size={14} strokeWidth={1.9} /></span>
                   {locale === "zh-CN" ? "创建分支任务" : t(locale, "fork_thread")}
+                </button>
+                <button
+                  type="button"
+                  className={`ghost-button topbar-action-with-icon ${graphWorkspaceOpen ? "topbar-action-active" : ""}`}
+                  data-testid="topbar-open-task-graph"
+                  onClick={() => setGraphWorkspaceOpen((value) => !value)}
+                  aria-label={graphWorkspaceOpen ? t(locale, "back_to_chat") : (locale === "zh-CN" ? "任务图" : "Task graph")}
+                  title={graphWorkspaceOpen ? t(locale, "back_to_chat") : (locale === "zh-CN" ? "任务图" : "Task graph")}
+                >
+                  <span className="topbar-action-icon" aria-hidden="true"><Workflow size={14} strokeWidth={1.9} /></span>
+                  {graphWorkspaceOpen ? t(locale, "back_to_chat") : (locale === "zh-CN" ? "任务图" : "Task graph")}
                 </button>
                 <button
                   type="button"
@@ -7838,10 +10469,10 @@ function AppShell() {
               fallbackCheckpoints={fallbackSetupCheckpoints}
               initialTab={setupInitialTab}
               initialExtensionsKind={setupExtensionsKind}
-              leftSidebarOpen={leftSidebarOpen}
+              leftSidebarOpen={sidebarVisible}
               rightSidebarOpen={rightSidebarOpen}
               archivedVisible={archivedVisible}
-              onToggleLeftSidebar={toggleLeftSidebar}
+              onToggleLeftSidebar={toggleNavigationSidebar}
               onToggleRightSidebar={toggleRightSidebar}
               onOpenSearch={() => {
                 setArchivedVisible(false);
@@ -7863,7 +10494,7 @@ function AppShell() {
         ) : (
           <>
         <div className="chat-canvas-shell">
-        <div className="chat-canvas" data-testid="chat-canvas">
+        <div className="chat-canvas" data-testid="chat-canvas" ref={chatCanvasRef}>
 
         <ConversationNoticeBar
           locale={locale}
@@ -7896,6 +10527,78 @@ function AppShell() {
           </section>
         ) : null}
 
+        {graphWorkspaceOpen ? (
+          <TaskGraphWorkspace
+            locale={locale}
+            templates={taskGraphTemplateList}
+            graph={currentTaskGraph}
+            selectedNodeId={selectedTaskGraphNodeId}
+            selectedEdgeId={selectedTaskGraphEdgeId}
+            providerOptions={taskGraphProviderOptions}
+            modelSuggestions={taskGraphModelSuggestions}
+            nodeSaveError={taskGraphNodeSaveError}
+            edgeSaveError={taskGraphEdgeSaveError}
+            dryRunResult={taskGraphDryRunResult}
+            dryRunError={taskGraphFixtureRunError || taskGraphDryRunError}
+            reportHref={taskGraphDryRunReportHref}
+            latestRunRef={currentTaskGraphRunRef}
+            artifactHrefFor={projectFileReadHref}
+            onInspectArtifactPath={inspectTaskGraphArtifactPath}
+            onSelectNode={(nodeId) => {
+              setSelectedTaskGraphNodeId(nodeId);
+              setSelectedTaskGraphEdgeId(null);
+            }}
+            onSelectEdge={setSelectedTaskGraphEdgeId}
+              onInstantiateTemplate={openTaskGraphTemplate}
+            onCreateNode={createTaskGraphNode}
+            onMoveNode={moveTaskGraphNode}
+            onSaveNode={saveTaskGraphNodeConfiguration}
+            onSaveEdge={saveTaskGraphEdgeConfiguration}
+            onDeleteEdge={deleteTaskGraphEdge}
+            onRunDryRun={runTaskGraphDryRun}
+            onRunLive={runTaskGraphLive}
+            onRunFixture={runTaskGraphFixture}
+            onRunCancellableFixture={runTaskGraphCancellableFixture}
+            onCancelLatestRun={cancelLatestTaskGraphRun}
+            onRecoverLatestRun={recoverLatestTaskGraphRun}
+            onApprovePendingRun={approveTaskGraphPendingRun}
+            onRejectPendingRun={rejectTaskGraphPendingRun}
+            onImportGraph={importTaskGraphThroughWorkspace}
+            onExportGraph={exportTaskGraphThroughWorkspace}
+            snapshotRefs={currentTaskGraphSnapshotRefs}
+            selectedSnapshotId={selectedTaskGraphSnapshot?.snapshot_id ?? null}
+            onSelectSnapshot={setSelectedTaskGraphSnapshotId}
+            onCreateSnapshot={createTaskGraphSnapshotFromWorkspace}
+            onCompareSnapshot={compareSelectedTaskGraphSnapshot}
+            onRollbackSnapshot={rollbackSelectedTaskGraphSnapshot}
+            onClose={() => setGraphWorkspaceOpen(false)}
+            importExportError={taskGraphImportExportError}
+            lastImportedPath={taskGraphLastImportedPath}
+            lastExportedPath={taskGraphLastExportedPath}
+            lastExportPreview={taskGraphLastExportPreview}
+            snapshotError={taskGraphSnapshotError}
+            snapshotStatus={taskGraphSnapshotStatus}
+            snapshotDiffMarkdown={taskGraphSnapshotDiffMarkdown}
+            isInstantiating={instantiateTaskGraph.isPending}
+            isLoadingTemplates={taskGraphTemplatesLoading}
+            isLoadingGraph={taskGraphLoading}
+            isSavingNode={updateTaskGraphNode.isPending}
+            isSavingEdge={updateTaskGraphEdge.isPending || saveTaskGraphDefinition.isPending}
+            isDryRunPending={dryRunTaskGraph.isPending}
+            isLiveRunPending={taskGraphLiveRunUiPending}
+            showLiveRunPendingChrome={taskGraphLiveRunUiPending}
+            isFixtureRunPending={fixtureRunTaskGraph.isPending || taskGraphFixturePendingVisible}
+            runActionDisabledReason={taskGraphRunActionBlockedReason}
+            isRunCancellationPending={cancelTaskGraphRun.isPending}
+            isRunRecoveryPending={recoverTaskGraphRun.isPending}
+            isApprovalDecisionPending={resolveTaskGraphApproval.isPending}
+            isImportingGraph={importTaskGraphFile.isPending}
+            isExportingGraph={exportTaskGraphFile.isPending}
+            isSnapshotPending={createTaskGraphSnapshot.isPending}
+            isSnapshotDiffPending={diffTaskGraphSnapshot.isPending}
+            isSnapshotRollbackPending={rollbackTaskGraphToSnapshot.isPending}
+          />
+        ) : (
         <div className={`message-stream ${conversationVisuallyEmpty ? "message-stream-empty" : ""}`} data-testid="message-stream">
           {activeThread?.forkedFromId ? (
             <div className="task-fork-row">
@@ -7941,11 +10644,39 @@ function AppShell() {
               <PlanProgressTimeline plan={messagePlanAnchor} />
             </article>
           ) : null}
-          {createThread.error ? <div className="error-text">{describeSendError(t(locale, "new_thread"), createThread.error)}</div> : null}
+          {(createThread.error || beginThreadCreate.error || beginThreadCreate.data?.status === "failed" || recoverThreadCreate.data?.status === "pending" || recoverThreadCreate.data?.status === "failed" || recoverThreadCreate.error) ? (
+            <div className="error-text thread-create-error">
+              <span>{beginThreadCreate.data?.status === "failed"
+                ? beginThreadCreate.data.error
+                : recoverThreadCreate.data?.status === "pending"
+                  ? (locale === "zh-CN" ? "任务仍在初始化；可继续检查状态。" : "The task is still initializing; you can check its status again.")
+                  : recoverThreadCreate.data?.status === "failed"
+                    ? recoverThreadCreate.data.error
+                    : describeSendError(t(locale, "new_thread"), createThread.error ?? beginThreadCreate.error ?? recoverThreadCreate.error)}</span>
+              {threadCreateRecovery ? (
+                <button
+                  type="button"
+                  className="ghost-button thread-create-recovery-action"
+                  title={locale === "zh-CN" ? "只查询这次创建的最终状态，不会再次创建线程。" : "Checks this creation operation without starting another thread."}
+                  disabled={recoverThreadCreate.isPending}
+                  onClick={() => recoverThreadCreate.mutate({ profile_id: threadCreateRecovery.profileId, operation_id: threadCreateRecovery.operationId })}
+                >
+                  {recoverThreadCreate.isPending
+                    ? (locale === "zh-CN" ? "正在检查" : "Checking")
+                    : (locale === "zh-CN" ? "检查创建状态" : "Check creation status")}
+                </button>
+              ) : null}
+              {recoverThreadCreate.data?.status === "pending" ? <small>{locale === "zh-CN" ? "线程仍在初始化；稍后再次检查。" : "The thread is still initializing; check again shortly."}</small> : null}
+              {recoverThreadCreate.data?.status === "failed" ? <small>{recoverThreadCreate.data.error}</small> : null}
+              {recoverThreadCreate.error ? <small>{String((recoverThreadCreate.error as Error).message ?? recoverThreadCreate.error)}</small> : null}
+            </div>
+          ) : null}
           {forkThread.error ? <div className="error-text">{describeSendError(t(locale, "fork_thread"), forkThread.error)}</div> : null}
           {conversationVisuallyEmpty ? <ConversationEmptyState locale={locale} state={conversationRenderState} /> : null}
         </div>
+        )}
 
+        {!graphWorkspaceOpen ? (
         <footer
           className={`composer ${attachmentDropActive ? "composer-drop-active" : ""}`}
           data-composer-rail-state={composerRailState}
@@ -7969,8 +10700,8 @@ function AppShell() {
             }
           }}
           onDrop={(event) => void handleComposerDrop(event)}
+          onPaste={(event) => void handleComposerPaste(event)}
         >
-          <ComposerStarTrack state={composerRailState} armed={composerRailArmed} />
           {attachmentDropActive ? (
             <div className="composer-drop-hint" aria-live="polite">
               <StarbridgeAttachIcon size={15} strokeWidth={1.9} aria-hidden="true" />
@@ -8046,15 +10777,13 @@ function AppShell() {
               className={`attachment-route-note ${imageAttachmentUnsupported ? "attachment-route-warning" : ""}`}
               title={
                 imageAttachmentUnsupported
-                  ? locale === "zh-CN"
-                    ? "当前模型没有验证图片输入。移除图片附件，或切换到支持图片输入的模型。"
-                    : "The current model has no verified image input. Remove image attachments or switch to an image-capable model."
+                  ? imageAttachmentRouteMessage
                   : locale === "zh-CN"
                     ? "附件会随下一轮发送。图片将作为视觉输入，普通文件和文件夹将作为文件引用。"
                     : "Attachments will be sent with the next turn. Images route as visual input; files and folders route as file mentions."
               }
             >
-              {attachmentRouteLine}
+              {imageAttachmentUnsupported ? `${attachmentRouteSummary(locale, sendableAttachments)} · ${imageAttachmentRouteMessage}` : attachmentRouteLine}
             </p>
           ) : null}
           {attachmentNotice ? <p className="attachment-notice">{attachmentNotice}</p> : null}
@@ -8092,33 +10821,34 @@ function AppShell() {
             onSaveEdit={saveQueuedInstruction}
             onSendNow={(id) => void sendQueuedInstructionNow(id)}
           />
-          <div
-            className="composer-resize-grip"
-            role="separator"
-            aria-orientation="horizontal"
-            aria-label={locale === "zh-CN" ? "拖动以调整对话框输入高度" : "Drag to resize composer input height"}
-            tabIndex={0}
-            onKeyDown={(event) => {
-              if (event.key === "ArrowUp") {
-                event.preventDefault();
-                composerInputResize.setHeightByDelta(18);
-              } else if (event.key === "ArrowDown") {
-                event.preventDefault();
-                composerInputResize.setHeightByDelta(-18);
-              }
-            }}
-            {...composerInputResize.bind}
-          />
-          <textarea
-            data-testid="composer-input"
-            value={composerText}
-            onChange={(event) => setComposerText(event.target.value)}
-            rows={6}
-            style={{ height: `${composerInputResize.height}px` }}
-            placeholder={t(locale, "composer_placeholder")}
-          />
-          <div className="composer-controls composer-toolbar">
-            <div className="composer-toolbar-left">
+          <div className="composer-surface">
+            <div
+              className="composer-resize-grip"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label={locale === "zh-CN" ? "拖动以调整对话框输入高度" : "Drag to resize composer input height"}
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  composerInputResize.setHeightByDelta(18);
+                } else if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  composerInputResize.setHeightByDelta(-18);
+                }
+              }}
+              {...composerInputResize.bind}
+            />
+            <textarea
+              data-testid="composer-input"
+              value={composerText}
+              onChange={(event) => setComposerText(event.target.value)}
+              rows={6}
+              style={{ height: `${composerInputResize.height}px` }}
+              placeholder={t(locale, "composer_placeholder")}
+            />
+            <div className="composer-controls composer-toolbar">
+              <div className="composer-toolbar-left">
               <div
                 className="attachment-picker"
                 onBlur={(event) => {
@@ -8157,9 +10887,10 @@ function AppShell() {
                 value={activeSettings.permission_mode}
                 onChange={(value) => updateComposerSettings({ permission_mode: value })}
               />
+              <ExecutionPolicyPicker locale={locale} value={composerExecutionPolicy} onChange={setComposerExecutionPolicy} />
               <WorkflowModePicker locale={locale} value={composerWorkflowMode} onChange={setComposerWorkflowMode} />
-            </div>
-            <div className="composer-toolbar-right">
+              </div>
+              <div className="composer-toolbar-right">
               <select
                 data-testid="composer-profile"
                 data-composer="profile"
@@ -8170,8 +10901,7 @@ function AppShell() {
                   const nextCatalogModel = pickPreferredModelForProvider(nextProviderId);
                   const nextModel = nextCatalogModel ?? nextProfile?.model ?? activeSettings.model;
                   const nextModelEntry =
-                    (llmCatalog.data?.models ?? []).find((model) => model.provider === nextProviderId && model.native_model === nextModel) ??
-                    (routerConfig.data?.models ?? []).find((model) => model.provider === nextProviderId && model.native_model === nextModel) ??
+                    mergedComposerCatalogModels.find((model) => model.provider === nextProviderId && model.native_model === nextModel) ??
                     null;
                   const nextEfforts = composerReasoningOptions(nextModelEntry, nextProfile, activeSettings.reasoning_effort);
                   const nextEffort = nextEfforts.includes(nextProfile?.reasoning_effort ?? "")
@@ -8198,8 +10928,7 @@ function AppShell() {
                 value={activeSettings.model ?? ""}
                 onChange={(event) => {
                   const nextModelEntry =
-                    (llmCatalog.data?.models ?? []).find((model) => model.provider === activeProfile?.provider_id && model.native_model === event.target.value) ??
-                    (routerConfig.data?.models ?? []).find((model) => model.provider === activeProfile?.provider_id && model.native_model === event.target.value) ??
+                    mergedComposerCatalogModels.find((model) => model.provider === activeProfile?.provider_id && model.native_model === event.target.value) ??
                     null;
                   const nextEfforts = composerReasoningOptions(nextModelEntry, activeProfile, activeSettings.reasoning_effort);
                   updateComposerSettings({
@@ -8252,28 +10981,33 @@ function AppShell() {
                   {t(locale, "interrupt")}
                 </button>
               ) : null}
-              <button
-              type="button"
-              className="primary-button composer-send"
-              data-testid="composer-send"
-              disabled={
-                imageAttachmentUnsupported ||
-                Boolean(activeModelAuthority?.sendBlocked) ||
-                (!composerText.trim() && sendableAttachments.length === 0) ||
-                startTurn.isPending ||
-                createThread.isPending
-              }
-              onClick={handleSend}
-              aria-label={startTurn.isPending || createThread.isPending ? t(locale, "loading") : t(locale, "send")}
-            >
-                <span className="composer-send-label">{startTurn.isPending || createThread.isPending ? t(locale, "loading") : t(locale, "send")}</span>
+                <button
+                  type="button"
+                  className="primary-button composer-send"
+                  data-testid="composer-send"
+                  disabled={
+                    imageAttachmentUnsupported ||
+                    Boolean(activeModelAuthority?.sendBlocked) ||
+                    sidebarSelectionBusy ||
+                    (!composerText.trim() && sendableAttachments.length === 0) ||
+                    startTurn.isPending ||
+                    createThread.isPending ||
+                    beginThreadCreate.isPending ||
+                    Boolean(taskCreationPending)
+                  }
+                  onClick={handleSend}
+                  aria-label={startTurn.isPending || createThread.isPending || beginThreadCreate.isPending || taskCreationPending ? t(locale, "loading") : t(locale, "send")}
+                >
+                <span className="composer-send-label">{startTurn.isPending || createThread.isPending || beginThreadCreate.isPending || taskCreationPending ? t(locale, "loading") : t(locale, "send")}</span>
                 <span className="composer-send-icon" aria-hidden="true"><StarbridgeSendIcon size={14} strokeWidth={1.95} /></span>
-              </button>
+                </button>
+              </div>
             </div>
+            <ComposerStarTrack state={composerRailState} armed={composerRailArmed} />
           </div>
           {sendStage ? <p className="send-stage">{sendStage}</p> : null}
-          {sendFailure ? <p className="error-text">{sendFailure}</p> : null}
         </footer>
+        ) : null}
         </div>
         </div>
           </>
@@ -8292,7 +11026,7 @@ function AppShell() {
                   locale={locale}
                   activeStatusType={activeStatusType}
                   waitingOnApproval={waitingOnApproval}
-                  sending={startTurn.isPending || createThread.isPending}
+                  sending={startTurn.isPending || createThread.isPending || beginThreadCreate.isPending || Boolean(taskCreationPending)}
                   queueCount={instructionQueue.length}
                   canInterrupt={canInterrupt}
                   goal={displayGoal}
@@ -8325,7 +11059,7 @@ function AppShell() {
                 />
                 <EnvironmentStrip
                   locale={locale}
-                  supervisor={supervisor.data}
+                  supervisor={supervisorForDisplay}
                   fallback={{
                     permission: permissionLabel(locale, activeSettings.permission_mode),
                   }}
@@ -8337,7 +11071,7 @@ function AppShell() {
             {inspectorTab === "review" ? (
               <ReviewInspectorPanel
                 locale={locale}
-                supervisor={supervisor.data}
+                supervisor={supervisorForDisplay}
                 review={inspectorReview.data}
                 diff={inspectorReviewDiff.data}
                 fallback={taskInspectorEvidence}
@@ -8348,7 +11082,7 @@ function AppShell() {
             {inspectorTab === "browser" ? (
                 <BrowserInspectorPanel
                   locale={locale}
-                  supervisor={supervisor.data}
+                  supervisor={supervisorForDisplay}
                   latestSmoke={(inspectorDogfoodRun.data?.run?.browser_smokes ?? []).slice(-1)[0] ?? null}
                   statusLabel={productStatusLabel}
                   isPreparingWorkflowDemo={prepareReleaseWorkflowDemo.isPending}
@@ -8746,7 +11480,13 @@ export default function App() {
 
   const setProject = useAppStore((store) => store.setProject);
   const project = useAppStore((store) => store.project);
-  const current = useQuery({ queryKey: ["project"], queryFn: api.currentProject, retry: false });
+  const current = useQuery({
+    queryKey: ["project"],
+    queryFn: api.currentProject,
+    retry: false,
+    refetchInterval: project ? false : 5000,
+    staleTime: project ? 60_000 : 0,
+  });
 
   useEffect(() => {
     if (current.data?.project) {
@@ -8754,10 +11494,34 @@ export default function App() {
     }
   }, [current.data?.project, setProject]);
 
+  const bootstrapProject = current.data?.project ?? null;
+  const hasProject = Boolean(project ?? bootstrapProject);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.dataset.appBootstrapDebug = JSON.stringify({
+      surface: hasProject ? "app-shell" : "root-launcher-gate",
+      hasProject,
+      storeProjectId: project?.project_id ?? null,
+      bootstrapProjectId: bootstrapProject?.project_id ?? null,
+      currentStatus: current.status,
+      currentFetchStatus: current.fetchStatus,
+      currentError: current.error instanceof Error ? current.error.message : current.error ? String(current.error) : null,
+      at: Date.now(),
+    });
+  }, [
+    bootstrapProject?.project_id,
+    current.error,
+    current.fetchStatus,
+    current.status,
+    hasProject,
+    project?.project_id,
+  ]);
+
   return (
     <>
       <StarbridgeCursorOverlay preference={cursorEnhancement} />
-      {project ? <AppShell /> : <Launcher />}
+      {hasProject ? <AppShell bootstrapProject={bootstrapProject} /> : <Launcher />}
     </>
   );
 }

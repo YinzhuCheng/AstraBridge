@@ -18,6 +18,7 @@ export type SetupRouteTab =
   | "automations"
   | "saves"
   | "dogfood"
+  | "updates"
   | "reports";
 
 export type AbilityEntryId = "automations" | "plugins" | "skills" | "multimodal_routes" | "web";
@@ -75,6 +76,7 @@ export const SETUP_ROUTE_TABS: SetupRouteTab[] = [
   "automations",
   "saves",
   "dogfood",
+  "updates",
   "reports",
 ];
 
@@ -143,6 +145,7 @@ export const SIDEBAR_UTILITY_GROUPS: SidebarUtilityGroupDefinition[] = [
       { id: "runtime", labelKey: "setup_tab_runtime", targetTab: "runtime", testId: "sidebar-nav-runtime" },
       { id: "saves", labelKey: "setup_tab_saves", targetTab: "saves", testId: "sidebar-nav-saves" },
       { id: "reports", labelKey: "setup_tab_reports", targetTab: "reports", testId: "sidebar-nav-reports" },
+      { id: "updates", labelKey: "setup_tab_updates", targetTab: "updates", testId: "sidebar-nav-updates" },
       { id: "dogfood", labelKey: "setup_tab_dogfood", targetTab: "dogfood", testId: "sidebar-nav-dogfood" },
     ],
   },

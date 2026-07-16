@@ -77,6 +77,7 @@ describe("runtime activity state", () => {
     const snapshot = useAppStore.getState().eventSnapshot;
     expect(snapshot.diffByTurn["turn-1"]).toBeUndefined();
     expect(snapshot.activityByTurn["turn-1"]).toBeUndefined();
+    expect(snapshot.latestTurnIdByThread["thread-1"]).toBeUndefined();
   });
 
   it("falls back to summary preview when file names are unavailable", () => {

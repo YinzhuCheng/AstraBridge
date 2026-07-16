@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AutomationInboxItem, AutomationRun, AutomationSpec, Profile } from "../../types";
+import type { AutomationInboxItem, AutomationRun, AutomationSpec, Profile, RouterModelEntry } from "../../types";
 import { AutomationsPanel, automationPayloadFromDraft, createEmptyAutomationDraft } from "./AutomationsPanel";
 
 const profile: Profile = {
@@ -16,6 +16,17 @@ const profile: Profile = {
   auth_mode: "env_ref",
   proxy_mode: "direct",
   proxy_url: "",
+};
+
+const catalogModel: RouterModelEntry = {
+  id: "qwen/qwen3.7-plus",
+  provider: "qwen",
+  native_model: "qwen3.7-plus",
+  display_name: "Qwen 3.7 Plus",
+  enabled: true,
+  advertised_context_window: 1_000_000,
+  ui_context_hint_only: false,
+  adapter_profile: "qwen-default",
 };
 
 const automation: AutomationSpec = {
@@ -212,6 +223,13 @@ describe("AutomationsPanel", () => {
         inboxItems={[inboxItem]}
         scheduler={{ running: true, active_run_count: 0, next_wake_up_at: null, inbox_summary: { unread: 1, reviewed: 0, archived: 0, promoted: 0 } }}
         supervisorAutomations={null}
+        catalogModels={[
+          {
+            ...catalogModel,
+            authority_tier: "A",
+            authority_reason: "Model can participate in read/write/tool workflows with guarded tool execution.",
+          },
+        ]}
         onCreate={vi.fn()}
         onUpdate={vi.fn()}
         onDelete={vi.fn()}
@@ -224,6 +242,17 @@ describe("AutomationsPanel", () => {
         onPromote={onPromote}
       />,
     );
+
+    const advancedSettings = screen.getByText("Advanced runtime settings").closest("details");
+    const activityDetails = screen.getByText("Inbox and run history").closest("details");
+    expect(advancedSettings).not.toHaveAttribute("open");
+    expect(activityDetails).toHaveAttribute("open");
+    fireEvent.click(advancedSettings!.querySelector("summary")!);
+    expect(advancedSettings).toHaveAttribute("open");
+    fireEvent.click(activityDetails!.querySelector("summary")!);
+    expect(activityDetails).not.toHaveAttribute("open");
+    fireEvent.click(activityDetails!.querySelector("summary")!);
+    expect(activityDetails).toHaveAttribute("open");
 
     expect(screen.getByText("Daily audit")).toBeInTheDocument();
     expect(screen.getByText("TODO found")).toBeInTheDocument();
@@ -240,6 +269,181 @@ describe("AutomationsPanel", () => {
     fireEvent.change(screen.getByLabelText("Promotion reference"), { target: { value: "task:123" } });
     fireEvent.click(screen.getByRole("button", { name: "Promote" }));
     expect(onPromote).toHaveBeenCalledWith("item-1", "task:123");
+  });
+
+  it("blocks standalone run-now when the selected model has no verified tool authority", () => {
+    const onRunNow = vi.fn();
+
+    render(
+      <AutomationsPanel
+        locale="en"
+        projectId="demo"
+        profiles={[profile]}
+        automations={[automation]}
+        runs={[run]}
+        inboxItems={[inboxItem]}
+        scheduler={{ running: true, active_run_count: 0, next_wake_up_at: null, inbox_summary: { unread: 1, reviewed: 0, archived: 0, promoted: 0 } }}
+        supervisorAutomations={null}
+        catalogModels={[
+          {
+            ...catalogModel,
+            authority_tier: "C",
+            authority_reason: "Model has no verified structured tool-calling surface.",
+          },
+        ]}
+        onCreate={vi.fn()}
+        onUpdate={vi.fn()}
+        onDelete={vi.fn()}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRunNow={onRunNow}
+        onCancelRun={vi.fn()}
+        onMarkReviewed={vi.fn()}
+        onArchive={vi.fn()}
+        onPromote={vi.fn()}
+      />,
+    );
+
+    const runButton = screen.getByRole("button", { name: "Run now" });
+    expect(runButton).toBeDisabled();
+    expect(screen.getByTestId("automation-profile-gate")).toHaveTextContent("blocked for direct automation runs");
+    expect(screen.getByTestId("automation-profile-gate")).toHaveTextContent("no verified structured tool-calling surface");
+    fireEvent.click(runButton);
+    expect(onRunNow).not.toHaveBeenCalled();
+  });
+
+  it("blocks standalone run-now when the selected provider secret is not loaded", () => {
+    const onRunNow = vi.fn();
+
+    render(
+      <AutomationsPanel
+        locale="en"
+        projectId="demo"
+        profiles={[{ ...profile, profile_id: "deepseek-default", provider_id: "deepseek", model: "deepseek-v4-pro", label: "DeepSeek" }]}
+        automations={[{ ...automation, runtime: { ...automation.runtime, profile_id: "deepseek-default" } }]}
+        runs={[run]}
+        inboxItems={[inboxItem]}
+        scheduler={{ running: true, active_run_count: 0, next_wake_up_at: null, inbox_summary: { unread: 1, reviewed: 0, archived: 0, promoted: 0 } }}
+        supervisorAutomations={null}
+        catalogModels={[
+          {
+            ...catalogModel,
+            id: "deepseek/deepseek-v4-pro",
+            provider: "deepseek",
+            native_model: "deepseek-v4-pro",
+            authority_tier: "B",
+            authority_reason: "Read-only review mode is acceptable after a real provider key is loaded.",
+          },
+        ]}
+        runtimeProviders={[
+          {
+            provider_id: "deepseek",
+            label: "DeepSeek",
+            secret_loaded: false,
+          },
+        ]}
+        onCreate={vi.fn()}
+        onUpdate={vi.fn()}
+        onDelete={vi.fn()}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRunNow={onRunNow}
+        onCancelRun={vi.fn()}
+        onMarkReviewed={vi.fn()}
+        onArchive={vi.fn()}
+        onPromote={vi.fn()}
+      />,
+    );
+
+    const runButton = screen.getByRole("button", { name: "Run now" });
+    expect(runButton).toBeDisabled();
+    expect(screen.getByTestId("automation-profile-gate")).toHaveTextContent("does not have a loaded secret");
+    fireEvent.click(runButton);
+    expect(onRunNow).not.toHaveBeenCalled();
+  });
+
+  it("keeps the activity workspace open for a brand-new automation surface", () => {
+    render(
+      <AutomationsPanel
+        locale="zh-CN"
+        projectId="demo"
+        profiles={[profile]}
+        automations={[]}
+        runs={[]}
+        inboxItems={[]}
+        scheduler={{ running: false, active_run_count: 0, next_wake_up_at: null, inbox_summary: { unread: 0, reviewed: 0, archived: 0, promoted: 0 } }}
+        supervisorAutomations={null}
+        onCreate={vi.fn()}
+        onUpdate={vi.fn()}
+        onDelete={vi.fn()}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRunNow={vi.fn()}
+        onCancelRun={vi.fn()}
+        onMarkReviewed={vi.fn()}
+        onArchive={vi.fn()}
+        onPromote={vi.fn()}
+      />,
+    );
+
+    const activityDetails = screen.getByText("收件箱与运行记录").closest("details");
+    expect(activityDetails).toHaveAttribute("open");
+    expect(screen.getByText("新建自动化")).toBeInTheDocument();
+    expect(screen.getByText("还没有自动化任务。先创建一个手动或间隔任务。")).toBeInTheDocument();
+  });
+
+  it("does not wipe an in-progress draft when the empty automation surface rerenders", () => {
+    const rendered = render(
+      <AutomationsPanel
+        locale="zh-CN"
+        projectId="demo"
+        profiles={[profile]}
+        automations={[]}
+        runs={[]}
+        inboxItems={[]}
+        scheduler={{ running: false, active_run_count: 0, next_wake_up_at: null, inbox_summary: { unread: 0, reviewed: 0, archived: 0, promoted: 0 } }}
+        supervisorAutomations={null}
+        onCreate={vi.fn()}
+        onUpdate={vi.fn()}
+        onDelete={vi.fn()}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRunNow={vi.fn()}
+        onCancelRun={vi.fn()}
+        onMarkReviewed={vi.fn()}
+        onArchive={vi.fn()}
+        onPromote={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "Draft automation" } });
+    fireEvent.change(screen.getByLabelText("执行提示词"), { target: { value: "Reply with exactly: ok" } });
+
+    rendered.rerender(
+      <AutomationsPanel
+        locale="zh-CN"
+        projectId="demo"
+        profiles={[profile]}
+        automations={[]}
+        runs={[]}
+        inboxItems={[]}
+        scheduler={{ running: false, active_run_count: 0, next_wake_up_at: null, inbox_summary: { unread: 0, reviewed: 0, archived: 0, promoted: 0 } }}
+        supervisorAutomations={null}
+        onCreate={vi.fn()}
+        onUpdate={vi.fn()}
+        onDelete={vi.fn()}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRunNow={vi.fn()}
+        onCancelRun={vi.fn()}
+        onMarkReviewed={vi.fn()}
+        onArchive={vi.fn()}
+        onPromote={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("名称")).toHaveValue("Draft automation");
+    expect(screen.getByLabelText("执行提示词")).toHaveValue("Reply with exactly: ok");
   });
 
   it("selects MCP and project plugin-skill presets through controlled chips", () => {

@@ -1,14 +1,419 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>AstraBridge</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Segoe UI", "IBM Plex Sans", sans-serif;
+        background:
+          radial-gradient(circle at 14% 14%, rgba(116, 156, 217, 0.16), transparent 32%),
+          radial-gradient(circle at 82% 18%, rgba(198, 216, 245, 0.2), transparent 30%),
+          linear-gradient(180deg, #f7fbff 0%, #eef4fb 100%);
+        color: #1f2937;
+      }
+
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        overflow: hidden;
+        background: transparent;
+      }
+
+      #root {
+        position: relative;
+        isolation: isolate;
+      }
+
+      .ab-bootstrap-shell {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: grid;
+        place-items: center;
+        padding: 1.5rem;
+        background:
+          linear-gradient(180deg, rgba(247, 251, 255, 0.94), rgba(238, 244, 251, 0.98)),
+          radial-gradient(circle at top right, rgba(116, 156, 217, 0.16), transparent 28%);
+        transition:
+          opacity 180ms ease,
+          visibility 180ms ease;
+      }
+
+      .ab-bootstrap-shell-hidden {
+        opacity: 0;
+        visibility: hidden;
+      }
+
+      .ab-bootstrap-card {
+        width: min(28rem, calc(100vw - 2rem));
+        display: grid;
+        gap: 0.9rem;
+        padding: 1.25rem 1.35rem;
+        border: 1px solid rgba(67, 87, 128, 0.14);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.9);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.72),
+          0 18px 44px rgba(39, 61, 102, 0.08);
+        backdrop-filter: blur(14px);
+      }
+
+      .ab-bootstrap-brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        min-width: 0;
+      }
+
+      .ab-bootstrap-brandmark {
+        width: 0.7rem;
+        height: 0.7rem;
+        border-radius: 999px;
+        background: radial-gradient(circle at 40% 40%, #ffffff, #6d96d6 68%, rgba(109, 150, 214, 0.16) 100%);
+        box-shadow: 0 0 0 6px rgba(109, 150, 214, 0.1);
+      }
+
+      .ab-bootstrap-brand strong {
+        font-size: 0.88rem;
+        font-weight: 650;
+        letter-spacing: 0.01em;
+      }
+
+      .ab-bootstrap-copy {
+        display: grid;
+        gap: 0.38rem;
+      }
+
+      .ab-bootstrap-copy h1 {
+        margin: 0;
+        font-size: 1.02rem;
+        line-height: 1.35;
+      }
+
+      .ab-bootstrap-copy p {
+        margin: 0;
+        color: #60738d;
+        font-size: 0.8rem;
+        line-height: 1.55;
+      }
+
+      .ab-bootstrap-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.46rem;
+        min-height: 1.5rem;
+        font-size: 0.78rem;
+        color: #435268;
+      }
+
+      .ab-bootstrap-pulse {
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 999px;
+        background: #2f67c8;
+        box-shadow: 0 0 0 0 rgba(47, 103, 200, 0.22);
+        animation: ab-bootstrap-pulse 1.45s ease infinite;
+      }
+
+      .ab-bootstrap-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+      }
+
+      .ab-bootstrap-reload {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 2rem;
+        padding: 0 0.78rem;
+        border: 1px solid rgba(67, 87, 128, 0.14);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.88);
+        color: #1f2937;
+        cursor: pointer;
+      }
+
+      .ab-bootstrap-reload[hidden] {
+        display: none;
+      }
+
+      .ab-bootstrap-meta {
+        color: #60738d;
+        font-size: 0.72rem;
+      }
+
+      .ab-bootstrap-shell[data-state="stalled"] .ab-bootstrap-pulse {
+        background: #9a650b;
+        animation-duration: 1.85s;
+      }
+
+      .ab-bootstrap-shell[data-state="error"] .ab-bootstrap-pulse {
+        background: #b65043;
+        animation: none;
+        box-shadow: 0 0 0 6px rgba(182, 80, 67, 0.12);
+      }
+
+      @keyframes ab-bootstrap-pulse {
+        0% {
+          box-shadow: 0 0 0 0 rgba(47, 103, 200, 0.22);
+        }
+        70% {
+          box-shadow: 0 0 0 12px rgba(47, 103, 200, 0);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(47, 103, 200, 0);
+        }
+      }
+    </style>
   </head>
   <body>
+    <div id="ab-bootstrap" class="ab-bootstrap-shell" data-state="loading" role="status" aria-live="polite">
+      <section class="ab-bootstrap-card">
+        <div class="ab-bootstrap-brand">
+          <span class="ab-bootstrap-brandmark" aria-hidden="true"></span>
+          <strong>AstraBridge</strong>
+        </div>
+        <div class="ab-bootstrap-copy">
+          <h1 id="ab-bootstrap-title">AstraBridge 正在启动</h1>
+          <p id="ab-bootstrap-detail">正在连接本地工作台与任务界面。</p>
+        </div>
+        <div class="ab-bootstrap-status" id="ab-bootstrap-status">
+          <span class="ab-bootstrap-pulse" aria-hidden="true"></span>
+          <span id="ab-bootstrap-status-text">前端入口已打开，正在等待应用挂载。</span>
+        </div>
+        <div class="ab-bootstrap-actions">
+          <button id="ab-bootstrap-reload" class="ab-bootstrap-reload" type="button" hidden>重新加载</button>
+          <span id="ab-bootstrap-meta" class="ab-bootstrap-meta">若停留过久，会自动尝试恢复一次。</span>
+        </div>
+      </section>
+    </div>
     <div id="root"></div>
+    <script>
+      (() => {
+        const html = document.documentElement;
+        const shell = document.getElementById("ab-bootstrap");
+        const title = document.getElementById("ab-bootstrap-title");
+        const detail = document.getElementById("ab-bootstrap-detail");
+        const statusText = document.getElementById("ab-bootstrap-status-text");
+        const metaText = document.getElementById("ab-bootstrap-meta");
+        const reloadButton = document.getElementById("ab-bootstrap-reload");
+        const readySurfaceSelector = "[data-testid='app-shell'], .launcher-shell, .launch-isolation-shell";
+        const autoReloadKey = `astrabridge.bootstrap-autoreload:${location.pathname}${location.search}`;
+        let stalledTimer = 0;
+        let failTimer = 0;
+        let autoReloadTimer = 0;
+        let readyCheckTimer = 0;
+        let readyObserver = null;
+
+        const setState = (state, nextTitle, nextDetail, nextStatus, allowReload = false, nextMeta = "") => {
+          html.dataset.abBootstrapState = state;
+          if (shell) shell.dataset.state = state;
+          if (title) title.textContent = nextTitle;
+          if (detail) detail.textContent = nextDetail;
+          if (statusText) statusText.textContent = nextStatus;
+          if (metaText) metaText.textContent = nextMeta;
+          if (reloadButton) reloadButton.hidden = !allowReload;
+        };
+
+        const clearTimers = () => {
+          if (stalledTimer) {
+            window.clearTimeout(stalledTimer);
+            stalledTimer = 0;
+          }
+          if (failTimer) {
+            window.clearTimeout(failTimer);
+            failTimer = 0;
+          }
+          if (autoReloadTimer) {
+            window.clearTimeout(autoReloadTimer);
+            autoReloadTimer = 0;
+          }
+          if (readyCheckTimer) {
+            window.clearInterval(readyCheckTimer);
+            readyCheckTimer = 0;
+          }
+        };
+
+        const disconnectReadyObserver = () => {
+          if (readyObserver) {
+            readyObserver.disconnect();
+            readyObserver = null;
+          }
+        };
+
+        const hasReadySurface = () => Boolean(document.querySelector(readySurfaceSelector));
+
+        const hasConsumedAutoReload = () => {
+          try {
+            return window.sessionStorage.getItem(autoReloadKey) === "1";
+          } catch {
+            return true;
+          }
+        };
+
+        const consumeAutoReload = () => {
+          try {
+            window.sessionStorage.setItem(autoReloadKey, "1");
+          } catch {
+            // Ignore storage failures and fall back to manual reload only.
+          }
+        };
+
+        const clearAutoReload = () => {
+          try {
+            window.sessionStorage.removeItem(autoReloadKey);
+          } catch {
+            // Ignore storage failures.
+          }
+        };
+
+        const manualReload = () => {
+          clearAutoReload();
+          window.location.reload();
+        };
+
+        const scheduleAutoReload = () => {
+          if (autoReloadTimer || hasReadySurface() || hasConsumedAutoReload()) return false;
+          consumeAutoReload();
+          if (metaText) {
+            metaText.textContent = "正在尝试自动恢复一次；若仍失败，请使用重新加载。";
+          }
+          autoReloadTimer = window.setTimeout(() => {
+            window.location.reload();
+          }, 1200);
+          return true;
+        };
+
+        const shellApi = {
+          note(message) {
+            if (detail && message) detail.textContent = String(message);
+          },
+          stalled(message) {
+            setState(
+              "stalled",
+              "AstraBridge 正在恢复界面",
+              message || "前端入口已连通，但应用仍未完成首屏渲染。",
+              "启动比平时更慢，可以继续等待或直接重新加载。",
+              true,
+              "若继续停留，本页会在失败前自动尝试恢复一次。",
+            );
+          },
+          ready(message) {
+            clearTimers();
+            clearAutoReload();
+            disconnectReadyObserver();
+            html.dataset.abBootstrapState = "ready";
+            if (statusText && message) statusText.textContent = message;
+            if (!shell) return;
+            shell.classList.add("ab-bootstrap-shell-hidden");
+            window.setTimeout(() => shell.remove(), 180);
+          },
+          fail(message) {
+            clearTimers();
+            const autoReloadScheduled = scheduleAutoReload();
+            setState(
+              "error",
+              "AstraBridge 未能完成启动",
+              message || "前端入口发生错误，当前页面没有完成挂载。",
+              autoReloadScheduled
+                ? "正在自动尝试恢复；若仍反复出现，请再手动重新加载。"
+                : "请先重新加载；若反复出现，再检查 4181 前端与 sidecar 健康。",
+              true,
+              autoReloadScheduled
+                ? "本页只会自动恢复一次，避免进入无限重载循环。"
+                : "自动恢复机会已用完，当前仅保留手动恢复。",
+            );
+          },
+          state() {
+            return html.dataset.abBootstrapState || shell?.dataset.state || null;
+          },
+        };
+
+        window.__AB_BOOTSTRAP__ = shellApi;
+        if (reloadButton) {
+          reloadButton.addEventListener("click", manualReload);
+        }
+
+        const confirmReadySurface = () => {
+          if (!hasReadySurface()) return false;
+          shellApi.ready("AstraBridge 已完成界面装载。");
+          return true;
+        };
+
+        const startReadyChecks = () => {
+          if (confirmReadySurface() || readyCheckTimer) return;
+          readyCheckTimer = window.setInterval(() => {
+            if (confirmReadySurface()) {
+              window.clearInterval(readyCheckTimer);
+              readyCheckTimer = 0;
+            }
+          }, 500);
+        };
+
+        const startReadyObserver = () => {
+          if (confirmReadySurface()) return;
+          if (!readyObserver && window.MutationObserver && document.body) {
+            readyObserver = new MutationObserver(() => {
+              if (confirmReadySurface()) {
+                disconnectReadyObserver();
+              }
+            });
+            readyObserver.observe(document.body, {
+              childList: true,
+              subtree: true,
+              attributes: true,
+            });
+          }
+          startReadyChecks();
+        };
+
+        setState(
+          "loading",
+          "AstraBridge 正在启动",
+          "正在连接本地工作台与任务界面。",
+          "前端入口已打开，正在等待应用挂载。",
+          false,
+          "若停留过久，会自动尝试恢复一次。",
+        );
+
+        stalledTimer = window.setTimeout(() => {
+          shellApi.stalled("前端入口仍可访问，但应用初始化明显偏慢。");
+        }, 3000);
+        failTimer = window.setTimeout(() => {
+          shellApi.fail("启动超时：入口脚本在限定时间内没有完成界面装载。");
+        }, 15000);
+
+        startReadyObserver();
+        window.addEventListener("pageshow", startReadyChecks);
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") {
+            startReadyChecks();
+          }
+        });
+
+        window.addEventListener("error", (event) => {
+          if (html.dataset.abBootstrapState === "ready") return;
+          const message = event.error?.message || event.message || "unknown error";
+          shellApi.fail(`启动脚本报错：${message}`);
+        });
+
+        window.addEventListener("unhandledrejection", (event) => {
+          if (html.dataset.abBootstrapState === "ready") return;
+          const reason = event.reason instanceof Error ? event.reason.message : String(event.reason || "unknown rejection");
+          shellApi.fail(`启动依赖加载失败：${reason}`);
+        });
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

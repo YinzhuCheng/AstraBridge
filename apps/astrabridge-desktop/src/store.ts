@@ -304,6 +304,10 @@ export const useAppStore = create<AppState>((set) => ({
       delete liveReasoningByTurn[turnId];
       delete activityByTurn[turnId];
       delete diffByTurn[turnId];
+      const latestTurnIdByThread = { ...state.eventSnapshot.latestTurnIdByThread };
+      if (latestTurnIdByThread[threadId] === turnId) {
+        delete latestTurnIdByThread[threadId];
+      }
       return {
         eventSnapshot: {
           ...state.eventSnapshot,
@@ -312,10 +316,7 @@ export const useAppStore = create<AppState>((set) => ({
           liveReasoningByTurn,
           activityByTurn,
           diffByTurn,
-          latestTurnIdByThread: {
-            ...state.eventSnapshot.latestTurnIdByThread,
-            [threadId]: turnId,
-          },
+          latestTurnIdByThread,
         },
       };
     }),

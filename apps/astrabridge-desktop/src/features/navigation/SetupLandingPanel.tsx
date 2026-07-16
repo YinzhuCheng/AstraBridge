@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 
+import { uiPrimitiveClassNames } from "../ui/uiSystem";
+
 export type SetupLandingMetric = {
   id: string;
   label: string;
@@ -54,7 +56,7 @@ export function SetupLandingPanel({
   actions,
 }: SetupLandingPanelProps) {
   return (
-    <div className="manager-panel setup-landing-panel" data-testid={testId}>
+    <div className={`manager-panel setup-landing-panel ${uiPrimitiveClassNames("flatSection")}`} data-testid={testId}>
       <section className="setup-landing-header">
         <div className="setup-landing-summary">
           <span className="eyebrow">{eyebrow}</span>
@@ -71,9 +73,9 @@ export function SetupLandingPanel({
         </div>
       </section>
 
-      <section className="manager-section">
+      <section className={`manager-section ${uiPrimitiveClassNames("denseSection")}`}>
         <h4>{sectionTitle}</h4>
-        <div className="setup-landing-actions">
+        <div className={`setup-landing-actions ${uiPrimitiveClassNames("denseList")}`}>
           {actions.map((action) => (
             <ActionRow
               key={action.id}

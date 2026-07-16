@@ -862,9 +862,12 @@ export function PluginSkillInventoryPanel({
       ) : null}
 
       {project ? (
-        <section className="metadata-section">
+        <details className="manager-disclosure extensions-project-preset">
+          <summary>
+            <span>{copy.projectPreset}</span>
+          </summary>
+          <section className="metadata-section manager-disclosure-content">
           <div className="section-header">
-            <h4>{copy.projectPreset}</h4>
             <div className="extensions-inline-actions">
               <button
                 type="button"
@@ -893,7 +896,8 @@ export function PluginSkillInventoryPanel({
               copy.none,
             )}
           </div>
-        </section>
+          </section>
+        </details>
       ) : null}
 
       <div className="metadata-editor extensions-editor">

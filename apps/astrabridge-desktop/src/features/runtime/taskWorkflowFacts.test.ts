@@ -104,10 +104,14 @@ describe("task workflow facts", () => {
       failedCommandCount: 1,
       recoveredCommandCount: 1,
       backend: "app_server",
-      checkpointRefs: [{ save_id: "save-1", description: "Event checkpoint", model_id: undefined, provider_id: undefined }],
+      checkpointRefs: [{ save_id: "save-1", description: "Event checkpoint" }],
+      commandRefs: [
+        { command: "python -m unittest", status: "failed" },
+        { command: "python -m unittest", status: "completed" },
+      ],
       diagnosticRefs: [
-        { key: "provider_handoff:handoff:", kind: "provider_handoff", summary: "handoff", model_id: undefined, provider_id: undefined, to_thread_id: undefined },
-        { key: "runtime_transition:transition:", kind: "runtime_transition", summary: "transition", model_id: undefined, provider_id: undefined, to_thread_id: undefined },
+        { key: "provider_handoff:handoff:", kind: "provider_handoff", summary: "handoff" },
+        { key: "runtime_transition:transition:", kind: "runtime_transition", summary: "transition" },
       ],
     });
   });

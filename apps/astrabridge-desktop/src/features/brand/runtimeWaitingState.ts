@@ -11,6 +11,7 @@ type RuntimeWaitingInputs = {
   activeStatusType: string;
   startPending?: boolean;
   createThreadPending?: boolean;
+  creatingTaskName?: string | null;
 };
 
 export type RuntimeWaitingDescriptor = {
@@ -169,7 +170,18 @@ export function resolveRuntimeWaitingState({
   activeStatusType,
   startPending = false,
   createThreadPending = false,
+  creatingTaskName,
 }: RuntimeWaitingInputs): RuntimeWaitingDescriptor {
+  if (creatingTaskName) {
+    return {
+      phase: "thinking",
+      label: zh(locale) ? "新任务" : "New task",
+      title: zh(locale) ? "正在创建新任务" : "Creating new task",
+      detail: zh(locale)
+        ? `${compactLine(creatingTaskName, 72)}。完成前，输入仍会保留在当前任务。`
+        : `${compactLine(creatingTaskName, 72)}. Input remains in the current task until creation finishes.`,
+    };
+  }
   const sending = startPending || createThreadPending;
   const phase = phaseFromActivity(liveActivity, liveDiff, waitingOnApproval);
   return {

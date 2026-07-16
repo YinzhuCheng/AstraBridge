@@ -45,11 +45,29 @@ struct BrowserSession {
 impl Drop for SidecarProcess {
     fn drop(&mut self) {
         if let Ok(mut child) = self.0.lock() {
-            if let Some(process) = child.as_mut() {
+            if let Some(mut process) = child.take() {
+                #[cfg(windows)]
+                if !terminate_process_tree(process.id()) {
+                    let _ = process.kill();
+                }
+                #[cfg(not(windows))]
                 let _ = process.kill();
+                let _ = process.wait();
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn terminate_process_tree(pid: u32) -> bool {
+    Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 fn repo_root_from_manifest() -> Option<PathBuf> {
@@ -80,19 +98,32 @@ fn sidecar_locations(app: &tauri::App) -> Option<(PathBuf, PathBuf)> {
 }
 
 #[cfg(windows)]
-fn stop_existing_astrabridge_sidecar_on_port() {
-    let script = format!(
-        r#"$ErrorActionPreference = 'SilentlyContinue';
-$conn = Get-NetTCPConnection -LocalPort {port} -State Listen | Select-Object -First 1;
-if ($conn) {{
-  $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)";
-  $cmd = [string]$proc.CommandLine;
-  if ($cmd -match 'astrabridge-sidecar|astrabridge_sidecar\.server|sidecar_server\.py') {{
-    taskkill /PID $($conn.OwningProcess) /T /F | Out-Null;
-  }}
-}}"#,
-        port = SIDECAR_PORT
-    );
+fn stop_existing_astrabridge_sidecars() {
+    let script = r#"$ErrorActionPreference = 'SilentlyContinue';
+function Test-AstraBridgeSidecar($item) {
+  if (-not $item) { return $false };
+  $name = [string]$item.Name;
+  $cmd = [string]$item.CommandLine;
+  $isSidecarProcess = $name -match '^(python|pythonw)(\.exe)?$|^astrabridge-sidecar(\.exe)?$|^sidecar_server(\.exe)?$';
+  $hasSidecarMarker = $cmd -match 'astrabridge[-_]sidecar|sidecar_server\.py';
+  return $isSidecarProcess -and $hasSidecarMarker -and $cmd -match '(?:^|\s)--serve(?:\s|$)';
+};
+$connection = Get-NetTCPConnection -LocalPort {port} -State Listen | Select-Object -First 1;
+if ($connection) {
+  $processes = @(Get-CimInstance Win32_Process);
+  $byPid = @{};
+  foreach ($item in $processes) { $byPid[[int]$item.ProcessId] = $item };
+  $root = $byPid[[int]$connection.OwningProcess];
+  if (Test-AstraBridgeSidecar $root) {
+    while ($true) {
+      $parent = $byPid[[int]$root.ParentProcessId];
+      if (-not (Test-AstraBridgeSidecar $parent)) { break };
+      $root = $parent;
+    };
+    Start-Process -FilePath "$env:WINDIR\System32\taskkill.exe" -ArgumentList @('/PID', [string]$root.ProcessId, '/T', '/F') -WindowStyle Hidden -Wait | Out-Null;
+  };
+}"#
+        .replace("{port}", SIDECAR_PORT);
     let _ = Command::new("powershell")
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
@@ -106,10 +137,21 @@ if ($conn) {{
 }
 
 #[cfg(not(windows))]
-fn stop_existing_astrabridge_sidecar_on_port() {}
+fn stop_existing_astrabridge_sidecars() {}
+
+fn configure_sidecar_environment(command: &mut Command) {
+    // A desktop launch always owns its runtime selection. Inherited Codex homes
+    // could otherwise make every project share official or stale Codex state.
+    command.env_remove("CODEX_HOME");
+    command.env_remove("ASTRABRIDGE_CODEX_HOME");
+    #[cfg(windows)]
+    if std::env::var_os("ASTRABRIDGE_RUNTIME_ROOT").is_none() && PathBuf::from(r"D:\").is_dir() {
+        command.env("ASTRABRIDGE_RUNTIME_ROOT", r"D:\AstraBridgeRuntime");
+    }
+}
 
 fn spawn_sidecar(app: &tauri::App) -> Option<Child> {
-    stop_existing_astrabridge_sidecar_on_port();
+    stop_existing_astrabridge_sidecars();
     let (sidecar, seed_root) = sidecar_locations(app)?;
     if !sidecar.exists() {
         eprintln!("AstraBridge sidecar was not found: {}", sidecar.display());
@@ -123,7 +165,9 @@ fn spawn_sidecar(app: &tauri::App) -> Option<Child> {
         .unwrap_or(false);
 
     if sidecar_is_exe {
-        return Command::new(&sidecar)
+        let mut command = Command::new(&sidecar);
+        configure_sidecar_environment(&mut command);
+        return command
             .arg("--serve")
             .arg("--port")
             .arg(SIDECAR_PORT)
@@ -138,14 +182,13 @@ fn spawn_sidecar(app: &tauri::App) -> Option<Child> {
     if let Ok(path) = std::env::var("ASTRABRIDGE_PYTHON") {
         candidates.push(path);
     }
-    if let Ok(path) = std::env::var("ASTRABRIDGE_PYTHON") {
-        candidates.push(path);
-    }
     candidates.push("python".to_string());
     candidates.push("py".to_string());
 
     for python in candidates {
-        match Command::new(&python)
+        let mut command = Command::new(&python);
+        configure_sidecar_environment(&mut command);
+        match command
             .arg(&sidecar)
             .arg("--serve")
             .arg("--port")
@@ -541,18 +584,21 @@ async fn browser_focus(
             .0
             .lock()
             .map_err(|_| "Browser registry lock failed.".to_string())?;
-        sessions.get(&id).cloned().unwrap_or_else(|| BrowserSession {
-            id: id.clone(),
-            role: id.trim_start_matches(BROWSER_LABEL_PREFIX).to_string(),
-            title: window.title().unwrap_or_else(|_| browser_title(&id)),
-            url: "".to_string(),
-            status: "focused".to_string(),
-            error: None,
-            preview_mode: "native".to_string(),
-            supervision_status: Some("starting".to_string()),
-            supervision_session_id: Some(id.clone()),
-            supervision_error: None,
-        })
+        sessions
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| BrowserSession {
+                id: id.clone(),
+                role: id.trim_start_matches(BROWSER_LABEL_PREFIX).to_string(),
+                title: window.title().unwrap_or_else(|_| browser_title(&id)),
+                url: "".to_string(),
+                status: "focused".to_string(),
+                error: None,
+                preview_mode: "native".to_string(),
+                supervision_status: Some("starting".to_string()),
+                supervision_session_id: Some(id.clone()),
+                supervision_error: None,
+            })
     };
     session.title = window.title().unwrap_or_else(|_| browser_title(&id));
     session.status = "focused".to_string();
@@ -632,6 +678,27 @@ async fn browser_tile_two_up(
 #[tauri::command]
 fn sidecar_url() -> String {
     format!("http://127.0.0.1:{SIDECAR_PORT}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_sidecar_does_not_inherit_codex_home_overrides() {
+        let mut command = Command::new("sidecar-placeholder");
+        configure_sidecar_environment(&mut command);
+        let environments: HashMap<_, _> = command.get_envs().collect();
+
+        assert_eq!(
+            environments.get(std::ffi::OsStr::new("CODEX_HOME")),
+            Some(&None)
+        );
+        assert_eq!(
+            environments.get(std::ffi::OsStr::new("ASTRABRIDGE_CODEX_HOME")),
+            Some(&None)
+        );
+    }
 }
 
 fn main() {

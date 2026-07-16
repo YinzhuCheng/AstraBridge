@@ -33,6 +33,8 @@ describe("SetupLandingPanel", () => {
     );
 
     expect(screen.getByTestId("setup-landing")).toBeTruthy();
+    expect(screen.getByTestId("setup-landing").className).toContain("flat-section");
+    expect(screen.getByText("Quick actions").closest("section")?.className).toContain("dense-section");
     expect(screen.getByText("File")).toBeTruthy();
     expect(screen.getByText("Tasks")).toBeTruthy();
     expect(screen.getByText("12")).toBeTruthy();

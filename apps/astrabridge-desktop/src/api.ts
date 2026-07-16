@@ -1,6 +1,10 @@
 ﻿import { invoke, isTauri } from "@tauri-apps/api/core";
 import type {
   AppearancePreset,
+  AgenticUpdateJobStatus,
+  AgenticUpdateProposalResult,
+  AgenticUpdateRunList,
+  AgenticUpdateStartPayload,
   AutomationInboxItem,
   AutomationInboxResponse,
   AutomationListResponse,
@@ -51,6 +55,7 @@ import type {
   McpServerConfig,
   McpStatusResponse,
   PermissionMode,
+  TurnExecutionPolicy,
   Profile,
   ProjectFile,
   ProjectFilePreview,
@@ -64,6 +69,7 @@ import type {
   ProjectSavesResponse,
   SidebarProjectsResponse,
   ProjectSummary,
+  ProjectTask,
   ProjectTasksResponse,
   ReasoningConfig,
   RouterConfigResponse,
@@ -74,12 +80,24 @@ import type {
   RuntimeEvent,
   RuntimeModal,
   RuntimeSupervisorState,
+  AgentOrchestrationGraphExportResponse,
+  AgentOrchestrationGraphImportResponse,
   ProjectTerminalHistory,
   ShellThread,
+  TaskGraphDefinition,
+  TaskGraphDryRunResult,
+  TaskGraphNode,
+  TaskGraphRecoverySummary,
+  TaskGraphRollbackResponse,
+  TaskGraphRunRef,
+  TaskGraphSnapshotDiffResponse,
+  TaskGraphSnapshotResponse,
+  TaskGraphTemplateSummary,
   TaskConversationResponse,
   TestMatrixResponse,
   TitleSuggestionResponse,
   ThreadListResponse,
+  ThreadCreateRecoveryResponse,
   ThreadReadResponse,
   TurnStartResponse,
   WebFetchRequest,
@@ -93,11 +111,43 @@ import type {
   YunwuImageSmokeResponse,
 } from "./types";
 import { requestWebFetch, requestWebResearchBrief, requestWebSearchBatch } from "./features/web/webToolClient";
+import { visibleTaskTitle, visibleThreadTitle } from "./features/navigation/displayTitle";
 
 let sidecarBaseUrlPromise: Promise<string> | null = null;
-const adminTokenPromises = new Map<string, Promise<string>>();
+type AdminSessionTokenCacheEntry = {
+  promise: Promise<string>;
+  startedAt: number;
+  purpose: "prewarm" | "mutation";
+  settled: boolean;
+};
+type AdminSessionTokenCacheRecord = AdminSessionTokenCacheEntry | Promise<string>;
+const adminTokenPromises = new Map<string, AdminSessionTokenCacheRecord>();
+const TASK_GRAPH_DEBUG_DATASET_KEY = "taskGraphDebug";
+const ADMIN_SESSION_TIMEOUT_MS = 12000;
+const BROWSER_SIDECAR_PROXY_PREFIX = "/__astrabridge_proxy__";
 
 const SIDECAR_URL_STORAGE_KEY = "astrabridge.sidecarBaseUrl";
+const THREAD_CREATE_RECEIPT_TIMEOUT_MS = 20000;
+
+function writeRequestDebugDataset(key: string, value: Record<string, unknown>) {
+  if (typeof document === "undefined") return;
+  document.documentElement.dataset[key] = JSON.stringify({
+    ...value,
+    at: Date.now(),
+  });
+}
+
+export class ApiRequestError extends Error {
+  status?: number;
+  data?: Record<string, unknown>;
+
+  constructor(message: string, options?: { status?: number; data?: Record<string, unknown> }) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = options?.status;
+    this.data = options?.data;
+  }
+}
 
 function normalizeSidecarBaseUrl(value: string | null | undefined) {
   const trimmed = value?.trim();
@@ -114,7 +164,22 @@ function normalizeSidecarBaseUrl(value: string | null | undefined) {
   }
 }
 
-function browserSidecarBaseUrl() {
+function normalizeProjectFilePath(value: string | null | undefined) {
+  return String(value ?? "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/+/g, "/")
+    .toLowerCase();
+}
+
+function isAdminSessionTokenCacheEntry(
+  value: AdminSessionTokenCacheRecord | undefined,
+): value is AdminSessionTokenCacheEntry {
+  if (!value || typeof value !== "object") return false;
+  return "promise" in value && "startedAt" in value && "purpose" in value && "settled" in value;
+}
+
+function configuredBrowserSidecarTargetBaseUrl() {
   const params = new URLSearchParams(window.location.search);
   const fromQuery = normalizeSidecarBaseUrl(params.get("sidecar"));
   if (fromQuery) {
@@ -128,6 +193,30 @@ function browserSidecarBaseUrl() {
   return "http://127.0.0.1:8790";
 }
 
+function shouldUseBrowserSidecarProxy() {
+  if (typeof window === "undefined" || isTauri()) return false;
+  const userAgent = window.navigator?.userAgent ?? "";
+  return !/\bjsdom\b/i.test(userAgent);
+}
+
+function browserSidecarProxyUrl(suffix: string) {
+  const url = new URL(`${BROWSER_SIDECAR_PROXY_PREFIX}${suffix}`, window.location.origin);
+  url.searchParams.set("__sidecar", configuredBrowserSidecarTargetBaseUrl());
+  return url.toString();
+}
+
+function browserSidecarBaseUrl() {
+  if (shouldUseBrowserSidecarProxy()) {
+    return `${window.location.origin}${BROWSER_SIDECAR_PROXY_PREFIX}`;
+  }
+  return configuredBrowserSidecarTargetBaseUrl();
+}
+
+function querySidecarBaseUrl() {
+  if (typeof window === "undefined") return "";
+  return normalizeSidecarBaseUrl(new URLSearchParams(window.location.search).get("sidecar"));
+}
+
 function hasConfiguredBrowserSidecarBaseUrl() {
   if (typeof window === "undefined") return false;
   const params = new URLSearchParams(window.location.search);
@@ -137,15 +226,103 @@ function hasConfiguredBrowserSidecarBaseUrl() {
 }
 
 async function sidecarBaseUrl() {
+  if (!isTauri()) {
+    // Browser dogfood can intentionally switch ?sidecar= between isolated
+    // processes, but all browser requests should still stay on the same-origin
+    // proxy when that proxy is active. The proxy target itself is derived from
+    // the current query/storage config inside browserSidecarBaseUrl().
+    return browserSidecarBaseUrl();
+  }
+  // A URL route is an explicit operator choice for the desktop host. Honor it
+  // before checking the bound sidecar so embedded launchers do not accidentally
+  // reuse another desktop-side session.
+  const fromQuery = querySidecarBaseUrl();
+  if (fromQuery) return fromQuery;
   if (!sidecarBaseUrlPromise) {
-    sidecarBaseUrlPromise = (async () => {
-      if (isTauri()) {
-        return invoke<string>("sidecar_url");
-      }
-      return browserSidecarBaseUrl();
-    })();
+    sidecarBaseUrlPromise = invoke<string>("sidecar_url");
   }
   return sidecarBaseUrlPromise;
+}
+
+function normalizeProviderThreadName<T extends { name?: string | null }>(thread: T): T {
+  if (typeof thread.name !== "string") return thread;
+  const visibleName = visibleThreadTitle(thread.name);
+  if (visibleName === thread.name) return thread;
+  return {
+    ...thread,
+    name: visibleName,
+  };
+}
+
+export function normalizeProjectTask(task: ProjectTask): ProjectTask {
+  return {
+    ...task,
+    title: visibleTaskTitle(task.title),
+    provider_threads: Array.isArray(task.provider_threads) ? task.provider_threads.map(normalizeProviderThreadName) : [],
+    fork_threads: Array.isArray(task.fork_threads) ? task.fork_threads.map(normalizeProviderThreadName) : [],
+  };
+}
+
+export function normalizeShellThread(thread: ShellThread): ShellThread {
+  return {
+    ...thread,
+    name: thread.name ? visibleThreadTitle(thread.name) : thread.name,
+    displayName: visibleThreadTitle(thread.displayName),
+    preview: visibleThreadTitle(thread.preview),
+    provider_threads: Array.isArray(thread.provider_threads) ? thread.provider_threads.map(normalizeProviderThreadName) : thread.provider_threads,
+  };
+}
+
+export function normalizeSidebarProjectsResponse(response: SidebarProjectsResponse): SidebarProjectsResponse {
+  return {
+    ...response,
+    projects: response.projects.map((project) => ({
+      ...project,
+      tasks: project.tasks.map((task) => ({
+        ...task,
+        title: visibleTaskTitle(task.title),
+        active_lane_label: task.active_lane_label ? visibleThreadTitle(task.active_lane_label) : task.active_lane_label,
+        previous_lane_label: task.previous_lane_label ? visibleThreadTitle(task.previous_lane_label) : task.previous_lane_label,
+        threads: Array.isArray(task.threads)
+          ? task.threads.map((thread) => ({
+              ...thread,
+              title: visibleThreadTitle(thread.title),
+            }))
+          : [],
+      })),
+    })),
+  };
+}
+
+export function normalizeProjectTasksResponse(response: ProjectTasksResponse): ProjectTasksResponse {
+  return {
+    ...response,
+    current_task: response.current_task ? normalizeProjectTask(response.current_task) : null,
+    tasks: response.tasks.map(normalizeProjectTask),
+  };
+}
+
+export function normalizeThreadListResponse(response: ThreadListResponse): ThreadListResponse {
+  return {
+    ...response,
+    threads: response.threads.map(normalizeShellThread),
+  };
+}
+
+export function normalizeThreadReadResponse(response: ThreadReadResponse): ThreadReadResponse {
+  return {
+    ...response,
+    thread: normalizeShellThread(response.thread),
+    task: response.task ? normalizeProjectTask(response.task) : response.task,
+  };
+}
+
+export function normalizeTaskConversationResponse(response: TaskConversationResponse): TaskConversationResponse {
+  return {
+    ...response,
+    thread: normalizeShellThread(response.thread),
+    task: response.task ? normalizeProjectTask(response.task) : response.task,
+  };
 }
 
 export function projectFileMediaHref(path: string) {
@@ -153,84 +330,498 @@ export function projectFileMediaHref(path: string) {
   if (typeof window === "undefined") {
     return suffix;
   }
+  if (shouldUseBrowserSidecarProxy()) {
+    return browserSidecarProxyUrl(suffix);
+  }
   return `${browserSidecarBaseUrl()}${suffix}`;
 }
 
-type RequestWithTimeout = RequestInit & { timeoutMs?: number; acceptOkFalse?: boolean };
+export function projectFileReadHref(path: string) {
+  const suffix = `/api/project/files/read?path=${encodeURIComponent(path)}`;
+  if (typeof window === "undefined") {
+    return suffix;
+  }
+  if (shouldUseBrowserSidecarProxy()) {
+    return browserSidecarProxyUrl(suffix);
+  }
+  return `${browserSidecarBaseUrl()}${suffix}`;
+}
+
+type RequestWithTimeout = RequestInit & {
+  timeoutMs?: number;
+  acceptOkFalse?: boolean;
+  onRequestStage?: (stage: string) => void;
+};
+
+function requestAbortTimer(callback: () => void, timeoutMs: number) {
+  if (typeof window !== "undefined" && typeof window.setTimeout === "function") {
+    return window.setTimeout(callback, timeoutMs);
+  }
+  return globalThis.setTimeout(callback, timeoutMs);
+}
+
+function clearRequestAbortTimer(timer: ReturnType<typeof setTimeout>) {
+  if (typeof window !== "undefined" && typeof window.clearTimeout === "function") {
+    window.clearTimeout(timer);
+    return;
+  }
+  globalThis.clearTimeout(timer);
+}
+
+function timeoutError(path: string) {
+  return new Error(
+    `The desktop sidecar did not respond in time for ${path}. Open Runtime and verify Codex login, provider key, model, and router health.`,
+  );
+}
+
+class ResponseBodyTimeoutError extends Error {
+  path: string;
+
+  constructor(path: string) {
+    super(`Timed out while reading the response body for ${path}.`);
+    this.name = "ResponseBodyTimeoutError";
+    this.path = path;
+  }
+}
+
+async function readJsonResponseWithTimeout(
+  response: Response,
+  options: {
+    path: string;
+    controller: AbortController;
+    timeoutMs: number;
+  },
+) {
+  let data: Record<string, unknown> = {};
+  let rawBody = "";
+  let bodyTimer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    rawBody = (await Promise.race([
+      (typeof response.text === "function"
+        ? response.text()
+        : (response.json() as Promise<unknown>).then((value) => JSON.stringify(value))) as Promise<string>,
+      new Promise<never>((_, reject) => {
+        bodyTimer = requestAbortTimer(() => {
+          options.controller.abort();
+          reject(new ResponseBodyTimeoutError(options.path));
+        }, options.timeoutMs);
+      }),
+    ])) as string;
+  } catch (error) {
+    if (error instanceof ResponseBodyTimeoutError) {
+      throw timeoutError(options.path);
+    }
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw timeoutError(options.path);
+    }
+    rawBody = "";
+  } finally {
+    if (bodyTimer) {
+      clearRequestAbortTimer(bodyTimer);
+    }
+  }
+  if (!rawBody.trim()) return data;
+  try {
+    data = JSON.parse(rawBody) as Record<string, unknown>;
+  } catch {
+    data = {};
+  }
+  return data;
+}
+
+async function fetchAdminSessionToken(base: string, options?: { refresh?: boolean; purpose?: "prewarm" | "mutation" }) {
+  const purpose = options?.purpose ?? "mutation";
+  if (options?.refresh) {
+    adminTokenPromises.delete(base);
+  } else {
+    const existing = adminTokenPromises.get(base);
+    if (existing) {
+      if (isAdminSessionTokenCacheEntry(existing)) {
+        const stalePending = !existing.settled && Date.now() - existing.startedAt >= ADMIN_SESSION_TIMEOUT_MS;
+        const prewarmPendingForMutation =
+          !existing.settled && existing.purpose === "prewarm" && purpose === "mutation";
+        if (!stalePending && !prewarmPendingForMutation) {
+          return existing.promise;
+        }
+      } else if (purpose === "prewarm") {
+        return existing;
+      }
+      adminTokenPromises.delete(base);
+    }
+  }
+  const entry: AdminSessionTokenCacheEntry = {
+    promise: Promise.resolve(""),
+    startedAt: Date.now(),
+    purpose,
+    settled: false,
+  };
+  const adminTokenPromise = (async () => {
+    const controller = new AbortController();
+    const timer = requestAbortTimer(() => controller.abort(), ADMIN_SESSION_TIMEOUT_MS);
+    try {
+      const headers: Record<string, string> = {};
+      const adminSessionBase = shouldUseBrowserSidecarProxy()
+        ? configuredBrowserSidecarTargetBaseUrl()
+        : base;
+      const response = await fetch(`${adminSessionBase}/api/admin/session`, {
+        headers,
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      const data = await readJsonResponseWithTimeout(response, {
+        path: "/api/admin/session",
+        controller,
+        timeoutMs: ADMIN_SESSION_TIMEOUT_MS,
+      });
+      if (!response.ok) {
+        throw new ApiRequestError(String(data.error ?? "Failed to establish desktop admin session."), {
+          status: response.status,
+          data,
+        });
+      }
+      const token = String(data.admin_session_token ?? "").trim();
+      if (!token) {
+        throw new Error("The desktop sidecar returned an empty admin session token.");
+      }
+      return token;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw timeoutError("/api/admin/session");
+      }
+      throw error;
+    } finally {
+      entry.settled = true;
+      clearRequestAbortTimer(timer);
+    }
+  })();
+  entry.promise = adminTokenPromise;
+  adminTokenPromises.set(base, entry);
+  adminTokenPromise.catch(() => {
+    if (adminTokenPromises.get(base) === entry) {
+      adminTokenPromises.delete(base);
+    }
+  });
+  return adminTokenPromise;
+}
+
+export function seedLegacyAdminSessionTokenPromiseForTests(base: string, promise: Promise<string>) {
+  adminTokenPromises.set(base, promise);
+}
+
+function shouldRefreshAdminSession(response: Response, data: Record<string, unknown>, alreadyRetried: boolean) {
+  if (alreadyRetried) return false;
+  if (response.status === 401 || response.status === 403) return true;
+  if (response.status !== 400) return false;
+  return typeof data.error === "string" && data.error.toLowerCase().includes("admin session token");
+}
+
+export function resetApiModuleStateForTests() {
+  sidecarBaseUrlPromise = null;
+  adminTokenPromises.clear();
+}
 
 async function request<T>(path: string, init?: RequestWithTimeout): Promise<T> {
   const base = await sidecarBaseUrl();
+  const isTaskGraphInstantiate = path === "/api/task-graphs/instantiate";
+  const isTaskGraphRun = path === "/api/task-graphs/run";
+  const isCurrentProjectRequest = path === "/api/projects/current";
+  const isHealthRequest = path === "/health";
   const fetchInit = { ...(init ?? {}) };
   const acceptOkFalse = Boolean(fetchInit.acceptOkFalse);
+  const onRequestStage = fetchInit.onRequestStage;
   delete fetchInit.timeoutMs;
   delete fetchInit.acceptOkFalse;
+  delete fetchInit.onRequestStage;
   const isMutation = (init?.method ?? "GET").toUpperCase() !== "GET";
   const timeoutMs = init?.timeoutMs ?? (isMutation ? 65000 : 15000);
   const cacheMode = init?.cache ?? (isMutation ? "no-store" : "no-store");
   const headers: Record<string, string> = { ...((fetchInit.headers ?? {}) as Record<string, string>) };
+  if (shouldUseBrowserSidecarProxy()) {
+    headers["X-AstraBridge-Sidecar-Base"] = configuredBrowserSidecarTargetBaseUrl();
+  }
   if (isMutation || fetchInit.body) {
     headers["Content-Type"] = headers["Content-Type"] ?? "application/json";
   }
   if (isMutation) {
-    let adminTokenPromise = adminTokenPromises.get(base);
-    if (!adminTokenPromise) {
-      adminTokenPromise = fetch(`${base}/api/admin/session`)
-        .then((response) => response.json())
-        .then((data) => String(data.admin_session_token ?? ""));
-      adminTokenPromises.set(base, adminTokenPromise);
+    if (isTaskGraphRun && typeof window !== "undefined") {
+      document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+        stage: "run_token_requested",
+        base,
+        path,
+        at: Date.now(),
+      });
     }
-    headers["X-Admin-Token"] = await adminTokenPromise;
+    onRequestStage?.("run_token_requested");
+    headers["X-Admin-Token"] = await fetchAdminSessionToken(base);
+    if (isTaskGraphRun && typeof window !== "undefined") {
+      document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+        stage: "run_token_prepared",
+        base,
+        tokenLength: headers["X-Admin-Token"]?.length ?? 0,
+        path,
+        at: Date.now(),
+      });
+    }
+    onRequestStage?.("run_token_prepared");
+    if (isTaskGraphInstantiate) {
+      if (typeof window !== "undefined") {
+        document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+          stage: "instantiate_token_prepared",
+          base,
+          tokenLength: headers["X-Admin-Token"]?.length ?? 0,
+          path,
+          at: Date.now(),
+        });
+      }
+      console.warn("[task-graph] instantiate token prepared", {
+        base,
+        tokenLength: headers["X-Admin-Token"]?.length ?? 0,
+      });
+    }
   }
   const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const timer = requestAbortTimer(() => controller.abort(), timeoutMs);
   let response: Response;
   try {
+    if (isCurrentProjectRequest) {
+      writeRequestDebugDataset("appRequestCurrentProjectDebug", {
+        stage: "fetch_started",
+        base,
+        timeoutMs,
+      });
+    }
+    if (isHealthRequest) {
+      writeRequestDebugDataset("appRequestHealthDebug", {
+        stage: "fetch_started",
+        base,
+        timeoutMs,
+      });
+    }
+    if (isTaskGraphRun && typeof window !== "undefined") {
+      document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+        stage: "run_fetch_started",
+        base,
+        path,
+        timeoutMs,
+        at: Date.now(),
+      });
+    }
+    onRequestStage?.("run_fetch_started");
+    if (isTaskGraphInstantiate && typeof window !== "undefined") {
+      document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+        stage: "instantiate_fetch_started",
+        path,
+        at: Date.now(),
+      });
+    }
     response = await fetch(`${base}${path}`, {
       headers,
       cache: cacheMode,
       ...fetchInit,
       signal: controller.signal,
     });
+    if (isCurrentProjectRequest) {
+      writeRequestDebugDataset("appRequestCurrentProjectDebug", {
+        stage: "fetch_resolved",
+        status: response.status,
+        ok: response.ok,
+      });
+    }
+    if (isHealthRequest) {
+      writeRequestDebugDataset("appRequestHealthDebug", {
+        stage: "fetch_resolved",
+        status: response.status,
+        ok: response.ok,
+      });
+    }
   } catch (error) {
-    window.clearTimeout(timer);
+    clearRequestAbortTimer(timer);
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error(`The desktop sidecar did not respond in time for ${path}. Open Runtime and verify Codex login, provider key, model, and router health.`);
+      throw timeoutError(path);
+    }
+    if (isTaskGraphRun && typeof window !== "undefined") {
+      document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+        stage: "run_fetch_threw",
+        base,
+        path,
+        error: String(error),
+        at: Date.now(),
+      });
+    }
+    onRequestStage?.("run_fetch_threw");
+    if (isTaskGraphInstantiate) {
+      if (typeof window !== "undefined") {
+        document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+          stage: "instantiate_fetch_threw",
+          error: String(error),
+          at: Date.now(),
+        });
+      }
+      console.error("[task-graph] instantiate fetch threw", error);
+    }
+    if (isCurrentProjectRequest) {
+      writeRequestDebugDataset("appRequestCurrentProjectDebug", {
+        stage: "fetch_threw",
+        error: String(error),
+      });
+    }
+    if (isHealthRequest) {
+      writeRequestDebugDataset("appRequestHealthDebug", {
+        stage: "fetch_threw",
+        error: String(error),
+      });
     }
     throw error;
   }
-  window.clearTimeout(timer);
-  let data: Record<string, unknown> = {};
-  try {
-    data = (await response.json()) as Record<string, unknown>;
-  } catch {
-    data = {};
-  }
-  if (
-    isMutation &&
-    response.status === 400 &&
-    typeof data.error === "string" &&
-    data.error.toLowerCase().includes("admin session token")
-  ) {
-    adminTokenPromises.delete(base);
-    const refreshedTokenPromise = fetch(`${base}/api/admin/session`)
-      .then((nextResponse) => nextResponse.json())
-      .then((nextData) => String(nextData.admin_session_token ?? ""));
-    adminTokenPromises.set(base, refreshedTokenPromise);
-    headers["X-Admin-Token"] = await refreshedTokenPromise;
-    response = await fetch(`${base}${path}`, {
-      headers,
-      cache: cacheMode,
-      ...fetchInit,
-      signal: controller.signal,
+  clearRequestAbortTimer(timer);
+  let data = await readJsonResponseWithTimeout(response, {
+    path,
+    controller,
+    timeoutMs,
+  });
+  if (isCurrentProjectRequest) {
+    writeRequestDebugDataset("appRequestCurrentProjectDebug", {
+      stage: "body_resolved",
+      status: response.status,
+      ok: response.ok,
+      hasProject: Boolean((data as { project?: unknown }).project),
     });
+  }
+  if (isHealthRequest) {
+    writeRequestDebugDataset("appRequestHealthDebug", {
+      stage: "body_resolved",
+      status: response.status,
+      ok: response.ok,
+      service: (data as { service?: unknown }).service ?? null,
+    });
+  }
+  if (isTaskGraphRun && typeof window !== "undefined") {
+    document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+      stage: "run_response_received",
+      base,
+      path,
+      status: response.status,
+      responseOk: response.ok,
+      error: data.error ?? null,
+      ok: data.ok ?? null,
+      at: Date.now(),
+    });
+  }
+  if (isTaskGraphRun) {
+    onRequestStage?.("run_response_received");
+  }
+  if (isTaskGraphInstantiate) {
+    if (typeof window !== "undefined") {
+      document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+        stage: "instantiate_response_received",
+        status: response.status,
+        responseOk: response.ok,
+        error: data.error ?? null,
+        graphId: data.graph && typeof data.graph === "object" ? (data.graph as Record<string, unknown>).graph_id ?? null : null,
+        at: Date.now(),
+      });
+    }
+    console.warn("[task-graph] instantiate response", {
+      status: response.status,
+      ok: response.ok,
+      error: data.error ?? null,
+      graphId: data.graph && typeof data.graph === "object" ? (data.graph as Record<string, unknown>).graph_id ?? null : null,
+    });
+  }
+  if (isMutation && shouldRefreshAdminSession(response, data, false)) {
+    headers["X-Admin-Token"] = await fetchAdminSessionToken(base, { refresh: true });
+    if (isTaskGraphInstantiate) {
+      if (typeof window !== "undefined") {
+        document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+          stage: "instantiate_token_refreshed",
+          base,
+          tokenLength: headers["X-Admin-Token"]?.length ?? 0,
+          at: Date.now(),
+        });
+      }
+      console.warn("[task-graph] instantiate token refreshed", {
+        base,
+        tokenLength: headers["X-Admin-Token"]?.length ?? 0,
+      });
+    }
+    const retryController = new AbortController();
+    const retryTimer = requestAbortTimer(() => retryController.abort(), timeoutMs);
     try {
-      data = (await response.json()) as Record<string, unknown>;
-    } catch {
-      data = {};
+      response = await fetch(`${base}${path}`, {
+        headers,
+        cache: cacheMode,
+        ...fetchInit,
+        signal: retryController.signal,
+      });
+      data = await readJsonResponseWithTimeout(response, {
+        path,
+        controller: retryController,
+        timeoutMs,
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw timeoutError(path);
+      }
+      throw error;
+    } finally {
+      clearRequestAbortTimer(retryTimer);
+    }
+    if (isTaskGraphInstantiate) {
+      if (typeof window !== "undefined") {
+        document.documentElement.dataset[TASK_GRAPH_DEBUG_DATASET_KEY] = JSON.stringify({
+          stage: "instantiate_retry_response_received",
+          status: response.status,
+          responseOk: response.ok,
+          error: data.error ?? null,
+          graphId: data.graph && typeof data.graph === "object" ? (data.graph as Record<string, unknown>).graph_id ?? null : null,
+          at: Date.now(),
+        });
+      }
+      console.warn("[task-graph] instantiate retried response", {
+        status: response.status,
+        ok: response.ok,
+        error: data.error ?? null,
+        graphId: data.graph && typeof data.graph === "object" ? (data.graph as Record<string, unknown>).graph_id ?? null : null,
+      });
     }
   }
   if (!response.ok || (!acceptOkFalse && data.ok === false)) {
-    throw new Error(String(data.error ?? `Request failed: ${path}`));
+    if (isCurrentProjectRequest) {
+      writeRequestDebugDataset("appRequestCurrentProjectDebug", {
+        stage: "request_rejected",
+        status: response.status,
+        ok: response.ok,
+        error: String(data.error ?? `Request failed: ${path}`),
+      });
+    }
+    if (isHealthRequest) {
+      writeRequestDebugDataset("appRequestHealthDebug", {
+        stage: "request_rejected",
+        status: response.status,
+        ok: response.ok,
+        error: String(data.error ?? `Request failed: ${path}`),
+      });
+    }
+    throw new ApiRequestError(String(data.error ?? `Request failed: ${path}`), {
+      status: response.status,
+      data,
+    });
+  }
+  if (isCurrentProjectRequest) {
+    writeRequestDebugDataset("appRequestCurrentProjectDebug", {
+      stage: "request_resolved",
+      status: response.status,
+      ok: response.ok,
+      hasProject: Boolean((data as { project?: unknown }).project),
+    });
+  }
+  if (isHealthRequest) {
+    writeRequestDebugDataset("appRequestHealthDebug", {
+      stage: "request_resolved",
+      status: response.status,
+      ok: response.ok,
+      service: (data as { service?: unknown }).service ?? null,
+    });
   }
   return data as T;
 }
@@ -553,6 +1144,21 @@ async function browserAction(payload: {
   return jsonRequest<BrowserWorkbenchSession>("/api/browser/workbench/action", payload, { timeoutMs: 120000 });
 }
 
+async function openProjectWithCurrentProjectShortCircuit(projectFile: string) {
+  const requestedProjectFile = normalizeProjectFilePath(projectFile);
+  if (requestedProjectFile) {
+    try {
+      const current = await request<{ project: ProjectFile | null }>("/api/projects/current");
+      if (normalizeProjectFilePath(current.project?.project_file) === requestedProjectFile && current.project) {
+        return { project: current.project };
+      }
+    } catch {
+      // Fall through to the normal admin-session-backed open path.
+    }
+  }
+  return jsonRequest<{ project: ProjectFile }>("/api/projects/open", { project_file: projectFile }, { timeoutMs: 30000 });
+}
+
 async function browserLayout(payload: BrowserWorkbenchLayoutRequest) {
   if (hasConfiguredBrowserSidecarBaseUrl()) {
     return jsonRequest<BrowserWorkbenchSession>("/api/browser/workbench/layout", payload, { timeoutMs: 120000 });
@@ -580,21 +1186,47 @@ function browserWorkbenchFrameHref(sessionId: string, revision?: string | null) 
   if (revision) params.set("rev", revision);
   const suffix = `/api/browser/workbench/frame?${params.toString()}`;
   if (typeof window === "undefined") return suffix;
+  if (shouldUseBrowserSidecarProxy()) {
+    return browserSidecarProxyUrl(suffix);
+  }
   return `${browserSidecarBaseUrl()}${suffix}`;
 }
 
+type HealthResponse = {
+  ok: boolean;
+  service: string;
+  sidecar?: RuntimeEnvironment["sidecar"];
+  runtime: RuntimeEnvironment;
+  router?: RuntimeEnvironment["router"];
+};
+
+function normalizeHealthResponse(payload: HealthResponse): HealthResponse {
+  const runtimeRouter = payload.runtime?.router ?? payload.router ?? undefined;
+  return {
+    ...payload,
+    runtime: {
+      ...payload.runtime,
+      router: runtimeRouter,
+    },
+  };
+}
+
 export const api = {
-  health: () => request<{ ok: boolean; service: string; sidecar?: RuntimeEnvironment["sidecar"]; runtime: RuntimeEnvironment }>("/health"),
+  ensureAdminSession: async () => {
+    const base = await sidecarBaseUrl();
+    await fetchAdminSessionToken(base, { purpose: "prewarm" });
+  },
+  health: async () => normalizeHealthResponse(await request<HealthResponse>("/health")),
   currentProject: () => request<{ project: ProjectFile | null }>("/api/projects/current"),
   recentProjects: () => request<{ projects: ProjectSummary[] }>("/api/projects/recent"),
-  projectSidebar: () => request<SidebarProjectsResponse>("/api/projects/sidebar"),
+  projectSidebar: async () => normalizeSidebarProjectsResponse(await request<SidebarProjectsResponse>("/api/projects/sidebar")),
   createProject: (payload: {
     name: string;
     project_file: string;
     workspace_root?: string;
     entry_mode: "existing" | "new";
   }) => jsonRequest<{ project: ProjectFile }>("/api/projects/create", payload),
-  openProject: (projectFile: string) => jsonRequest<{ project: ProjectFile }>("/api/projects/open", { project_file: projectFile }),
+  openProject: (projectFile: string) => openProjectWithCurrentProjectShortCircuit(projectFile),
   closeProject: () => jsonRequest<{ closed: boolean }>("/api/projects/close", {}),
   suggestProjectTitle: (force = false) => jsonRequest<TitleSuggestionResponse>("/api/project/title/suggest", { force }),
   updateProjectPreferences: (payload: {
@@ -641,17 +1273,175 @@ export const api = {
   browserWorkbenchFrameHref,
   projectFileMediaUrl: async (path: string) => `${await sidecarBaseUrl()}/api/project/files/media?path=${encodeURIComponent(path)}`,
   stageAttachments: (payload: { files: AttachmentStageFile[]; directory_name?: string | null }) =>
-    jsonRequest<AttachmentStageResponse>("/api/project/attachments/stage", payload, { timeoutMs: 120000 }),
+    jsonRequest<AttachmentStageResponse>("/api/project/attachments/stage", payload, { timeoutMs: 30000 }),
   projectTerminalHistory: () => request<ProjectTerminalHistory>("/api/project/terminal/history?limit=30"),
-  projectTasks: () => request<ProjectTasksResponse>("/api/project/tasks"),
+  projectTasks: async () => normalizeProjectTasksResponse(await request<ProjectTasksResponse>("/api/project/tasks")),
+  taskGraphTemplates: () => request<{ schema_version: string; templates: TaskGraphTemplateSummary[] }>("/api/task-graphs/templates"),
+  taskGraph: (graphId?: string | null) => {
+    const params = new URLSearchParams();
+    if (graphId) params.set("graph_id", graphId);
+    const suffix = params.toString();
+    return request<{ graph: TaskGraphDefinition | null; task: ProjectTask | null }>(`/api/task-graphs/graph${suffix ? `?${suffix}` : ""}`);
+  },
+  currentTaskGraph: (graphId?: string | null) => {
+    const params = new URLSearchParams();
+    if (graphId) params.set("graph_id", graphId);
+    const suffix = params.toString();
+    return request<{ graph: TaskGraphDefinition | null; task: ProjectTask | null }>(`/api/task-graphs/current${suffix ? `?${suffix}` : ""}`);
+  },
+  instantiateTaskGraph: (payload: { template_id: string; title?: string | null }) =>
+    jsonRequest<{ graph: TaskGraphDefinition; task: ProjectTask | null }>("/api/task-graphs/instantiate", payload),
+  updateTaskGraphNode: (payload: {
+    graph_id: string;
+    node_id: string;
+    position?: { x: number; y: number } | null;
+    configuration?: Record<string, unknown> | null;
+    create?: {
+      kind: string;
+      label?: string | null;
+      position?: { x: number; y: number } | null;
+    } | null;
+  }) => jsonRequest<{ graph: TaskGraphDefinition; node: TaskGraphNode; task: ProjectTask | null }>("/api/task-graphs/node/update", payload),
+  updateTaskGraphEdge: (payload: {
+    graph_id: string;
+    edge_id?: string | null;
+    from_node_id?: string | null;
+    to_node_id?: string | null;
+    edge_type?: string | null;
+    handoff_contract?: Record<string, unknown> | null;
+    context_policy?: Record<string, unknown> | null;
+    status?: string | null;
+  }) =>
+    jsonRequest<{ graph: TaskGraphDefinition; edge: TaskGraphDefinition["edges"][number]; task: ProjectTask | null }>(
+      "/api/task-graphs/edge/update",
+      payload,
+    ),
+  dryRunTaskGraph: (payload: {
+    graph_id: string;
+    validation_mode?: "live";
+    budget?: { limits: { total_tokens: number } };
+  }) =>
+    jsonRequest<{ schema_version: string; dry_run: TaskGraphDryRunResult; graph: TaskGraphDefinition; task: ProjectTask | null }>(
+      "/api/task-graphs/dry-run",
+      payload,
+    ),
+  runTaskGraph: (
+    payload: {
+      graph_id: string;
+      budget: { limits: { total_tokens: number } };
+    },
+    init?: RequestWithTimeout,
+  ) =>
+    jsonRequest<{
+      schema_version: string;
+      live_run: {
+        run_id: string;
+        run_status: string;
+        run_ref: TaskGraphRunRef;
+        artifact_paths?: Record<string, string>;
+      };
+      graph: TaskGraphDefinition;
+      task: ProjectTask | null;
+    }>("/api/task-graphs/run", payload, { timeoutMs: 300000, ...(init ?? {}) }),
+  importTaskGraphFile: (payload: { graph_path?: string | null; graph_text?: string | null }) =>
+    jsonRequest<AgentOrchestrationGraphImportResponse>("/api/task-graphs/import", payload),
+  exportTaskGraphFile: (payload: { graph_id: string; export_path?: string | null }) =>
+    jsonRequest<AgentOrchestrationGraphExportResponse>("/api/task-graphs/export", payload),
+  createTaskGraphSnapshot: (payload: {
+    graph_id: string;
+    label?: string | null;
+    reason?: string | null;
+    source_action?: string | null;
+  }) => jsonRequest<TaskGraphSnapshotResponse>("/api/task-graphs/snapshot", payload),
+  diffTaskGraphSnapshot: (payload: {
+    snapshot_id: string;
+    compare_to_snapshot_id?: string | null;
+  }) => jsonRequest<TaskGraphSnapshotDiffResponse>("/api/task-graphs/snapshot/diff", payload),
+  rollbackTaskGraphToSnapshot: (payload: { snapshot_id: string; label?: string | null }) =>
+    jsonRequest<TaskGraphRollbackResponse>("/api/task-graphs/rollback", payload),
+  saveTaskGraph: (payload: { graph: TaskGraphDefinition }) =>
+    jsonRequest<{ schema_version: string; graph: TaskGraphDefinition; task: ProjectTask | null }>("/api/task-graphs/save", payload),
+  fixtureRunTaskGraph: (payload: {
+    graph_id: string;
+    branch_behaviors?: Record<string, string> | null;
+    execution_mode?: "default" | "cancellable" | null;
+  }) =>
+    jsonRequest<{
+      schema_version: string;
+      fixture_run: {
+        run_ref?: TaskGraphRunRef;
+      } & Record<string, unknown>;
+      graph: TaskGraphDefinition;
+      task: ProjectTask | null;
+    }>("/api/task-graphs/fixture-run", payload),
+  cancelTaskGraphRun: (payload: { run_id: string; notes?: string | null }) =>
+    jsonRequest<{
+      cancellation: Record<string, unknown>;
+      run_ref: TaskGraphRunRef;
+      graph: TaskGraphDefinition;
+      task: ProjectTask | null;
+    }>("/api/task-graphs/run/cancel", payload),
+  recoverTaskGraphRun: (payload: {
+    run_id: string;
+    strategy:
+      | "resume_run"
+      | "retry_failed_nodes"
+      | "rerun_selected_nodes"
+      | "partial_execution";
+    selected_node_ids?: string[] | null;
+    node_behaviors?: Record<string, string> | null;
+  }) =>
+    jsonRequest<{
+      recovery: TaskGraphRecoverySummary & {
+        artifact_paths?: Record<string, string>;
+        requested_at?: string;
+      };
+      fixture_run: {
+        run_ref: TaskGraphRunRef;
+      } & Record<string, unknown>;
+      graph: TaskGraphDefinition;
+      task: ProjectTask | null;
+    }>("/api/task-graphs/run/recover", payload),
+  resolveTaskGraphApproval: (payload: { run_id: string; decision: "approve" | "reject"; notes?: string | null }) =>
+    jsonRequest<{
+      approval: Record<string, unknown>;
+      run_ref: TaskGraphRunRef;
+      graph: TaskGraphDefinition;
+      task: ProjectTask | null;
+    }>("/api/task-graphs/approval/resolve", payload),
+  recordTaskGraphWorkerOutput: (payload: {
+    graph_id: string;
+    run_id: string;
+    node_id: string;
+    worker_thread_id: string;
+    human_summary?: string | null;
+    machine_result?: Record<string, unknown> | null;
+    confidence?: unknown;
+    next_action_hints?: string[] | null;
+    status?: string | null;
+  }) =>
+    jsonRequest<{
+      worker_binding: Record<string, unknown>;
+      run_ref: Record<string, unknown>;
+      task: ProjectTask | null;
+      artifact_bundle: Record<string, unknown>;
+    }>("/api/task-graphs/worker/output", payload),
   taskConversation: (taskId?: string | null) => {
     const params = new URLSearchParams();
     if (taskId) params.set("task_id", taskId);
     const suffix = params.toString();
-    return request<TaskConversationResponse>(`/api/project/task-conversation${suffix ? `?${suffix}` : ""}`);
+    return request<TaskConversationResponse>(`/api/project/task-conversation${suffix ? `?${suffix}` : ""}`).then(normalizeTaskConversationResponse);
   },
-  createTask: (title?: string) => jsonRequest<{ task: ProjectTasksResponse["tasks"][number]; project: ProjectFile }>("/api/project/tasks/create", { title }),
-  switchTask: (taskId: string) => jsonRequest<{ task: ProjectTasksResponse["tasks"][number]; project: ProjectFile }>("/api/project/tasks/switch", { task_id: taskId }),
+  createTask: (title?: string) =>
+    jsonRequest<{ task: ProjectTasksResponse["tasks"][number]; project: ProjectFile }>("/api/project/tasks/create", { title }).then((response) => ({
+      ...response,
+      task: normalizeProjectTask(response.task),
+    })),
+  switchTask: (taskId: string) =>
+    jsonRequest<{ task: ProjectTasksResponse["tasks"][number]; project: ProjectFile }>("/api/project/tasks/switch", { task_id: taskId }).then((response) => ({
+      ...response,
+      task: normalizeProjectTask(response.task),
+    })),
   suggestTaskTitle: (force = false) => jsonRequest<TitleSuggestionResponse>("/api/project/tasks/title/suggest", { force }),
   createProjectSave: (payload: { thread_id?: string | null; description?: string; provider?: string; model?: string }) =>
     jsonRequest<ProjectSaveCreateResponse>("/api/project/saves/create", payload),
@@ -664,6 +1454,13 @@ export const api = {
     return request<ProjectContextPackResponse>(`/api/project/context${suffix}`);
   },
   rebuildProjectContext: (threadId?: string) => jsonRequest<ProjectContextPackResponse>("/api/project/context/rebuild", { thread_id: threadId }),
+  agenticUpdateStart: (payload: AgenticUpdateStartPayload) =>
+    jsonRequest<AgenticUpdateJobStatus>("/api/agentic-updates/start", payload as unknown as Record<string, unknown>, { timeoutMs: 120000 }),
+  agenticUpdateRuns: (limit = 25) => request<AgenticUpdateRunList>(`/api/agentic-updates/runs?limit=${encodeURIComponent(String(limit))}`),
+  agenticUpdateStatus: (jobId?: string | null) =>
+    request<AgenticUpdateJobStatus>(`/api/agentic-updates/status${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`),
+  agenticUpdateResult: (jobId?: string | null) =>
+    request<AgenticUpdateProposalResult>(`/api/agentic-updates/result${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`),
   profiles: () => request<{ profiles: Profile[] }>("/api/profiles"),
   routerConfig: () => request<RouterConfigResponse>("/api/router/config"),
   automations: () => request<AutomationListResponse>("/api/automations"),
@@ -674,7 +1471,12 @@ export const api = {
     jsonRequest<{ automation: AutomationSpec }>("/api/automations/delete", { automation_id: automationId, reason }),
   pauseAutomation: (automationId: string) => jsonRequest<{ automation: AutomationSpec }>("/api/automations/pause", { automation_id: automationId }),
   resumeAutomation: (automationId: string) => jsonRequest<{ automation: AutomationSpec }>("/api/automations/resume", { automation_id: automationId }),
-  runAutomationNow: (automationId: string) => jsonRequest<{ run: AutomationRun; inbox_item?: AutomationInboxItem | null; scheduler: AutomationSchedulerStatus }>("/api/automations/run-now", { automation_id: automationId }),
+  runAutomationNow: (automationId: string) =>
+    jsonRequest<{ run: AutomationRun; inbox_item?: AutomationInboxItem | null; scheduler: AutomationSchedulerStatus }>(
+      "/api/automations/run-now",
+      { automation_id: automationId },
+      { timeoutMs: 30000 },
+    ),
   automationRuns: (automationId?: string | null) => {
     const params = new URLSearchParams();
     if (automationId) params.set("automation_id", automationId);
@@ -744,6 +1546,9 @@ export const api = {
   saveReasoningConfig: (payload: ReasoningConfig) => jsonRequest<{ reasoning: ReasoningConfig }>("/api/router/reasoning/save", payload),
   previewPayload: (payload: Record<string, unknown>) => jsonRequest<{ provider: string; model: string; adapter: string; warnings?: string[]; upstream_payload: Record<string, unknown> }>("/api/router/payload-preview", payload),
   testProvider: (payload: { provider_id: string; model_id?: string; stream?: boolean }) => jsonRequest<RouterTestResult>("/api/router/test-provider", payload),
+  testProviderVision: (payload: { provider_id: string; model_id?: string; stream?: boolean }) => jsonRequest<RouterTestResult>("/api/router/test-provider-vision", payload),
+  verifyAppServerImageRoute: (payload: { provider_id: string; model_id?: string; profile_id?: string }) =>
+    jsonRequest<RouterTestResult>("/api/runtime/verify-app-server-image-route", payload, { timeoutMs: 120000 }),
   exportRouterConfig: () => jsonRequest<RouterConfigResponse>("/api/router/export-config", {}),
   importRouterConfig: (payload: RouterConfigResponse) => jsonRequest<RouterConfigResponse>("/api/router/import-config", payload),
   rotateRouterToken: () => jsonRequest<RuntimeEnvironment["router"]>("/api/router/token/rotate", {}),
@@ -861,10 +1666,14 @@ export const api = {
     jsonRequest<Record<string, unknown>>("/api/runtime/supervisor/decision", payload),
   routerStatus: () => request<RuntimeEnvironment["router"]>("/api/router/status"),
   restartRuntime: () => jsonRequest<{ runtime: RuntimeEnvironment }>("/api/runtime/restart", {}),
-  runtimeEvents: (after: number) => request<{ cursor: number; events: RuntimeEvent[] }>(`/api/runtime/events?after=${after}`),
+  runtimeEvents: (after: number) =>
+    request<{ cursor: number; events: RuntimeEvent[] }>(`/api/runtime/events?after=${after}`, { timeoutMs: 65000 }),
   runtimeEventsStreamUrl: async (after: number) => {
     const base = await sidecarBaseUrl();
     const params = new URLSearchParams({ after: String(Math.max(0, after)), seconds: "60" });
+    if (shouldUseBrowserSidecarProxy()) {
+      return browserSidecarProxyUrl(`/api/events/stream?${params.toString()}`);
+    }
     return `${base}/api/events/stream?${params.toString()}`;
   },
   pendingModals: () => request<{ modals: RuntimeModal[] }>("/api/runtime/modals"),
@@ -877,20 +1686,41 @@ export const api = {
     const params = new URLSearchParams();
     if (profileId) params.set("profile_id", profileId);
     if (archived) params.set("archived", "true");
-    return request<ThreadListResponse>(`/api/runtime/threads?${params.toString()}`);
+    return request<ThreadListResponse>(`/api/runtime/threads?${params.toString()}`).then(normalizeThreadListResponse);
   },
   readThread: (threadId: string, profileId?: string) => {
     const params = new URLSearchParams({ thread_id: threadId });
     if (profileId) params.set("profile_id", profileId);
-    return request<ThreadReadResponse>(`/api/runtime/thread?${params.toString()}`);
+    return request<ThreadReadResponse>(`/api/runtime/thread?${params.toString()}`).then(normalizeThreadReadResponse);
   },
   createThread: (payload: {
     profile_id: string;
     model?: string;
     effort?: string;
     permission_mode: PermissionMode;
+    task_id?: string;
     name?: string;
-  }) => jsonRequest<ThreadReadResponse>("/api/runtime/threads/create", payload),
+    operation_id?: string;
+  }) => jsonRequest<ThreadReadResponse>("/api/runtime/threads/create", payload).then(normalizeThreadReadResponse),
+  beginThreadCreate: (payload: {
+    profile_id: string;
+    model?: string;
+    effort?: string;
+    permission_mode: PermissionMode;
+    name?: string;
+    operation_id: string;
+  }) =>
+    jsonRequest<ThreadCreateRecoveryResponse>("/api/runtime/threads/create/start", payload, { timeoutMs: THREAD_CREATE_RECEIPT_TIMEOUT_MS }).then((response) => ({
+      ...response,
+      thread: response.thread ? normalizeShellThread(response.thread) : response.thread,
+      task: response.task ? normalizeProjectTask(response.task) : response.task,
+    })),
+  recoverThreadCreate: (payload: { profile_id: string; operation_id: string }) =>
+    jsonRequest<ThreadCreateRecoveryResponse>("/api/runtime/threads/create/recover", payload, { timeoutMs: THREAD_CREATE_RECEIPT_TIMEOUT_MS }).then((response) => ({
+      ...response,
+      thread: response.thread ? normalizeShellThread(response.thread) : response.thread,
+      task: response.task ? normalizeProjectTask(response.task) : response.task,
+    })),
   forkThread: (payload: {
     thread_id: string;
     profile_id?: string;
@@ -898,7 +1728,7 @@ export const api = {
     effort?: string;
     permission_mode: PermissionMode;
     name?: string;
-  }) => jsonRequest<ThreadReadResponse>("/api/runtime/threads/fork", payload),
+  }) => jsonRequest<ThreadReadResponse>("/api/runtime/threads/fork", payload).then(normalizeThreadReadResponse),
   renameThread: (threadId: string, name: string, profileId?: string) =>
     jsonRequest<{ thread: { thread_id: string; name: string } }>("/api/runtime/threads/rename", {
       thread_id: threadId,
@@ -907,7 +1737,11 @@ export const api = {
     }),
   archiveThread: (threadId: string, profileId?: string) =>
     jsonRequest<{ archived: string }>("/api/runtime/threads/archive", { thread_id: threadId, profile_id: profileId }),
-  switchThread: (threadId: string | null) => jsonRequest<{ project: ProjectFile; task?: ProjectTasksResponse["tasks"][number] | null }>("/api/runtime/threads/switch", { thread_id: threadId }),
+  switchThread: (threadId: string | null) =>
+    jsonRequest<{ project: ProjectFile; task?: ProjectTasksResponse["tasks"][number] | null }>("/api/runtime/threads/switch", { thread_id: threadId }).then((response) => ({
+      ...response,
+      task: response.task ? normalizeProjectTask(response.task) : response.task,
+    })),
   saveThreadSettings: (payload: {
     thread_id: string;
     profile_id?: string;
@@ -937,6 +1771,7 @@ export const api = {
     permission_mode: PermissionMode;
     collaboration_mode?: CollaborationMode;
     context_mode?: ContextMode;
+    execution_policy?: TurnExecutionPolicy;
   }) => jsonRequest<TurnStartResponse>("/api/runtime/turns/start", payload, { timeoutMs: 120000 }),
   interruptTurn: (threadId: string, turnId: string, profileId?: string) =>
     jsonRequest<{ interrupt: unknown }>("/api/runtime/turns/interrupt", {

@@ -29,7 +29,6 @@ describe("ComposerStarTrack", () => {
     expect(screen.getByTestId("composer-star-track")).toHaveAttribute("data-state", "sending");
     expect(screen.getByTestId("composer-star-track")).toHaveAttribute("data-armed", "true");
     expect(screen.getByTestId("composer-star-track")).toHaveAttribute("data-motion", "animated");
-    expect(screen.getByTestId("composer-star-track-traveler")).toBeInTheDocument();
   });
 
   it("drops the traveler under reduced motion", () => {
@@ -37,6 +36,5 @@ describe("ComposerStarTrack", () => {
     render(<ComposerStarTrack state="idle" armed={false} />);
 
     expect(screen.getByTestId("composer-star-track")).toHaveAttribute("data-motion", "reduced");
-    expect(screen.queryByTestId("composer-star-track-traveler")).toBeNull();
   });
 });

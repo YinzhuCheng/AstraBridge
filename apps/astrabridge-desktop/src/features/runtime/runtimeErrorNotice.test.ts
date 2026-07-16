@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { RuntimeSupervisorState } from "../../types";
-import { runtimeErrorNoticeActions, runtimeErrorNoticeInline, runtimeErrorNoticeText } from "./runtimeErrorNotice";
+import { composerFailureNoticeText, latestCompletedTurnSuppressesRuntimeError, runtimeErrorNoticeActions, runtimeErrorNoticeInline, runtimeErrorNoticeText } from "./runtimeErrorNotice";
 
 describe("runtime error notice", () => {
   it("combines summary, hint, and suggested recovery actions", () => {
@@ -57,5 +57,24 @@ describe("runtime error notice", () => {
       { action: "fork_followup", label: "Fork Narrower", reason: "Continue in a smaller thread.", target: null },
       { action: "switch_model", label: "Try Fallback Model", reason: "Use a smaller model.", target: "mini" },
     ]);
+  });
+
+  it("uses the compact composer fallback only when no persisted runtime error is available", () => {
+    expect(composerFailureNoticeText("模型运行失败： Model runtime ended with an error.", null)).toBe(
+      "Model runtime ended with an error.",
+    );
+    expect(
+      composerFailureNoticeText("Model run failed: Model runtime ended with an error.", {
+        level: "danger",
+        category: "unknown",
+        summary: "Provider rejected the request.",
+        recommended_actions: [],
+      }),
+    ).toBe("");
+  });
+
+  it("suppresses a stale runtime error after the latest persisted turn completed successfully", () => {
+    expect(latestCompletedTurnSuppressesRuntimeError({ turns: [{ status: "failed", error: { message: "old failure" } }, { status: "completed", error: null }] })).toBe(true);
+    expect(latestCompletedTurnSuppressesRuntimeError({ turns: [{ status: "completed", error: { message: "current failure" } }] })).toBe(false);
   });
 });

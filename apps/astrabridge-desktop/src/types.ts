@@ -8,6 +8,7 @@
 
 export type LocaleCode = "en" | "zh-CN";
 export type PermissionMode = "ask" | "auto" | "full";
+export type TurnExecutionPolicy = "standard" | "patch_only";
 export type CollaborationMode = "default" | "plan";
 export type AppearancePreset = "codex" | "paper" | "slate" | "cobalt" | "sunrise";
 export type CursorEnhancementPreference = "auto" | "off";
@@ -91,6 +92,22 @@ export type ProjectTaskProviderThread = {
   updated_at?: string;
 };
 
+export type TaskLaneSummary = {
+  thread_id?: string | null;
+  profile_id?: string | null;
+  provider_id?: string | null;
+  model?: string | null;
+  reasoning_effort?: string | null;
+  permission_mode?: PermissionMode | string | null;
+  collaboration_mode?: CollaborationMode | string | null;
+  name?: string | null;
+  label?: string | null;
+  missing_at?: string | null;
+  missing_reason?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
 export type ContextMode = "default" | "minimal_visual" | "no_context";
 
 export type ProjectTaskHandoffEvent = {
@@ -98,6 +115,11 @@ export type ProjectTaskHandoffEvent = {
   type: "provider_handoff" | string;
   handoff_policy?: string;
   from_thread_id?: string | null;
+  from_profile_id?: string;
+  from_provider_id?: string;
+  from_model?: string;
+  from_reasoning_effort?: string;
+  from_permission_mode?: PermissionMode;
   to_thread_id: string;
   profile_id?: string;
   provider_id?: string;
@@ -115,6 +137,7 @@ export type ProjectTaskHandoffEvent = {
     replayable_artifact_count?: number;
     projection_preview?: string | null;
     warnings?: string[];
+    warning_count?: number;
     target_runtime?: Record<string, unknown>;
     transition_plan?: Record<string, unknown>;
   };
@@ -129,6 +152,13 @@ export type ProjectTask = {
   status: string;
   handoff_policy: "multi_provider_handoff" | string;
   active_provider_thread_id?: string | null;
+  lane_state?: {
+    lane_count: number;
+    handoff_count: number;
+    active_lane?: TaskLaneSummary | null;
+    previous_lane?: TaskLaneSummary | null;
+    latest_handoff?: ProjectTaskHandoffEvent | null;
+  };
   provider_threads: ProjectTaskProviderThread[];
   fork_threads?: ProjectTaskProviderThread[];
   handoff_events: ProjectTaskHandoffEvent[];
@@ -138,8 +168,464 @@ export type ProjectTask = {
   verification_refs?: Array<Record<string, unknown>>;
   diagnostic_refs?: Array<Record<string, unknown>>;
   asset_context_refs?: Array<Record<string, unknown>>;
+  context_pack_refs?: Array<Record<string, unknown>>;
+  graph_definitions?: TaskGraphDefinition[];
+  graph_run_refs?: TaskGraphRunRef[];
+  graph_snapshot_refs?: TaskGraphSnapshotRef[];
+  graph_activity_summary?: TaskGraphActivitySummary;
   created_at: string;
   updated_at: string;
+};
+
+export type TaskGraphNodePosition = {
+  x: number;
+  y: number;
+};
+
+export type TaskGraphContextPolicy = {
+  policy_id: string;
+  history_mode: string;
+  artifact_mode: string;
+  exclude_private_memory: boolean;
+  include_machine_results: boolean;
+  include_human_summaries: boolean;
+  summary_strategy?: string;
+  history_length?: number;
+  included_artifacts?: string[];
+  resource_refs?: string[];
+};
+
+export type TaskGraphNode = {
+  node_id: string;
+  graph_id: string;
+  kind: string;
+  label: string;
+  agent_card_ref: string;
+  execution_policy: Record<string, unknown>;
+  output_contract: Record<string, unknown>;
+  position: TaskGraphNodePosition;
+  status: string;
+  provider_id?: string;
+  model_id?: string;
+  reasoning_effort?: string;
+  permission_mode?: string;
+  collaboration_mode?: string;
+  execution_backend?: string;
+  budget?: unknown;
+  human_summary_template?: string;
+  machine_result_schema?: unknown;
+  ui_hints?: unknown;
+  artifact_requirements?: unknown;
+  approval_gate?: Record<string, unknown>;
+};
+
+export type TaskGraphEdge = {
+  edge_id: string;
+  graph_id: string;
+  from_node_id: string;
+  to_node_id: string;
+  edge_type: string;
+  handoff_contract?: {
+    message_template?: string;
+    message_part_modes?: string[];
+    required_output_schema_refs?: string[];
+    port_bindings?: Array<{
+      from_port_id: string;
+      to_port_id: string;
+    }>;
+  };
+  context_policy: TaskGraphContextPolicy;
+  status: string;
+};
+
+export type TaskGraphDefinition = {
+  schema_version: string;
+  graph_id: string;
+  task_id: string;
+  title: string;
+  template_id: string;
+  status: string;
+  nodes: TaskGraphNode[];
+  edges: TaskGraphEdge[];
+  graph_policy: {
+    entry_node_ids?: string[];
+  };
+  orchestration_graph?: AgentOrchestrationGraph;
+  created_at: string;
+  updated_at: string;
+  state_version: number;
+};
+
+export type TaskGraphBudgetSection = {
+  status?: string | null;
+  limits?: Record<string, number>;
+  observed?: Record<string, number | null>;
+  exceeded_fields?: string[];
+  unknown_fields?: string[];
+};
+
+export type TaskGraphRunBudget = {
+  status?: string | null;
+  enforcement?: string | null;
+  graph?: TaskGraphBudgetSection | null;
+  run?: TaskGraphBudgetSection | null;
+  nodes?: Array<TaskGraphBudgetSection & {
+    node_id?: string | null;
+    label?: string | null;
+  }>;
+  provider_models?: Array<TaskGraphBudgetSection & {
+    provider_id?: string | null;
+    model_id?: string | null;
+  }>;
+  static_blockers?: string[];
+};
+
+export type TaskGraphRunRef = {
+  run_id: string;
+  graph_id: string;
+  task_id: string;
+  trace_id?: string;
+  context_id?: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  state_version?: number;
+  entry_node_ids: string[];
+  node_status_counts: Record<string, number>;
+  node_outcome_counts?: Record<string, number>;
+  artifact_count: number;
+  event_count: number;
+  approval_state?: string | null;
+  approval_details?: {
+    status: string;
+    review_kind?: string | null;
+    node_id?: string | null;
+    reason?: string | null;
+    requested_at?: string | null;
+    resolved_at?: string | null;
+    decision?: string | null;
+    notes?: string | null;
+    resolution_summary?: string | null;
+    worker_thread_id?: string | null;
+    allowed_actions?: string[];
+    blocked_actions?: string[];
+  } | null;
+  latest_event_type?: string | null;
+  latest_event_at?: string | null;
+  timeline_events?: TaskGraphRunTimelineEvent[];
+  diagnostic_refs?: TaskGraphRunDiagnosticRef[];
+  artifact_refs?: TaskGraphRunArtifactRef[];
+  policy_snapshot?: {
+    mode?: string | null;
+    scheduler?: string | null;
+    template_id?: string | null;
+    execution_mode?: string | null;
+    compatibility_shim?: boolean;
+    parallel_group_count?: number;
+    max_parallelism?: number;
+    parallel_group_ids?: string[];
+    recovery?: TaskGraphRecoverySummary | null;
+    budget?: TaskGraphRunBudget | null;
+  } | null;
+  metrics?: {
+    status?: string | null;
+    elapsed_ms?: number | null;
+    max_parallelism?: number | null;
+    artifact_count?: number | null;
+    event_count?: number | null;
+    retry_count?: number | null;
+    failure_count?: number | null;
+    approval_count?: number | null;
+    provider_call_count?: number | null;
+    tool_call_count?: number | null;
+    token_usage?: {
+      status?: string | null;
+      reason?: string | null;
+      input_tokens?: number | null;
+      output_tokens?: number | null;
+      reasoning_tokens?: number | null;
+      cached_input_tokens?: number | null;
+      total_tokens?: number | null;
+    } | null;
+    cost?: {
+      status?: string | null;
+      reason?: string | null;
+      currency?: string | null;
+      total_cost?: number | null;
+    } | null;
+    unknown_fields?: string[];
+  } | null;
+  budget?: TaskGraphRunBudget | null;
+  worker_count?: number;
+  worker_bindings?: TaskGraphWorkerBinding[];
+};
+
+export type TaskGraphSnapshotRef = {
+  snapshot_id: string;
+  task_id: string;
+  graph_id: string;
+  label?: string | null;
+  reason?: string | null;
+  source_action?: string | null;
+  state_version?: number | null;
+  based_on_snapshot_id?: string | null;
+  rollback_source_snapshot_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  artifact_paths: Record<string, string>;
+  summary?: {
+    node_count?: number;
+    edge_count?: number;
+    change_count?: number;
+    change_types?: string[];
+  };
+  comparison?: {
+    status?: string;
+    change_count?: number;
+    change_types?: string[];
+  };
+};
+
+export type TaskGraphRunTimelineEvent = {
+  event_id: string;
+  event_type: string;
+  created_at: string;
+  summary?: string | null;
+  node_id?: string | null;
+  edge_id?: string | null;
+  artifact_id?: string | null;
+  status?: string | null;
+};
+
+export type TaskGraphRunDiagnosticRef = {
+  artifact_id: string;
+  artifact_kind: string;
+  path: string;
+  status: string;
+  label?: string | null;
+};
+
+export type TaskGraphRunArtifactRef = {
+  artifact_id: string;
+  artifact_kind: string;
+  path: string;
+  status: string;
+  label?: string | null;
+};
+
+export type TaskGraphRecoverySummary = {
+  recovery_id?: string | null;
+  source_run_id?: string | null;
+  strategy?: string | null;
+  selected_node_ids?: string[];
+  rerun_node_ids?: string[];
+  reused_node_ids?: string[];
+};
+
+export type TaskGraphWorkerArtifactRef = {
+  artifact_id: string;
+  artifact_kind: string;
+  path: string;
+  status: string;
+};
+
+export type TaskGraphWorkerOutputSummary = {
+  human_summary?: string;
+  machine_result_preview?: string;
+  confidence?: unknown;
+  next_action_hints?: string[];
+  artifact_bundle_path?: string;
+};
+
+export type TaskGraphWorkerHandoff = {
+  edge_id: string;
+  to_node_id: string;
+  edge_type: string;
+  context_policy: {
+    history_mode: string;
+    artifact_mode: string;
+    exclude_private_memory: boolean;
+    include_machine_results: boolean;
+    include_human_summaries: boolean;
+    summary_strategy?: string;
+    history_length?: number;
+    included_artifacts?: string[];
+    resource_refs?: string[];
+  };
+  downstream_input: {
+    source: string;
+    run_id: string;
+    artifact_paths: string[];
+    human_summary_path?: string | null;
+    machine_result_path?: string | null;
+  };
+};
+
+export type TaskGraphWorkerBinding = {
+  binding_id: string;
+  graph_id: string;
+  run_id: string;
+  node_id: string;
+  worker_thread_id: string;
+  parent_thread_id?: string;
+  spawn_mode?: string;
+  worker_origin?: string;
+  agent_role?: string;
+  agent_nickname?: string;
+  status: string;
+  execution_backend?: string;
+  artifact_refs: TaskGraphWorkerArtifactRef[];
+  output_summary?: TaskGraphWorkerOutputSummary;
+  downstream_handoffs?: TaskGraphWorkerHandoff[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type TaskGraphActivitySummary = {
+  graph_count: number;
+  run_count: number;
+  latest_graph_id?: string | null;
+  latest_run_id?: string | null;
+  latest_run_status?: string | null;
+  latest_updated_at?: string | null;
+  graph_status_counts?: Record<string, number>;
+  run_status_counts?: Record<string, number>;
+};
+
+export type TaskGraphTemplateSummary = {
+  template_id: string;
+  title: string;
+  summary: string;
+  node_count: number;
+  edge_count: number;
+  entry_node_ids: string[];
+  node_kinds: string[];
+  recommended_provider_ids?: string[];
+  recommended_model_ids?: string[];
+  artifact_expectations?: string[];
+  validation_hints?: string[];
+  constraints?: string[];
+  preview_graph: {
+    title: string;
+    nodes: Array<{
+      node_id: string;
+      kind: string;
+      label: string;
+      position: TaskGraphNodePosition;
+    }>;
+    edges: Array<{
+      edge_id: string;
+      from_node_id: string;
+      to_node_id: string;
+      edge_type: string;
+    }>;
+  };
+};
+
+export type TaskGraphDryRunStatus = "pass" | "warning" | "blocked" | string;
+
+export type TaskGraphDryRunNodeResult = {
+  node_id: string;
+  label: string;
+  status: TaskGraphDryRunStatus;
+  reasons: string[];
+};
+
+export type TaskGraphDryRunEdgeResult = {
+  edge_id: string;
+  label: string;
+  status: TaskGraphDryRunStatus;
+  reasons: string[];
+};
+
+export type TaskGraphDryRunResult = {
+  schema_version: string;
+  run_id: string;
+  graph_id: string;
+  task_id: string;
+  created_at: string;
+  overall_status: TaskGraphDryRunStatus;
+  status_counts: Record<string, number>;
+  graph_result: {
+    status: TaskGraphDryRunStatus;
+    reasons: string[];
+  };
+  node_results: TaskGraphDryRunNodeResult[];
+  edge_results: TaskGraphDryRunEdgeResult[];
+  artifact_paths: {
+    summary_json: string;
+    report_md: string;
+  };
+  run_status?: string;
+  artifact_refs?: Array<{
+    artifact_id: string;
+    artifact_kind: string;
+    path: string;
+    media_type: string;
+    status: string;
+    created_at: string;
+  }>;
+  run_ref?: TaskGraphRunRef;
+};
+
+export type AgentOrchestrationGraph = {
+  schema_version: string;
+  graph_id: string;
+  task_id: string;
+  title: string;
+  template_id?: string | null;
+  status: string;
+  metadata: Record<string, unknown>;
+  graph_policy: Record<string, unknown>;
+  nodes: Record<string, unknown>[];
+  edges: Record<string, unknown>[];
+  schema_registry?: Record<string, unknown>;
+  prompt_registry?: Record<string, unknown>;
+  migration: Record<string, unknown>;
+  state_version: number;
+};
+
+export type AgentOrchestrationGraphExportResponse = {
+  schema_version: string;
+  graph: TaskGraphDefinition;
+  task: ProjectTask | null;
+  orchestration_graph: AgentOrchestrationGraph;
+  serialized_text: string;
+  export_path?: string | null;
+};
+
+export type AgentOrchestrationGraphImportResponse = {
+  schema_version: string;
+  graph: TaskGraphDefinition;
+  task: ProjectTask | null;
+  orchestration_graph: AgentOrchestrationGraph;
+  import_path?: string | null;
+  snapshot?: TaskGraphSnapshotRef;
+};
+
+export type TaskGraphSnapshotResponse = {
+  schema_version: string;
+  graph: TaskGraphDefinition;
+  snapshot: TaskGraphSnapshotRef;
+  task: ProjectTask | null;
+};
+
+export type TaskGraphSnapshotDiffResponse = {
+  schema_version: string;
+  snapshot: TaskGraphSnapshotRef;
+  compared_snapshot?: TaskGraphSnapshotRef | null;
+  compared_label?: string | null;
+  diff_report: Record<string, unknown>;
+  diff_markdown: string;
+  task: ProjectTask | null;
+};
+
+export type TaskGraphRollbackResponse = {
+  schema_version: string;
+  graph: TaskGraphDefinition;
+  snapshot: TaskGraphSnapshotRef;
+  rolled_back_to_snapshot: TaskGraphSnapshotRef;
+  task: ProjectTask | null;
 };
 
 export type ProjectTasksResponse = {
@@ -187,6 +673,7 @@ export type SidebarTaskNode = {
   thread_count?: number;
   lane_count?: number;
   active_lane_label?: string;
+  previous_lane_label?: string;
   latest_lane_status?: string;
   handoff_count?: number;
   checkpoint_count?: number;
@@ -248,6 +735,8 @@ export type Profile = {
   mcp_verified_servers?: string[];
   mcp_smoke_status?: string;
   mcp_tool_argument_validation?: string;
+  command_execution_status?: string;
+  command_execution_note?: string;
   native_web_search_support?: string;
   tool_web_search_support?: string;
   mcp_web_support?: string;
@@ -968,6 +1457,8 @@ export type RouterModelEntry = {
   authority_tier?: "A" | "B" | "C" | "D" | string;
   authority_reason?: string;
   parallel_tool_call_status?: "verified" | "serial_only" | "disabled" | string;
+  command_execution_status?: string;
+  command_execution_note?: string;
   source_urls?: string[];
   source_status?: string;
   recommended?: boolean;
@@ -984,17 +1475,46 @@ export type RouterModelEntry = {
 };
 
 export type MetadataSourceRecord = {
+  source_id?: string;
+  url?: string;
+  source_type?: string;
+  trust_level?: string;
+  channel?: string;
+  parser_strategy?: string;
+  stale_after_days?: number;
+  promotable?: boolean;
+  requires_manual_review?: boolean;
+  notes?: string;
+};
+
+export type MetadataSourcePromotionPolicy = {
+  promotable?: boolean;
+  requires_manual_review?: boolean;
+  reason?: string;
+};
+
+export type MetadataProviderSourceRecord = {
   provider_id: string;
   display_name: string;
   urls: string[];
   source_status: string;
+  source_type?: string;
+  trust_level?: string;
+  channel?: string;
+  parser_strategy?: string;
+  stale_after_days?: number;
+  promotion_policy?: MetadataSourcePromotionPolicy;
+  source_registry_schema?: string;
+  source_records?: MetadataSourceRecord[];
+  source_provenance?: Record<string, unknown>;
   notes?: string;
 };
 
 export type MetadataSourcesResponse = {
-  providers: MetadataSourceRecord[];
+  providers: MetadataProviderSourceRecord[];
   updated_at: string;
   catalog_schema?: string;
+  source_registry_schema?: string;
 };
 
 export type CodexModelCatalogEntry = Record<string, unknown> & {
@@ -1028,6 +1548,7 @@ export type LlmManagerSession = {
   started_at: string;
   auth_surface: string;
   users: Array<{ username: string; has_vault: boolean; display_name?: string; avatar_path?: string; updated_at?: string | null }>;
+  preferred_username?: string | null;
   profile?: { display_name: string; avatar_path: string; updated_at?: string | null };
   key_count: number;
   active_key_ids: Record<string, string>;
@@ -1107,6 +1628,146 @@ export type LlmHealthResultsResponse = {
   updated_at?: string | null;
   results: Array<Record<string, unknown>>;
   model_health: Record<string, Record<string, unknown>>;
+};
+
+export type AgenticUpdateScope =
+  | "provider_metadata"
+  | "provider_adapter"
+  | "capability_routes"
+  | "codex_kernel"
+  | "plugin_skill_surface"
+  | "docs_only";
+
+export type AgenticUpdateVersionPolicy =
+  | "pinned"
+  | "stable"
+  | "latest"
+  | "deprecated_check"
+  | "security_fix_only";
+
+export type AgenticUpdateApplyMode =
+  | "discover_only"
+  | "proposal_only"
+  | "isolated_apply"
+  | "verify_candidate"
+  | "promote_after_smoke";
+
+export type AgenticUpdateApprovalPolicy = "manual_review_required" | "preapproved_discovery_only";
+
+export type AgenticUpdateRunContract = {
+  schema_version?: string;
+  normalized_at?: string;
+  scope: AgenticUpdateScope[];
+  providers?: string[];
+  models?: string[];
+  version_policy: AgenticUpdateVersionPolicy;
+  target_version?: string | null;
+  apply_mode: AgenticUpdateApplyMode;
+  allow_network: boolean;
+  allow_provider_calls: boolean;
+  allow_install: boolean;
+  allow_code_changes: boolean;
+  approval_policy: AgenticUpdateApprovalPolicy;
+};
+
+export type AgenticUpdateStartPayload = {
+  run_id?: string;
+  run_contract: AgenticUpdateRunContract;
+  provider_sources?: Array<Record<string, unknown>>;
+  fixture_sources?: Record<string, unknown>;
+  kernel_source_records?: Array<Record<string, unknown>>;
+  kernel_fixture_sources?: Record<string, unknown>;
+  current_models?: Array<Record<string, unknown>>;
+  complete_provider_snapshot?: boolean;
+};
+
+export type AgenticUpdateJobStatus = {
+  schema_version: string;
+  job_id: string | null;
+  run_id: string | null;
+  status: "idle" | "running" | "success" | "failed" | string;
+  running: boolean;
+  latest_job_id?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  run_contract?: AgenticUpdateRunContract;
+  summary?: Record<string, unknown>;
+  artifact_paths?: Record<string, string | null | undefined>;
+  error?: string | null;
+};
+
+export type AgenticUpdateRunList = {
+  schema_version: string;
+  generated_at: string;
+  runs: AgenticUpdateJobStatus[];
+  run_count: number;
+  total_known_runs: number;
+  latest_job_id?: string | null;
+};
+
+export type AgenticUpdateProposal = {
+  schema_version?: string;
+  run_id?: string;
+  created_at?: string;
+  run_contract?: AgenticUpdateRunContract;
+  discovery_result?: {
+    sources?: Array<Record<string, unknown>>;
+    findings?: Array<Record<string, unknown>>;
+    warnings?: string[];
+    [key: string]: unknown;
+  };
+  diff?: {
+    status?: string;
+    risk_class?: string | null;
+    summary?: Record<string, unknown>;
+    changes?: Array<Record<string, unknown>>;
+    warnings?: string[];
+    artifact_paths?: Record<string, string | null | undefined>;
+    [key: string]: unknown;
+  };
+  validation_result?: {
+    status?: string;
+    gates?: Array<Record<string, unknown>>;
+    evidence_paths?: string[];
+    warnings?: string[];
+    [key: string]: unknown;
+  };
+  approval_state?: {
+    status?: string;
+    policy?: string;
+    [key: string]: unknown;
+  };
+  apply_manifest?: {
+    changed_paths?: string[];
+    warnings?: string[];
+    [key: string]: unknown;
+  };
+  rollback_manifest?: {
+    reversible?: boolean;
+    steps?: Array<Record<string, unknown>>;
+    evidence_paths?: string[];
+    warnings?: string[];
+    [key: string]: unknown;
+  };
+};
+
+export type AgenticUpdateProposalResult = {
+  schema_version: string;
+  generated_at: string;
+  run_id: string;
+  run_contract: AgenticUpdateRunContract;
+  summary: Record<string, unknown>;
+  discovery?: {
+    sources?: Array<Record<string, unknown>>;
+    warnings?: string[];
+    [key: string]: unknown;
+  } | null;
+  parser_output?: Record<string, unknown> | null;
+  kernel_candidates?: Record<string, unknown> | null;
+  diff?: AgenticUpdateProposal["diff"];
+  proposal?: AgenticUpdateProposal;
+  artifact_paths?: Record<string, string | null | undefined>;
+  mutations?: Record<string, unknown>;
 };
 
 export type MetadataRefreshResponse = {
@@ -2237,6 +2898,7 @@ export type ShellThread = Thread & {
   task_id?: string;
   active_provider_thread_id?: string | null;
   provider_threads?: ProjectTaskProviderThread[];
+  lane_state?: ProjectTask["lane_state"];
 };
 
 export type RuntimeModal = {
@@ -2398,6 +3060,13 @@ export type RuntimeDiffSummary = {
 };
 
 export type ThreadReadResponse = { thread: ShellThread; project?: ProjectFile; task?: ProjectTask };
+export type ThreadCreateRecoveryResponse = Partial<ThreadReadResponse> & {
+  operation_id: string;
+  status: "pending" | "completed" | "failed";
+  retry_after_ms?: number | null;
+  error?: string;
+  warning?: string;
+};
 export type TaskConversationResponse = { thread: ShellThread; task?: ProjectTask; transcript_path?: string; updated_at?: string };
 export type ThreadListResponse = { threads: ShellThread[]; next_cursor: string | null; backwards_cursor: string | null };
 export type TurnStartResponse = {

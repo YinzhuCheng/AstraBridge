@@ -312,4 +312,32 @@ describe("reasoning options", () => {
       },
     });
   });
+
+  it("does not infer image input from provider-wide supports_vision alone", () => {
+    const provider = {
+      id: "glm",
+      display_name: "GLM",
+      enabled: true,
+      adapter_type: "chat",
+      base_url: "https://open.bigmodel.cn/api/paas/v4",
+      default_model: "glm-5.2",
+      request_timeout_ms: 300000,
+      stream_idle_timeout_ms: 300000,
+      env_key: "GLM_API_KEY",
+      auth_mode: "env_ref",
+      proxy_mode: "direct",
+      proxy_url: "",
+      capabilities: {
+        supports_vision: true,
+      },
+    } satisfies RouterProvider;
+
+    expect(providerModelDraftDefaults(provider)).toMatchObject({
+      input_modalities: ["text"],
+      modality_limits: {
+        text: true,
+        image_input: false,
+      },
+    });
+  });
 });

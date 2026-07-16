@@ -27,7 +27,7 @@ export type TaskWorkflowFacts = {
   recoveredCommandCount: number;
   backend: "app_server" | "native_kernel";
   checkpointRefs: TaskWorkflowCheckpointRef[];
-  commandRefs: CodingEventInspectorSummary["commandRefs"];
+  commandRefs?: CodingEventInspectorSummary["commandRefs"];
   diagnosticRefs: TaskWorkflowRef[];
 };
 
@@ -72,12 +72,15 @@ function taskCheckpointRefs(task: ProjectTask | null | undefined): TaskWorkflowC
     const saveId = nonEmptyText((item as Record<string, unknown>).save_id);
     if (!saveId || seen.has(saveId)) continue;
     seen.add(saveId);
-    refs.push({
+    const ref: TaskWorkflowCheckpointRef = {
       save_id: saveId,
       description: nonEmptyText((item as Record<string, unknown>).description) ?? saveId,
-      provider_id: nonEmptyText((item as Record<string, unknown>).provider_id),
-      model_id: nonEmptyText((item as Record<string, unknown>).model ?? (item as Record<string, unknown>).model_id),
-    });
+    };
+    const providerId = nonEmptyText((item as Record<string, unknown>).provider_id);
+    const modelId = nonEmptyText((item as Record<string, unknown>).model ?? (item as Record<string, unknown>).model_id);
+    if (providerId) ref.provider_id = providerId;
+    if (modelId) ref.model_id = modelId;
+    refs.push(ref);
   }
   return refs;
 }
@@ -95,14 +98,17 @@ function taskDiagnosticRefs(task: ProjectTask | null | undefined): TaskWorkflowR
     const key = [kind, summary, toThreadId ?? ""].join(":");
     if (seen.has(key)) continue;
     seen.add(key);
-    refs.push({
+    const ref: TaskWorkflowRef = {
       key,
       kind,
       summary,
-      provider_id: nonEmptyText(record.provider_id),
-      model_id: nonEmptyText(record.model ?? record.model_id),
-      to_thread_id: toThreadId,
-    });
+    };
+    const providerId = nonEmptyText(record.provider_id);
+    const modelId = nonEmptyText(record.model ?? record.model_id);
+    if (providerId) ref.provider_id = providerId;
+    if (modelId) ref.model_id = modelId;
+    if (toThreadId) ref.to_thread_id = toThreadId;
+    refs.push(ref);
   }
   return refs;
 }
@@ -118,12 +124,15 @@ function mergedCheckpointRefs(
   for (const item of eventSummary?.checkpointRefs ?? []) {
     const saveId = nonEmptyText(item.save_id);
     if (!saveId) continue;
-    merged.set(saveId, {
+    const ref: TaskWorkflowCheckpointRef = {
       save_id: saveId,
       description: nonEmptyText(item.description) ?? saveId,
-      provider_id: nonEmptyText(item.provider_id),
-      model_id: nonEmptyText(item.model_id),
-    });
+    };
+    const providerId = nonEmptyText(item.provider_id);
+    const modelId = nonEmptyText(item.model_id);
+    if (providerId) ref.provider_id = providerId;
+    if (modelId) ref.model_id = modelId;
+    merged.set(saveId, ref);
   }
   return Array.from(merged.values());
 }
@@ -142,14 +151,17 @@ function mergedDiagnosticRefs(
     if (!kind || !summary) continue;
     const toThreadId = nonEmptyText(item.to_thread_id);
     const key = [kind, summary, toThreadId ?? ""].join(":");
-    merged.set(key, {
+    const ref: TaskWorkflowRef = {
       key,
       kind,
       summary,
-      provider_id: nonEmptyText(item.provider_id),
-      model_id: nonEmptyText(item.model_id),
-      to_thread_id: toThreadId,
-    });
+    };
+    const providerId = nonEmptyText(item.provider_id);
+    const modelId = nonEmptyText(item.model_id);
+    if (providerId) ref.provider_id = providerId;
+    if (modelId) ref.model_id = modelId;
+    if (toThreadId) ref.to_thread_id = toThreadId;
+    merged.set(key, ref);
   }
   return Array.from(merged.values());
 }
@@ -166,13 +178,14 @@ function persistedCommandRefs(task: ProjectTask | null | undefined): CodingEvent
     const exitCode = typeof record.exit_code === "number" ? record.exit_code : null;
     const key = `${command}:${status ?? ""}:${exitCode ?? ""}`;
     if (!commands.has(key)) {
-      commands.set(key, {
-        command,
-        status,
-        exit_code: exitCode,
-        provider_id: nonEmptyText(record.provider_id),
-        model_id: nonEmptyText(record.model ?? record.model_id),
-      });
+      const ref: CodingEventInspectorSummary["commandRefs"][number] = { command };
+      const providerId = nonEmptyText(record.provider_id);
+      const modelId = nonEmptyText(record.model ?? record.model_id);
+      if (status) ref.status = status;
+      if (typeof exitCode === "number") ref.exit_code = exitCode;
+      if (providerId) ref.provider_id = providerId;
+      if (modelId) ref.model_id = modelId;
+      commands.set(key, ref);
     }
   }
   return Array.from(commands.values());
@@ -216,7 +229,7 @@ export function summarizeTaskWorkflowFacts(
       recoveredCommands.add(command);
     }
   }
-  return {
+  const facts: TaskWorkflowFacts = {
     laneCount: task?.provider_threads?.length ?? 0,
     handoffCount: Math.max(handoffCountFromTask, handoffCountFromDiagnostics),
     checkpointCount: checkpointRefs.length,
@@ -226,7 +239,8 @@ export function summarizeTaskWorkflowFacts(
     recoveredCommandCount: recoveredCommands.size,
     backend: executionThread?.shellSettings?.execution_backend === "native_kernel" ? "native_kernel" : "app_server",
     checkpointRefs,
-    commandRefs,
     diagnosticRefs,
   };
+  if (commandRefs.length) facts.commandRefs = commandRefs;
+  return facts;
 }

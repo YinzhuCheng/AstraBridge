@@ -25,6 +25,9 @@ function buildModelCandidate(
     lane_type: "model_backed",
     transport_mode: "request_response",
     source: "adapter",
+    catalog_present: true,
+    default_for_provider: providerId === "qwen",
+    recommended: providerId === "qwen",
     input_modalities: ["text", "image"],
     eligibility_notes: [],
   };
@@ -294,6 +297,11 @@ describe("CapabilityRoutesPanel", () => {
   it("renders route details and saves a pinned candidate", () => {
     const { onSave } = renderPanel();
 
+    const routeDetails = screen.getByText("Route diagnostics, candidates, smoke, and artifacts").closest("details");
+    expect(routeDetails).not.toHaveAttribute("open");
+    fireEvent.click(routeDetails!.querySelector("summary")!);
+    expect(routeDetails).toHaveAttribute("open");
+
     expect(screen.getByText("Multimodal routes")).toBeInTheDocument();
     expect(screen.getByText("Choose auto routing or pin a provider/model for each multimodal capability. Web stays standalone.")).toBeInTheDocument();
     expect(screen.getByText("Vision Analysis")).toBeInTheDocument();
@@ -302,12 +310,23 @@ describe("CapabilityRoutesPanel", () => {
     expect(screen.getByText("MCP preset: configured")).toBeInTheDocument();
     expect(screen.getByText("Runtime: visible")).toBeInTheDocument();
     expect(screen.getByText("tools: 5/5 (5 runtime tools)")).toBeInTheDocument();
+    expect(screen.getByText("Compatibility snapshot")).toBeInTheDocument();
+    expect(screen.getByText("resolved routes")).toBeInTheDocument();
+    expect(screen.getByText("verified model smokes")).toBeInTheDocument();
+    expect(screen.getByText("diagnostic warnings")).toBeInTheDocument();
+    expect(screen.getByText("smoke not verified")).toBeInTheDocument();
     expect(screen.getByText("Provider-backed calls may spend paid quota")).toBeInTheDocument();
     expect(screen.getByText("Artifacts may be large and retained locally")).toBeInTheDocument();
     expect(screen.getByText("qwen: credential configured")).toBeInTheDocument();
     expect(screen.getByText("kimi: credential missing")).toBeInTheDocument();
     expect(screen.getByText("AstraBridge vision artifact preview")).toBeInTheDocument();
     expect(screen.getByText("1 refs")).toBeInTheDocument();
+    expect(screen.getByTestId("capability-route-status-vision.analyze")).toHaveTextContent("unverified");
+    expect(screen.getByTestId("capability-candidate-status-vision.analyze-qwen-qwen3-vl-plus")).toHaveTextContent("unverified");
+    expect(screen.getByText("resolved route")).toBeInTheDocument();
+    expect(screen.getAllByText("recommended").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("provider default").length).toBeGreaterThan(0);
+    expect(screen.getByRole("option", { name: "qwen/qwen3-vl-plus - unverified" })).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Route mode"), { target: { value: "pinned" } });
     fireEvent.change(screen.getByLabelText("Pinned candidate"), { target: { value: "kimi/kimi-k2.6" } });
@@ -443,8 +462,37 @@ describe("CapabilityRoutesPanel", () => {
       },
     });
 
+    expect(screen.getByTestId("capability-route-status-vision.analyze")).toHaveTextContent("failed");
     expect(screen.getByText("Last smoke: provider · fail / dry_run_vision_analyze / provider not called")).toBeInTheDocument();
+    expect(screen.getByText("smoke failed")).toBeInTheDocument();
     expect(screen.getByText("qwen vision adapter requires an api_key or DASHSCOPE_API_KEY.")).toBeInTheDocument();
+  });
+
+  it("treats warn smoke results as partial instead of fully verified", () => {
+    renderPanel({
+      smokeResults: {
+        "vision.analyze": {
+          schema_version: "astrabridge-capability-smoke-result-v1",
+          capability_id: "vision.analyze",
+          mode: "provider",
+          status: "warn",
+          provider_invoked: true,
+          provider_requested: true,
+          case_id: "provider_vision_partial",
+          route: { route_mode: "auto", resolution_status: "ok", resolved_candidate: visionRoute.resolved_candidate, error: null },
+          sanitized_request: {},
+          sanitized_response: { elapsed_ms: 42 },
+          artifact_refs: [],
+          evidence_refs: [],
+          created_at: "2026-06-25T01:00:00Z",
+        },
+      },
+    });
+
+    expect(screen.getByTestId("capability-route-status-vision.analyze")).toHaveTextContent("partial");
+    expect(screen.getByText("smoke partial")).toBeInTheDocument();
+    expect(screen.getByText("0/1")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "qwen/qwen3-vl-plus - partial" })).toBeInTheDocument();
   });
 
   it("shows multimodal dry-run pass states for vision and speech capabilities", () => {
@@ -491,6 +539,8 @@ describe("CapabilityRoutesPanel", () => {
 
     expect(screen.getByText("Last smoke: dry-run · pass / dry_run_vision_analyze / provider not called / elapsed 12 ms")).toBeInTheDocument();
     expect(screen.getByText("Last smoke: dry-run · pass / dry_run_speech_transcribe / provider not called / elapsed 19 ms")).toBeInTheDocument();
+    expect(screen.getAllByText("2/2").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("no route warnings").length).toBeGreaterThanOrEqual(2);
   });
 
   it("shows provider smoke as skipped when the resolved credential is not configured", () => {
@@ -537,7 +587,8 @@ describe("CapabilityRoutesPanel", () => {
       },
     });
 
-    expect(screen.getAllByText("no candidate").length).toBeGreaterThan(0);
+    expect(screen.getByTestId("capability-route-status-speech.transcribe")).toHaveTextContent("unsupported");
+    expect(screen.getByText("no resolved provider route")).toBeInTheDocument();
     expect(screen.getByText("Last smoke: dry-run · skipped / dry_run_speech_transcribe / provider not called")).toBeInTheDocument();
     expect(screen.getByText("No resolved provider route is available, so the real provider smoke was not started.")).toBeInTheDocument();
   });
@@ -598,6 +649,7 @@ describe("CapabilityRoutesPanel", () => {
     expect(screen.getAllByText("OpenAI Primary Runtime").length).toBeGreaterThan(0);
     expect(screen.getAllByText("plugin missing").length).toBeGreaterThan(0);
     expect(screen.getByText("Standalone web lane")).toBeInTheDocument();
+    expect(screen.getByText("web lane separate")).toBeInTheDocument();
     expect(screen.getByText("web.search stays separate from model-backed routing, and plugin or skill inventory does not reroute it.")).toBeInTheDocument();
   });
 

@@ -9,11 +9,13 @@ import type {
   AutomationRun,
   AutomationSchedulerStatus,
   AutomationSpec,
+  RouterModelEntry,
   AutomationWorkspaceMode,
   LocaleCode,
   Profile,
   RuntimeSupervisorState,
 } from "../../types";
+import { resolveStandaloneAutomationProfileGate, type AutomationRuntimeProviderStatus } from "./automationProfileGate";
 
 export type AutomationFormState = {
   automation_id: string;
@@ -427,7 +429,10 @@ type Props = {
   supervisorAutomations?: RuntimeSupervisorState["automations"] | null;
   mcpPresetOptions?: AutomationMcpPresetOption[];
   pluginSkillPresetOptions?: AutomationPluginSkillPresetOption[];
+  catalogModels?: RouterModelEntry[];
+  runtimeProviders?: AutomationRuntimeProviderStatus[];
   isBusy?: boolean;
+  operationNotice?: { tone: "info" | "success"; title: string; detail: string } | null;
   errorMessage?: string | null;
   onCreate: (payload: ReturnType<typeof automationPayloadFromDraft>) => void;
   onUpdate: (automationId: string, patch: ReturnType<typeof automationPayloadFromDraft>) => void;
@@ -452,7 +457,10 @@ export function AutomationsPanel({
   supervisorAutomations,
   mcpPresetOptions = [],
   pluginSkillPresetOptions = [],
+  catalogModels = [],
+  runtimeProviders = [],
   isBusy,
+  operationNotice,
   errorMessage,
   onCreate,
   onUpdate,
@@ -469,13 +477,18 @@ export function AutomationsPanel({
   const [selectedRunId, setSelectedRunId] = useState<string>("");
   const [promotionRef, setPromotionRef] = useState("task:");
   const [draft, setDraft] = useState<AutomationFormState>(() => createEmptyAutomationDraft(projectId, profiles));
+  const [activityExpanded, setActivityExpanded] = useState<boolean>(true);
   const lastHydratedAutomationId = useRef<string>("");
 
   useEffect(() => {
     if (automations.length === 0) {
+      const shouldResetDraft = Boolean(selectedAutomationId || lastHydratedAutomationId.current);
       setSelectedAutomationId("");
       lastHydratedAutomationId.current = "";
-      setDraft(createEmptyAutomationDraft(projectId, profiles));
+      if (shouldResetDraft) {
+        setDraft(createEmptyAutomationDraft(projectId, profiles));
+      }
+      setActivityExpanded(true);
       return;
     }
     if (!selectedAutomationId || !automations.some((item) => item.automation_id === selectedAutomationId)) {
@@ -483,10 +496,31 @@ export function AutomationsPanel({
     }
   }, [automations, profiles, projectId, selectedAutomationId]);
 
+  useEffect(() => {
+    if (automations.length > 0 || selectedAutomationId || isBusy || operationNotice || errorMessage) {
+      setActivityExpanded(true);
+    }
+  }, [automations.length, errorMessage, isBusy, operationNotice, selectedAutomationId]);
+
   const selectedAutomation = useMemo(
     () => automations.find((item) => item.automation_id === selectedAutomationId) ?? null,
     [automations, selectedAutomationId],
   );
+  const selectedAutomationProfile = useMemo(() => {
+    if (!selectedAutomation) return null;
+    const selectedProfileId = String(selectedAutomation.runtime.profile_id || "").trim();
+    if (!selectedProfileId) return null;
+    return profiles.find((profile) => String(profile.profile_id || "").trim() === selectedProfileId) ?? null;
+  }, [profiles, selectedAutomation]);
+  const standaloneProfileGate = useMemo(() => {
+    if (!selectedAutomation || selectedAutomation.kind !== "standalone") return null;
+    return resolveStandaloneAutomationProfileGate(
+      selectedAutomationProfile,
+      catalogModels,
+      selectedAutomation.runtime.permission_mode,
+      runtimeProviders,
+    );
+  }, [catalogModels, runtimeProviders, selectedAutomation, selectedAutomationProfile]);
 
   useEffect(() => {
     if (!selectedAutomationId) return;
@@ -522,6 +556,20 @@ export function AutomationsPanel({
   const selectedRunInboxItem = selectedRun ? filteredInbox.find((item) => item.run_id === selectedRun.run_id) ?? null : null;
   const selectedRunFinalization = selectedRun ? runFinalizationNotice(locale, selectedRun, selectedRunInboxItem) : null;
   const selectedRunNotice = selectedRun ? runDiagnosticNotice(locale, selectedRun) : null;
+  const runNowBlocked = standaloneProfileGate?.status === "blocked";
+  const showStandaloneProfileGate = Boolean(standaloneProfileGate && standaloneProfileGate.status !== "ready");
+  const standaloneProfileGateTitle =
+    locale === "zh-CN"
+      ? runNowBlocked
+        ? "当前模型已阻止直接运行"
+        : "当前模型将以审查模式运行"
+      : runNowBlocked
+        ? "Current model is blocked for direct automation runs"
+        : "Current model will stay in review mode";
+  const standaloneProfileGateDetail =
+    locale === "zh-CN"
+      ? `${standaloneProfileGate?.detail ?? ""}${selectedAutomationProfile ? ` 当前 profile: ${selectedAutomationProfile.label}.` : ""}`
+      : `${standaloneProfileGate?.detail ?? ""}${selectedAutomationProfile ? ` Active profile: ${selectedAutomationProfile.label}.` : ""}`;
   const summary = supervisorAutomations?.inbox_summary ?? scheduler?.inbox_summary ?? { unread: 0, reviewed: 0, archived: 0, promoted: 0 };
   const configuredPresetIds = splitList(draft.mcp_preset_ids);
   const knownPresetIds = new Set(mcpPresetOptions.map((item) => item.preset_id));
@@ -574,6 +622,7 @@ export function AutomationsPanel({
             type="button"
             className="ghost-button"
             onClick={() => {
+              setActivityExpanded(true);
               setSelectedAutomationId("");
               lastHydratedAutomationId.current = "";
               setDraft(createEmptyAutomationDraft(projectId, profiles));
@@ -590,7 +639,16 @@ export function AutomationsPanel({
         <div><dt>{t(locale, "automations_next_due")}</dt><dd>{relativeTimeLabel((scheduler?.next_due?.next_run_at || supervisorAutomations?.next_due?.next_run_at) ?? null) || t(locale, "automations_none")}</dd></div>
       </div>
 
-      <div className="automation-columns">
+      <details className="manager-disclosure automation-activity-disclosure" open={activityExpanded}>
+        <summary
+          onClick={(event) => {
+            event.preventDefault();
+            setActivityExpanded((value) => !value);
+          }}
+        >
+          <span>{t(locale, "automations_activity_details")}</span>
+        </summary>
+        <div className="automation-columns">
         <section className="manager-section">
           <h4>{t(locale, "automations_list_title")}</h4>
           <div className="manager-list manager-list-tall">
@@ -600,7 +658,10 @@ export function AutomationsPanel({
                 key={automation.automation_id}
                 type="button"
                 className={selectedAutomationId === automation.automation_id ? "manager-row manager-row-active" : "manager-row"}
-                onClick={() => setSelectedAutomationId(automation.automation_id)}
+                onClick={() => {
+                  setActivityExpanded(true);
+                  setSelectedAutomationId(automation.automation_id);
+                }}
               >
                 <span>
                   <strong>{automation.name}</strong>
@@ -624,9 +685,29 @@ export function AutomationsPanel({
               <button type="button" className="primary-button" disabled={isBusy || !draft.name.trim() || !draft.prompt.trim()} onClick={() => (selectedAutomation ? onUpdate(selectedAutomation.automation_id, submitPayload) : onCreate(submitPayload))}>
                 {selectedAutomation ? t(locale, "automations_save") : t(locale, "automations_create_button")}
               </button>
-              {selectedAutomation ? <button type="button" className="ghost-button" disabled={isBusy} onClick={() => onRunNow(selectedAutomation.automation_id)}>{t(locale, "automations_run_now")}</button> : null}
+              {selectedAutomation ? (
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={isBusy || runNowBlocked}
+                  title={runNowBlocked ? standaloneProfileGate?.detail : undefined}
+                  onClick={() => onRunNow(selectedAutomation.automation_id)}
+                >
+                  {t(locale, "automations_run_now")}
+                </button>
+              ) : null}
             </div>
           </div>
+
+          {operationNotice ? (
+            <div
+              className={operationNotice.tone === "success" ? "automation-operation-notice automation-operation-notice-success" : "automation-operation-notice"}
+              role="status"
+            >
+              <strong>{operationNotice.title}</strong>
+              <span>{operationNotice.detail}</span>
+            </div>
+          ) : null}
 
           {errorMessage ? (
             <div className="automation-operation-error" data-testid="automation-error-message" role="alert">
@@ -639,6 +720,20 @@ export function AutomationsPanel({
             <strong>{t(locale, "automations_safety_title")}</strong>
             <span>{t(locale, "automations_safety_summary")}</span>
           </div>
+          {showStandaloneProfileGate && standaloneProfileGate ? (
+            <div
+              className={
+                standaloneProfileGate.status === "blocked"
+                  ? "automation-run-notice"
+                  : "automation-run-notice automation-run-notice-neutral"
+              }
+              data-testid="automation-profile-gate"
+              role="status"
+            >
+              <strong>{standaloneProfileGateTitle}</strong>
+              <span>{standaloneProfileGateDetail}</span>
+            </div>
+          ) : null}
 
           <div className="form-grid">
             <label className="field"><span>{t(locale, "automations_id")}</span><input value={draft.automation_id} onChange={(event) => setDraft({ ...draft, automation_id: event.target.value })} disabled={Boolean(selectedAutomation)} /></label>
@@ -657,6 +752,11 @@ export function AutomationsPanel({
               const [hour = "09", minute = "00"] = event.target.value.split(":", 2);
               setDraft({ ...draft, daily_hour: hour.padStart(2, "0"), daily_minute: minute.padStart(2, "0") });
             }} /></label> : null}
+          </div>
+
+          <details className="manager-disclosure automation-advanced-settings">
+            <summary><span>{t(locale, "automations_advanced_settings")}</span></summary>
+            <div className="form-grid">
             <label className="field"><span>{t(locale, "automations_timezone")}</span><input value={draft.timezone} onChange={(event) => setDraft({ ...draft, timezone: event.target.value })} /></label>
             <label className="field"><span>{t(locale, "automations_execution_host")}</span><select value={draft.execution_host} onChange={(event) => setDraft({ ...draft, execution_host: event.target.value as AutomationFormState["execution_host"] })}><option value="auto">{executionHostLabel(locale, "auto")}</option><option value="windows">{executionHostLabel(locale, "windows")}</option><option value="wsl">{executionHostLabel(locale, "wsl")}</option></select></label>
             <label className="field"><span>{t(locale, "automations_model")}</span><input value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} /></label>
@@ -725,7 +825,8 @@ export function AutomationsPanel({
               </div>
               <small className="muted compact-copy">{t(locale, "automations_plugin_skill_preset_hint")}</small>
             </div>
-          </div>
+            </div>
+          </details>
 
           <label className="field"><span>{t(locale, "automations_description")}</span><textarea rows={2} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
           <label className="field"><span>{t(locale, "automations_prompt")}</span><textarea rows={6} value={draft.prompt} onChange={(event) => setDraft({ ...draft, prompt: event.target.value })} /></label>
@@ -845,7 +946,8 @@ export function AutomationsPanel({
             </div>
           ) : null}
         </section>
-      </div>
+        </div>
+      </details>
     </div>
   );
 }

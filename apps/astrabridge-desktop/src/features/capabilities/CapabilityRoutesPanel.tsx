@@ -5,6 +5,7 @@ import type {
   CapabilityManagementEntry,
   CapabilityArtifactEntry,
   CapabilityMcpPresetStatus,
+  CapabilityRouteCandidate,
   CapabilityRouteEntry,
   CapabilitySmokeResult,
   CodexPluginRegistryRecord,
@@ -120,6 +121,7 @@ const CAPABILITY_STATUS_KEYS: Record<string, string> = {
   unknown: "manager_capability_status_unknown",
   untested: "manager_capability_status_untested",
   pass: "manager_capability_status_pass",
+  warn: "manager_capability_status_warn",
   fail: "manager_capability_status_fail",
   provider_not_run: "manager_capability_status_provider_not_run",
   skipped: "manager_capability_status_skipped",
@@ -132,6 +134,17 @@ const CAPABILITY_STATUS_KEYS: Record<string, string> = {
 const CAPABILITY_SMOKE_MODE_KEYS: Record<string, string> = {
   dry_run: "manager_capability_smoke_mode_dry_run",
   provider: "manager_capability_smoke_mode_provider",
+};
+
+type CapabilitySurfaceStatus = "verified" | "partial" | "failed" | "unverified" | "unsupported" | "standalone";
+
+const CAPABILITY_SURFACE_STATUS_KEYS: Record<CapabilitySurfaceStatus, string> = {
+  verified: "manager_capability_surface_verified",
+  partial: "manager_capability_surface_partial",
+  failed: "manager_capability_surface_failed",
+  unverified: "manager_capability_surface_unverified",
+  unsupported: "manager_capability_surface_unsupported",
+  standalone: "manager_capability_status_standalone",
 };
 
 function smokeProviderError(result: CapabilitySmokeResult | undefined): string {
@@ -176,6 +189,14 @@ const CAPABILITY_MODALITY_KEYS: Record<string, string> = {
   image: "manager_capability_modality_image",
   audio: "manager_capability_modality_audio",
   video: "manager_capability_modality_video",
+};
+
+type CapabilityDiagnosticTone = "ok" | "warning" | "info";
+
+type CapabilityDiagnostic = {
+  key: string;
+  label: string;
+  tone: CapabilityDiagnosticTone;
 };
 
 type CapabilityRoutesPanelProps = {
@@ -253,6 +274,172 @@ function localizedModalities(locale: LocaleCode, modalities: string[] | null | u
   return values.map((value) => localizedEnum(locale, value, CAPABILITY_MODALITY_KEYS)).join(", ");
 }
 
+function effectiveSmokeStatus(management: CapabilityManagementEntry | undefined, smokeResult: CapabilitySmokeResult | null): string {
+  return smokeResult?.status ?? management?.smoke.status ?? "unknown";
+}
+
+function sameCandidate(
+  left: Pick<CapabilityRouteCandidate, "provider_id" | "model" | "adapter_id"> | null | undefined,
+  right: Pick<CapabilityRouteCandidate, "provider_id" | "model" | "adapter_id"> | null | undefined,
+) {
+  return (
+    Boolean(left && right) &&
+    (left?.provider_id ?? null) === (right?.provider_id ?? null) &&
+    (left?.model ?? null) === (right?.model ?? null) &&
+    (left?.adapter_id ?? null) === (right?.adapter_id ?? null)
+  );
+}
+
+function routeSurfaceStatus(
+  route: CapabilityRouteEntry,
+  management: CapabilityManagementEntry | undefined,
+  smokeResult: CapabilitySmokeResult | null,
+): CapabilitySurfaceStatus {
+  if (route.lane_type === "web_standalone") {
+    return "standalone";
+  }
+  if (!route.resolved_candidate || route.resolution_status === "no_capability_candidate") {
+    return "unsupported";
+  }
+  const smokeStatus = effectiveSmokeStatus(management, smokeResult);
+  if (smokeStatus === "pass") {
+    return "verified";
+  }
+  if (smokeStatus === "warn") {
+    return "partial";
+  }
+  if (smokeStatus === "fail") {
+    return "failed";
+  }
+  return "unverified";
+}
+
+function candidateSurfaceStatus(
+  candidate: CapabilityRouteCandidate,
+  route: CapabilityRouteEntry,
+  management: CapabilityManagementEntry | undefined,
+  smokeResult: CapabilitySmokeResult | null,
+): CapabilitySurfaceStatus {
+  if (!candidate.provider_id || !candidate.model) {
+    return "unsupported";
+  }
+  if (sameCandidate(candidate, route.resolved_candidate ?? null)) {
+    return routeSurfaceStatus(route, management, smokeResult);
+  }
+  return "unverified";
+}
+
+function capabilitySurfaceToneClass(status: CapabilitySurfaceStatus) {
+  if (status === "verified" || status === "standalone") {
+    return "capability-ok";
+  }
+  if (status === "partial") {
+    return "status-tag-warning";
+  }
+  return "capability-warn";
+}
+
+function candidateStatusNote(
+  locale: LocaleCode,
+  candidate: CapabilityRouteCandidate,
+  status: CapabilitySurfaceStatus,
+): string {
+  if (status === "verified") {
+    return t(locale, "manager_capability_candidate_note_verified");
+  }
+  if (status === "partial") {
+    return t(locale, "manager_capability_candidate_note_partial");
+  }
+  if (status === "failed") {
+    return t(locale, "manager_capability_candidate_note_failed");
+  }
+  if (candidate.catalog_present === false) {
+    return t(locale, "manager_capability_candidate_note_catalog_missing");
+  }
+  return t(locale, "manager_capability_candidate_note_unverified");
+}
+
+function routeDiagnostics(
+  locale: LocaleCode,
+  route: CapabilityRouteEntry,
+  management: CapabilityManagementEntry | undefined,
+  smokeResult: CapabilitySmokeResult | null,
+  credential: CapabilityProviderCredentialStatus | null,
+): CapabilityDiagnostic[] {
+  const diagnostics: CapabilityDiagnostic[] = [];
+  const isStandalone = route.lane_type === "web_standalone";
+  const smokeStatus = effectiveSmokeStatus(management, smokeResult);
+
+  if (isStandalone) {
+    diagnostics.push({
+      key: "web-standalone",
+      label: t(locale, "manager_capability_diagnostic_web_standalone"),
+      tone: "info",
+    });
+    return diagnostics;
+  }
+
+  if (!route.resolved_candidate?.provider_id) {
+    diagnostics.push({
+      key: "no-route",
+      label: t(locale, "manager_capability_diagnostic_no_route"),
+      tone: "warning",
+    });
+  }
+
+  if (
+    !credential ||
+    !credential.enabled ||
+    credential.status === "missing" ||
+    credential.status === "session_required" ||
+    credential.status === "disabled"
+  ) {
+    diagnostics.push({
+      key: "credential",
+      label: t(locale, "manager_capability_diagnostic_credential"),
+      tone: "warning",
+    });
+  }
+
+  if (smokeStatus === "fail") {
+    diagnostics.push({
+      key: "smoke-fail",
+      label: t(locale, "manager_capability_diagnostic_smoke_failed"),
+      tone: "warning",
+    });
+  } else if (smokeStatus === "warn") {
+    diagnostics.push({
+      key: "smoke-partial",
+      label: t(locale, "manager_capability_diagnostic_smoke_partial"),
+      tone: "warning",
+    });
+  } else if (smokeStatus !== "pass") {
+    diagnostics.push({
+      key: "smoke-untested",
+      label: t(locale, "manager_capability_diagnostic_smoke_not_verified"),
+      tone: "warning",
+    });
+  }
+
+  if (route.resolved_candidate && route.resolved_candidate.catalog_present === false) {
+    diagnostics.push({
+      key: "catalog-missing",
+      label: t(locale, "manager_capability_diagnostic_catalog_missing"),
+      tone: "info",
+    });
+  }
+
+  if (diagnostics.length === 0) {
+    diagnostics.push({
+      key: "ok",
+      label: t(locale, "manager_capability_diagnostic_no_warnings"),
+      tone: "ok",
+    });
+  }
+
+  return diagnostics;
+}
+
 export function CapabilityRoutesPanel({
   locale,
   routes,
@@ -318,6 +505,34 @@ export function CapabilityRoutesPanel({
     current.push(artifact);
     artifactsByCapability.set(artifact.capability_id, current);
   }
+  const diagnosticsByCapability = new Map<string, CapabilityDiagnostic[]>();
+  let resolvedRouteCount = 0;
+  let verifiedModelSmokeCount = 0;
+  let modelBackedRouteCount = 0;
+  let warningDiagnosticCount = 0;
+  let standaloneWebReady = false;
+  for (const route of routes) {
+    const management = managementById.get(route.capability_id);
+    const smokeResult = smokeResults[route.capability_id] ?? null;
+    const resolvedCredential = route.resolved_candidate?.provider_id
+      ? providerCredentials[route.resolved_candidate.provider_id] ?? null
+      : null;
+    const diagnostics = routeDiagnostics(locale, route, management, smokeResult, resolvedCredential);
+    diagnosticsByCapability.set(route.capability_id, diagnostics);
+    if (route.resolved_candidate) {
+      resolvedRouteCount += 1;
+    }
+    if (route.lane_type === "web_standalone" && route.resolution_status === "standalone") {
+      standaloneWebReady = true;
+    }
+    if (route.lane_type !== "web_standalone") {
+      modelBackedRouteCount += 1;
+      if (routeSurfaceStatus(route, management, smokeResult) === "verified") {
+        verifiedModelSmokeCount += 1;
+      }
+    }
+    warningDiagnosticCount += diagnostics.filter((item) => item.tone === "warning").length;
+  }
   return (
     <div className="manager-section">
       <div className="metadata-actions metadata-actions-compact">
@@ -349,6 +564,30 @@ export function CapabilityRoutesPanel({
           {t(locale, "manager_capability_mcp_missing_tools")}: {(mcpPreset?.missing_tool_names ?? []).join(", ")}
         </p>
       ) : null}
+      <div className="capability-observability-panel" aria-label={t(locale, "manager_capability_observability_title")}>
+        <div>
+          <strong>{t(locale, "manager_capability_observability_title")}</strong>
+          <p className="muted compact-copy">{t(locale, "manager_capability_observability_summary")}</p>
+        </div>
+        <div className="capability-observability-grid">
+          <span className="capability-observability-metric">
+            <strong>{resolvedRouteCount}/{routes.length}</strong>
+            <small>{t(locale, "manager_capability_observability_routes_ready")}</small>
+          </span>
+          <span className="capability-observability-metric">
+            <strong>{verifiedModelSmokeCount}/{modelBackedRouteCount}</strong>
+            <small>{t(locale, "manager_capability_observability_smoke_verified")}</small>
+          </span>
+          <span className={`capability-observability-metric ${warningDiagnosticCount === 0 ? "capability-ok" : "capability-warn"}`}>
+            <strong>{warningDiagnosticCount}</strong>
+            <small>{t(locale, "manager_capability_observability_warnings")}</small>
+          </span>
+          <span className={`capability-observability-metric ${standaloneWebReady ? "capability-ok" : "capability-warn"}`}>
+            <strong>{standaloneWebReady ? t(locale, "manager_capability_status_ok") : t(locale, "manager_capability_status_unknown")}</strong>
+            <small>{t(locale, "manager_capability_observability_web_lane")}</small>
+          </span>
+        </div>
+      </div>
       {isLoading ? <p className="muted compact-copy">{t(locale, "manager_capability_loading")}</p> : null}
       {isError ? <p className="error-text">{t(locale, "manager_capability_load_error")}</p> : null}
       {routes.length === 0 && !isLoading ? (
@@ -369,6 +608,9 @@ export function CapabilityRoutesPanel({
               draft.mode !== route.route_record.mode ||
               (draft.provider_id ?? null) !== (route.route_record.provider_id ?? null) ||
               (draft.model ?? null) !== (route.route_record.model ?? null);
+            const smokeResult = smokeResults[route.capability_id] ?? null;
+            const routeStatus = routeSurfaceStatus(route, management, smokeResult);
+            const routeStatusLabel = localizedEnum(locale, routeStatus, CAPABILITY_SURFACE_STATUS_KEYS);
             const resolvedLabel = route.resolved_candidate?.provider_id
               ? `${route.resolved_candidate.provider_id}/${route.resolved_candidate.model ?? ""}`
               : localizedEnum(locale, route.resolution_status, CAPABILITY_STATUS_KEYS);
@@ -378,8 +620,8 @@ export function CapabilityRoutesPanel({
             const smokeStatusLabel = localizedEnum(locale, management?.smoke.status ?? "unknown", CAPABILITY_STATUS_KEYS);
             const artifactPolicyLabel = localizedEnum(locale, management?.artifacts.policy ?? "unknown", CAPABILITY_ARTIFACT_POLICY_KEYS);
             const visibleCandidates = route.candidates.slice(0, 4);
-            const smokeResult = smokeResults[route.capability_id] ?? null;
             const providerError = smokeProviderError(smokeResult ?? undefined);
+            const diagnostics = diagnosticsByCapability.get(route.capability_id) ?? [];
             const smokePending = isSmokePending && smokePendingCapabilityId === route.capability_id;
             const recentArtifacts = artifactsByCapability.get(route.capability_id) ?? [];
             const selectedProviderCredential = draft.provider_id ? providerCredentials[draft.provider_id] : null;
@@ -433,8 +675,11 @@ export function CapabilityRoutesPanel({
                     <div className="muted compact-copy">{route.capability_id} / {laneLabel} / {transportLabel}</div>
                   </div>
                   <div className="capability-route-badges">
-                    <span className={`session-badge ${route.resolved_candidate ? "capability-ok" : "capability-warn"}`}>
-                      {route.resolved_candidate ? t(locale, "manager_capability_available") : t(locale, "manager_capability_no_candidate")}
+                    <span
+                      className={`session-badge ${capabilitySurfaceToneClass(routeStatus)}`}
+                      data-testid={`capability-route-status-${route.capability_id}`}
+                    >
+                      {routeStatusLabel}
                     </span>
                     <span className="session-badge">{resolvedLabel}</span>
                   </div>
@@ -445,6 +690,25 @@ export function CapabilityRoutesPanel({
                   <span>{t(locale, "manager_capability_adapters")}: {management?.adapters.length ?? 0}</span>
                   <span>{t(locale, "manager_capability_smoke")}: {smokeStatusLabel}</span>
                   <span>{t(locale, "manager_capability_artifacts")}: {artifactPolicyLabel}</span>
+                </div>
+
+                <details className="manager-disclosure capability-route-disclosure">
+                  <summary>{t(locale, "manager_capability_route_details")}</summary>
+                  <div className="manager-disclosure-content">
+                <div className="capability-diagnostic-strip" aria-label={`${routeDisplayName} ${t(locale, "manager_capability_diagnostics")}`}>
+                  {diagnostics.map((diagnostic) => {
+                    const toneClass =
+                      diagnostic.tone === "ok"
+                        ? "capability-ok"
+                        : diagnostic.tone === "warning"
+                          ? "status-tag-warning"
+                          : "";
+                    return (
+                      <span className={`status-tag ${toneClass}`} key={`${route.capability_id}-${diagnostic.key}`}>
+                        {diagnostic.label}
+                      </span>
+                    );
+                  })}
                 </div>
 
                 <div className="capability-safety-panel" aria-label={`${routeDisplayName} ${t(locale, "manager_capability_safety_panel")}`}>
@@ -538,6 +802,9 @@ export function CapabilityRoutesPanel({
                   </div>
                 ) : null}
 
+                  </div>
+                </details>
+
                 <div className="form-grid capability-route-controls">
                   <label className="field">
                     <span>{t(locale, "manager_capability_mode")}</span>
@@ -576,11 +843,15 @@ export function CapabilityRoutesPanel({
                       }}
                     >
                       <option value="">{t(locale, "manager_capability_unavailable")}</option>
-                      {selectableCandidates.map((candidate) => (
-                        <option key={`${candidate.provider_id}/${candidate.model}`} value={`${candidate.provider_id}/${candidate.model}`}>
-                          {candidate.provider_id}/{candidate.model}
-                        </option>
-                      ))}
+                      {selectableCandidates.map((candidate) => {
+                        const status = candidateSurfaceStatus(candidate, route, management, smokeResult);
+                        const statusLabel = localizedEnum(locale, status, CAPABILITY_SURFACE_STATUS_KEYS);
+                        return (
+                          <option key={`${candidate.provider_id}/${candidate.model}`} value={`${candidate.provider_id}/${candidate.model}`}>
+                            {candidate.provider_id}/{candidate.model} - {statusLabel}
+                          </option>
+                        );
+                      })}
                     </select>
                   </label>
                 </div>
@@ -589,12 +860,37 @@ export function CapabilityRoutesPanel({
                   {visibleCandidates.length === 0 ? (
                     <span className="muted compact-copy">{t(locale, "manager_capability_no_candidate_detail")}</span>
                   ) : (
-                    visibleCandidates.map((candidate) => (
-                      <span className="capability-candidate-pill" key={`${candidate.adapter_id}-${candidate.provider_id ?? "standalone"}-${candidate.model ?? "none"}`}>
-                        <strong>{candidate.provider_id ? `${candidate.provider_id}/${candidate.model ?? ""}` : candidate.source}</strong>
-                        <small>{candidate.adapter_id} / {localizedModalities(locale, candidate.input_modalities)}</small>
-                      </span>
-                    ))
+                    visibleCandidates.map((candidate) => {
+                      const candidateStatus = candidateSurfaceStatus(candidate, route, management, smokeResult);
+                      const candidateStatusLabel = localizedEnum(locale, candidateStatus, CAPABILITY_SURFACE_STATUS_KEYS);
+                      const isResolvedCandidate = sameCandidate(candidate, route.resolved_candidate ?? null);
+                      return (
+                        <article
+                          className="capability-candidate-pill"
+                          key={`${candidate.adapter_id}-${candidate.provider_id ?? "standalone"}-${candidate.model ?? "none"}`}
+                        >
+                          <div className="capability-candidate-pill-header">
+                            <strong>{candidate.provider_id ? `${candidate.provider_id}/${candidate.model ?? ""}` : candidate.source}</strong>
+                            <div className="capability-candidate-badges">
+                              <span
+                                className={`session-badge ${capabilitySurfaceToneClass(candidateStatus)}`}
+                                data-testid={`capability-candidate-status-${route.capability_id}-${candidate.provider_id ?? "standalone"}-${candidate.model ?? "none"}`}
+                              >
+                                {candidateStatusLabel}
+                              </span>
+                              {isResolvedCandidate ? <span className="session-badge">{t(locale, "manager_capability_candidate_resolved")}</span> : null}
+                              {candidate.recommended ? <span className="session-badge">{t(locale, "manager_capability_candidate_recommended")}</span> : null}
+                              {candidate.default_for_provider ? <span className="session-badge">{t(locale, "manager_capability_candidate_default")}</span> : null}
+                              {candidate.catalog_present === false ? (
+                                <span className="session-badge capability-warn">{t(locale, "manager_capability_candidate_catalog_missing")}</span>
+                              ) : null}
+                            </div>
+                          </div>
+                          <small>{candidate.adapter_id} / {localizedModalities(locale, candidate.input_modalities)}</small>
+                          <small>{candidateStatusNote(locale, candidate, candidateStatus)}</small>
+                        </article>
+                      );
+                    })
                   )}
                 </div>
 
