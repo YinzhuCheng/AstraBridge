@@ -16,6 +16,7 @@ from .common import (
     app_runtime_dir,
     default_codex_home,
     now_iso,
+    path_for_host,
     read_json,
     slugify,
     write_json,
@@ -24,6 +25,7 @@ from .codex_plugin_skill_project_presets import normalize_project_plugin_skill_p
 from .profile_service import ProfileService
 from .model_catalog import preferred_provider_model_record
 from .security import SECRET_RE, SecurityError, redact_sensitive
+from .task_service import _display_task_title
 from .wsl_dependency_service import DEFAULT_WSL_DISTRO, ASTRABRIDGE_WSL_CODEX_HOME, ASTRABRIDGE_WSL_ROOT
 
 
@@ -52,6 +54,12 @@ SIDEBAR_TASK_STATE_SCHEMA_VERSION = "astrabridge-task-state-v1"
 _OPENAI_DEFAULT_MODEL = str(
     (preferred_provider_model_record("openai", include_deprecated=False) or {}).get("native_model") or "gpt-5.5"
 )
+
+
+def _sidebar_path_key(path: str | Path | None) -> str:
+    """Compare project references after adapting them to the current host."""
+    normalized = str(path_for_host(path)).replace("\\", "/").rstrip("/")
+    return normalized.casefold() if os.name == "nt" else normalized
 
 
 class ProjectService:
@@ -247,7 +255,7 @@ class ProjectService:
         payload = read_json(self.store_path, {"projects": []})
         projects = []
         for item in payload.get("projects") or []:
-            project_file = Path(str(item.get("project_file") or "")).expanduser()
+            project_file = path_for_host(str(item.get("project_file") or ""))
             if project_file.exists():
                 projects.append(item)
         if projects != payload.get("projects"):
@@ -275,13 +283,14 @@ class ProjectService:
                 thread_limit=thread_limit,
             )
             project_nodes.append(current_node)
-            seen_files.add(str(current_node.get("project_file") or ""))
+            seen_files.add(_sidebar_path_key(current_node.get("project_file")))
 
         for item in recent_items:
             if len(project_nodes) >= project_limit:
                 break
             project_file = str((item or {}).get("project_file") or "").strip()
-            if not project_file or project_file in seen_files:
+            project_key = _sidebar_path_key(project_file)
+            if not project_file or project_key in seen_files:
                 continue
             node = self._sidebar_project_node_from_recent(
                 item,
@@ -292,7 +301,7 @@ class ProjectService:
             if node is None:
                 continue
             project_nodes.append(node)
-            seen_files.add(str(node.get("project_file") or ""))
+            seen_files.add(_sidebar_path_key(node.get("project_file")))
 
         return {
             "schema_version": SIDEBAR_SCHEMA_VERSION,
@@ -432,7 +441,7 @@ class ProjectService:
         project_file = str((item or {}).get("project_file") or "").strip()
         if not project_file:
             return None
-        project_path = Path(project_file).expanduser()
+        project_path = path_for_host(project_file)
         if not project_path.exists():
             return None
         warnings: list[str] = []
@@ -462,8 +471,8 @@ class ProjectService:
     ) -> dict[str, Any]:
         project_file = str(project.get("project_file") or "")
         workspace_root = str(project.get("workspace_root") or "")
-        current_task_id = str(project.get("current_task_id") or "")
         task_state, warnings = self._sidebar_task_state(project)
+        current_task_id = str(task_state.get("current_task_id") or project.get("current_task_id") or "")
         tasks = [
             self._sidebar_task_node(task, project=project, current_task_id=current_task_id, thread_limit=thread_limit)
             for task in list(task_state.get("tasks") or [])[:task_limit]
@@ -471,11 +480,15 @@ class ProjectService:
         ]
         return {
             "project_id": str(project.get("project_id") or ""),
-            "name": str(redact_sensitive(project.get("name") or Path(project_file).stem or "Project"))[:160],
+            "name": str(redact_sensitive(project.get("name") or path_for_host(project_file).stem or "Project"))[:160],
             "project_file": project_file,
             "workspace_root": workspace_root,
             "updated_at": str(project.get("updated_at") or task_state.get("updated_at") or ""),
-            "is_current": bool(project_file and current_file and project_file == current_file),
+            "is_current": bool(
+                project_file
+                and current_file
+                and _sidebar_path_key(project_file) == _sidebar_path_key(current_file)
+            ),
             "tasks": tasks,
             "warnings": [*list(project.get("_sidebar_warnings") or []), *warnings],
         }
@@ -485,7 +498,7 @@ class ProjectService:
         workspace_root = str(project.get("workspace_root") or "").strip()
         if not workspace_root:
             return {"schema_version": SIDEBAR_TASK_STATE_SCHEMA_VERSION, "tasks": []}, ["missing_workspace_root"]
-        task_path = Path(workspace_root).expanduser() / WORKSPACE_STATE_DIRNAME / "tasks.json"
+        task_path = path_for_host(workspace_root) / WORKSPACE_STATE_DIRNAME / "tasks.json"
         try:
             state = read_json(task_path, {"schema_version": SIDEBAR_TASK_STATE_SCHEMA_VERSION, "current_task_id": None, "tasks": []})
         except Exception as exc:
@@ -504,10 +517,11 @@ class ProjectService:
         fork_threads = [dict(item) for item in list(task.get("fork_threads") or []) if isinstance(item, dict)]
         thread_nodes = self._sidebar_thread_nodes(provider_threads, fork_threads, active_thread_id=active_thread_id, limit=thread_limit)
         active_lane = self._sidebar_active_lane([*provider_threads, *fork_threads], active_thread_id=active_thread_id)
+        previous_lane_label = self._sidebar_previous_lane_label(task, provider_threads=provider_threads)
         missing_count = len([item for item in provider_threads if item.get("missing_at")])
         return {
             "task_id": str(task.get("task_id") or ""),
-            "title": str(redact_sensitive(task.get("title") or "New task"))[:160],
+            "title": str(redact_sensitive(_display_task_title(task.get("title")) or "New task"))[:160],
             "status": str(task.get("status") or ""),
             "updated_at": str(task.get("updated_at") or task.get("created_at") or ""),
             "is_current": bool(current_task_id and str(task.get("task_id") or "") == current_task_id),
@@ -519,6 +533,7 @@ class ProjectService:
             "thread_count": len(thread_nodes),
             "lane_count": len(thread_nodes),
             "active_lane_label": self._sidebar_thread_title(active_lane) if active_lane else "",
+            "previous_lane_label": previous_lane_label,
             "latest_lane_status": self._sidebar_lane_status(active_lane),
             "handoff_count": len(list(task.get("handoff_events") or [])),
             "checkpoint_count": len(list(task.get("checkpoint_refs") or [])),
@@ -543,6 +558,30 @@ class ProjectService:
         if isinstance(status, dict):
             return str(status.get("type") or status.get("status") or "").strip()[:80]
         return str(status or "").strip()[:80]
+
+    def _sidebar_previous_lane_label(self, task: dict[str, Any], *, provider_threads: list[dict[str, Any]]) -> str:
+        active_thread_id = str(task.get("active_provider_thread_id") or "").strip()
+        handoff_events = [dict(item) for item in list(task.get("handoff_events") or []) if isinstance(item, dict)]
+        latest = next(
+            (
+                event
+                for event in reversed(handoff_events)
+                if str(event.get("to_thread_id") or "").strip() == active_thread_id
+            ),
+            handoff_events[-1] if handoff_events else None,
+        )
+        if not isinstance(latest, dict):
+            return ""
+        from_thread_id = str(latest.get("from_thread_id") or "").strip()
+        if from_thread_id:
+            for item in provider_threads:
+                if str(item.get("thread_id") or "").strip() == from_thread_id:
+                    return self._sidebar_thread_title(item)
+        provider = str(latest.get("from_provider_id") or latest.get("from_profile_id") or "").strip()
+        model = str(latest.get("from_model") or "").strip()
+        if provider and model:
+            return f"{provider} / {model}"
+        return provider or model
 
     def _sidebar_thread_nodes(
         self,

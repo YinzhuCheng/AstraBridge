@@ -20,9 +20,13 @@ class KimiChatTransport(ChatCompletionsTransport):
         upstream_payload = super().build_request(payload)
         merged_messages = self._merge_reasoning_content_into_assistant_messages(list(upstream_payload.get("messages") or []))
         upstream_payload["messages"] = self._repair_tool_message_sequence(merged_messages)
-        effort = self._requested_effort(payload)
-        explicit_effort = self._explicit_requested_effort(payload)
+        effort = self._resolved_reasoning_effort(payload)
+        explicit_effort = self._explicit_reasoning_effort(payload)
+        model_id = str(payload.get("model") or self.profile.get("model") or "").strip()
+        native_model = model_id.split("/", 1)[1] if "/" in model_id else model_id
         has_local_image = self._has_local_image_input(payload)
+        if effort == "off" and native_model in {"kimi-k2.7-code", "kimi-k2.7-code-highspeed"}:
+            raise ValueError(f"{native_model} does not support reasoning effort 'off'; use low, medium, high, or xhigh.")
         if effort == "off":
             upstream_payload["thinking"] = {"type": "disabled"}
         elif has_local_image and explicit_effort not in KIMI_KEEP_ALL_EFFORTS:
@@ -45,22 +49,6 @@ class KimiChatTransport(ChatCompletionsTransport):
             if max_tokens < floor:
                 upstream_payload["max_tokens"] = floor
         return upstream_payload
-
-    def _requested_effort(self, payload: dict[str, Any]) -> str | None:
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, dict):
-            effort = str(reasoning.get("effort") or "").strip().lower()
-            if effort:
-                return effort
-        effort = str(self.profile.get("reasoning_effort") or "").strip().lower()
-        return effort or None
-
-    def _explicit_requested_effort(self, payload: dict[str, Any]) -> str | None:
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, dict):
-            effort = str(reasoning.get("effort") or "").strip().lower()
-            return effort or None
-        return None
 
     def _has_local_image_input(self, payload: dict[str, Any]) -> bool:
         raw_input = payload.get("input")

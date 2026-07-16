@@ -80,12 +80,13 @@ class AutomationTriageService:
             previous_status == "queued" and next_status in {"completed", "needs_review"}
         ):
             assert_transition_run_status(previous_status, next_status)
+        artifact_refs = self._artifact_refs(artifact_ref, result.get("artifact_refs"))
         payload = {
             **existing_run,
             **{key: value for key, value in result.items() if key in AutomationRun.__dataclass_fields__},
             "status": next_status,
             "signal": classification["signal"],
-            "artifact_refs": [artifact_ref],
+            "artifact_refs": artifact_refs,
             "finished_at": result.get("finished_at") if next_status != "running" else None,
             "started_at": result.get("started_at") or existing_run.get("started_at"),
             "summary": str(result.get("summary") or "").strip(),
@@ -136,6 +137,7 @@ class AutomationTriageService:
             "severity": classification["severity"],
             "title": title,
             "summary": str(run.get("summary") or "").strip(),
+            "artifact_refs": list(run.get("artifact_refs") or []),
             "promotion_ref": None,
         }
         return self._store.upsert_inbox_item(item)
@@ -202,6 +204,7 @@ class AutomationTriageService:
             "stdout_excerpt": self._truncate(result.get("stdout_excerpt"), text_limit),
             "stderr_excerpt": self._truncate(result.get("stderr_excerpt"), text_limit),
             "diff_excerpt": self._truncate(result.get("diff_excerpt"), text_limit),
+            "artifact_refs": self._artifact_refs(None, result.get("artifact_refs")),
             "exit_code": result.get("exit_code"),
             "thread_id": result.get("thread_id") or run.get("thread_id"),
             "turn_id": result.get("turn_id"),
@@ -228,6 +231,23 @@ class AutomationTriageService:
                 manifest[field] = self._truncate(manifest.get(field), overflow_limit)
         write_json(manifest_path, manifest)
         return str(manifest_path.resolve())
+
+    @staticmethod
+    def _artifact_refs(primary: str | None, extra: Any) -> list[str]:
+        refs: list[str] = []
+        if isinstance(extra, list):
+            values = extra
+        elif isinstance(extra, tuple):
+            values = list(extra)
+        elif extra:
+            values = [extra]
+        else:
+            values = []
+        for value in [primary, *values]:
+            text = str(value or "").strip()
+            if text and text not in refs:
+                refs.append(text)
+        return refs
 
     def _artifact_root(self, *, automation_id: str, run_id: str) -> Path:
         runtime_root = self._projects.current_runtime_roots()["project_runtime_root"].resolve()

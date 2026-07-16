@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import inspect
 import json
 import mimetypes
 import re
 import time
 import urllib.parse
 from abc import ABC, abstractmethod
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from ...reasoning_policy import normalize_reasoning_effort
 from ..ir import NormalizedResponse, ProviderWarning, RawProviderArtifactRef, ReasoningState, ToolCall, Usage
 from ..tooling import (
     enforce_tool_message_sequence,
@@ -131,11 +135,42 @@ class ProviderTransport(ABC):
     def describe(self) -> str:
         return "responses"
 
+    def transport_signature(self) -> str:
+        return transport_signature_for_class(type(self))
+
     def supports_passthrough_stream(self) -> bool:
         return True
 
     def supports_local_image_input(self) -> bool:
         return False
+
+    def _local_image_data_url(self, raw_path: str) -> str:
+        path = self._local_image_path(raw_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"image file not found: {raw_path}")
+        size = path.stat().st_size
+        if size > LOCAL_IMAGE_MAX_BYTES:
+            raise ValueError(f"image file is too large for provider vision input: {size} bytes")
+        mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+        if mime_type not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+            raise ValueError(f"unsupported image format: {mime_type}")
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+
+    def _local_image_path(self, raw_path: str) -> Path:
+        if not raw_path:
+            raise ValueError("missing local image path")
+        parsed = urllib.parse.urlparse(raw_path)
+        if parsed.scheme == "file":
+            value = urllib.parse.unquote(parsed.path)
+            if value.startswith("/") and len(value) > 3 and value[2] == ":":
+                value = value[1:]
+            return Path(value)
+        if raw_path.startswith("/mnt/") and len(raw_path) > 6 and raw_path[6] == "/":
+            drive = raw_path[5].upper()
+            rest = raw_path[7:].replace("/", "\\")
+            return Path(f"{drive}:\\{rest}")
+        return Path(raw_path)
 
     def _provider_id(self) -> str:
         return str(self.profile.get("provider_id") or self.profile.get("provider_family") or "").strip()
@@ -168,14 +203,25 @@ class ProviderTransport(ABC):
     def _raw_ref(self, *, kind: str, locator: Any, summary: str | None = None) -> RawProviderArtifactRef:
         return RawProviderArtifactRef(kind=kind, locator=str(locator or "unknown"), redaction_status="redacted", summary=summary)
 
+    def _explicit_reasoning_effort(self, payload: dict[str, Any]) -> str | None:
+        reasoning = payload.get("reasoning")
+        if not isinstance(reasoning, dict):
+            return None
+        return normalize_reasoning_effort(reasoning.get("effort"))
+
+    def _resolved_reasoning_effort(self, payload: dict[str, Any]) -> str | None:
+        explicit = self._explicit_reasoning_effort(payload)
+        if explicit is not None:
+            return explicit
+        return normalize_reasoning_effort(self.router.resolve_reasoning_effort(self.profile, payload.get("model")))
+
     def apply_reasoning_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         upstream_payload = dict(payload)
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, dict):
-            return upstream_payload
-        effort = self.router.resolve_reasoning_effort(self.profile, payload.get("model"))
+        effort = self._resolved_reasoning_effort(payload)
         if effort:
             upstream_payload["reasoning"] = {"effort": effort}
+        else:
+            upstream_payload.pop("reasoning", None)
         return upstream_payload
 
     def upstream_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -270,7 +316,7 @@ class ProviderTransport(ABC):
 
 class ResponsesTransport(ProviderTransport):
     def build_request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        upstream_payload = dict(payload)
+        upstream_payload = self.apply_reasoning_config(payload)
         upstream_payload["model"] = str(self.profile.get("model") or "")
         raw_input = payload.get("input")
         if isinstance(raw_input, list):
@@ -729,34 +775,6 @@ class ChatCompletionsTransport(ProviderTransport):
         except Exception as exc:  # noqa: BLE001
             return {"type": "text", "text": f"[image attachment unavailable: {str(exc)[:160]}]"}
 
-    def _local_image_data_url(self, raw_path: str) -> str:
-        path = self._local_image_path(raw_path)
-        if not path.is_file():
-            raise FileNotFoundError(f"image file not found: {raw_path}")
-        size = path.stat().st_size
-        if size > LOCAL_IMAGE_MAX_BYTES:
-            raise ValueError(f"image file is too large for provider vision input: {size} bytes")
-        mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
-        if mime_type not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
-            raise ValueError(f"unsupported image format: {mime_type}")
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-        return f"data:{mime_type};base64,{encoded}"
-
-    def _local_image_path(self, raw_path: str) -> Path:
-        if not raw_path:
-            raise ValueError("missing local image path")
-        parsed = urllib.parse.urlparse(raw_path)
-        if parsed.scheme == "file":
-            value = urllib.parse.unquote(parsed.path)
-            if value.startswith("/") and len(value) > 3 and value[2] == ":":
-                value = value[1:]
-            return Path(value)
-        if raw_path.startswith("/mnt/") and len(raw_path) > 6 and raw_path[6] == "/":
-            drive = raw_path[5].upper()
-            rest = raw_path[7:].replace("/", "\\")
-            return Path(f"{drive}:\\{rest}")
-        return Path(raw_path)
-
     def _command_execution_tool_result(self, item: dict[str, Any]) -> str:
         command = str(item.get("command") or "").strip()
         status = str(item.get("status") or "").strip()
@@ -912,3 +930,28 @@ class ChatCompletionsTransport(ProviderTransport):
         if pending_reasoning:
             merged.append({"role": "assistant", "content": "", "reasoning_content": pending_reasoning})
         return merged
+
+
+@lru_cache(maxsize=None)
+def transport_signature_for_class(transport_class: type[ProviderTransport]) -> str:
+    digest = hashlib.sha256()
+    digest.update(str(transport_class.__module__).encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(str(transport_class.__qualname__).encode("utf-8"))
+    digest.update(b"\0")
+    for source_file in _transport_source_files(transport_class):
+        digest.update(source_file.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+@lru_cache(maxsize=None)
+def _transport_source_files(transport_class: type[ProviderTransport]) -> tuple[Path, ...]:
+    files: list[Path] = []
+    for candidate in (inspect.getsourcefile(transport_class), inspect.getsourcefile(ProviderTransport)):
+        if not candidate:
+            continue
+        path = Path(candidate).resolve()
+        if path not in files and path.is_file():
+            files.append(path)
+    return tuple(files)

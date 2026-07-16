@@ -13,6 +13,10 @@ from .specs import (
     normalize_schema,
 )
 from .capability_registry import CapabilityCandidate, CapabilityRegistry, default_capability_registry
+from .dashscope_image_generate_adapter import (
+    DASHSCOPE_IMAGE_GENERATE_CAPABILITY_RESULT_SCHEMA,
+    DashScopeImageGenerateAdapter,
+)
 from .runtime import CapabilityRuntime
 from .smoke import CAPABILITY_SMOKE_SCHEMA_VERSION, capability_smoke_snapshot
 from .artifacts import CAPABILITY_ARTIFACTS_SCHEMA_VERSION, capability_artifact_snapshot
@@ -22,6 +26,7 @@ from .speech_transcribe_adapter import (
     QwenSpeechTranscribeAdapter,
 )
 from .speech_synthesize_adapter import (
+    AlibabaSpeechSynthesizeAdapter,
     SPEECH_SYNTHESIZE_CAPABILITY_RESULT_SCHEMA,
     QwenSpeechSynthesizeAdapter,
 )
@@ -50,8 +55,11 @@ __all__ = [
     "default_capability_registry",
     "default_adapter_contracts",
     "default_capability_specs",
+    "DASHSCOPE_IMAGE_GENERATE_CAPABILITY_RESULT_SCHEMA",
+    "DashScopeImageGenerateAdapter",
     "IMAGE_GENERATE_CAPABILITY_RESULT_SCHEMA",
     "QwenVisionAnalyzeAdapter",
+    "AlibabaSpeechSynthesizeAdapter",
     "QwenSpeechSynthesizeAdapter",
     "QwenSpeechTranscribeAdapter",
     "SPEECH_SYNTHESIZE_CAPABILITY_RESULT_SCHEMA",

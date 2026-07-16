@@ -172,7 +172,7 @@ def _tools() -> list[dict[str, Any]]:
                     "mask_path": {"type": "string", "description": "Optional local PNG mask path."},
                     "model": {
                         "type": "string",
-                        "enum": ["gpt-image-1", "gpt-image-1-all", "flux-kontext-pro", "flux-kontext-max", "gpt-image-2", "gpt-image-2-all"],
+                        "enum": ["gpt-image-1", "gpt-image-2", "gpt-image-2-all"],
                         "default": "gpt-image-2",
                     },
                     "size": {

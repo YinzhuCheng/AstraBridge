@@ -39,12 +39,19 @@ class ContextBudgetReport:
     effective_context_window_percent: int
     effective_context_budget_tokens: int | None
     auto_compact_token_limit: int | None
+    tool_output_token_limit: int | None
+    manual_compact_status: str
+    auto_compact_status: str
+    compact_summary_quality_status: str
     tool_schema_token_estimate: int
     usable_prompt_budget_tokens: int | None
     full_text_tokens: int
     selected_text_tokens: int
     selected_text_chars: int
     compact_recommended: bool
+    preflight_budgeting_status: str
+    automatic_request_truncation: bool
+    provider_rejection_category: str
     dropped_section_ids: tuple[str, ...]
     section_estimates: tuple[ContextSectionEstimate, ...]
 
@@ -86,7 +93,14 @@ def build_context_budget(
     context_window: int | None,
     effective_context_window_percent: int = 80,
     auto_compact_token_limit: int | None = None,
+    tool_output_token_limit: int | None = None,
+    manual_compact_status: str = "app_server_native",
+    auto_compact_status: str = "configured_unverified",
+    compact_summary_quality_status: str = "untested",
     tool_schema_token_estimate: int = 0,
+    preflight_budgeting_status: str = "budgeted_before_send",
+    automatic_request_truncation: bool = False,
+    provider_rejection_category: str = "context_window_limit",
 ) -> tuple[str, ContextBudgetReport]:
     ordered = sorted(sections, key=lambda item: (item.priority, item.section_id))
     effective_budget = None
@@ -167,12 +181,19 @@ def build_context_budget(
         effective_context_window_percent=int(effective_context_window_percent or 80),
         effective_context_budget_tokens=effective_budget,
         auto_compact_token_limit=auto_compact_token_limit,
+        tool_output_token_limit=tool_output_token_limit,
+        manual_compact_status=str(manual_compact_status or "app_server_native"),
+        auto_compact_status=str(auto_compact_status or "configured_unverified"),
+        compact_summary_quality_status=str(compact_summary_quality_status or "untested"),
         tool_schema_token_estimate=int(tool_schema_token_estimate or 0),
         usable_prompt_budget_tokens=usable_budget,
         full_text_tokens=estimate_text_tokens(full_text),
         selected_text_tokens=selected_tokens,
         selected_text_chars=selected_chars,
         compact_recommended=compact_recommended,
+        preflight_budgeting_status=str(preflight_budgeting_status or "budgeted_before_send"),
+        automatic_request_truncation=bool(automatic_request_truncation),
+        provider_rejection_category=str(provider_rejection_category or "context_window_limit"),
         dropped_section_ids=tuple(dropped),
         section_estimates=tuple(estimates),
     )

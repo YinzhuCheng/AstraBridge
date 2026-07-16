@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agentic Update Pipeline"
+  short_description: "Controlled AstraBridge update proposals"
+  default_prompt: "Use $agentic-update-pipeline to discover and propose a scoped AstraBridge provider or Codex kernel update."

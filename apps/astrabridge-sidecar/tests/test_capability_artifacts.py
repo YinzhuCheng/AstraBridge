@@ -45,7 +45,7 @@ class CapabilityArtifactTests(unittest.TestCase):
                     "saved_at": "2026-06-25T02:00:00Z",
                     "capability_id": "speech.synthesize",
                     "provider_id": "qwen",
-                    "model": "qwen3-omni-flash",
+                    "model": "qwen3-tts-flash",
                     "mime_type": "audio/wav",
                     "audio_path": str(audio_path),
                     "transcript_path": str(transcript_path),

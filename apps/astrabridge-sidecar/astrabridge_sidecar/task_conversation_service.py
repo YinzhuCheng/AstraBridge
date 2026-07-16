@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
+import re
 from typing import Any
 
 from .common import now_iso, read_json, write_json
@@ -17,6 +18,7 @@ MAX_SNAPSHOT_TURNS = 60
 MAX_DIGEST_ITEMS = 12
 MAX_TEXT_CHARS = 1200
 MAX_STORED_STRING_CHARS = 12000
+SMOKE_TASK_PREFIX_PATTERN = re.compile(r"^Step\s+\d+\s+(?:source|target)\s+for\s+", re.IGNORECASE)
 
 
 class TaskConversationService:
@@ -43,21 +45,33 @@ class TaskConversationService:
         state["updated_at"] = now_iso()
         write_json(self._path(), state)
 
+    def thread_snapshot(self, thread_id: str) -> dict[str, Any] | None:
+        clean_thread_id = str(thread_id or "").strip()
+        if not clean_thread_id:
+            return None
+        state = self._state()
+        snapshot = dict((state.get("threads") or {}).get(clean_thread_id) or {})
+        if not snapshot:
+            return None
+        return snapshot
+
     def conversation(self, *, task_id: str | None = None) -> dict[str, Any]:
         task = self._task_by_id(task_id) if task_id else self._current_task()
         if not task:
             raise ValueError("No current task is available.")
+        task_view = self._tasks.task_view(task) or task
+        visible_task_title = self._visible_task_title(task_view.get("title"))
         state = self._state()
         snapshots = dict(state.get("threads") or {})
-        active_thread_id = str(task.get("active_provider_thread_id") or "").strip()
+        active_thread_id = str(task_view.get("active_provider_thread_id") or "").strip()
         turns: list[dict[str, Any]] = []
-        provider_threads = [dict(item) for item in list(task.get("provider_threads") or []) if isinstance(item, dict)]
+        provider_threads = [dict(item) for item in list(task_view.get("provider_threads") or []) if isinstance(item, dict)]
         for route in reversed(provider_threads):
             thread_id = str(route.get("thread_id") or "").strip()
             snapshot = dict(snapshots.get(thread_id) or {})
             if not snapshot:
                 continue
-            cutoff = self._task_route_cutoff(route=route, task=task)
+            cutoff = self._task_route_cutoff(route=route, task=task_view)
             for turn in list(snapshot.get("turns") or []):
                 if not isinstance(turn, dict):
                     continue
@@ -65,30 +79,31 @@ class TaskConversationService:
                 if cutoff is not None and turn_ts is not None and (turn_ts + 999) < cutoff:
                     continue
                 turns.append(self._annotate_turn(dict(turn), snapshot=snapshot, route=route))
-        for handoff_event in list(task.get("handoff_events") or []):
+        for handoff_event in list(task_view.get("handoff_events") or []):
             if not isinstance(handoff_event, dict):
                 continue
-            handoff_turn = self._handoff_turn(task=task, handoff_event=handoff_event)
+            handoff_turn = self._handoff_turn(task=task_view, handoff_event=handoff_event)
             if handoff_turn:
                 turns.append(handoff_turn)
         turns.sort(key=self._turn_sort_key)
         active_snapshot = dict(snapshots.get(active_thread_id) or {})
-        active_route = self._route_for_thread(task, active_thread_id)
+        active_route = self._route_for_thread(task_view, active_thread_id)
         return {
             "thread": {
-                "id": f"task:{task.get('task_id')}",
-                "sessionId": f"task:{task.get('task_id')}",
-                "name": task.get("title") or "Task conversation",
-                "displayName": task.get("title") or "Task conversation",
+                "id": f"task:{task_view.get('task_id')}",
+                "sessionId": f"task:{task_view.get('task_id')}",
+                "name": visible_task_title or "Task conversation",
+                "displayName": visible_task_title or "Task conversation",
                 "status": active_snapshot.get("status") or {"type": "idle"},
                 "shellSettings": self._shell_settings(active_route),
                 "turns": turns,
                 "isCompositeTaskThread": True,
-                "task_id": task.get("task_id"),
+                "task_id": task_view.get("task_id"),
                 "active_provider_thread_id": active_thread_id or None,
                 "provider_threads": provider_threads,
+                "lane_state": task_view.get("lane_state"),
             },
-            "task": task,
+            "task": task_view,
             "transcript_path": str(self._path()),
             "updated_at": state.get("updated_at"),
         }
@@ -138,11 +153,12 @@ class TaskConversationService:
         sanitized, stripped_provider_keys = sanitize_provider_private_state(sanitized)
         sanitized = self._truncate_large_strings(sanitized)
         turns = [dict(item) for item in list(sanitized.get("turns") or []) if isinstance(item, dict)]
+        visible_name = self._visible_task_title(sanitized.get("name") or sanitized.get("displayName") or route.get("name"))
         snapshot = {
             "thread_id": str(sanitized.get("id") or sanitized.get("thread_id") or ""),
             "task_id": task.get("task_id"),
-            "name": sanitized.get("name") or sanitized.get("displayName") or route.get("name") or "",
-            "displayName": sanitized.get("displayName") or sanitized.get("name") or route.get("name") or "",
+            "name": visible_name,
+            "displayName": visible_name,
             "status": sanitized.get("status") if isinstance(sanitized.get("status"), dict) else {"type": str(sanitized.get("status") or "idle")},
             "shellSettings": self._shell_settings({**route, **dict(sanitized.get("shellSettings") or {})}),
             "profile_id": route.get("profile_id") or dict(sanitized.get("shellSettings") or {}).get("profile_id"),
@@ -156,6 +172,12 @@ class TaskConversationService:
         if stripped_provider_keys:
             snapshot["provider_private_redactions"] = stripped_provider_keys
         return redact_sensitive(snapshot)
+
+    def _visible_task_title(self, value: Any) -> str:
+        title = str(value or "").strip()
+        if not title:
+            return ""
+        return SMOKE_TASK_PREFIX_PATTERN.sub("", title).strip()
 
     def _annotate_turn(self, turn: dict[str, Any], *, snapshot: dict[str, Any], route: dict[str, Any]) -> dict[str, Any]:
         thread_id = str(snapshot.get("thread_id") or route.get("thread_id") or "")
@@ -268,13 +290,20 @@ class TaskConversationService:
         replayable_artifact_count = int(transition_summary.get("replayable_artifact_count") or 0)
         projection_preview = str(transition_summary.get("projection_preview") or "").strip()
         warning_count = len(list(transition_summary.get("warnings") or []))
+        source_provider = str(handoff_event.get("from_provider_id") or transition_summary.get("from_provider") or "").strip()
+        source_model = str(handoff_event.get("from_model") or "").strip()
         target_provider = str(handoff_event.get("provider_id") or "").strip()
         target_model = str(handoff_event.get("model") or "").strip()
         target_thread_id = str(handoff_event.get("to_thread_id") or "").strip()
         summary_parts = [
             "Provider handoff",
-            f"to {target_provider}/{target_model}".strip("/"),
         ]
+        source_route = f"{source_provider}/{source_model}".strip("/")
+        target_route = f"{target_provider}/{target_model}".strip("/")
+        if source_route and target_route:
+            summary_parts.append(f"{source_route} -> {target_route}")
+        elif target_route:
+            summary_parts.append(f"to {target_route}")
         if projection_mode:
             summary_parts.append(f"via {projection_mode}")
         if dropped_artifacts:
@@ -387,7 +416,14 @@ class TaskConversationService:
         }
 
     def _task_for_thread(self, thread_id: str) -> dict[str, Any] | None:
-        for task in list((self._tasks.snapshot() or {}).get("tasks") or []):
+        current = self._current_task()
+        if isinstance(current, dict) and any(
+            str(item.get("thread_id") or "") == thread_id
+            for item in list(current.get("provider_threads") or [])
+            if isinstance(item, dict)
+        ):
+            return current
+        for task in self._full_tasks():
             if not isinstance(task, dict):
                 continue
             if any(str(item.get("thread_id") or "") == thread_id for item in list(task.get("provider_threads") or []) if isinstance(item, dict)):
@@ -398,7 +434,10 @@ class TaskConversationService:
         clean_task_id = str(task_id or "").strip()
         if not clean_task_id:
             return None
-        for task in list((self._tasks.snapshot() or {}).get("tasks") or []):
+        current = self._current_task()
+        if isinstance(current, dict) and str(current.get("task_id") or "") == clean_task_id:
+            return current
+        for task in self._full_tasks():
             if isinstance(task, dict) and str(task.get("task_id") or "") == clean_task_id:
                 return task
         return None
@@ -406,6 +445,16 @@ class TaskConversationService:
     def _current_task(self) -> dict[str, Any] | None:
         task = self._tasks.current_task()
         return dict(task) if isinstance(task, dict) else None
+
+    def _full_tasks(self) -> list[dict[str, Any]]:
+        state = getattr(self._tasks, "_state", None)
+        if callable(state):
+            try:
+                payload = state()
+                return [dict(item) for item in list(payload.get("tasks") or []) if isinstance(item, dict)]
+            except Exception:
+                pass
+        return []
 
     def _state(self) -> dict[str, Any]:
         payload = read_json(self._path(), {"schema_version": TASK_TRANSCRIPT_SCHEMA_VERSION, "threads": {}})

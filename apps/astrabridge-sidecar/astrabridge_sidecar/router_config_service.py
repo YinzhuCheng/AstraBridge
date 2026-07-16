@@ -19,13 +19,73 @@ from .providers import (
     get_provider_profile,
     resolve_provider_id,
 )
-from .providers.tooling import assess_model_authority
+from .providers.transports import transport_class_for_profile
+from .providers.transports.base import transport_signature_for_class
+from .providers.tooling import assess_model_authority, has_structured_tool_surface
 
 
 PROFILE_MODEL_SEED_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
+    "qwen": {
+        "qwen3-vl-plus": {
+            "display_name": "Qwen3 VL Plus",
+            "input_modalities": ["text", "image"],
+            "source_urls": [
+                "https://help.aliyun.com/zh/model-studio/models",
+                "https://help.aliyun.com/zh/model-studio/vision",
+            ],
+        },
+        "qwen3-vl-flash": {
+            "display_name": "Qwen3 VL Flash",
+            "input_modalities": ["text", "image"],
+            "source_urls": [
+                "https://help.aliyun.com/zh/model-studio/models",
+                "https://help.aliyun.com/zh/model-studio/vision",
+            ],
+        },
+        "qwen3-asr-flash": {
+            "display_name": "Qwen3 ASR Flash",
+            "input_modalities": ["text", "audio"],
+            "source_urls": [
+                "https://help.aliyun.com/zh/model-studio/models",
+                "https://help.aliyun.com/zh/model-studio/asr-model/",
+            ],
+        },
+        "qwen3-tts-flash": {
+            "display_name": "Qwen3 TTS Flash",
+            "input_modalities": ["text", "audio"],
+            "source_urls": [
+                "https://help.aliyun.com/zh/model-studio/models",
+                "https://help.aliyun.com/zh/model-studio/qwen-tts-api",
+            ],
+        },
+        "qwen3-tts-instruct-flash": {
+            "display_name": "Qwen3 TTS Instruct Flash",
+            "input_modalities": ["text", "audio"],
+            "source_urls": [
+                "https://help.aliyun.com/zh/model-studio/models",
+                "https://help.aliyun.com/zh/model-studio/qwen-tts-api",
+            ],
+        },
+    },
     "kimi": {
         "kimi-k2.7-code": {
             "display_name": "Kimi K2.7 Code",
+            "input_modalities": ["text", "image"],
+            "modality_limits": {
+                "image_transport": "chat_completions_base64_image_url",
+                "remote_image_url_supported": False,
+                "supported_image_formats": ["png", "jpeg", "webp", "gif"],
+                "request_body_limit_mb": 100,
+                "video_input": "provider_supported_unverified_in_astrabridge",
+            },
+            "source_urls": [
+                "https://platform.moonshot.ai/docs/overview",
+                "https://platform.kimi.com/docs/api/overview",
+                "https://platform.kimi.com/docs/guide/start-using-kimi-api",
+            ],
+        },
+        "kimi-k2.7-code-highspeed": {
+            "display_name": "Kimi K2.7 Code Highspeed",
             "input_modalities": ["text", "image"],
             "modality_limits": {
                 "image_transport": "chat_completions_base64_image_url",
@@ -64,7 +124,11 @@ PROVIDER_METADATA_FIELDS = (
     "runtime_backend",
     "supported_reasoning_levels",
     "default_reasoning_level",
+    "native_supported_reasoning_levels",
+    "native_default_reasoning_level",
     "reasoning_policy_mode",
+    "supports_reasoning_replay",
+    "preserve_reasoning_for_tool_turns",
     "input_modalities",
     "edit_policy",
     "capabilities",
@@ -100,16 +164,52 @@ PROVIDER_METADATA_FIELDS = (
     "drop_unsupported_modalities",
 )
 
+CATALOG_MANAGED_MODEL_SOURCE_STATUSES = {"official_docs", "screenshot_seed", "seeded"}
+CATALOG_MANAGED_MODALITY_SYNC_FIELDS = (
+    "input_modalities",
+    "supports_image_detail_original",
+    "modality_limits",
+    "ui_warnings",
+)
+
 
 class RouterConfigService:
     def __init__(self, profile_service, store_path: Path | None = None) -> None:
         self._profiles = profile_service
         self.store_path = store_path or (app_data_dir() / "router_config.json")
 
+    def health_snapshot(self) -> dict[str, Any]:
+        payload = read_json(self.store_path, {})
+        if not isinstance(payload, dict):
+            payload = {}
+        providers = [item for item in payload.get("providers") or [] if isinstance(item, dict)]
+        models = [item for item in payload.get("models") or [] if isinstance(item, dict)]
+        if not providers:
+            profiles = list((self._profiles.list_profiles().get("profiles") or []))
+            providers = [self._provider_from_profile(profile) for profile in profiles if isinstance(profile, dict) and profile.get("base_url")]
+        if not providers:
+            providers = [dict(item) for item in current_generated_catalog().providers]
+        if not models:
+            models = [dict(item) for item in current_generated_catalog().models if isinstance(item, dict)]
+        enabled_provider_ids = {str(item.get("id") or item.get("provider_id") or "") for item in providers if item.get("enabled", True)}
+        enabled_model_count = len(
+            [
+                item
+                for item in models
+                if item.get("enabled", True) and str(item.get("provider") or item.get("provider_id") or "") in enabled_provider_ids
+            ]
+        )
+        return {
+            "providers": providers,
+            "provider_count": len([item for item in providers if item.get("enabled", True)]),
+            "model_count": enabled_model_count,
+            "latest_test": payload.get("latest_test"),
+        }
+
     def snapshot(self) -> dict[str, Any]:
         payload = self._load()
         providers = payload["providers"]
-        models = payload["models"]
+        models = self._refresh_models(providers, payload["models"])
         latest_test = payload.get("latest_test")
         capability_routes = self.capability_route_snapshot(models)
         providers_with_capabilities = [
@@ -136,7 +236,8 @@ class RouterConfigService:
         return list(self._load()["providers"])
 
     def models(self) -> list[dict[str, Any]]:
-        return list(self._load()["models"])
+        payload = self._load()
+        return self._refresh_models(payload["providers"], payload["models"])
 
     def reasoning(self) -> dict[str, Any]:
         return dict(self._load()["reasoning"])
@@ -321,6 +422,163 @@ class RouterConfigService:
         write_json(self.store_path, payload)
         return merged
 
+    def apply_catalog_seed(
+        self,
+        providers: list[dict[str, Any]],
+        models: list[dict[str, Any]],
+        *,
+        managed_provider_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Apply a generated catalog with one router-config write.
+
+        Metadata refresh used to call the single-record upsert methods for
+        every provider and model. Each call reloaded and atomically rewrote
+        the same JSON file, which made the asynchronous job appear stuck on
+        Windows and increased the chance of watcher/reader contention. Keep
+        the single-record methods for interactive edits, but use one in-memory
+        merge for catalog refreshes.
+        """
+        payload = self._load()
+        provider_map = {
+            str(item.get("id") or item.get("provider_id") or ""): dict(item)
+            for item in list(payload.get("providers") or [])
+            if isinstance(item, dict) and str(item.get("id") or item.get("provider_id") or "").strip()
+        }
+        model_map = {
+            str(item.get("id") or ""): dict(item)
+            for item in list(payload.get("models") or [])
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        }
+        incoming_provider_ids: set[str] = set()
+        applied_providers: list[dict[str, Any]] = []
+
+        for provider in list(providers or []):
+            if not isinstance(provider, dict):
+                continue
+            provider_id = str(provider.get("id") or provider.get("provider_id") or "").strip()
+            if not provider_id:
+                continue
+            existing = provider_map.get(provider_id) or {}
+            provider_family = _provider_family(
+                provider_id,
+                provider_family=provider.get("provider_family"),
+                adapter_profile=provider.get("adapter_profile"),
+                wire_api=provider.get("adapter_type") or provider.get("wire_api"),
+                base_url=provider.get("base_url"),
+                model=provider.get("default_model") or provider.get("model"),
+            )
+            registry_profile = get_provider_profile(provider_family) if provider_family else None
+            registry_defaults = registry_profile.to_router_provider() if registry_profile else {}
+            display_name = str(
+                provider.get("display_name")
+                or provider.get("label")
+                or (registry_profile.display_name if registry_profile else provider_id)
+            ).strip()
+            default_model = str(
+                provider.get("default_model")
+                or provider.get("model")
+                or (registry_profile.default_model if registry_profile else "")
+            ).strip()
+            merged_provider = {
+                **registry_defaults,
+                "id": provider_id,
+                "provider_id": provider_id,
+                "provider_family": provider_family,
+                "display_name": display_name,
+                "enabled": bool(provider.get("enabled", True)),
+                "adapter_type": str(
+                    provider.get("adapter_type")
+                    or provider.get("wire_api")
+                    or ("responses" if registry_profile and registry_profile.protocol in {"responses", "qwen_responses"} else "responses")
+                ),
+                "runtime_backend": str(
+                    provider.get("runtime_backend")
+                    or provider.get("execution_backend")
+                    or (registry_profile.runtime_backend if registry_profile else "app_server")
+                ),
+                "base_url": str(provider.get("base_url") or (registry_profile.base_url if registry_profile else "")).strip(),
+                # Catalog seeds are sanitized and omit credentials. Preserve a
+                # configured reference instead of accidentally disconnecting a
+                # provider during a metadata refresh.
+                "auth_key_ref": provider.get("auth_key_ref")
+                if provider.get("auth_key_ref") is not None
+                else existing.get("auth_key_ref"),
+                "default_model": default_model,
+                "request_timeout_ms": int(provider.get("request_timeout_ms") or 300000),
+                "stream_idle_timeout_ms": int(provider.get("stream_idle_timeout_ms") or 300000),
+                "env_key": str(
+                    provider.get("env_key")
+                    or ((registry_profile.auth.env_vars[0]) if registry_profile and registry_profile.auth.env_vars else "OPENAI_API_KEY")
+                ).strip(),
+                "auth_mode": str(provider.get("auth_mode") or "os_keychain").strip(),
+                "proxy_mode": str(provider.get("proxy_mode") or "direct"),
+                "proxy_url": str(provider.get("proxy_url") or ""),
+                "logo_source_url": str(provider.get("logo_source_url") or ""),
+                "logo_asset_path": str(provider.get("logo_asset_path") or ""),
+                "logo_license_note": str(provider.get("logo_license_note") or ""),
+                "accent_color": str(provider.get("accent_color") or ""),
+                "created_at": existing.get("created_at") or provider.get("created_at") or now_iso(),
+                "updated_at": now_iso(),
+            }
+            provider_map[provider_id] = merged_provider
+            incoming_provider_ids.add(provider_id)
+            applied_providers.append(merged_provider)
+
+        managed_ids = {str(item).strip() for item in (managed_provider_ids or incoming_provider_ids) if str(item).strip()}
+        incoming_model_ids: set[str] = set()
+        for model in list(models or []):
+            if not isinstance(model, dict):
+                continue
+            provider_id = str(model.get("provider") or model.get("provider_id") or "").strip()
+            native_model = str(model.get("native_model") or "").strip()
+            model_id = str(model.get("id") or "").strip()
+            if not provider_id and "/" in model_id:
+                provider_id, native_model = model_id.split("/", 1)
+            if not native_model and "/" in model_id:
+                native_model = model_id.split("/", 1)[1]
+            if not provider_id or not native_model:
+                continue
+            model_id = model_id if "/" in model_id else f"{provider_id}/{native_model}"
+            provider_family = _provider_family(provider_id, model=native_model)
+            base_defaults = _profile_model_defaults(provider_family)
+            merged_model = {**base_defaults, **model}
+            existing = model_map.get(model_id) or {}
+            model_map[model_id] = {
+                "id": model_id,
+                "provider": provider_id,
+                "native_model": native_model,
+                "display_name": str(merged_model.get("display_name") or native_model),
+                "enabled": bool(merged_model.get("enabled", True)),
+                "advertised_context_window": int(merged_model.get("advertised_context_window") or 1000000),
+                "ui_context_hint_only": bool(merged_model.get("ui_context_hint_only", True)),
+                "adapter_profile": str(merged_model.get("adapter_profile") or "default"),
+                **_model_capability_fields(merged_model),
+                "created_at": existing.get("created_at") or merged_model.get("created_at") or now_iso(),
+                "updated_at": now_iso(),
+            }
+            incoming_model_ids.add(model_id)
+
+        # Keep user/custom models, but remove stale entries owned by the
+        # generated providers exactly as the old per-record path did.
+        model_map = {
+            model_id: item
+            for model_id, item in model_map.items()
+            if str(item.get("provider") or "") not in managed_ids or model_id in incoming_model_ids
+        }
+        for provider_id in incoming_provider_ids:
+            provider = provider_map[provider_id]
+            default_model = str(provider.get("default_model") or "").strip()
+            default_id = f"{provider_id}/{default_model}" if default_model else ""
+            if default_id and default_id not in model_map:
+                model_map[default_id] = self._default_model(provider, default_model)
+
+        payload["providers"] = sorted(provider_map.values(), key=lambda item: str(item.get("id")))
+        payload["models"] = sorted(model_map.values(), key=lambda item: str(item.get("id")))
+        write_json(self.store_path, payload)
+        for provider in applied_providers:
+            self._sync_provider_profile(provider)
+        return self.snapshot()
+
     def delete_model(self, model_id: str) -> dict[str, Any]:
         payload = self._load()
         payload["models"] = [item for item in payload["models"] if str(item.get("id")) != model_id]
@@ -344,11 +602,44 @@ class RouterConfigService:
         payload["latest_test"] = {"timestamp": now_iso(), **result}
         write_json(self.store_path, payload)
 
+    def record_app_server_image_transport_verification(self, model_id: str, verification: dict[str, Any] | None) -> dict[str, Any]:
+        payload = self._load()
+        models = []
+        updated_model: dict[str, Any] | None = None
+        for item in payload["models"]:
+            if not isinstance(item, dict):
+                models.append(item)
+                continue
+            if str(item.get("id") or "") != str(model_id or "").strip():
+                models.append(item)
+                continue
+            updated = dict(item)
+            if verification:
+                updated["app_server_image_transport_verification"] = dict(verification)
+            else:
+                updated.pop("app_server_image_transport_verification", None)
+            updated["updated_at"] = now_iso()
+            updated_model = updated
+            models.append(updated)
+        if updated_model is None:
+            raise ValueError(f"Unknown model id: {model_id}")
+        payload["models"] = models
+        write_json(self.store_path, payload)
+        providers = payload["providers"]
+        return self._refresh_model(
+            {
+                str(item.get("id") or item.get("provider_id") or ""): dict(item)
+                for item in providers
+                if isinstance(item, dict)
+            },
+            updated_model,
+        )
+
     def export_sanitized(self) -> dict[str, Any]:
         payload = self._load()
         exported = {
             "providers": [],
-            "models": payload["models"],
+            "models": self._refresh_models(payload["providers"], payload["models"]),
             "reasoning": payload["reasoning"],
             "capability_routes": payload.get("capability_routes") or {},
         }
@@ -516,6 +807,40 @@ class RouterConfigService:
 
     def _merge_known_models(self, providers: list[dict[str, Any]], models: list[dict[str, Any]]) -> list[dict[str, Any]]:
         merged = {str(item.get("id")): dict(item) for item in models if isinstance(item, dict)}
+        generated = current_generated_catalog()
+        generated_by_id = {
+            str(item.get("id") or ""): dict(item)
+            for item in generated.models
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        }
+        for model_id, existing in list(merged.items()):
+            generated_model = generated_by_id.get(model_id)
+            if not generated_model or not _should_sync_catalog_managed_modalities(existing, generated.catalog_version):
+                continue
+            synced = dict(existing)
+            for field in CATALOG_MANAGED_MODALITY_SYNC_FIELDS:
+                if field in generated_model:
+                    synced[field] = generated_model[field]
+            # Keep static transport limits from the generated catalog. Only the
+            # app-server verification fields are recalculated below; dropping
+            # the whole map loses provider-specific image/audio constraints.
+            modality_limits = dict(generated_model.get("modality_limits") or {})
+            for field in (
+                "app_server_image_input_status",
+                "app_server_image_transport_signature",
+                "app_server_image_last_verified_at",
+            ):
+                modality_limits.pop(field, None)
+            if modality_limits:
+                synced["modality_limits"] = modality_limits
+            else:
+                synced.pop("modality_limits", None)
+            synced.pop("ui_warnings", None)
+            computed_fields = _model_capability_fields(synced)
+            for field in CATALOG_MANAGED_MODALITY_SYNC_FIELDS:
+                if field in computed_fields:
+                    synced[field] = computed_fields[field]
+            merged[model_id] = synced
         provider_model_counts: dict[str, int] = {}
         for item in models:
             if not isinstance(item, dict):
@@ -561,6 +886,39 @@ class RouterConfigService:
                 }
         return sorted(merged.values(), key=lambda item: str(item.get("id")))
 
+    def _refresh_models(self, providers: list[dict[str, Any]], models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        provider_map = {
+            str(item.get("id") or item.get("provider_id") or ""): dict(item)
+            for item in providers
+            if isinstance(item, dict)
+        }
+        refreshed: list[dict[str, Any]] = []
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            refreshed.append(self._refresh_model(provider_map, dict(item)))
+        return refreshed
+
+    def _refresh_model(self, provider_map: dict[str, dict[str, Any]], model: dict[str, Any]) -> dict[str, Any]:
+        provider_id = str(model.get("provider") or "")
+        provider = dict(provider_map.get(provider_id) or {})
+        native_model = str(model.get("native_model") or "")
+        provider_family = _provider_family(
+            provider.get("provider_family") or model.get("provider_family") or provider_id,
+            provider_family=provider.get("provider_family") or model.get("provider_family"),
+            adapter_profile=model.get("adapter_profile") or provider.get("adapter_profile"),
+            wire_api=provider.get("adapter_type") or provider.get("wire_api"),
+            base_url=provider.get("base_url"),
+            model=native_model or provider.get("default_model"),
+        )
+        merged = {**_profile_model_defaults(provider_family), **model}
+        refreshed = {
+            **model,
+            "provider_family": provider_family or model.get("provider_family"),
+            **_model_capability_fields(merged),
+        }
+        return _apply_app_server_image_transport_status(refreshed, provider=provider)
+
 
 def _profile_seed_entries(provider_family: str | None) -> list[dict[str, Any]]:
     if not provider_family:
@@ -571,11 +929,14 @@ def _profile_seed_entries(provider_family: str | None) -> list[dict[str, Any]]:
         return []
     advertised_context_window = profile.context_window() or 1_000_000
     preferred_models = profile.fallback_policy.fallback_models or profile.fallback_models or (profile.default_model,)
+    override_models = tuple(PROFILE_MODEL_SEED_OVERRIDES.get(profile.id, {}).keys())
     seed_entries: list[dict[str, Any]] = []
-    for native_model in preferred_models:
+    seen_models: set[str] = set()
+    for native_model in (*preferred_models, *override_models):
         clean_model = str(native_model or "").strip()
-        if not clean_model:
+        if not clean_model or clean_model in seen_models:
             continue
+        seen_models.add(clean_model)
         overrides = PROFILE_MODEL_SEED_OVERRIDES.get(profile.id, {}).get(clean_model, {})
         seed_entries.append(
             {
@@ -600,13 +961,22 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
     authority = assess_model_authority(
         {
             **model,
-            "supports_tool_calls": bool(model.get("supports_mcp_tools", False) or model.get("apply_patch_tool_type")),
+            "supports_tool_calls": has_structured_tool_surface(model),
         }
     )
     ui_warnings = list(model.get("ui_warnings") or _default_ui_warnings(model, modalities))
     for warning in authority.ui_warnings:
         if warning not in ui_warnings:
             ui_warnings.append(warning)
+    # Keep the compact boolean capability fields for older UI/runtime
+    # consumers, while allowing a provider-specific transport contract to
+    # add richer limits on top.
+    modality_limits = {
+        **_default_modality_limits(modalities),
+        **dict(model.get("modality_limits") or {}),
+    }
+    if "image" in modalities:
+        modality_limits.setdefault("app_server_image_input_status", "unverified")
     return {
         "input_modalities": [str(item) for item in modalities if str(item).strip()] or ["text"],
         "model_kind": str(model.get("model_kind") or "chat"),
@@ -618,6 +988,11 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
         "reasoning_display_policy": str(model.get("reasoning_display_policy") or "collapsed_3_lines"),
         "supported_reasoning_levels": list(model.get("supported_reasoning_levels") or []),
         "default_reasoning_level": model.get("default_reasoning_level"),
+        "native_supported_reasoning_levels": list(model.get("native_supported_reasoning_levels") or model.get("supported_reasoning_levels") or []),
+        "native_default_reasoning_level": model.get("native_default_reasoning_level") or model.get("default_reasoning_level"),
+        "reasoning_policy_mode": str(model.get("reasoning_policy_mode") or "none"),
+        "supports_reasoning_replay": bool(model.get("supports_reasoning_replay", False)),
+        "preserve_reasoning_for_tool_turns": bool(model.get("preserve_reasoning_for_tool_turns", False)),
         "supports_search_tool": bool(model.get("supports_search_tool", False)),
         **resolved_web_capability_fields(model),
         "supports_image_detail_original": bool(model.get("supports_image_detail_original", False)),
@@ -649,11 +1024,13 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
         "planner_support": dict(model.get("planner_support") or default_planner_support()),
         "goal_support": dict(model.get("goal_support") or default_goal_support()),
         "context_compaction_support": dict(model.get("context_compaction_support") or default_context_compaction_support()),
-        "modality_limits": dict(model.get("modality_limits") or _default_modality_limits(modalities)),
+        "modality_limits": modality_limits,
         "ui_warnings": ui_warnings,
         "authority_tier": authority.tier,
         "authority_reason": authority.reason,
         "parallel_tool_call_status": authority.parallel_tool_call_status,
+        "command_execution_status": authority.command_execution_status,
+        "command_execution_note": authority.command_execution_note,
         "source_urls": list(model.get("source_urls") or []),
         "source_status": str(model.get("source_status") or "seeded"),
         "recommended": bool(model.get("recommended", False)),
@@ -665,6 +1042,75 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
         "source_provenance": dict(model.get("source_provenance") or {}),
         "last_verified_at": model.get("last_verified_at"),
         "verification_notes": str(model.get("verification_notes") or ""),
+        "app_server_image_transport_verification": dict(model.get("app_server_image_transport_verification") or {}),
+    }
+
+
+def _apply_app_server_image_transport_status(model: dict[str, Any], *, provider: dict[str, Any]) -> dict[str, Any]:
+    refreshed = dict(model)
+    modalities = [str(item).strip().lower() for item in list(refreshed.get("input_modalities") or [])]
+    if "image" not in modalities:
+        return refreshed
+    verification = dict(refreshed.get("app_server_image_transport_verification") or {})
+    modality_limits = dict(refreshed.get("modality_limits") or {})
+    current_contract = _current_app_server_image_transport_contract(refreshed, provider=provider)
+    verified = _verification_matches_current_contract(verification, current_contract)
+    modality_limits["app_server_image_input_status"] = "verified" if verified else "unverified"
+    modality_limits["app_server_image_transport_signature"] = current_contract["transport_signature"]
+    if verified:
+        modality_limits["app_server_image_last_verified_at"] = verification.get("verified_at")
+    else:
+        modality_limits.pop("app_server_image_last_verified_at", None)
+    refreshed["modality_limits"] = modality_limits
+    return refreshed
+
+
+def _verification_matches_current_contract(verification: dict[str, Any], current_contract: dict[str, Any]) -> bool:
+    if str(verification.get("status") or "").strip().lower() != "verified":
+        return False
+    required_pairs = {
+        "provider_id": str(current_contract.get("provider_id") or ""),
+        "model_id": str(current_contract.get("model_id") or ""),
+        "native_model": str(current_contract.get("native_model") or ""),
+        "runtime_backend": str(current_contract.get("runtime_backend") or ""),
+        "transport_adapter": str(current_contract.get("transport_adapter") or ""),
+        "transport_signature": str(current_contract.get("transport_signature") or ""),
+    }
+    for key, expected in required_pairs.items():
+        if expected and str(verification.get(key) or "") != expected:
+            return False
+    return True
+
+
+def _current_app_server_image_transport_contract(model: dict[str, Any], *, provider: dict[str, Any]) -> dict[str, Any]:
+    provider_id = str(model.get("provider") or provider.get("id") or provider.get("provider_id") or "").strip()
+    native_model = str(model.get("native_model") or "").strip()
+    model_id = str(model.get("id") or (f"{provider_id}/{native_model}" if provider_id and native_model else "")).strip()
+    provider_family = _provider_family(
+        provider.get("provider_family") or model.get("provider_family") or provider_id,
+        provider_family=provider.get("provider_family") or model.get("provider_family"),
+        adapter_profile=model.get("adapter_profile") or provider.get("adapter_profile"),
+        wire_api=provider.get("adapter_type") or provider.get("wire_api"),
+        base_url=provider.get("base_url"),
+        model=native_model or provider.get("default_model"),
+    )
+    profile = {
+        "provider_id": provider_id,
+        "provider_family": provider_family,
+        "adapter_profile": model.get("adapter_profile") or provider.get("adapter_profile") or "default",
+        "wire_api": provider.get("adapter_type") or provider.get("wire_api") or "responses",
+        "base_url": provider.get("base_url"),
+        "model": native_model,
+    }
+    transport_class = transport_class_for_profile(profile, provider_family=provider_family)
+    transport = transport_class(None, profile)
+    return {
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "native_model": native_model,
+        "runtime_backend": str(provider.get("runtime_backend") or provider.get("execution_backend") or "app_server"),
+        "transport_adapter": transport.describe(),
+        "transport_signature": transport_signature_for_class(transport_class),
     }
 
 
@@ -759,4 +1205,12 @@ def _default_ui_warnings(model: dict[str, Any], modalities: Any) -> list[str]:
     if not bool(model.get("supports_mcp_tools", False)):
         warnings.append("MCP tool use is unverified for this model. Keep MCP tools approval-gated until a smoke test passes.")
     return warnings
+
+
+def _should_sync_catalog_managed_modalities(model: dict[str, Any], generated_catalog_version: str) -> bool:
+    catalog_version = str(model.get("catalog_version") or "").strip()
+    if catalog_version and catalog_version == str(generated_catalog_version or "").strip():
+        return True
+    source_status = str(model.get("source_status") or "").strip().lower()
+    return source_status in CATALOG_MANAGED_MODEL_SOURCE_STATUSES
 

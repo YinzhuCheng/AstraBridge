@@ -15,6 +15,7 @@ PROJECT_SCHEMA_VERSION = "astrabridge-project-v1"
 DEFAULT_PORT = 8790
 DEFAULT_CODEX_HOME_NAME = "embedded_codex_home"
 SHORT_CODEX_HOME_DIR = ("AstraBridge", "cx")
+DEFAULT_WINDOWS_RUNTIME_ROOT = Path("D:/AstraBridgeRuntime")
 PROJECT_FILE_SUFFIX = ".abproj"
 WORKSPACE_STATE_DIRNAME = ".astrabridge"
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"^(?P<drive>[A-Za-z]):[\\/](?P<rest>.*)$")
@@ -32,28 +33,71 @@ def new_id(prefix: str) -> str:
     return f"{prefix}-{stamp}-{uuid.uuid4().hex[:6]}"
 
 
+def _official_codex_roots() -> tuple[Path, ...]:
+    candidates = [Path.home() / ".codex"]
+    user_profile = os.environ.get("USERPROFILE")
+    if user_profile:
+        candidates.append(Path(user_profile) / ".codex")
+    roots: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+def _same_or_descendant(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_managed_root(path: Path, *, label: str) -> Path:
+    resolved = path.expanduser().resolve()
+    for official_root in _official_codex_roots():
+        if _same_or_descendant(resolved, official_root) or _same_or_descendant(official_root, resolved):
+            raise ValueError(
+                f"{label} must be isolated from the official Codex home: "
+                f"{resolved} overlaps {official_root}"
+            )
+    return resolved
+
+
 def app_data_dir() -> Path:
     root = os.environ.get("ASTRABRIDGE_APPDATA")
     if root:
-        return Path(root).expanduser().resolve()
+        return _validate_managed_root(Path(root), label="ASTRABRIDGE_APPDATA")
     if os.name == "nt":
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-        return (Path(base) / APP_NAME).resolve()
-    return Path.home() / ".astrabridge"
+        return _validate_managed_root(Path(base) / APP_NAME, label="AstraBridge app data")
+    return _validate_managed_root(Path.home() / ".astrabridge", label="AstraBridge app data")
+
+
+def app_runtime_root() -> Path:
+    override = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+    if override:
+        return _validate_managed_root(Path(override), label="ASTRABRIDGE_RUNTIME_ROOT")
+    if os.environ.get("ASTRABRIDGE_APPDATA"):
+        return _validate_managed_root(app_data_dir() / "runtime", label="AstraBridge runtime root")
+    if os.name == "nt" and DEFAULT_WINDOWS_RUNTIME_ROOT.anchor and Path(DEFAULT_WINDOWS_RUNTIME_ROOT.anchor).exists():
+        return _validate_managed_root(DEFAULT_WINDOWS_RUNTIME_ROOT, label="AstraBridge runtime root")
+    return _validate_managed_root(app_data_dir() / "runtime", label="AstraBridge runtime root")
 
 
 def default_codex_home() -> Path:
     override = os.environ.get("ASTRABRIDGE_CODEX_HOME")
     if override:
-        return Path(override).expanduser().resolve()
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        return Path(base).joinpath(*SHORT_CODEX_HOME_DIR)
-    return app_data_dir() / DEFAULT_CODEX_HOME_NAME
+        return _validate_managed_root(Path(override), label="ASTRABRIDGE_CODEX_HOME")
+    return _validate_managed_root(
+        app_runtime_root() / DEFAULT_CODEX_HOME_NAME,
+        label="AstraBridge Codex home",
+    )
 
 
 def app_runtime_dir(*parts: str) -> Path:
-    root = app_data_dir() / "runtime"
+    root = app_runtime_root()
     path = root.joinpath(*parts) if parts else root
     path.mkdir(parents=True, exist_ok=True)
     return path.resolve()
@@ -176,6 +220,10 @@ def path_for_host(path: str | Path, host_os_name: str | None = None) -> Path:
 
 
 def public_error(exc: Exception) -> dict[str, Any]:
-    return {"ok": False, "error": str(exc), "error_type": exc.__class__.__name__}
+    payload = {"ok": False, "error": str(exc), "error_type": exc.__class__.__name__}
+    extra = getattr(exc, "public_payload", None)
+    if isinstance(extra, dict):
+        from .security import redact_sensitive
 
-
+        payload.update(redact_sensitive(extra))
+    return payload

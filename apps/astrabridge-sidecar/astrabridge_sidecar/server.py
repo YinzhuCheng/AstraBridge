@@ -3,14 +3,17 @@
 import argparse
 import json
 import os
+import re
 import socket
+import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .asset_registry_service import AssetRegistryService
+from .agentic_update_service import AgenticUpdateService
 from .automations import AutomationService
 from .browser_workbench_service import BrowserWorkbenchService
 from .checkpoint_service import CheckpointService
@@ -33,6 +36,7 @@ from .profile_service import ProfileService
 from .project_context_service import ProjectContextService
 from .project_service import ProjectService
 from .project_tools_service import ProjectToolsService
+from .provider_compatibility_smoke import run_provider_compatibility_smoke
 from .router_config_service import RouterConfigService
 from .router_service import RouterService
 from .runtime_supervisor_service import RuntimeSupervisorService
@@ -40,7 +44,7 @@ from .runtime_service import RuntimeService
 from .secret_service import SecretService
 from .sidecar_provenance import build_sidecar_provenance
 from .task_conversation_service import TaskConversationService
-from .task_service import TaskService
+from .task_service import TaskService, _display_task_title
 from .title_suggestion_service import TitleSuggestionService
 from .web_tool_service import AstraBridgeWebService
 from .wsl_dependency_service import WslDependencyService
@@ -53,6 +57,7 @@ ALLOWED_ORIGINS = {
     "http://tauri.localhost",
     "tauri://localhost",
 }
+SMOKE_TASK_PREFIX_PATTERN = re.compile(r"^Step\s+\d+\s+(?:source|target)\s+for\s+", re.IGNORECASE)
 
 
 def configured_allowed_origins() -> set[str]:
@@ -118,6 +123,27 @@ def sse_frame(*, event: str | None = None, data: Any | None = None, comment: str
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def visible_task_title(value: Any) -> str:
+    title = str(value or "").strip()
+    if not title:
+        return ""
+    return SMOKE_TASK_PREFIX_PATTERN.sub("", title).strip()
+
+
+def normalize_task_conversation_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    thread = payload.get("thread")
+    if not isinstance(thread, dict):
+        return payload
+    normalized = dict(payload)
+    normalized_thread = dict(thread)
+    normalized_title = visible_task_title(normalized_thread.get("displayName") or normalized_thread.get("name"))
+    if normalized_title:
+        normalized_thread["name"] = normalized_title
+        normalized_thread["displayName"] = normalized_title
+    normalized["thread"] = normalized_thread
+    return normalized
+
+
 class AppContext:
     def __init__(self, seed_root: Path) -> None:
         self.seed_root = seed_root.expanduser().resolve()
@@ -137,6 +163,15 @@ class AppContext:
         os.environ["ASTRABRIDGE_PORT"] = str(router_status.get("listen_port") or router_port)
         os.environ["ASTRABRIDGE_TOKEN_FINGERPRINT"] = str(router_status.get("token_fingerprint") or "")
         self.metadata = MetadataService(self.router_config, self.router)
+        self.agentic_updates = AgenticUpdateService(
+            workspace_root_resolver=self.projects.require_workspace_root,
+            runtime_root_resolver=lambda: self.projects.current_runtime_roots()["project_runtime_root"],
+            provider_smoke_runtime_resolver=lambda: CapabilityRuntime(
+                router_config=self.router_config,
+                key_injector=self.llm_manager.inject_profile_key,
+            ),
+            router_config=self.router_config,
+        )
         self.llm_manager = LlmApiManagerService(self.router_config, self.router)
         self.modals = ModalService(self.projects.require_shell_state_root)
         self.tasks = TaskService(self.projects)
@@ -194,6 +229,7 @@ class AppContext:
             runtime_service=self.runtime,
             profile_service=self.profiles,
             runtime_config=self.runtime_config,
+            agentic_update_service=self.agentic_updates,
             event_recorder=self._record_automation_event,
         )
         self.supervisor = RuntimeSupervisorService(self.projects, self.runtime, self.modals, self.dogfood, automation_service=self.automations)
@@ -268,47 +304,95 @@ class AppContext:
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     context: AppContext
 
-    def _send(self, status: int, body: bytes, content_type: str = "application/json; charset=utf-8") -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
+    def _run_after_response(self, *, name: str, callback: Callable[[], None]) -> None:
+        def runner() -> None:
+            try:
+                callback()
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    self.context.runtime.record_supervisor_event(
+                        {
+                            "event": "background_post_response_failed",
+                            "name": name,
+                            "error": str(exc)[:300],
+                        }
+                    )
+                except Exception:
+                    return
+
+        worker = threading.Thread(
+            target=runner,
+            name=f"astrabridge-{name}",
+            daemon=True,
+        )
+        worker.start()
+
+    def _send_cors_headers(self) -> None:
         origin = self.headers.get("Origin")
         if is_allowed_origin(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token, X-Admin-Session-Token")
+            self.send_header("Vary", "Origin, Access-Control-Request-Headers, Access-Control-Request-Method, Access-Control-Request-Private-Network")
+        allowed_headers = ["Content-Type", "X-Admin-Token", "X-Admin-Session-Token"]
+        requested_headers = [
+            item.strip()
+            for item in str(self.headers.get("Access-Control-Request-Headers") or "").split(",")
+            if item.strip() and all(char.isalnum() or char in {"-", "_"} for char in item.strip())
+        ]
+        for header in requested_headers:
+            if header.lower() not in {item.lower() for item in allowed_headers}:
+                allowed_headers.append(header)
+        self.send_header("Access-Control-Allow-Headers", ", ".join(allowed_headers))
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        if str(self.headers.get("Access-Control-Request-Private-Network") or "").strip().lower() == "true":
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+
+    def _send(self, status: int, body: bytes, content_type: str = "application/json; charset=utf-8") -> None:
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self._send_cors_headers()
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            self.close_connection = True
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # A browser timeout can close the socket after work has completed.
+            # Do not attempt a second error response on that same connection.
+            return
 
     def send_json(self, payload: Any, status: int = 200) -> None:
         self._send(status, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
 
     def _send_file(self, path: Path, *, content_type: str, filename: str) -> None:
         body = path.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Content-Disposition", f"inline; filename*=UTF-8''{urllib.parse.quote(filename)}")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        origin = self.headers.get("Origin")
-        if is_allowed_origin(origin):
-            self.send_header("Access-Control-Allow-Origin", origin)
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token, X-Admin-Session-Token")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition", f"inline; filename*=UTF-8''{urllib.parse.quote(filename)}")
+            self.send_header("Connection", "close")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self._send_cors_headers()
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            self.close_connection = True
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
 
     def _send_event_stream(self, *, after: int = 0, limit: int | None = None, seconds: float = 60.0) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        origin = self.headers.get("Origin")
-        if is_allowed_origin(origin):
-            self.send_header("Access-Control-Allow-Origin", origin)
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token, X-Admin-Session-Token")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self._send_cors_headers()
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
@@ -401,8 +485,8 @@ class Handler(BaseHTTPRequestHandler):
                         "ok": True,
                         "service": "astrabridge-sidecar",
                         "sidecar": self._sidecar_provenance(),
-                        "runtime": self.context.runtime.environment(),
-                        "router": self.context.router.status(),
+                        "runtime": self.context.runtime.health_environment(),
+                        "router": self.context.router.health_status(),
                     }
                 )
                 return
@@ -410,8 +494,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"admin_session_token": self.context.admin_token})
                 return
             if path in {"/api/projects/current", "/api/project/current"}:
-                task = self.context.tasks.current_task()
-                self.send_json({"project": self.context.projects.reconcile_task_projection(task)})
+                if not self.context.projects.current_project:
+                    self.send_json({"project": None})
+                    return
+                # Launcher bootstrap only needs the currently open project. Avoid
+                # pulling task reconciliation into this path because task-graph
+                # runs can leave large task state hot, and a slow current-task
+                # sync here blocks the whole app from re-entering the workspace.
+                self.send_json({"project": self.context.projects.refresh_current_project()})
                 return
             if path == "/api/projects/recent":
                 self.send_json(self.context.projects.list_recent())
@@ -462,10 +552,28 @@ class Handler(BaseHTTPRequestHandler):
                 task = self.context.tasks.current_task()
                 self.send_json(
                     {
-                        "task": task,
+                        "task": self._task_view(task),
                         "project": self.context.projects.reconcile_task_projection(task),
                     }
                 )
+                return
+            if path == "/api/task-graphs/templates":
+                self.send_json(
+                    self.context.tasks.list_graph_templates(
+                        configured_models=self.context.router_config.models()
+                        if getattr(self.context, "router_config", None)
+                        else None,
+                    )
+                )
+                return
+            if path in {"/api/task-graphs/graph", "/api/task-graphs/current"}:
+                graph = self.context.tasks.graph_definition(self._optional_query_string(query, "graph_id"))
+                task_view = self.context.tasks.task_view(
+                    self.context.tasks.current_task(),
+                    compact_graph_runs=True,
+                    compact_graph_details=True,
+                )
+                self.send_json({"graph": graph, "task": task_view})
                 return
             if path == "/api/profiles":
                 self.send_json(self.context.profiles.list_profiles())
@@ -518,6 +626,33 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/router/metadata/refresh/result":
                 self.send_json(self.context.metadata.refresh_result(self._optional_query_string(query, "job_id")))
                 return
+            if path == "/api/agentic-updates/runs":
+                limit_values = query.get("limit", [])
+                limit = int(limit_values[0]) if limit_values and str(limit_values[0]).strip() else 50
+                self.send_json(self.context.agentic_updates.list_runs(limit=limit))
+                return
+            if path == "/api/agentic-updates/status":
+                self.send_json(
+                    self.context.agentic_updates.status(
+                        self._optional_query_string(query, "job_id") or self._optional_query_string(query, "run_id")
+                    )
+                )
+                return
+            if path == "/api/agentic-updates/result":
+                self.send_json(
+                    self.context.agentic_updates.result(
+                        self._optional_query_string(query, "job_id") or self._optional_query_string(query, "run_id")
+                    )
+                )
+                return
+            if path.startswith("/api/agentic-updates/"):
+                parts = [part for part in path.split("/") if part]
+                if len(parts) == 4 and parts[0] == "api" and parts[1] == "agentic-updates" and parts[3] == "status":
+                    self.send_json(self.context.agentic_updates.status(parts[2]))
+                    return
+                if len(parts) == 4 and parts[0] == "api" and parts[1] == "agentic-updates" and parts[3] == "result":
+                    self.send_json(self.context.agentic_updates.result(parts[2]))
+                    return
             if path == "/api/router/image/prompt-guides":
                 self.send_json(prompt_guides_payload())
                 return
@@ -666,7 +801,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             if path == "/api/project/task-conversation":
-                self.send_json(self.context.task_conversation.conversation(task_id=self._optional_query_string(query, "task_id")))
+                self.send_json(
+                    normalize_task_conversation_payload(
+                        self.context.task_conversation.conversation(task_id=self._optional_query_string(query, "task_id"))
+                    )
+                )
                 return
             self.send_json({"ok": False, "error": "Not found"}, status=404)
         except Exception as exc:  # noqa: BLE001
@@ -688,7 +827,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self.context.tasks.ensure_default_task(title=project.get("name") or "New task")
                 project = self.context.projects.current_project
-                self.context.runtime.restart()
+                self.context.runtime.restart_in_background()
                 self.context.automations.start()
                 self.send_json({"project": project})
                 return
@@ -703,14 +842,20 @@ class Handler(BaseHTTPRequestHandler):
                         title=project.get("name") or "Default task",
                     )
                 project = self.context.projects.current_project
-                self.context.runtime.restart()
-                self.context.automations.start()
                 self.send_json({"project": project})
+                self._run_after_response(
+                    name="project-open-post-start",
+                    callback=lambda: (
+                        self.context.runtime.restart_in_background(),
+                        self.context.automations.start(),
+                    ),
+                )
                 return
             if path == "/api/projects/close":
                 self.context.automations.stop()
-                self.context.runtime.restart()
-                self.send_json(self.context.projects.close_project())
+                closed = self.context.projects.close_project()
+                self.context.runtime.restart_in_background()
+                self.send_json(closed)
                 return
             if path == "/api/project/title/suggest":
                 self.send_json(self.context.title_suggestions.suggest_project_title(force=bool(payload.get("force"))))
@@ -771,7 +916,7 @@ class Handler(BaseHTTPRequestHandler):
                 automation_id = str(payload.get("automation_id") or "").strip()
                 if not automation_id:
                     raise ValueError("automation_id is required.")
-                self.send_json(self.context.automations.run_now(automation_id))
+                self.send_json(self.context.automations.run_now(automation_id, background=True))
                 return
             if path == "/api/automations/runs/cancel":
                 run_id = str(payload.get("run_id") or "").strip()
@@ -947,6 +1092,141 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/router/metadata/refresh/start":
                 self.send_json(self.context.metadata.start_refresh(apply=bool(payload.get("apply"))))
+                return
+            if path == "/api/agentic-updates/start":
+                self.send_json(self.context.agentic_updates.start(payload))
+                return
+            if path == "/api/agentic-updates/automation-template":
+                self.send_json(self.context.automations.create_agentic_update_check_template(payload))
+                return
+            if path == "/api/agentic-updates/apply":
+                self.send_json(self.context.agentic_updates.apply(payload))
+                return
+            if path == "/api/agentic-updates/rollback":
+                self.send_json(self.context.agentic_updates.rollback(payload))
+                return
+            if path == "/api/agentic-updates/code-change-plan":
+                self.send_json(self.context.agentic_updates.code_change_plan(payload))
+                return
+            if path == "/api/agentic-updates/validate":
+                self.send_json(self.context.agentic_updates.validate(payload))
+                return
+            if path == "/api/agentic-updates/kernel-verify":
+                self.send_json(self.context.agentic_updates.verify_kernel_candidate(payload))
+                return
+            if path == "/api/task-graphs/instantiate":
+                self.send_json(
+                    self.context.tasks.instantiate_graph_template(
+                        str(payload.get("template_id") or ""),
+                        title=str(payload.get("title") or "").strip() or None,
+                        configured_models=self.context.router_config.models() if getattr(self.context, "router_config", None) else None,
+                    )
+                )
+                return
+            if path == "/api/task-graphs/import":
+                self.send_json(
+                    self.context.tasks.import_graph_from_orchestration_file(
+                        payload,
+                        profiles_snapshot=self.context.profiles.list_profiles() if getattr(self.context, "profiles", None) else None,
+                        configured_models=self.context.router_config.models() if getattr(self.context, "router_config", None) else None,
+                    )
+                )
+                return
+            if path == "/api/task-graphs/export":
+                self.send_json(self.context.tasks.export_graph_for_orchestration_file(payload))
+                return
+            if path == "/api/task-graphs/snapshot":
+                self.send_json(self.context.tasks.create_graph_snapshot(payload))
+                return
+            if path == "/api/task-graphs/snapshot/diff":
+                self.send_json(self.context.tasks.diff_graph_snapshot(payload))
+                return
+            if path == "/api/task-graphs/rollback":
+                self.send_json(self.context.tasks.rollback_graph_to_snapshot(payload))
+                return
+            if path == "/api/task-graphs/save":
+                self.send_json(self.context.tasks.save_graph_definition(payload))
+                return
+            if path == "/api/task-graphs/node/update":
+                self.send_json(self.context.tasks.update_graph_node(payload))
+                return
+            if path == "/api/task-graphs/edge/update":
+                self.send_json(self.context.tasks.update_graph_edge(payload))
+                return
+            if path == "/api/task-graphs/dry-run":
+                self.send_json(
+                    self.context.tasks.dry_run_graph(
+                        payload,
+                        profiles_snapshot=self.context.profiles.list_profiles() if getattr(self.context, "profiles", None) else None,
+                        configured_models=self.context.router_config.models() if getattr(self.context, "router_config", None) else None,
+                    )
+                )
+                return
+            if path == "/api/task-graphs/run":
+                try:
+                    self.send_json(self.context.runtime.execute_task_graph_run(payload))
+                except Exception as exc:  # noqa: BLE001
+                    structured_error = public_error(exc)
+                    graph_id = str(payload.get("graph_id") or "").strip()
+                    if graph_id and not structured_error.get("graph"):
+                        try:
+                            graph_payload = self.context.tasks.graph_definition(graph_id)
+                        except Exception:
+                            graph_payload = None
+                        if isinstance(graph_payload, dict) and graph_payload:
+                            structured_error["graph"] = graph_payload
+                    if not structured_error.get("task"):
+                        try:
+                            current_task = self.context.tasks.current_task()
+                            structured_task = self.context.tasks.task_view(
+                                current_task,
+                                compact_graph_runs=True,
+                            )
+                        except Exception:
+                            structured_task = None
+                        if isinstance(structured_task, dict) and structured_task:
+                            structured_error["task"] = structured_task
+                    live_run = dict(structured_error.get("live_run") or {})
+                    run_ref = dict(live_run.get("run_ref") or {})
+                    terminal_status = str(
+                        run_ref.get("status") or live_run.get("run_status") or ""
+                    ).strip().lower()
+                    if terminal_status in {"failed", "cancelled"} or graph_id:
+                        structured_error["ok"] = False
+                        self.send_json(structured_error, status=200)
+                        return
+                    raise
+                return
+            if path == "/api/task-graphs/worker/start":
+                profile = self._resolve_runtime_profile(payload.get("profile_id"))
+                self.send_json(
+                    self.context.runtime.start_graph_worker(
+                        profile,
+                        graph_id=str(payload.get("graph_id") or ""),
+                        run_id=str(payload.get("run_id") or ""),
+                        node_id=str(payload.get("node_id") or ""),
+                        parent_thread_id=str(payload.get("parent_thread_id") or ""),
+                        model=self._optional_string(payload, "model"),
+                        effort=self._optional_string(payload, "effort"),
+                        permission_mode=self._optional_string(payload, "permission_mode") or "auto",
+                        artifact_refs=payload.get("artifact_refs") if isinstance(payload.get("artifact_refs"), list) else None,
+                    )
+                )
+                return
+            if path == "/api/task-graphs/worker/output":
+                self.send_json(self.context.tasks.record_graph_worker_output(payload))
+                return
+            if path == "/api/task-graphs/fixture-run":
+                self.send_json(self.context.tasks.execute_fixture_graph(payload))
+                return
+            if path == "/api/task-graphs/run/cancel":
+                self.send_json(self.context.tasks.cancel_graph_run(payload))
+                return
+            if path == "/api/task-graphs/run/recover":
+                self.send_json(self.context.tasks.recover_graph_run(payload))
+                return
+            if path == "/api/task-graphs/approval/resolve":
+                self.send_json(self.context.tasks.resolve_graph_run_approval(payload))
                 return
             if path == "/api/router/metadata/import-seed":
                 self.send_json(self.context.metadata.import_seed(apply=bool(payload.get("apply", True))))
@@ -1169,6 +1449,29 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 )
                 return
+            if path == "/api/router/test-provider-vision":
+                self.send_json(
+                    self.context.router.test_provider_vision(
+                        str(payload.get("provider_id") or ""),
+                        self._optional_string(payload, "model_id"),
+                        stream=bool(payload.get("stream")),
+                    )
+                )
+                return
+            if path == "/api/runtime/verify-app-server-image-route":
+                profile = self._resolve_runtime_profile_for_turn(
+                    {
+                        "profile_id": self._optional_string(payload, "profile_id"),
+                        "model": self._optional_string(payload, "model_id"),
+                    }
+                )
+                self.send_json(
+                    self.context.runtime.verify_app_server_image_transport(
+                        profile,
+                        model=self._optional_string(payload, "model_id"),
+                    )
+                )
+                return
             if path == "/api/router/export-config":
                 self.send_json(self.context.router_config.export_sanitized())
                 return
@@ -1185,6 +1488,7 @@ class Handler(BaseHTTPRequestHandler):
                 capability_payload = payload.get("payload")
                 if not isinstance(capability_payload, dict):
                     capability_payload = {}
+                capability_payload = self._payload_with_default_workspace_root(capability_payload)
                 self.send_json(
                     {
                         "result": CapabilityRuntime(
@@ -1195,6 +1499,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             if path == "/api/runtime/capability-smoke":
+                payload = self._payload_with_default_workspace_root(payload)
                 route_record = self.context.router_config.capability_routes().get(str(payload.get("capability_id") or "").strip())
                 self.send_json(
                     {
@@ -1206,6 +1511,22 @@ class Handler(BaseHTTPRequestHandler):
                                 router_config=self.context.router_config,
                                 key_injector=self.context.llm_manager.inject_profile_key,
                             ),
+                        )
+                    }
+                )
+                return
+            if path == "/api/runtime/provider-compatibility-smoke":
+                self.send_json(
+                    {
+                        "smoke": run_provider_compatibility_smoke(
+                            payload,
+                            configured_models=self.context.router_config.models(),
+                            capability_route_records=self.context.router_config.capability_routes(),
+                            runtime=CapabilityRuntime(
+                                router_config=self.context.router_config,
+                                key_injector=self.context.llm_manager.inject_profile_key,
+                            ),
+                            workspace_root=self.context.projects.require_workspace_root(),
                         )
                     }
                 )
@@ -1329,9 +1650,46 @@ class Handler(BaseHTTPRequestHandler):
                     model=self._optional_string(payload, "model"),
                     effort=self._optional_string(payload, "effort"),
                     permission_mode=str(payload.get("permission_mode") or "auto"),
+                    task_id=self._optional_string(payload, "task_id"),
                     name=self._optional_string(payload, "name"),
+                    operation_id=self._optional_string(payload, "operation_id"),
                 )
-                self.send_json({**response, "project": self.context.projects.current_project, "task": self.context.tasks.current_task()})
+                self.send_json({**response, "project": self.context.projects.current_project, "task": self._task_view(self.context.tasks.current_task())})
+                return
+            if path == "/api/runtime/threads/create/start":
+                # The start endpoint must return an operation receipt promptly.
+                # Key injection and catalog enrichment belong to the background
+                # runtime preparation path, not this HTTP request.
+                profile = self.context.profiles.get_profile(
+                    str(payload.get("profile_id") or "") or None
+                )
+                response = self.context.runtime.begin_thread_create(
+                    profile,
+                    model=self._optional_string(payload, "model"),
+                    effort=self._optional_string(payload, "effort"),
+                    permission_mode=str(payload.get("permission_mode") or "auto"),
+                    name=self._optional_string(payload, "name"),
+                    operation_id=self._optional_string(payload, "operation_id"),
+                )
+                # This endpoint is deliberately an operation receipt. Reading the
+                # active task here can contend with the worker that is creating
+                # it, turning an asynchronous start back into a blocking HTTP
+                # request. The client reconciles the completed operation and
+                # refreshes project/task state through its existing queries.
+                self.send_json(response)
+                return
+            if path == "/api/runtime/threads/create/recover":
+                # Recovery is primarily an operation-state read. Keep its
+                # request path free of Vault work so a caller can always learn
+                # whether the background creation reached a terminal state.
+                profile = self.context.profiles.get_profile(
+                    str(payload.get("profile_id") or "") or None
+                )
+                response = self.context.runtime.recover_thread_create(
+                    profile,
+                    operation_id=str(payload.get("operation_id") or ""),
+                )
+                self.send_json(response)
                 return
             if path == "/api/runtime/threads/fork":
                 profile = self._resolve_runtime_profile(payload.get("profile_id"))
@@ -1343,7 +1701,7 @@ class Handler(BaseHTTPRequestHandler):
                     permission_mode=str(payload.get("permission_mode") or "auto"),
                     name=self._optional_string(payload, "name"),
                 )
-                self.send_json({**response, "project": self.context.projects.current_project, "task": self.context.tasks.current_task()})
+                self.send_json({**response, "project": self.context.projects.current_project, "task": self._task_view(self.context.tasks.current_task())})
                 return
             if path == "/api/runtime/threads/rename":
                 profile = self._resolve_runtime_profile(payload.get("profile_id"))
@@ -1370,7 +1728,7 @@ class Handler(BaseHTTPRequestHandler):
                 thread_id = self._optional_string(payload, "thread_id")
                 project = self.context.projects.switch_thread(thread_id)
                 task = self.context.tasks.restore_active_provider_thread(thread_id) if thread_id else self.context.tasks.current_task()
-                self.send_json({"project": self.context.projects.current_project or project, "task": task})
+                self.send_json({"project": self.context.projects.current_project or project, "task": self._task_view(task)})
                 return
             if path == "/api/runtime/thread-settings":
                 settings = self.context.runtime.update_thread_defaults(
@@ -1420,9 +1778,10 @@ class Handler(BaseHTTPRequestHandler):
                     permission_mode=str(payload.get("permission_mode") or "auto"),
                     collaboration_mode=self._optional_string(payload, "collaboration_mode"),
                     context_mode=self._optional_string(payload, "context_mode"),
+                    execution_policy=self._optional_string(payload, "execution_policy"),
                 )
                 if bool(payload.get("include_full_state")):
-                    self.send_json({**response, "project": self.context.projects.current_project, "task": self.context.tasks.current_task()})
+                    self.send_json({**response, "project": self.context.projects.current_project, "task": self._task_view(self.context.tasks.current_task())})
                 else:
                     self.send_json(
                         {
@@ -1535,6 +1894,29 @@ class Handler(BaseHTTPRequestHandler):
     def _profile_with_model_capabilities(self, profile: dict[str, Any]) -> dict[str, Any]:
         return self.context.profile_with_model_capabilities(profile)
 
+    def _payload_with_default_workspace_root(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        if str(normalized.get("workspace_root") or "").strip():
+            return normalized
+        workspace_root = self._default_workspace_root()
+        if workspace_root:
+            normalized["workspace_root"] = workspace_root
+        return normalized
+
+    def _default_workspace_root(self) -> str:
+        current_project_service = getattr(getattr(self, "context", None), "projects", None)
+        project_payload = getattr(current_project_service, "current_project", None)
+        if isinstance(project_payload, dict):
+            project_root = str(project_payload.get("workspace_root") or "").strip()
+            if project_root:
+                return project_root
+        seed_root = getattr(getattr(self, "context", None), "seed_root", None)
+        if isinstance(seed_root, Path):
+            return str(seed_root.resolve())
+        if seed_root is not None:
+            return str(seed_root).strip()
+        return ""
+
     def _optional_string(self, payload: dict[str, Any], key: str) -> str | None:
         value = payload.get(key)
         if value is None:
@@ -1617,10 +1999,11 @@ class Handler(BaseHTTPRequestHandler):
             "schema_version": str(task.get("schema_version") or ""),
             "task_id": str(task.get("task_id") or ""),
             "project_id": str(task.get("project_id") or ""),
-            "title": str(task.get("title") or ""),
+            "title": _display_task_title(task.get("title")) or "New task",
             "status": str(task.get("status") or ""),
             "handoff_policy": str(task.get("handoff_policy") or ""),
             "active_provider_thread_id": active_thread_id,
+            "lane_state": self._lane_state(task),
             "provider_threads": compact_threads,
             "fork_threads": list(task.get("fork_threads") or [])[:6],
             "handoff_events": self._compact_handoff_events(list(task.get("handoff_events") or [])[-6:]),
@@ -1640,23 +2023,39 @@ class Handler(BaseHTTPRequestHandler):
         for event in events:
             if not isinstance(event, dict):
                 continue
-            compact.append(
-                {
-                    "event_id": str(event.get("event_id") or ""),
-                    "type": str(event.get("type") or ""),
-                    "handoff_policy": str(event.get("handoff_policy") or ""),
-                    "from_thread_id": str(event.get("from_thread_id") or ""),
-                    "to_thread_id": str(event.get("to_thread_id") or ""),
-                    "profile_id": str(event.get("profile_id") or ""),
-                    "provider_id": str(event.get("provider_id") or ""),
-                    "model": str(event.get("model") or ""),
-                    "reasoning_effort": str(event.get("reasoning_effort") or ""),
-                    "permission_mode": str(event.get("permission_mode") or ""),
-                    "reused_existing": bool(event.get("reused_existing")),
-                    "created_at": str(event.get("created_at") or ""),
-                }
-            )
+            compact.append(self._compact_handoff_event(event))
         return compact
+
+    def _compact_handoff_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        context = getattr(self, "context", None)
+        if getattr(context, "tasks", None) is not None:
+            return context.tasks.compact_handoff_event(event)
+        return {
+            "event_id": str(event.get("event_id") or ""),
+            "type": str(event.get("type") or ""),
+            "handoff_policy": str(event.get("handoff_policy") or ""),
+            "from_thread_id": str(event.get("from_thread_id") or ""),
+            "to_thread_id": str(event.get("to_thread_id") or ""),
+            "profile_id": str(event.get("profile_id") or ""),
+            "provider_id": str(event.get("provider_id") or ""),
+            "model": str(event.get("model") or ""),
+            "reasoning_effort": str(event.get("reasoning_effort") or ""),
+            "permission_mode": str(event.get("permission_mode") or ""),
+            "reused_existing": bool(event.get("reused_existing")),
+            "created_at": str(event.get("created_at") or ""),
+        }
+
+    def _lane_state(self, task: dict[str, Any] | None) -> dict[str, Any] | None:
+        context = getattr(self, "context", None)
+        if not task or getattr(context, "tasks", None) is None:
+            return None
+        return context.tasks.lane_state(task=task)
+
+    def _task_view(self, task: dict[str, Any] | None) -> dict[str, Any] | None:
+        context = getattr(self, "context", None)
+        if not task or getattr(context, "tasks", None) is None:
+            return task
+        return context.tasks.task_view(task)
 
     def _compact_text(self, value: Any, limit: int = 180) -> str:
         text = " ".join(str(value or "").split())

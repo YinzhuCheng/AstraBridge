@@ -22,7 +22,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -87,7 +87,7 @@ from astrabridge_sidecar.providers.tooling import (
 from astrabridge_sidecar.project_context_service import ProjectContextService
 from astrabridge_sidecar.project_service import DEFAULT_RUNTIME_HOST_ENV, DEFAULT_RUNTIME_WSL_DISTRO_ENV, ProjectService
 from astrabridge_sidecar.project_tools_service import ProjectToolsService
-from astrabridge_sidecar.common import default_codex_home
+from astrabridge_sidecar.common import default_codex_home, now_iso
 from astrabridge_sidecar.router_config_service import RouterConfigService
 from astrabridge_sidecar.router_service import ROUTER_ENV_KEY, RouterService
 from astrabridge_sidecar.runtime_config_service import RuntimeConfigService
@@ -195,6 +195,25 @@ def _sidecar_provenance_fixture(port: int = 8790, *, origin: str = "current_sour
             "listen_port": port,
         },
     }
+
+
+def _seed_verified_agent_model(router_config: RouterConfigService, provider_id: str, model_id: str) -> dict[str, object]:
+    """Seed only the capability facts needed to exercise an allowed test path."""
+    return router_config.upsert_model(
+        {
+            "id": f"{provider_id}/{model_id}",
+            "provider": provider_id,
+            "native_model": model_id,
+            "display_name": f"{provider_id}/{model_id} verified test model",
+            "enabled": True,
+            "codex_agent_enabled": True,
+            "apply_patch_tool_type": "freeform",
+            "supports_mcp_tools": True,
+            "mcp_tool_call_policy": "conservative",
+            "tool_mode": "full",
+            "command_execution_status": "verified",
+        }
+    )
 
 
 class _LiveProcessStub:
@@ -585,6 +604,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             )
             profiles = ProfileService(store_path=root / "profiles.json")
             router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            _seed_verified_agent_model(router_config, "openai", "gpt-5.5")
             tools = ProjectToolsService(
                 projects,
                 _RuntimeEventsStub(),
@@ -846,6 +866,21 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         self.assertFalse(client.is_running())
 
+    def test_runtime_health_environment_handles_unconfigured_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_dir:
+            workspace = Path(workspace_dir)
+            projects = ProjectService()
+            project_file = workspace / "demo.abproj"
+            project = projects.create_project("Demo", str(project_file), str(workspace), entry_mode="new")
+            projects.open_project(str(project["project_file"]))
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+
+            payload = runtime.health_environment()
+
+            self.assertFalse(payload["running"])
+            self.assertFalse(payload["runtime_config"]["configured"])
+            self.assertEqual(payload["runtime_config"]["codex_home"], str(runtime._runtime_config.codex_home))  # noqa: SLF001
+
     def test_app_server_client_notification_callback_error_does_not_disconnect_reader(self) -> None:
         client = AppServerClient(codex_executable="codex", on_notification=lambda _method, _params: (_ for _ in ()).throw(PermissionError("cache locked")))
 
@@ -861,14 +896,54 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         self.assertEqual(handler.read_json_body()["project_file"], "demo.abproj")
 
+    def test_handler_send_json_writes_content_length_and_flushes_body(self) -> None:
+        handler = object.__new__(Handler)
+        handler.headers = {}
+        handler.wfile = MagicMock()
+        calls: list[tuple[str, object, object | None]] = []
+
+        handler.send_response = lambda status: calls.append(("status", status, None))  # type: ignore[method-assign]
+        handler.send_header = lambda name, value: calls.append(("header", name, value))  # type: ignore[method-assign]
+        handler.end_headers = lambda: calls.append(("end_headers", None, None))  # type: ignore[method-assign]
+        handler._send_cors_headers = lambda: calls.append(("cors", None, None))  # type: ignore[method-assign]
+
+        Handler.send_json(handler, {"admin_session_token": "token"})
+
+        expected_body = json.dumps({"admin_session_token": "token"}, ensure_ascii=False, indent=2).encode("utf-8")
+        self.assertEqual(calls[0], ("status", 200, None))
+        self.assertIn(("header", "Content-Type", "application/json; charset=utf-8"), calls)
+        self.assertIn(("header", "Content-Length", str(len(expected_body))), calls)
+        self.assertIn(("header", "X-Content-Type-Options", "nosniff"), calls)
+        handler.wfile.write.assert_called_once_with(expected_body)
+        handler.wfile.flush.assert_called_once_with()
+
     def test_handler_health_includes_sidecar_provenance(self) -> None:
         handler = object.__new__(Handler)
         handler.path = "/health"
         handler.server = SimpleNamespace(server_address=("127.0.0.1", 8839))
+        runtime_environment_called = False
+        router_status_called = False
+
+        def runtime_environment() -> dict[str, object]:
+            nonlocal runtime_environment_called
+            runtime_environment_called = True
+            return {"running": False, "runtime_config": {}}
+
+        def router_status() -> dict[str, object]:
+            nonlocal router_status_called
+            router_status_called = True
+            return {"listen_port": 8787, "base_url": "http://127.0.0.1:8787/v1"}
+
         handler.context = SimpleNamespace(
             seed_root=Path("D:/AstraBridge"),
-            runtime=SimpleNamespace(environment=lambda: {"running": False, "runtime_config": {}}),
-            router=SimpleNamespace(status=lambda: {"listen_port": 8787, "base_url": "http://127.0.0.1:8787/v1"}),
+            runtime=SimpleNamespace(
+                health_environment=lambda: {"running": False, "runtime_config": {}},
+                environment=runtime_environment,
+            ),
+            router=SimpleNamespace(
+                health_status=lambda: {"listen_port": 8787, "base_url": "http://127.0.0.1:8787/v1"},
+                status=router_status,
+            ),
         )
         captured: dict[str, object] = {}
 
@@ -887,6 +962,262 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(payload["sidecar"]["schema_version"], "astrabridge-sidecar-provenance-v1")  # type: ignore[index]
         self.assertEqual(payload["sidecar"]["listen_port"], 8839)  # type: ignore[index]
         self.assertEqual(payload["router"]["listen_port"], 8787)  # type: ignore[index]
+        self.assertFalse(runtime_environment_called)
+        self.assertFalse(router_status_called)
+
+    def test_handler_projects_close_returns_before_background_restart(self) -> None:
+        body = b"{}"
+        handler = object.__new__(Handler)
+        handler.command = "POST"
+        handler.path = "/api/projects/close"
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+
+        calls: list[tuple[str, object | None]] = []
+
+        class _Automations:
+            def stop(self) -> None:
+                calls.append(("automations.stop", None))
+
+        class _Projects:
+            def close_project(self) -> dict[str, object]:
+                calls.append(("projects.close_project", None))
+                return {"closed": True}
+
+        class _Runtime:
+            def restart_in_background(self) -> dict[str, object]:
+                calls.append(("runtime.restart_in_background", None))
+                return {"running": False}
+
+        handler.context = SimpleNamespace(
+            automations=_Automations(),
+            projects=_Projects(),
+            runtime=_Runtime(),
+        )
+        handler._require_admin_token = lambda: calls.append(("_require_admin_token", None))  # type: ignore[method-assign]
+
+        captured: dict[str, object] = {}
+
+        def send_json(payload: object, status: int = 200) -> None:
+            calls.append(("send_json", payload))
+            captured["status"] = status
+            captured["payload"] = payload
+
+        handler.send_json = send_json  # type: ignore[method-assign]
+
+        Handler.do_POST(handler)
+
+        self.assertEqual(
+            calls,
+            [
+                ("_require_admin_token", None),
+                ("automations.stop", None),
+                ("projects.close_project", None),
+                ("runtime.restart_in_background", None),
+                ("send_json", {"closed": True}),
+            ],
+        )
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(captured["payload"], {"closed": True})
+
+    def test_handler_projects_open_sends_response_before_background_restart_and_automation_start(self) -> None:
+        body = json.dumps({"project_file": "D:/work/demo.abproj"}).encode("utf-8")
+        handler = object.__new__(Handler)
+        handler.command = "POST"
+        handler.path = "/api/projects/open"
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+
+        calls: list[tuple[str, object | None]] = []
+        background_targets: list[object] = []
+        project_payload = {
+            "project_file": "D:/work/demo.abproj",
+            "current_thread_id": "thread-1",
+            "default_profile_id": "qwen",
+            "default_model": "qwen3-coder-plus",
+            "default_effort": "medium",
+        }
+
+        class _Projects:
+            current_project = dict(project_payload)
+
+            def open_project(self, project_file: str) -> dict[str, object]:
+                calls.append(("projects.open_project", project_file))
+                return dict(project_payload)
+
+        class _Tasks:
+            def reconcile_after_project_reload(self, *, preferred_thread_id: str | None = None) -> dict[str, object]:
+                calls.append(("tasks.reconcile_after_project_reload", preferred_thread_id))
+                return {"task_id": "task-1"}
+
+            def ensure_default_task(self, **_: object) -> dict[str, object]:
+                raise AssertionError("ensure_default_task should not run when reconcile returns a task")
+
+        class _Runtime:
+            def restart_in_background(self) -> dict[str, object]:
+                calls.append(("runtime.restart_in_background", None))
+                return {"running": False}
+
+            def record_supervisor_event(self, event: dict[str, object]) -> None:
+                calls.append(("runtime.record_supervisor_event", event))
+
+        class _Automations:
+            def start(self) -> dict[str, object]:
+                calls.append(("automations.start", None))
+                return {"running": True}
+
+        class _DeferredThread:
+            def __init__(self, *, target, name: str, daemon: bool) -> None:
+                calls.append(("threading.Thread", {"name": name, "daemon": daemon}))
+                background_targets.append(target)
+
+            def start(self) -> None:
+                calls.append(("thread.start", None))
+
+        handler.context = SimpleNamespace(
+            projects=_Projects(),
+            tasks=_Tasks(),
+            runtime=_Runtime(),
+            automations=_Automations(),
+        )
+        handler._require_admin_token = lambda: calls.append(("_require_admin_token", None))  # type: ignore[method-assign]
+
+        captured: dict[str, object] = {}
+
+        def send_json(payload: object, status: int = 200) -> None:
+            calls.append(("send_json", payload))
+            captured["status"] = status
+            captured["payload"] = payload
+
+        handler.send_json = send_json  # type: ignore[method-assign]
+
+        with patch("astrabridge_sidecar.server.threading.Thread", _DeferredThread):
+            Handler.do_POST(handler)
+
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(captured["payload"], {"project": project_payload})
+        self.assertEqual(
+            calls,
+            [
+                ("_require_admin_token", None),
+                ("projects.open_project", "D:/work/demo.abproj"),
+                ("tasks.reconcile_after_project_reload", "thread-1"),
+                ("send_json", {"project": project_payload}),
+                ("threading.Thread", {"name": "astrabridge-project-open-post-start", "daemon": True}),
+                ("thread.start", None),
+            ],
+        )
+        self.assertEqual(len(background_targets), 1)
+
+        background_targets[0]()
+
+        self.assertEqual(
+            calls[-2:],
+            [
+                ("runtime.restart_in_background", None),
+                ("automations.start", None),
+            ],
+        )
+
+    def test_handler_projects_current_returns_null_when_no_project_is_open(self) -> None:
+        handler = object.__new__(Handler)
+        handler.path = "/api/projects/current"
+        handler.context = SimpleNamespace(
+            projects=SimpleNamespace(current_project=None),
+            tasks=SimpleNamespace(current_task=lambda: (_ for _ in ()).throw(AssertionError("current_task should not be called"))),
+        )
+        captured: dict[str, object] = {}
+
+        def send_json(payload: object, status: int = 200) -> None:
+            captured["status"] = status
+            captured["payload"] = payload
+
+        handler.send_json = send_json  # type: ignore[method-assign]
+
+        Handler.do_GET(handler)
+
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(captured["payload"], {"project": None})
+
+    def test_handler_projects_current_returns_refreshed_project_without_task_sync(self) -> None:
+        project_payload = {"project_id": "demo", "project_file": "D:/work/demo.abproj"}
+        refresh_calls: list[str] = []
+        handler = object.__new__(Handler)
+        handler.path = "/api/projects/current"
+        handler.context = SimpleNamespace(
+            projects=SimpleNamespace(
+                current_project=dict(project_payload),
+                refresh_current_project=lambda: (refresh_calls.append("refresh"), dict(project_payload))[1],
+            ),
+            tasks=SimpleNamespace(current_task=lambda: (_ for _ in ()).throw(AssertionError("current_task should not be called"))),
+        )
+        captured: dict[str, object] = {}
+
+        def send_json(payload: object, status: int = 200) -> None:
+            captured["status"] = status
+            captured["payload"] = payload
+
+        handler.send_json = send_json  # type: ignore[method-assign]
+
+        Handler.do_GET(handler)
+
+        self.assertEqual(refresh_calls, ["refresh"])
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(captured["payload"], {"project": project_payload})
+
+    def test_handler_task_conversation_response_strips_smoke_prefix(self) -> None:
+        handler = object.__new__(Handler)
+        handler.path = "/api/project/task-conversation?task_id=task-1"
+        handler.context = SimpleNamespace(
+            task_conversation=SimpleNamespace(
+                conversation=lambda task_id=None: {
+                    "thread": {
+                        "id": "task:task-1",
+                        "name": "Step 11 source for compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run",
+                        "displayName": "Step 11 source for compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run",
+                    },
+                    "task": {"task_id": task_id or "task-1"},
+                }
+            )
+        )
+        captured: dict[str, object] = {}
+
+        def send_json(payload: object, status: int = 200) -> None:
+            captured["status"] = status
+            captured["payload"] = payload
+
+        handler.send_json = send_json  # type: ignore[method-assign]
+
+        Handler.do_GET(handler)
+
+        self.assertEqual(captured["status"], 200)
+        payload = captured["payload"]
+        self.assertIsInstance(payload, dict)
+        thread = dict(payload["thread"])  # type: ignore[index]
+        self.assertEqual(thread["name"], "compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run")
+        self.assertEqual(thread["displayName"], "compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run")
+
+    def test_handler_capability_payload_defaults_workspace_root_from_current_project(self) -> None:
+        handler = object.__new__(Handler)
+        handler.context = SimpleNamespace(
+            projects=SimpleNamespace(current_project={"workspace_root": "D:/Workspace/demo"}),
+            seed_root=Path("D:/AstraBridge"),
+        )
+
+        payload = Handler._payload_with_default_workspace_root(handler, {"capability_id": "image.generate"})
+
+        self.assertEqual(payload["workspace_root"], "D:/Workspace/demo")
+
+    def test_handler_capability_payload_defaults_workspace_root_from_seed_root(self) -> None:
+        handler = object.__new__(Handler)
+        handler.context = SimpleNamespace(
+            projects=SimpleNamespace(current_project={}),
+            seed_root=Path("D:/AstraBridge"),
+        )
+
+        payload = Handler._payload_with_default_workspace_root(handler, {"capability_id": "image.generate"})
+
+        self.assertEqual(payload["workspace_root"], str(Path("D:/AstraBridge").resolve()))
 
     def test_project_defaults_to_wsl_when_runtime_default_is_wsl(self) -> None:
         previous_host = os.environ.get(DEFAULT_RUNTIME_HOST_ENV)
@@ -1057,6 +1388,50 @@ class AstraBridgeServiceTests(unittest.TestCase):
             state_text = (workspace / ".astrabridge" / "tasks.json").read_text(encoding="utf-8")
             self.assertIn("multi_provider_handoff", state_text)
             self.assertNotIn("Authorization", state_text)
+
+    def test_task_snapshot_compacts_graph_run_payloads_for_shell_polling(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            compacted = tasks._task_response_graph_run_refs(  # noqa: SLF001
+                [
+                {
+                    "run_id": "run-1",
+                    "graph_id": "graph-1",
+                    "task_id": "task-1",
+                    "status": "completed",
+                    "artifact_count": 1,
+                    "event_count": 2,
+                    "worker_count": 1,
+                    "metrics": {"duration_ms": 12},
+                    "artifacts": [{"path": "PRIVATE/large-output.json", "content": "not for the task list"}],
+                    "events": [{"summary": "not for the task list"}],
+                }
+                ]
+            )
+
+            visible = compacted[0]
+
+            self.assertEqual(visible["run_id"], "run-1")
+            self.assertEqual(visible["artifact_count"], 1)
+            self.assertNotIn("artifacts", visible)
+            self.assertNotIn("events", visible)
+
+            graph_ref = tasks._task_response_graph_definition_refs(  # noqa: SLF001
+                [{"graph_id": "graph-1", "task_id": "task-1", "title": "Graph", "nodes": [{"node_id": "a"}], "edges": []}]
+            )[0]
+            self.assertEqual(graph_ref["node_count"], 1)
+            self.assertNotIn("nodes", graph_ref)
+
+            task = tasks.create_task("List item")
+            list_item = tasks.snapshot()["tasks"][0]
+            self.assertEqual(list_item["task_id"], task["task_id"])
+            self.assertNotIn("graph_run_refs", list_item)
+            self.assertNotIn("provider_threads", list_item)
 
     def test_task_conversation_merges_provider_threads_and_redacts_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1285,6 +1660,67 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("Build a release readiness scorecard", handoff_item["projection_preview"])
             self.assertIn("projection_preview=Assistant: Build a release readiness scorecard.", pack["text"])
 
+    def test_task_conversation_visible_thread_name_strips_smoke_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            task = tasks.create_task(
+                "Step 11 source for compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run",
+                thread_id="thread-qwen",
+                settings={
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3.7-plus",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            conversation = TaskConversationService(projects, tasks)
+            conversation.record_thread_snapshot(
+                {
+                    "id": "thread-qwen",
+                    "name": "Step 11 source for compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run",
+                    "displayName": "Step 11 source for compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run",
+                    "turns": [],
+                }
+            )
+
+            composite = conversation.conversation(task_id=task["task_id"])["thread"]
+
+            self.assertEqual(composite["name"], "compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run")
+            self.assertEqual(composite["displayName"], "compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run")
+
+    def test_task_snapshot_visible_title_strips_smoke_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            created = tasks.create_task(
+                "Step 11 source for compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run",
+                thread_id="thread-qwen",
+                settings={
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3.7-plus",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+
+            snapshot = tasks.snapshot()
+            current_task = snapshot["current_task"]
+            list_item = next(item for item in snapshot["tasks"] if item["task_id"] == created["task_id"])
+
+            self.assertEqual(current_task["title"], "compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run")
+            self.assertEqual(list_item["title"], "compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run")
+
     def test_task_conversation_filters_turns_before_thread_joined_current_task(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1349,9 +1785,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
             digest = conversation.digest(task_id=new_task["task_id"])
             self.assertEqual([item["turn_id"] for item in digest["items"]], ["turn-new"])
             self.assertNotIn("Unrelated old task prompt", json.dumps(digest, ensure_ascii=False))
-            snapshot = tasks.snapshot()
-            old_task = next(item for item in snapshot["tasks"] if item["title"] == "Old task")
-            refreshed_new = next(item for item in snapshot["tasks"] if item["task_id"] == new_task["task_id"])
+            stored = tasks._state()
+            old_task = next(item for item in stored["tasks"] if item["title"] == "Old task")
+            refreshed_new = next(item for item in stored["tasks"] if item["task_id"] == new_task["task_id"])
             self.assertFalse(any(str(item.get("thread_id") or "") == "thread-shared" for item in old_task["provider_threads"]))
             self.assertEqual(refreshed_new["active_provider_thread_id"], "thread-shared")
 
@@ -1452,9 +1888,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 },
             )
 
-            snapshot = tasks.snapshot()
-            refreshed_old = next(item for item in snapshot["tasks"] if item["task_id"] == old_task["task_id"])
-            refreshed_new = next(item for item in snapshot["tasks"] if item["task_id"] == new_task["task_id"])
+            stored = tasks._state()
+            refreshed_old = next(item for item in stored["tasks"] if item["task_id"] == old_task["task_id"])
+            refreshed_new = next(item for item in stored["tasks"] if item["task_id"] == new_task["task_id"])
 
             self.assertEqual(projects.current_project["current_task_id"], new_task["task_id"])
             self.assertEqual(projects.current_project["current_thread_id"], "thread-shared")
@@ -2823,6 +3259,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
             def close(self) -> None:
                 self.closed = True
 
+        class FakeRouter:
+            def runtime_environment(self) -> dict[str, str]:
+                return {
+                    "ASTRABRIDGE_BASE_URL": "http://127.0.0.1:45871/v1",
+                    "ASTRABRIDGE_PORT": "45871",
+                    ROUTER_ENV_KEY: "fresh-router-token",
+                }
+
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace = root / "workspace"
@@ -2833,6 +3277,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 projects,
                 ModalService(projects.require_shell_state_root),
                 runtime_config=FakeRuntimeConfig(),  # type: ignore[arg-type]
+                router_service=FakeRouter(),  # type: ignore[arg-type]
             )
             runtime._resolve_launch_target = lambda _status: {  # type: ignore[method-assign]
                 "codex_executable": "codex",
@@ -2851,6 +3296,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(runtime_env["ASTRABRIDGE_DOWNLOADS_ROOT"], str(runtime_roots["downloads_root"]))
             self.assertEqual(runtime_env["ASTRABRIDGE_CACHES_ROOT"], str(runtime_roots["caches_root"]))
             self.assertEqual(runtime_env["ASTRABRIDGE_TMP_ROOT"], str(runtime_roots["tmp_root"]))
+            self.assertEqual(runtime_env["ASTRABRIDGE_BASE_URL"], "http://127.0.0.1:45871/v1")
+            self.assertEqual(runtime_env[ROUTER_ENV_KEY], "fresh-router-token")
 
     def test_runtime_thread_list_defers_provider_switch_while_turn_runtime_is_pinned(self) -> None:
         class FakeRuntimeConfig:
@@ -2896,6 +3343,100 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(result["threads"][0]["id"], "thread-kimi")
             self.assertTrue(
                 any(event.get("type") == "threads_list_deferred_active_turn" for event in runtime.list_events()["events"])
+            )
+
+    def test_runtime_notification_clears_pinned_turn_after_terminal_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            runtime._runtime_pin_signature = ("deepseek",)
+            runtime._runtime_pin_until_monotonic = time.monotonic() + 60
+            runtime._runtime_pin_thread_id = "thread-deepseek"
+            runtime._runtime_pin_turn_id = "turn-deepseek"
+
+            runtime._on_notification("turn/completed", {"threadId": "thread-deepseek", "turnId": "turn-deepseek"})
+
+            self.assertIsNone(runtime._runtime_pin_signature)
+            self.assertIsNone(runtime._runtime_pin_thread_id)
+            self.assertIsNone(runtime._runtime_pin_turn_id)
+            self.assertTrue(
+                any(
+                    event.get("type") == "runtime_turn_pin_cleared"
+                    and event.get("thread_id") == "thread-deepseek"
+                    and event.get("turn_id") == "turn-deepseek"
+                    for event in runtime.list_events()["events"]
+                )
+            )
+
+    def test_runtime_read_thread_clears_pinned_turn_after_terminal_turn_snapshot(self) -> None:
+        class FakeRuntimeConfig:
+            def prepare_profile(self, profile: dict[str, object], *, require_secret: bool) -> dict[str, object]:  # noqa: ARG002
+                return {"profile_id": profile.get("profile_id"), "provider_id": profile.get("provider_id")}
+
+            def runtime_signature(self, status: dict[str, object]) -> tuple[object, ...]:
+                return (status.get("provider_id"),)
+
+        class ExistingClient:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def is_running(self) -> bool:
+                return not self.closed
+
+            def close(self) -> None:
+                self.closed = True
+
+            def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:  # noqa: ARG002
+                if method == "thread/read":
+                    return {
+                        "thread": {
+                            "id": "thread-deepseek",
+                            "name": "DeepSeek thread",
+                            "status": {"type": "idle"},
+                            "turns": [
+                                {
+                                    "id": "turn-deepseek",
+                                    "status": "completed",
+                                    "items": [],
+                                }
+                            ],
+                        }
+                    }
+                raise AssertionError(f"Unexpected method {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                runtime_config=FakeRuntimeConfig(),  # type: ignore[arg-type]
+            )
+            existing = ExistingClient()
+            runtime._client = existing  # type: ignore[assignment]
+            runtime._runtime_signature = ("deepseek",)
+            runtime._runtime_pin_signature = ("deepseek",)
+            runtime._runtime_pin_until_monotonic = time.monotonic() + 60
+            runtime._runtime_pin_thread_id = "thread-deepseek"
+            runtime._runtime_pin_turn_id = "turn-deepseek"
+
+            result = runtime.read_thread({"profile_id": "deepseek-default", "provider_id": "deepseek"}, "thread-deepseek")
+
+            self.assertEqual(result["thread"]["id"], "thread-deepseek")
+            self.assertIsNone(runtime._runtime_pin_signature)
+            self.assertTrue(
+                any(
+                    event.get("type") == "runtime_turn_pin_cleared"
+                    and event.get("reason") == "thread_read_terminal_turn:completed"
+                    for event in runtime.list_events()["events"]
+                )
             )
 
     def test_runtime_thread_list_uses_active_runtime_during_thread_create_mutation(self) -> None:
@@ -2969,8 +3510,59 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(result["threads"][0]["id"], "thread-qwen")
             self.assertEqual(existing.requests[0][0], "thread/list")
             self.assertTrue(
-                any(event.get("type") == "runtime_switch_deferred_active_mutation" for event in runtime.list_events()["events"])
+                any(event.get("type") == "threads_list_using_active_runtime" for event in runtime.list_events()["events"])
             )
+
+    def test_runtime_model_list_does_not_restart_a_different_active_provider(self) -> None:
+        class FakeRuntimeConfig:
+            def __init__(self) -> None:
+                self.prepare_calls = 0
+
+            def prepare_profile(self, profile: dict[str, object], *, require_secret: bool) -> dict[str, object]:  # noqa: ARG002
+                self.prepare_calls += 1
+                return {"profile_id": profile.get("profile_id"), "provider_id": profile.get("provider_id")}
+
+            def runtime_signature(self, status: dict[str, object]) -> tuple[object, ...]:
+                return (status.get("provider_id"),)
+
+            def status(self) -> dict[str, object]:
+                return {
+                    "configured": True,
+                    "provider_id": "qwen",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "model": "qwen3.7-plus",
+                    "reasoning_effort": "high",
+                    "wire_api": "responses",
+                }
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime_config = FakeRuntimeConfig()
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                runtime_config=runtime_config,  # type: ignore[arg-type]
+            )
+            runtime._runtime_signature = ("qwen",)
+
+            result = runtime.list_models({"profile_id": "deepseek-default", "provider_id": "deepseek", "model": "deepseek-v4-pro", "wire_api": "chat"})
+
+            self.assertEqual(result["models"], [])
+            self.assertEqual(result["warning"], "model_list_deferred_active_runtime")
+            self.assertEqual(result["active_provider_id"], "qwen")
+            self.assertEqual(runtime_config.prepare_calls, 0)
+            self.assertTrue(
+                any(event.get("type") == "models_list_deferred_active_runtime" for event in runtime.list_events()["events"])
+            )
+
+            goal = runtime.get_goal({"profile_id": "deepseek-default", "provider_id": "deepseek", "model": "deepseek-v4-pro", "wire_api": "chat"}, "thread-deepseek")
+
+            self.assertEqual(goal["warning"], "goal_read_deferred_active_runtime")
+            self.assertEqual(runtime_config.prepare_calls, 0)
 
     def test_runtime_request_client_retries_one_transport_disconnect(self) -> None:
         class FakeClient:
@@ -3237,7 +3829,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
             )
             client = FakeClient()
             runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
-            runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id")}  # type: ignore[method-assign]  # noqa: ARG005
+            runtime._prepare_runtime = lambda profile, require_secret=False: {  # type: ignore[method-assign]  # noqa: ARG005
+                "provider_id": profile.get("provider_id"),
+                "input_modalities": ["text", "image"],
+                "modality_limits": {
+                    "image_transport": "chat_completions_base64_image_url",
+                    "app_server_image_input_status": "verified",
+                },
+            }
             runtime._ensure_client = lambda runtime_status: client  # type: ignore[method-assign]  # noqa: ARG005
             runtime._events = [
                 {
@@ -3317,7 +3916,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
             )
             client = FakeClient()
             runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
-            runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id")}  # type: ignore[method-assign]  # noqa: ARG005
+            runtime._prepare_runtime = lambda profile, require_secret=False: {  # type: ignore[method-assign]  # noqa: ARG005
+                "provider_id": profile.get("provider_id"),
+                "input_modalities": ["text", "image"],
+                "modality_limits": {
+                    "image_transport": "chat_completions_base64_image_url",
+                    "app_server_image_input_status": "verified",
+                },
+            }
             runtime._ensure_client = lambda runtime_status: client  # type: ignore[method-assign]  # noqa: ARG005
 
             result = runtime.start_turn(
@@ -3373,7 +3979,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 settings={"profile_id": "kimi-default", "provider_id": "kimi", "model": "kimi-k2.6", "reasoning_effort": "xhigh", "permission_mode": "auto"},
             )
             runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
-            runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id")}  # type: ignore[method-assign]  # noqa: ARG005
+            runtime._prepare_runtime = lambda profile, require_secret=False: {  # type: ignore[method-assign]  # noqa: ARG005
+                "provider_id": profile.get("provider_id"),
+                "input_modalities": ["text", "image"],
+                "modality_limits": {
+                    "image_transport": "chat_completions_base64_image_url",
+                    "app_server_image_input_status": "verified",
+                },
+            }
             runtime._ensure_client = lambda runtime_status: FakeClient()  # type: ignore[method-assign]  # noqa: ARG005
 
             with self.assertRaisesRegex(ValueError, "Attachment preparation failed"):
@@ -3533,6 +4146,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(result["thread_id"], "thread-recovered")
             self.assertEqual(result["turn"]["id"], "turn-recovered")
             self.assertEqual(projects.current_project["current_thread_id"], "thread-recovered")
+            self.assertEqual((tasks.current_task() or {}).get("active_provider_thread_id"), "thread-recovered")
             self.assertEqual([method for method, _params in client.requests].count("turn/start"), 2)
             self.assertTrue(any(event.get("type") == "provider_thread_recovered" for event in runtime.list_events()["events"]))
 
@@ -4121,6 +4735,174 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(direct["turns"][0]["coding_events"][0]["event_type"], "agent_message")
             self.assertEqual(composite["turns"][0]["coding_events"][0]["event_type"], "agent_message")
 
+    def test_terminal_notification_records_task_conversation_snapshot(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.requests: list[tuple[str, dict[str, object] | None]] = []
+
+            def is_running(self) -> bool:
+                return True
+
+            def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:
+                self.requests.append((method, params))
+                if method == "thread/read":
+                    return {
+                        "thread": {
+                            "id": "thread-deepseek",
+                            "name": "Recovered provider thread",
+                            "status": {"type": "idle"},
+                            "turns": [
+                                {
+                                    "id": "turn-deepseek",
+                                    "startedAt": now_iso(),
+                                    "completedAt": now_iso(),
+                                    "items": [
+                                        {"type": "userMessage", "id": "user-1", "text": "Attached is a tiny test image."},
+                                        {"type": "agentMessage", "id": "agent-1", "text": "image-attachment-ok"},
+                                    ],
+                                }
+                            ],
+                        }
+                    }
+                raise AssertionError(f"unexpected request: {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            task = tasks.create_task(
+                "Visible task",
+                thread_id="thread-deepseek",
+                settings={
+                    "profile_id": "deepseek",
+                    "provider_id": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "reasoning_effort": "max",
+                    "permission_mode": "auto",
+                },
+            )
+            conversation = TaskConversationService(projects, tasks)
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                task_service=tasks,
+                task_conversation=conversation,
+            )
+            fake_client = FakeClient()
+            runtime._client = fake_client  # noqa: SLF001
+            runtime._runtime_pin_thread_id = "thread-deepseek"  # noqa: SLF001
+            runtime._runtime_pin_turn_id = "turn-deepseek"  # noqa: SLF001
+
+            runtime._on_notification("turn/completed", {"threadId": "thread-deepseek", "turnId": "turn-deepseek"})  # noqa: SLF001
+
+            deadline = time.monotonic() + 2.0
+            composite = {"turns": []}
+            synced = False
+            while time.monotonic() < deadline:
+                composite = conversation.conversation(task_id=task["task_id"])["thread"]
+                synced = any(
+                    event.get("type") == "terminal_thread_snapshot_synced"
+                    and event.get("thread_id") == "thread-deepseek"
+                    for event in runtime.list_events()["events"]
+                )
+                if composite["turns"] and synced:
+                    break
+                time.sleep(0.05)
+
+            self.assertEqual(projects.current_project["current_thread_id"], "thread-deepseek")
+            self.assertEqual((tasks.current_task() or {}).get("active_provider_thread_id"), "thread-deepseek")
+            self.assertEqual(composite["turns"][0]["items"][1]["text"], "image-attachment-ok")
+            self.assertTrue(any(method == "thread/read" for method, _params in fake_client.requests))
+            self.assertTrue(synced)
+
+    def test_terminal_notification_does_not_steal_focus_after_switching_to_lane_less_task(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.requests: list[tuple[str, dict[str, object] | None]] = []
+
+            def is_running(self) -> bool:
+                return True
+
+            def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:
+                self.requests.append((method, params))
+                if method == "thread/read":
+                    return {
+                        "thread": {
+                            "id": "thread-step11",
+                            "name": "Recovered provider thread",
+                            "status": {"type": "idle"},
+                            "turns": [
+                                {
+                                    "id": "turn-step11",
+                                    "startedAt": now_iso(),
+                                    "completedAt": now_iso(),
+                                    "items": [
+                                        {"type": "userMessage", "id": "user-1", "text": "reply with exactly ok"},
+                                        {"type": "agentMessage", "id": "agent-1", "text": "ok"},
+                                    ],
+                                }
+                            ],
+                        }
+                    }
+                raise AssertionError(f"unexpected request: {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Step 11 source",
+                thread_id="thread-step11",
+                settings={
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3.7-plus",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            dg_task = tasks.create_task("DG Multimodal UI 01 Recovery 10")
+            self.assertEqual((tasks.current_task() or {}).get("task_id"), dg_task["task_id"])
+            self.assertIsNone(projects.current_project.get("current_thread_id"))
+
+            conversation = TaskConversationService(projects, tasks)
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                task_service=tasks,
+                task_conversation=conversation,
+            )
+            fake_client = FakeClient()
+            runtime._client = fake_client  # noqa: SLF001
+            runtime._runtime_pin_thread_id = "thread-step11"  # noqa: SLF001
+            runtime._runtime_pin_turn_id = "turn-step11"  # noqa: SLF001
+
+            runtime._on_notification("turn/completed", {"threadId": "thread-step11", "turnId": "turn-step11"})  # noqa: SLF001
+
+            deadline = time.monotonic() + 2.0
+            synced = False
+            while time.monotonic() < deadline:
+                synced = any(
+                    event.get("type") == "terminal_thread_snapshot_synced"
+                    and event.get("thread_id") == "thread-step11"
+                    for event in runtime.list_events()["events"]
+                )
+                if synced:
+                    break
+                time.sleep(0.05)
+
+            self.assertTrue(synced)
+            self.assertIsNone(projects.current_project.get("current_thread_id"))
+            self.assertEqual((tasks.current_task() or {}).get("task_id"), dg_task["task_id"])
+            self.assertIsNone((tasks.current_task() or {}).get("active_provider_thread_id"))
+            self.assertTrue(any(method == "thread/read" for method, _params in fake_client.requests))
+
     def test_task_conversation_includes_provider_handoff_as_event_only_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -4504,13 +5286,22 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 },
             )
             profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            _seed_verified_agent_model(router_config, "deepseek", "deepseek-v4-pro")
             runtime = RuntimeService(
                 projects,
                 ModalService(projects.require_shell_state_root),
                 task_service=tasks,
                 profile_service=profiles,
             )
-            tools = ProjectToolsService(projects, runtime, checkpoints=CheckpointService(projects), tasks=tasks, profiles=profiles)
+            tools = ProjectToolsService(
+                projects,
+                runtime,
+                checkpoints=CheckpointService(projects),
+                tasks=tasks,
+                profiles=profiles,
+                router_config=router_config,
+            )
             runtime.attach_project_tools(tools)
             runtime.attach_router(FakeNativeRouter())
 
@@ -4606,6 +5397,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 },
             )
             profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            _seed_verified_agent_model(router_config, "deepseek", "deepseek-v4-pro")
             modals = ModalService(projects.require_shell_state_root)
             runtime = RuntimeService(
                 projects,
@@ -4613,7 +5406,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 task_service=tasks,
                 profile_service=profiles,
             )
-            tools = ProjectToolsService(projects, runtime, checkpoints=CheckpointService(projects), tasks=tasks, profiles=profiles)
+            tools = ProjectToolsService(
+                projects,
+                runtime,
+                checkpoints=CheckpointService(projects),
+                tasks=tasks,
+                profiles=profiles,
+                router_config=router_config,
+            )
             runtime.attach_project_tools(tools)
             runtime.attach_router(FakeNativeRouter())
 
@@ -4700,6 +5500,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 },
             )
             profiles = ProfileService(store_path=root / "profiles.json")
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            _seed_verified_agent_model(router_config, "deepseek", "deepseek-v4-pro")
             modals = ModalService(projects.require_shell_state_root)
             runtime = RuntimeService(
                 projects,
@@ -4707,7 +5509,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 task_service=tasks,
                 profile_service=profiles,
             )
-            tools = ProjectToolsService(projects, runtime, checkpoints=CheckpointService(projects), tasks=tasks, profiles=profiles)
+            tools = ProjectToolsService(
+                projects,
+                runtime,
+                checkpoints=CheckpointService(projects),
+                tasks=tasks,
+                profiles=profiles,
+                router_config=router_config,
+            )
             runtime.attach_project_tools(tools)
             runtime.attach_router(FakeNativeRouter())
 
@@ -5224,6 +6033,86 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(quality["status"], "suspect")
             self.assertEqual(quality["recommended_action"], "continue_or_retry_final_answer")
             self.assertEqual(quality["tool_item_count"], 1)
+
+    def test_patch_only_execution_policy_fails_closed_before_provider_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            runtime._prepare_runtime = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("provider dispatch must not occur"))  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(ValueError, "blocked the turn rather than silently allowing shell edits"):
+                runtime.start_turn(
+                    {"profile_id": "qwen", "provider_id": "qwen", "model": "qwen3-coder-plus"},
+                    thread_id="thread-1",
+                    text="Fix the failing test.",
+                    attachments=[],
+                    model="qwen3-coder-plus",
+                    effort="high",
+                    permission_mode="auto",
+                    execution_policy="patch_only",
+                )
+
+            self.assertEqual(runtime.list_events()["events"][-1]["type"], "turn_execution_policy_rejected")
+
+    def test_patch_only_execution_policy_auto_declines_shell_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            runtime._register_active_turn_execution_policy("thread-1", "patch_only")
+
+            response = runtime._on_server_request(
+                "item/commandExecution/requestApproval",
+                {"threadId": "thread-1", "turnId": "turn-1", "command": "Set-Content unsafe.txt nope"},
+            )
+
+            self.assertEqual(response, {"decision": "decline"})
+            event = runtime.list_events()["events"][-1]
+            self.assertEqual(event["type"], "turn_execution_policy_approval_blocked")
+            self.assertEqual(event["policy"], "patch_only")
+
+    def test_runtime_read_thread_marks_patch_only_shell_trace_as_non_compliant(self) -> None:
+        class FakeClient:
+            def request(self, method: str, params: dict[str, object] | None = None, timeout: float | None = None) -> dict[str, object]:
+                if method == "thread/read":
+                    return {
+                        "thread": {
+                            "id": "thread-1",
+                            "turns": [
+                                {
+                                    "id": "turn-1",
+                                    "status": "completed",
+                                    "items": [{"type": "commandExecution", "id": "shell-1", "command": "Set-Content unsafe.txt nope"}],
+                                }
+                            ],
+                        }
+                    }
+                raise AssertionError(f"unexpected request: {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            runtime._ensure_client = lambda _status: FakeClient()  # type: ignore[method-assign]
+            runtime._prepare_runtime = lambda _profile, require_secret=False: {"configured": True}  # type: ignore[method-assign]
+            runtime._record_execution_policy_started(thread_id="thread-1", turn_id="turn-1", policy="patch_only")
+
+            result = runtime.read_thread({"profile_id": "p"}, "thread-1")
+
+            policy = result["thread"]["turns"][0]["executionPolicy"]
+            self.assertEqual(policy["status"], "violated")
+            self.assertFalse(policy["compliant_success"])
+            self.assertEqual(policy["recommended_action"], "review_changes_and_retry_in_a_fresh_patch_only_turn")
 
     def test_runtime_read_thread_does_not_flag_completed_tool_turn_with_substantive_final(self) -> None:
         substantive = "Decision plan: " + ("use background art plus invisible collision grid. " * 8)
@@ -6505,6 +7394,16 @@ class AstraBridgeServiceTests(unittest.TestCase):
             else:
                 os.environ["TEST_PROVIDER_KEY"] = original
 
+    def test_runtime_config_status_is_available_before_a_profile_is_prepared(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            service = RuntimeConfigService(Path(temp) / "embedded_codex_home")
+
+            status = service.status()
+
+            self.assertFalse(status["configured"])
+            self.assertIsNone(status["provider_id"])
+            self.assertIsNone(status["input_modalities"])
+
     def test_runtime_config_keeps_verified_kimi_image_modality_for_catalog(self) -> None:
         original = os.environ.pop("TEST_KIMI_PROVIDER_KEY", None)
         try:
@@ -7376,7 +8275,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 prompt="convert into a transparent JRPG icon",
                 image_paths=[str(image_path)],
                 mask_path=str(mask_path),
-                model="flux-kontext-pro",
+                model="gpt-image-1",
                 size="1024x1024",
                 n=3,
                 quality="high",
@@ -7385,7 +8284,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 prompt_category="image_edit_recreation",
                 purpose="unit_edit_icon",
             )
-            self.assertEqual(fields["model"], "flux-kontext-pro")
+            self.assertEqual(fields["model"], "gpt-image-1")
             self.assertEqual(fields["n"], "3")
             self.assertEqual(fields["background"], "transparent")
             self.assertEqual(fields["moderation"], "low")
@@ -9296,6 +10195,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     raise AssertionError(f"Unexpected method {method}")
             profiles = ProfileService(store_path=root / "profiles.json")
             router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            _seed_verified_agent_model(router_config, "kimi", "kimi-k2.6")
             conversation = TaskConversationService(projects, tasks)
             runtime = RuntimeService(
                 projects,
@@ -9365,6 +10265,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "    return [f\"{'PASS' if item['ok'] else 'FAIL'} {item['name']}\" for item in checks]\n"
                     ),
                     "profile_id": "kimi-default",
+                    "provider_id": "kimi",
+                    "model": "kimi-k2.6",
                 }
             )
             self.assertTrue(edit["applied"])
@@ -9772,6 +10674,43 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(logged_in["session"]["mode"], "managed_user")
             self.assertEqual(logged_in["session"]["username"], "astra")
             self.assertEqual(logged_in["session"]["key_count"], 1)
+
+    def test_llm_api_manager_restores_unlocked_vault_from_windows_credential_manager(self) -> None:
+        class MemorySecretService:
+            def __init__(self) -> None:
+                self.values: dict[str, str] = {}
+
+            def store(self, name: str, secret: str) -> str:
+                self.values[name] = secret
+                return f"wincred:{name}"
+
+            def load(self, secret_ref: str) -> str | None:
+                return self.values.get(secret_ref.split(":", 1)[1])
+
+            def delete(self, secret_ref: str) -> bool:
+                return self.values.pop(secret_ref.split(":", 1)[1], None) is not None
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService(root / "profiles.json")
+            config = RouterConfigService(profiles, root / "router.json")
+            secrets = MemorySecretService()
+            manager = LlmApiManagerService(config, DummyRouter(), root / "manager", secret_service=secrets)
+
+            manager.create_user({"username": "astra", "password": "resume-vault-password"})
+            manager.save_key({"provider_id": "qwen", "label": "Qwen", "env_key": "DASHSCOPE_API_KEY", "secret": "unit_secret_resume_qwen"})
+            restarted = LlmApiManagerService(config, DummyRouter(), root / "manager", secret_service=secrets)
+
+            self.assertEqual(restarted.session()["mode"], "managed_user")
+            self.assertEqual(restarted.session()["username"], "astra")
+            self.assertEqual(restarted.session()["auth_surface"], "windows_credential_manager_resume")
+            self.assertEqual(restarted.session()["key_count"], 1)
+            self.assertNotIn("unit_secret_resume_qwen", (root / "manager" / "session_resume.json").read_text(encoding="utf-8"))
+
+            restarted.logout()
+            locked_again = LlmApiManagerService(config, DummyRouter(), root / "manager", secret_service=secrets)
+            self.assertEqual(locked_again.session()["mode"], "anonymous")
+            self.assertEqual(locked_again.session()["preferred_username"], "astra")
 
     def test_llm_api_manager_multi_user_isolation_key_redaction_and_env_cleanup(self) -> None:
         original = os.environ.pop("DEEPSEEK_API_KEY", None)
@@ -10390,7 +11329,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(provider["display_name"], "Qwen / DashScope")
             self.assertEqual(provider["base_url"], "https://dashscope.aliyuncs.com/compatible-mode/v1")
             self.assertEqual(provider["default_model"], "qwen3.7-plus")
-            self.assertEqual(provider["supported_reasoning_levels"], ["low", "medium", "high", "xhigh"])
+            self.assertEqual(provider["supported_reasoning_levels"], ["off", "minimal", "low", "medium", "high", "xhigh"])
             self.assertEqual(provider["reasoning_policy_mode"], "enable_thinking")
 
     def test_runtime_config_embeds_isolated_mcp_config(self) -> None:
@@ -10450,7 +11389,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                     session_key="unit_secret_qwen_effective_123456",
                 )
 
-                self.assertEqual(status["input_modalities"], ["text"])
+                self.assertEqual(status["input_modalities"], ["text", "image"])
                 self.assertEqual(status["web_search_tool_type"], "text")
                 self.assertEqual(status["supports_mcp_tools"], False)
                 self.assertEqual(status["citation_quality"], "untested")
@@ -11368,6 +12307,10 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 router.start()
                 fresh_token = os.environ[ROUTER_ENV_KEY]
                 self.assertNotEqual(fresh_token, "stale_router")
+                runtime_environment = router.runtime_environment()
+                self.assertEqual(runtime_environment[ROUTER_ENV_KEY], fresh_token)
+                self.assertEqual(runtime_environment["ASTRABRIDGE_BASE_URL"], router.status()["base_url"])
+                self.assertNotIn(ROUTER_ENV_KEY, router.status())
 
                 stale_request = urllib.request.Request(
                     f"http://127.0.0.1:{router.status()['listen_port']}/v1/models",
@@ -12134,6 +13077,96 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(upstream["thinking"], {"type": "enabled"})
             self.assertEqual(upstream["max_tokens"], 32768)
 
+    def test_qwen_responses_adapter_maps_app_server_local_image_to_input_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            image_path = Path(temp) / "vision.png"
+            image_path.write_bytes(_png_rgba(1, 1, (0, 64, 255, 255)))
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            profiles.upsert_profile(
+                {
+                    "profile_id": "qwen-router",
+                    "label": "Qwen Router",
+                    "type": "custom_provider",
+                    "provider_id": "qwen",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "model": "qwen3.7-plus",
+                    "reasoning_effort": "high",
+                    "wire_api": "responses",
+                    "env_key": "TEST_QWEN_PROVIDER_KEY",
+                    "auth_mode": "env_ref",
+                    "proxy_mode": "direct",
+                    "proxy_url": "",
+                }
+            )
+            router = RouterService(profiles, port=0)
+            payload = {
+                "model": "qwen/qwen3.7-plus",
+                "input": [
+                    {"type": "text", "text": "Read the marker in this image."},
+                    {"type": "localImage", "path": str(image_path), "detail": "high"},
+                ],
+                "stream": False,
+                "astrabridge_probe_force_final": True,
+            }
+
+            profile = router._resolve_profile(payload)  # noqa: SLF001
+            upstream = router._adapter_for(profile).upstream_payload(payload)  # noqa: SLF001
+            user_messages = [
+                item
+                for item in upstream["input"]
+                if item.get("type") == "message" and item.get("role") == "user"
+            ]
+            self.assertEqual(len(user_messages), 1)
+            image_message = next(item for item in upstream["input"] if item.get("type") == "message")
+            self.assertEqual(image_message["content"][0], {"type": "input_text", "text": "Read the marker in this image."})
+            image_part = next(part for part in image_message["content"] if part.get("type") == "input_image")
+            self.assertTrue(image_part["image_url"].startswith("data:image/png;base64,"))
+            self.assertEqual(image_part["detail"], "high")
+            self.assertIn(base64.b64encode(image_path.read_bytes()).decode("ascii"), image_part["image_url"])
+            self.assertFalse(upstream["enable_thinking"])
+            self.assertNotIn("astrabridge_probe_force_final", upstream)
+
+            preview = router.preview_payload(payload)
+            self.assertIn("[REDACTED_IMAGE_DATA_URL]", json.dumps(preview["upstream_payload"]))
+
+    def test_kimi_adapter_rejects_remote_image_url_during_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            profiles.upsert_profile(
+                {
+                    "profile_id": "kimi-router",
+                    "label": "Kimi Router",
+                    "type": "custom_provider",
+                    "provider_id": "kimi",
+                    "base_url": "https://api.moonshot.cn/v1",
+                    "model": "kimi-k2.6",
+                    "reasoning_effort": "xhigh",
+                    "wire_api": "chat",
+                    "env_key": "TEST_KIMI_PROVIDER_KEY",
+                    "auth_mode": "env_ref",
+                    "proxy_mode": "direct",
+                    "proxy_url": "",
+                }
+            )
+            router = RouterService(profiles, port=0)
+            payload = {
+                "model": "kimi/kimi-k2.6",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Inspect this image."},
+                            {"type": "input_image", "image_url": "https://example.com/vision.png?sig=secret-token", "detail": "high"},
+                        ],
+                    }
+                ],
+                "stream": False,
+            }
+
+            with self.assertRaisesRegex(ValueError, "base64 data URLs or localImage paths"):
+                router.preview_payload(payload)
+
     def test_kimi_adapter_recovers_app_server_embedded_input_image_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             profiles = ProfileService(Path(temp) / "profiles.json")
@@ -12830,6 +13863,39 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertNotIn("choices", normalized.provider_data)
             self.assertTrue(any(item.code == "reasoning_only_notice_emitted" for item in normalized.warnings))
 
+    def test_glm_chat_transport_normalizes_tool_calls_without_raw_payload_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+            adapter = router._adapter_for_provider("glm")  # noqa: SLF001
+
+            upstream = {
+                "id": "chat-normalized-glm-tools",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "Inspect the repository before editing.",
+                            "tool_calls": [
+                                {
+                                    "id": "call-shell",
+                                    "function": {"name": "run_command", "arguments": "{\"command\":\"pwd\"}"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+
+            normalized = adapter.normalize_response(upstream, {"model": "glm/glm-5.2"})
+
+            self.assertEqual([(item.id, item.name, item.arguments_json) for item in normalized.tool_calls], [("call-shell", "run_command", "{\"command\":\"pwd\"}")])
+            self.assertEqual(normalized.provider_data["tool_call_count"], 1)
+            self.assertNotIn("choices", normalized.provider_data)
+            self.assertEqual(normalized.raw_ref.locator, "chat-normalized-glm-tools")
+
     def test_yunwu_transport_normalizes_response_without_raw_payload_leak(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             profiles = ProfileService(Path(temp) / "profiles.json")
@@ -13214,7 +14280,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                             "model": "kimi/kimi-k2.6",
                             "input": "hello",
                             "stream": True,
-                            "tool_choice": "required",
+                            "tool_choice": "auto",
                             "tools": [{"type": "function", "name": "update_plan", "description": "update", "parameters": {"type": "object"}}],
                         }
                     ).encode("utf-8"),
@@ -13284,9 +14350,9 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 }
             )
 
-            self.assertEqual(profile["reasoning_effort"], "xhigh")
-            self.assertEqual(profile["default_reasoning_level"], "xhigh")
-            self.assertEqual(profile["supported_reasoning_levels"], ["high", "xhigh", "max"])
+            self.assertEqual(profile["reasoning_effort"], "high")
+            self.assertEqual(profile["default_reasoning_level"], "high")
+            self.assertEqual(profile["supported_reasoning_levels"], ["off", "high", "xhigh"])
 
     def test_profile_service_resolves_provider_id_for_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -13375,7 +14441,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 }
             )
 
-            self.assertEqual(normalized["reasoning_effort"], "xhigh")
+            self.assertEqual(normalized["reasoning_effort"], "high")
 
     def test_runtime_config_service_defaults_model_from_generated_catalog_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -13771,8 +14837,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
         kimi = get_provider_profile("kimi").to_default_profile()
 
         self.assertEqual(deepseek["execution_backend"], "app_server")
-        self.assertEqual(deepseek["supported_reasoning_levels"], ["high", "xhigh", "max"])
-        self.assertEqual(deepseek["default_reasoning_level"], "xhigh")
+        self.assertEqual(deepseek["supported_reasoning_levels"], ["off", "high", "xhigh"])
+        self.assertEqual(deepseek["default_reasoning_level"], "high")
         self.assertEqual(deepseek["supports_mcp_tools"], True)
         self.assertEqual(deepseek["mcp_verified_servers"], ["astrabridge_web"])
         self.assertEqual(deepseek["mcp_web_support"], "verified_astrabridge_web")
@@ -13784,20 +14850,24 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
     def test_provider_profiles_seed_catalog_provider_and_model_defaults(self) -> None:
         qwen = get_provider_profile("qwen")
+        glm = get_provider_profile("glm")
         catalog_provider = qwen.to_catalog_provider()
         router_provider = qwen.to_router_provider()
         model_defaults = qwen.to_model_defaults()
+        glm_defaults = glm.to_model_defaults()
 
         self.assertEqual(catalog_provider["id"], "qwen")
         self.assertEqual(catalog_provider["adapter_type"], "responses")
         self.assertEqual(catalog_provider["runtime_backend"], "app_server")
         self.assertEqual(catalog_provider["default_model"], "qwen3.7-plus")
         self.assertEqual(catalog_provider["env_key"], "DASHSCOPE_API_KEY")
-        self.assertEqual(catalog_provider["supported_reasoning_levels"], ["low", "medium", "high", "xhigh"])
+        self.assertEqual(catalog_provider["supported_reasoning_levels"], ["off", "minimal", "low", "medium", "high", "xhigh"])
         self.assertEqual(catalog_provider["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
         self.assertAlmostEqual(float(catalog_provider["provider_temperature_min"]), 0.00001)
+        self.assertEqual(glm_defaults["command_execution_status"], "partial_no_command_execution")
+        self.assertIn("no commandExecution event", str(glm_defaults["command_execution_note"]))
         self.assertEqual(catalog_provider["effective_context_window_percent"], 80)
-        self.assertEqual(catalog_provider["input_modalities"], ["text"])
+        self.assertEqual(catalog_provider["input_modalities"], ["text", "image"])
         self.assertEqual(catalog_provider["supports_mcp_tools"], False)
         self.assertEqual(catalog_provider["web_search_tool_type"], "text")
         self.assertEqual(catalog_provider["planner_support"]["plan_mode"], "conservative")
@@ -13807,7 +14877,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(router_provider["model_defaults"]["default_reasoning_level"], model_defaults["default_reasoning_level"])
         self.assertEqual(router_provider["model_defaults"]["temperature_adapter_policy"], model_defaults["temperature_adapter_policy"])
         self.assertEqual(router_provider["model_defaults"]["planner_support"]["plan_mode"], "conservative")
-        self.assertEqual(model_defaults["default_reasoning_level"], "high")
+        self.assertEqual(model_defaults["default_reasoning_level"], "medium")
         self.assertEqual(model_defaults["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
         self.assertEqual(model_defaults["provider_profile_id"], "qwen")
         self.assertEqual(model_defaults["planner_support"]["plan_mode"], "conservative")
@@ -13833,6 +14903,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         self.assertEqual(seeded["qwen/qwen3.7-plus"]["temperature_adapter_policy"], qwen_defaults["temperature_adapter_policy"])
         self.assertEqual(seeded["qwen/qwen3.7-plus"]["supported_reasoning_levels"], qwen_defaults["supported_reasoning_levels"])
+        self.assertEqual(seeded["qwen/qwen3.7-plus"]["input_modalities"], ["text", "image"])
+        self.assertEqual(seeded["qwen/qwen3.6-flash"]["input_modalities"], ["text", "image"])
         self.assertEqual(seeded["glm/glm-5.2"]["input_modalities"], glm_defaults["input_modalities"])
         self.assertEqual(seeded["glm/glm-5.2"]["provider_profile_id"], "glm")
 
@@ -13858,8 +14930,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             model = next(item for item in config.models() if item["id"] == "deepseek-alt/deepseek-v4-pro")
             profile = next(item for item in profiles.list_profiles()["profiles"] if item["profile_id"] == "deepseek-alt-default")
 
-            self.assertEqual(provider["supported_reasoning_levels"], ["high", "xhigh", "max"])
-            self.assertEqual(provider["default_reasoning_level"], "xhigh")
+            self.assertEqual(provider["supported_reasoning_levels"], ["off", "high", "xhigh"])
+            self.assertEqual(provider["default_reasoning_level"], "high")
             self.assertEqual(provider["runtime_backend"], "app_server")
             self.assertEqual(provider["temperature_adapter_policy"], "pass_through_0_2")
             self.assertEqual(provider["effective_context_window_percent"], 80)
@@ -13872,11 +14944,11 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(provider["goal_support"]["thread_goal"], "app_server_native")
             self.assertEqual(provider["context_compaction_support"]["manual_compact"], "app_server_native")
             self.assertEqual(provider["codex_builtin_tools"]["shell_command"]["support"], "verified")
-            self.assertEqual(provider["model_defaults"]["default_reasoning_level"], "xhigh")
+            self.assertEqual(provider["model_defaults"]["default_reasoning_level"], "high")
             self.assertEqual(provider["model_defaults"]["supports_mcp_tools"], True)
             self.assertEqual(provider["model_defaults"]["planner_support"]["plan_mode"], "conservative")
-            self.assertEqual(model["supported_reasoning_levels"], ["high", "xhigh", "max"])
-            self.assertEqual(model["default_reasoning_level"], "xhigh")
+            self.assertEqual(model["supported_reasoning_levels"], ["off", "high", "xhigh"])
+            self.assertEqual(model["default_reasoning_level"], "high")
             self.assertEqual(model["temperature_adapter_policy"], "pass_through_0_2")
             self.assertEqual(model["planner_support"]["plan_mode"], "conservative")
             self.assertEqual(model["goal_support"]["thread_goal"], "app_server_native")
@@ -13884,8 +14956,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(model["codex_builtin_tools"]["shell_command"]["support"], "verified")
             self.assertEqual(profile["wire_api"], "chat")
             self.assertEqual(profile["execution_backend"], "app_server")
-            self.assertEqual(profile["supported_reasoning_levels"], ["high", "xhigh", "max"])
-            self.assertEqual(profile["reasoning_effort"], "xhigh")
+            self.assertEqual(profile["supported_reasoning_levels"], ["off", "high", "xhigh"])
+            self.assertEqual(profile["reasoning_effort"], "high")
             self.assertEqual(profile["planner_support"]["plan_mode"], "conservative")
             self.assertEqual(profile["goal_support"]["thread_goal"], "app_server_native")
             self.assertEqual(profile["context_compaction_support"]["manual_compact"], "app_server_native")
@@ -13937,8 +15009,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             self.assertEqual(created["wire_api"], "chat")
             self.assertEqual(created["execution_backend"], "app_server")
-            self.assertEqual(created["supported_reasoning_levels"], ["high", "xhigh", "max"])
-            self.assertEqual(created["default_reasoning_level"], "xhigh")
+            self.assertEqual(created["supported_reasoning_levels"], ["off", "high", "xhigh"])
+            self.assertEqual(created["default_reasoning_level"], "high")
             self.assertEqual(created["planner_support"]["plan_mode"], "conservative")
             self.assertEqual(created["goal_support"]["thread_goal"], "app_server_native")
             self.assertEqual(created["context_compaction_support"]["manual_compact"], "app_server_native")
@@ -13983,17 +15055,98 @@ class AstraBridgeServiceTests(unittest.TestCase):
             qwen_profile = get_provider_profile("qwen")
             seeded_ids = {item["id"] for item in snapshot["models"] if item["provider"] == "qwen-alt"}
 
-            self.assertEqual(
-                seeded_ids,
-                {f"qwen-alt/{model_id}" for model_id in (qwen_profile.fallback_policy.fallback_models or qwen_profile.fallback_models)},
-            )
+            expected_seed_models = {
+                *(qwen_profile.fallback_policy.fallback_models or qwen_profile.fallback_models),
+                "qwen3-vl-plus",
+                "qwen3-vl-flash",
+                "qwen3-asr-flash",
+                "qwen3-tts-flash",
+                "qwen3-tts-instruct-flash",
+            }
+            self.assertEqual(seeded_ids, {f"qwen-alt/{model_id}" for model_id in expected_seed_models})
             seeded_plus = next(item for item in snapshot["models"] if item["id"] == "qwen-alt/qwen3.7-plus")
             self.assertEqual(seeded_plus["temperature_adapter_policy"], "qwen_omit_zero_clamp_1")
-            self.assertEqual(seeded_plus["supported_reasoning_levels"], ["low", "medium", "high", "xhigh"])
+            self.assertEqual(seeded_plus["supported_reasoning_levels"], ["off", "minimal", "low", "medium", "high", "xhigh"])
+
+    def test_router_config_refreshes_catalog_managed_modalities_from_generated_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService(root / "profiles.json")
+            stale_payload = {
+                "providers": [
+                    {
+                        "id": "qwen",
+                        "provider_id": "qwen",
+                        "provider_family": "qwen",
+                        "display_name": "Qwen / DashScope",
+                        "enabled": True,
+                        "adapter_type": "responses",
+                        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        "default_model": "qwen3.7-plus",
+                        "request_timeout_ms": 300000,
+                        "stream_idle_timeout_ms": 300000,
+                        "env_key": "DASHSCOPE_API_KEY",
+                        "auth_mode": "env_ref",
+                        "proxy_mode": "direct",
+                        "proxy_url": "",
+                        "created_at": "2026-06-21T14:28:41.049490+08:00",
+                        "updated_at": "2026-06-21T14:47:38.914666+08:00",
+                    }
+                ],
+                "models": [
+                    {
+                        "id": "qwen/qwen3.7-plus",
+                        "provider": "qwen",
+                        "native_model": "qwen3.7-plus",
+                        "display_name": "Qwen3.7 Plus",
+                        "enabled": True,
+                        "advertised_context_window": 1000000,
+                        "ui_context_hint_only": True,
+                        "adapter_profile": "default",
+                        "input_modalities": ["text"],
+                        "supports_image_detail_original": False,
+                        "modality_limits": {
+                            "text": True,
+                            "image_input": False,
+                            "file_mentions": True,
+                            "image_generation": False,
+                        },
+                        "ui_warnings": [
+                            "Image attachments are not verified for this model; send them as file context only or choose an image-capable model."
+                        ],
+                        "source_status": "official_docs",
+                        "catalog_version": "astrabridge-generated-catalog-v1",
+                        "last_verified_at": "2026-07-06T11:08:11.420572+09:00",
+                        "verification_notes": "keep me",
+                        "created_at": "2026-06-21T14:28:51.446408+08:00",
+                        "updated_at": "2026-06-21T14:47:39.345278+08:00",
+                    }
+                ],
+                "reasoning": {
+                    "global_effort": "high",
+                    "provider_overrides": {},
+                    "model_overrides": {},
+                    "native_parameter_overrides": {},
+                },
+            }
+            (root / "router.json").write_text(json.dumps(stale_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            config = RouterConfigService(profiles, root / "router.json")
+            model = next(item for item in config.models() if item["id"] == "qwen/qwen3.7-plus")
+            stored = json.loads((root / "router.json").read_text(encoding="utf-8"))
+            stored_model = next(item for item in stored["models"] if item["id"] == "qwen/qwen3.7-plus")
+
+            self.assertEqual(model["input_modalities"], ["text", "image"])
+            self.assertEqual(stored_model["input_modalities"], ["text", "image"])
+            self.assertTrue(model["modality_limits"]["image_input"])
+            self.assertTrue(stored_model["modality_limits"]["image_input"])
+            self.assertEqual(model["last_verified_at"], "2026-07-06T11:08:11.420572+09:00")
+            self.assertEqual(model["verification_notes"], "keep me")
+            self.assertNotIn("Image attachments are not verified", " ".join(model["ui_warnings"]))
 
     def test_model_catalog_known_functions_fall_back_to_provider_profiles(self) -> None:
-        self.assertEqual(known_reasoning_efforts("deepseek", "deepseek-v4-pro"), ["high", "xhigh", "max"])
-        self.assertEqual(known_input_modalities("glm", "glm-5.2"), ["text", "image"])
+        self.assertEqual(known_reasoning_efforts("deepseek", "deepseek-v4-pro"), ["off", "high", "xhigh"])
+        self.assertEqual(known_input_modalities("glm", "glm-5.2"), ["text"])
         self.assertEqual(known_context_window("qwen", "qwen3.7-plus"), 1_000_000)
 
     def test_model_seed_uses_known_context_window_fallback_when_missing(self) -> None:
@@ -14146,11 +15299,11 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("request_user_input", deepseek["codex_builtin_tools"])
             self.assertIn("structured_summary_quality", deepseek["context_compaction_support"])
             self.assertIn("glm/glm-5.2", catalog_ids)
-            self.assertIn("image", glm["input_modalities"])
-            self.assertEqual(glm["default_reasoning_level"], "high")
+            self.assertEqual(glm["input_modalities"], ["text"])
+            self.assertEqual(glm["default_reasoning_level"], "xhigh")
             self.assertEqual(glm["authority_tier"], "C")
             self.assertIn("image", kimi["input_modalities"])
-            self.assertIn("https://platform.moonshot.ai/docs/overview", kimi["source_urls"])
+            self.assertIn("https://platform.kimi.ai/docs/overview", kimi["source_urls"])
             self.assertEqual(kimi["modality_limits"]["image_transport"], "chat_completions_base64_image_url")
             self.assertFalse(kimi["modality_limits"]["remote_image_url_supported"])
             self.assertTrue(any(item["id"] == "kimi/kimi-k2.7-code" for item in catalog["models"]))
@@ -15041,6 +16194,43 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(status["thread_status"]["type"], "idle")
         self.assertTrue(status["thread_status"]["stale_error_normalized"])
         self.assertIsNone(status["runtime_error"])
+
+    def test_runtime_supervisor_suppresses_older_error_after_successful_turn(self) -> None:
+        class FakeRuntime:
+            def list_events(self, after: int = 0, limit: int | None = None) -> dict[str, object]:
+                return {"cursor": 2, "events": []}
+
+        supervisor = RuntimeSupervisorService(object(), FakeRuntime(), object(), object())
+        events = [
+            {
+                "type": "notification",
+                "method": "error",
+                "timestamp": "2026-07-11T00:00:00+00:00",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-old",
+                    "error": {"message": "older provider failure"},
+                },
+            },
+            {
+                "type": "notification",
+                "method": "turn/completed",
+                "timestamp": "2026-07-11T00:00:01+00:00",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-new", "status": "completed", "error": None},
+                },
+            },
+        ]
+
+        result = supervisor._latest_runtime_error(
+            events,
+            "thread-1",
+            {"type": "idle"},
+            profile={"provider_id": "qwen", "model": "qwen3.7-plus"},
+        )
+
+        self.assertIsNone(result)
 
     def test_runtime_supervisor_suppresses_stale_not_loaded_from_completed_thread_snapshot(self) -> None:
         class FakeProjects:
@@ -16011,6 +17201,546 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(notice["recommended_actions"][0]["action"], "restart_runtime_lane")
         self.assertTrue(notice["recommended_actions"][0]["transition"]["restart_runtime"])
         self.assertEqual(notice["recommended_actions"][0]["transition"]["target"]["base_url"], "https://open.bigmodel.cn/api/paas/v4")
+
+    def test_thread_create_recovery_returns_the_same_completed_thread_without_a_second_start(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:  # noqa: ARG002
+                self.calls.append(method)
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-recovered", "name": "Recovered task"}}
+                if method == "thread/name/set":
+                    return {}
+                if method == "thread/read":
+                    return {"thread": {"id": str(params.get("threadId") or ""), "name": "Recovered task", "turns": []}}
+                raise AssertionError(f"Unexpected method {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            selected_task = tasks.create_task("DG Multimodal UI")
+            client = FakeClient()
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id")}  # type: ignore[method-assign]  # noqa: ARG005
+            runtime._runtime_request_client = lambda runtime_status: client  # type: ignore[method-assign]  # noqa: ARG005
+            runtime._ensure_client = lambda runtime_status: client  # type: ignore[method-assign]  # noqa: ARG005
+            profile = {"profile_id": "qwen-default", "provider_id": "qwen", "model": "qwen3.7-plus", "reasoning_effort": "high"}
+
+            created = runtime.create_thread(
+                profile,
+                model="qwen3.7-plus",
+                effort="high",
+                permission_mode="auto",
+                task_id=str(selected_task["task_id"]),
+                name="Recovered task",
+                operation_id="thread-create-recovery-01",
+            )
+            recovered = runtime.recover_thread_create(profile, operation_id="thread-create-recovery-01")
+            repeated = runtime.create_thread(
+                profile,
+                model="qwen3.7-plus",
+                effort="high",
+                permission_mode="auto",
+                task_id=str(selected_task["task_id"]),
+                name="Recovered task",
+                operation_id="thread-create-recovery-01",
+            )
+
+            self.assertEqual(created["thread"]["id"], "thread-recovered")
+            self.assertEqual(recovered["status"], "completed")
+            self.assertEqual(recovered["thread"]["id"], "thread-recovered")
+            self.assertEqual(repeated["status"], "completed")
+            self.assertEqual(client.calls.count("thread/start"), 1)
+            current_task = tasks.current_task()
+            self.assertEqual(current_task["task_id"], selected_task["task_id"])
+            self.assertEqual(current_task["title"], "DG Multimodal UI")
+            self.assertEqual(current_task["active_provider_thread_id"], "thread-recovered")
+
+    def test_app_server_rejects_unverified_image_transport_before_turn_dispatch(self) -> None:
+        class FakeProjects:
+            def require_shell_state_root(self) -> Path:
+                return Path(tempfile.mkdtemp())
+
+        runtime = RuntimeService(FakeProjects(), ModalService(FakeProjects().require_shell_state_root))
+
+        with self.assertRaisesRegex(ValueError, "not verified image transport"):
+            runtime._assert_attachment_route_supported(  # noqa: SLF001
+                [{"name": "ui.png", "kind": "image", "mime_type": "image/png", "size": 1024}],
+                runtime_status={
+                    "input_modalities": ["text", "image"],
+                    "modality_limits": {"app_server_image_input_status": "unverified"},
+                },
+                execution_backend="app_server",
+                provider_id="qwen",
+                model_id="qwen3.7-plus",
+            )
+
+        self.assertTrue(any(event.get("type") == "attachment_route_rejected" for event in runtime._events))
+
+    def test_start_turn_rejects_unverified_image_before_creating_or_dispatching_a_provider_turn(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.requests: list[str] = []
+
+            def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:  # noqa: ARG002
+                self.requests.append(method)
+                raise AssertionError(f"Image routing must reject before calling {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            client = FakeClient()
+            runtime._prepare_runtime = lambda profile, require_secret=False: {  # type: ignore[method-assign]  # noqa: ARG005
+                "provider_id": profile.get("provider_id"),
+                "input_modalities": ["text", "image"],
+                "modality_limits": {"app_server_image_input_status": "unverified"},
+            }
+            runtime._ensure_client = lambda runtime_status: client  # type: ignore[method-assign]  # noqa: ARG005
+
+            with self.assertRaisesRegex(ValueError, "not verified image transport"):
+                runtime.start_turn(
+                    {"profile_id": "qwen-default", "provider_id": "qwen", "model": "qwen3.7-plus", "reasoning_effort": "high"},
+                    thread_id="thread-qwen",
+                    text="Describe the image.",
+                    attachments=[{"name": "ui.png", "kind": "image", "mime_type": "image/png", "size": 1024}],
+                    model="qwen3.7-plus",
+                    effort="high",
+                    permission_mode="auto",
+                )
+
+            self.assertEqual(client.requests, [])
+
+    def test_runtime_status_refreshes_verified_image_route_from_current_router_model(self) -> None:
+        class FakeRuntimeConfig:
+            def prepare_profile(self, profile: dict[str, object], *, require_secret: bool) -> dict[str, object]:  # noqa: ARG002
+                return {
+                    "provider_id": profile.get("provider_id"),
+                    "model": profile.get("model"),
+                    "input_modalities": ["text", "image"],
+                    "modality_limits": {"app_server_image_input_status": "unverified"},
+                }
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            profiles = ProfileService()
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            current = next(item for item in router_config.models() if item["id"] == "qwen/qwen3.7-plus")
+            verification = {
+                "status": "verified",
+                "provider_id": "qwen",
+                "model_id": "qwen/qwen3.7-plus",
+                "native_model": "qwen3.7-plus",
+                "runtime_backend": "app_server",
+                "transport_adapter": "qwen_responses",
+                "transport_signature": current["modality_limits"]["app_server_image_transport_signature"],
+                "verified_at": "2026-07-12T12:25:59.888895+09:00",
+            }
+            router_config.record_app_server_image_transport_verification("qwen/qwen3.7-plus", verification)
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                runtime_config=FakeRuntimeConfig(),
+                profile_service=profiles,
+                router_config_service=router_config,
+            )
+
+            refreshed = runtime._runtime_status_for_profile(  # noqa: SLF001
+                {"profile_id": "qwen-default", "provider_id": "qwen", "model": "qwen3.7-plus"},
+                require_secret=False,
+            )
+
+            self.assertEqual(refreshed["modality_limits"]["app_server_image_input_status"], "verified")
+            self.assertEqual(
+                refreshed["modality_limits"]["app_server_image_last_verified_at"],
+                "2026-07-12T12:25:59.888895+09:00",
+            )
+
+    def test_verify_app_server_image_transport_promotes_model_only_after_exact_probe(self) -> None:
+        class FakeClient:
+            def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:  # noqa: ARG002
+                if method == "thread/start":
+                    return {"thread": {"id": "probe-thread"}}
+                if method == "thread/name/set":
+                    return {}
+                if method == "turn/start":
+                    return {"turn": {"id": "probe-turn"}}
+                if method == "thread/read":
+                    return {
+                        "thread": {
+                            "id": "probe-thread",
+                            "turns": [
+                                {
+                                    "id": "probe-turn",
+                                    "status": "completed",
+                                    "items": [{"type": "agentMessage", "text": "red"}],
+                                }
+                            ],
+                        }
+                    }
+                if method == "thread/archive":
+                    return {}
+                raise AssertionError(f"Unexpected method {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            profiles = ProfileService()
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            router_config.upsert_provider(
+                {
+                    "id": "qwen",
+                    "display_name": "Qwen",
+                    "enabled": True,
+                    "adapter_type": "responses",
+                    "runtime_backend": "app_server",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "default_model": "qwen3.7-plus",
+                    "env_key": "DASHSCOPE_API_KEY",
+                    "auth_mode": "os_keychain",
+                }
+            )
+            router_config.upsert_model(
+                {
+                    "id": "qwen/qwen3.7-plus",
+                    "provider": "qwen",
+                    "native_model": "qwen3.7-plus",
+                    "display_name": "Qwen3.7 Plus",
+                    "input_modalities": ["text", "image"],
+                    "adapter_profile": "default",
+                    "supported_reasoning_levels": ["low", "medium", "high", "xhigh"],
+                    "native_supported_reasoning_levels": ["none", "minimal", "low", "medium", "high"],
+                }
+            )
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                router_config_service=router_config,
+                profile_service=profiles,
+            )
+            runtime._prepare_runtime = lambda profile, require_secret=False: {  # type: ignore[method-assign]  # noqa: ARG005
+                "provider_id": profile.get("provider_id"),
+                "execution_backend": "app_server",
+                "input_modalities": ["text", "image"],
+            }
+            runtime._runtime_request_client = lambda runtime_status: FakeClient()  # type: ignore[method-assign]  # noqa: ARG005
+            profile = {
+                "profile_id": "qwen-default",
+                "provider_id": "qwen",
+                "provider_family": "qwen",
+                "model": "qwen3.7-plus",
+                "wire_api": "responses",
+                "execution_backend": "app_server",
+                "reasoning_effort": "high",
+            }
+
+            result = runtime.verify_app_server_image_transport(profile, model="qwen/qwen3.7-plus")
+            refreshed = next(item for item in router_config.models() if item["id"] == "qwen/qwen3.7-plus")
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(refreshed["modality_limits"]["app_server_image_input_status"], "verified")
+            self.assertEqual(refreshed["app_server_image_transport_verification"]["response_excerpt"], "red")
+
+    def test_verify_app_server_image_transport_retries_reasoning_only_completion_with_strict_final_fallback(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.turn_start_payloads: list[dict[str, object]] = []
+                self.thread_reads = 0
+
+            def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:  # noqa: ARG002
+                if method == "thread/start":
+                    return {"thread": {"id": f"probe-thread-{len(self.turn_start_payloads) + 1}"}}
+                if method == "thread/name/set":
+                    return {}
+                if method == "turn/start":
+                    self.turn_start_payloads.append(dict(params))
+                    return {"turn": {"id": f"probe-turn-{len(self.turn_start_payloads)}"}}
+                if method == "thread/read":
+                    self.thread_reads += 1
+                    if self.thread_reads == 1:
+                        return {
+                            "thread": {
+                                "id": "probe-thread-1",
+                                "turns": [
+                                    {
+                                        "id": "probe-turn-1",
+                                        "status": "completed",
+                                        "items": [
+                                            {
+                                                "type": "reasoning",
+                                                "summary": [
+                                                    {
+                                                        "type": "summary_text",
+                                                        "text": "The image appears to be a solid red color. I should answer with one word only.",
+                                                    }
+                                                ],
+                                            }
+                                        ],
+                                    }
+                                ],
+                            }
+                        }
+                    return {
+                        "thread": {
+                            "id": "probe-thread-2",
+                            "turns": [
+                                {
+                                    "id": "probe-turn-2",
+                                    "status": "completed",
+                                    "items": [{"type": "agentMessage", "text": "red"}],
+                                }
+                            ],
+                        }
+                    }
+                if method == "thread/archive":
+                    return {}
+                raise AssertionError(f"Unexpected method {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            profiles = ProfileService()
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            router_config.upsert_provider(
+                {
+                    "id": "qwen",
+                    "display_name": "Qwen",
+                    "enabled": True,
+                    "adapter_type": "responses",
+                    "runtime_backend": "app_server",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "default_model": "qwen3.7-plus",
+                    "env_key": "DASHSCOPE_API_KEY",
+                    "auth_mode": "os_keychain",
+                }
+            )
+            router_config.upsert_model(
+                {
+                    "id": "qwen/qwen3.7-plus",
+                    "provider": "qwen",
+                    "native_model": "qwen3.7-plus",
+                    "display_name": "Qwen3.7 Plus",
+                    "input_modalities": ["text", "image"],
+                    "adapter_profile": "default",
+                }
+            )
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                router_config_service=router_config,
+                profile_service=profiles,
+            )
+            client = FakeClient()
+            runtime._prepare_runtime = lambda profile, require_secret=False: {  # type: ignore[method-assign]  # noqa: ARG005
+                "provider_id": profile.get("provider_id"),
+                "execution_backend": "app_server",
+                "input_modalities": ["text", "image"],
+            }
+            runtime._runtime_request_client = lambda runtime_status: client  # type: ignore[method-assign]  # noqa: ARG005
+            profile = {
+                "profile_id": "qwen-default",
+                "provider_id": "qwen",
+                "provider_family": "qwen",
+                "model": "qwen3.7-plus",
+                "wire_api": "responses",
+                "execution_backend": "app_server",
+                "reasoning_effort": "high",
+            }
+
+            result = runtime.verify_app_server_image_transport(profile, model="qwen/qwen3.7-plus")
+            refreshed = next(item for item in router_config.models() if item["id"] == "qwen/qwen3.7-plus")
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(client.turn_start_payloads), 2)
+            self.assertEqual(client.turn_start_payloads[0]["effort"], "high")
+            self.assertEqual(client.turn_start_payloads[1]["effort"], "minimal")
+            self.assertEqual(result["image_probe"]["attempt_count"], 2)
+            self.assertEqual(result["image_probe"]["attempts"][0]["failure_reason"], "reasoning_only_without_final_message")
+            self.assertEqual(refreshed["app_server_image_transport_verification"]["verified_attempt"], 2)
+            self.assertEqual(refreshed["app_server_image_transport_verification"]["attempt_count"], 2)
+
+    def test_router_config_invalidates_stale_app_server_image_transport_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService()
+            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+            router_config.upsert_provider(
+                {
+                    "id": "qwen",
+                    "display_name": "Qwen",
+                    "enabled": True,
+                    "adapter_type": "responses",
+                    "runtime_backend": "app_server",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "default_model": "qwen3.7-plus",
+                    "env_key": "DASHSCOPE_API_KEY",
+                    "auth_mode": "os_keychain",
+                }
+            )
+            router_config.upsert_model(
+                {
+                    "id": "qwen/qwen3.7-plus",
+                    "provider": "qwen",
+                    "native_model": "qwen3.7-plus",
+                    "display_name": "Qwen3.7 Plus",
+                    "input_modalities": ["text", "image"],
+                    "adapter_profile": "default",
+                    "app_server_image_transport_verification": {
+                        "status": "verified",
+                        "provider_id": "qwen",
+                        "model_id": "qwen/qwen3.7-plus",
+                        "native_model": "qwen3.7-plus",
+                        "runtime_backend": "app_server",
+                        "transport_adapter": "qwen_responses",
+                        "transport_signature": "stale-signature",
+                        "verified_at": "2026-07-12T00:00:00Z",
+                    },
+                }
+            )
+
+            refreshed = next(item for item in router_config.models() if item["id"] == "qwen/qwen3.7-plus")
+
+            self.assertEqual(refreshed["modality_limits"]["app_server_image_input_status"], "unverified")
+
+    def test_thread_create_recovery_reports_pending_without_starting_a_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            profile = {"profile_id": "qwen-default", "provider_id": "qwen", "model": "qwen3.7-plus", "reasoning_effort": "high"}
+
+            runtime._begin_thread_create_operation(  # noqa: SLF001
+                "thread-create-pending-01",
+                profile=profile,
+                model="qwen3.7-plus",
+                effort="high",
+                permission_mode="auto",
+                name="Pending task",
+            )
+            recovered = runtime.recover_thread_create(profile, operation_id="thread-create-pending-01")
+
+            self.assertEqual(recovered["status"], "pending")
+            self.assertEqual(recovered["operation_id"], "thread-create-pending-01")
+            self.assertEqual(recovered["retry_after_ms"], 1500)
+
+    def test_begin_thread_create_returns_pending_without_waiting_for_the_runtime_start_lock(self) -> None:
+        class FakeClient:
+            def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:  # noqa: ARG002
+                if method == "thread/start":
+                    time.sleep(0.08)
+                    return {"thread": {"id": "thread-background", "name": "Background task"}}
+                if method == "thread/name/set":
+                    return {}
+                if method == "thread/read":
+                    return {"thread": {"id": str(params.get("threadId") or ""), "name": "Background task", "turns": []}}
+                raise AssertionError(f"Unexpected method {method}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            tasks = TaskService(projects)
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            client = FakeClient()
+            runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id")}  # type: ignore[method-assign]  # noqa: ARG005
+            runtime._runtime_request_client = lambda runtime_status: client  # type: ignore[method-assign]  # noqa: ARG005
+            runtime._ensure_client = lambda runtime_status: client  # type: ignore[method-assign]  # noqa: ARG005
+            profile = {"profile_id": "qwen-default", "provider_id": "qwen", "model": "qwen3.7-plus", "reasoning_effort": "high"}
+
+            started_at = time.monotonic()
+            started = runtime.begin_thread_create(
+                profile,
+                model="qwen3.7-plus",
+                effort="high",
+                permission_mode="auto",
+                name="Background task",
+                operation_id="thread-create-background-01",
+            )
+            self.assertLess(time.monotonic() - started_at, 0.05)
+            self.assertEqual(started["status"], "pending")
+
+            deadline = time.monotonic() + 2.0
+            recovered = runtime.recover_thread_create(profile, operation_id="thread-create-background-01")
+            while recovered["status"] == "pending" and time.monotonic() < deadline:
+                time.sleep(0.02)
+                recovered = runtime.recover_thread_create(profile, operation_id="thread-create-background-01")
+            self.assertEqual(recovered["status"], "completed")
+            self.assertEqual(recovered["thread"]["id"], "thread-background")
+
+    def test_thread_create_background_worker_fails_when_runtime_lane_stays_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(root / "recent.json")
+            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            profile = {"profile_id": "qwen-default", "provider_id": "qwen", "model": "qwen3.7-plus", "reasoning_effort": "high"}
+
+            runtime._runtime_operation_lock.acquire()  # noqa: SLF001
+            try:
+                with patch(
+                    "astrabridge_sidecar.runtime_service.THREAD_CREATE_RUNTIME_LOCK_TIMEOUT_SECONDS",
+                    0.05,
+                ):
+                    started = runtime.begin_thread_create(
+                        profile,
+                        model="qwen3.7-plus",
+                        effort="high",
+                        permission_mode="auto",
+                        name="Blocked background task",
+                        operation_id="thread-create-lock-timeout-01",
+                    )
+                    self.assertEqual(started["status"], "pending")
+
+                    deadline = time.monotonic() + 1.0
+                    recovered = runtime.recover_thread_create(profile, operation_id="thread-create-lock-timeout-01")
+                    while recovered["status"] == "pending" and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                        recovered = runtime.recover_thread_create(profile, operation_id="thread-create-lock-timeout-01")
+            finally:
+                runtime._runtime_operation_lock.release()  # noqa: SLF001
+
+            self.assertEqual(recovered["status"], "failed")
+            self.assertIn("runtime lane", recovered["error"])
+
+    def test_server_send_ignores_client_disconnect_without_writing_a_second_response(self) -> None:
+        class BrokenStream:
+            def write(self, body: bytes) -> int:  # noqa: ARG002
+                raise ConnectionAbortedError("client closed the response")
+
+        handler = Handler.__new__(Handler)
+        handler.headers = {}
+        handler.wfile = BrokenStream()
+        handler.send_response = lambda status: None  # type: ignore[method-assign]
+        handler.send_header = lambda name, value: None  # type: ignore[method-assign]
+        handler.end_headers = lambda: None  # type: ignore[method-assign]
+
+        handler._send(200, b'{"ok":true}')
 
 
 if __name__ == "__main__":

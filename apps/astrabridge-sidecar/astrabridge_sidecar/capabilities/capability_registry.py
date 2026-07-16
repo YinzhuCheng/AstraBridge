@@ -16,11 +16,26 @@ _CAPABILITY_MODALITY_HINTS = {
     "speech.synthesize": ("text", "audio"),
     "web.search": ("text",),
 }
+_CAPABILITY_REQUIRED_INPUT_MODALITIES = {
+    "vision.analyze": ("image",),
+    "speech.transcribe": ("audio",),
+}
 _CAPABILITY_MODEL_PREFERENCE = {
-    # The default image.generate operation calls /images/generations, which is
-    # currently supported by gpt-image-2 variants. Flux models remain eligible
-    # for edit-style asset flows, but should not win the default route.
-    "image.generate": ("gpt-image-2", "gpt-image-2-all", "gpt-image-1", "flux-kontext-pro", "flux-kontext-max"),
+    # The capability lane only advertises validated Yunwu generation-route
+    # models. Edit-oriented or undocumented variants stay off this surface
+    # until they have a tested image.generate contract.
+    "image.generate": ("gpt-image-2", "gpt-image-2-all"),
+    # Keep the default speech lane on the already-wired Qwen TTS pair while
+    # exposing CosyVoice variants for explicit selection and future rollout.
+    "speech.synthesize": (
+        "qwen3-tts-flash",
+        "qwen3-tts-instruct-flash",
+        "cosyvoice-v3-plus",
+        "cosyvoice-v3-flash",
+        "cosyvoice-v3.5-plus",
+        "cosyvoice-v3.5-flash",
+        "cosyvoice-v2",
+    ),
 }
 
 
@@ -250,7 +265,11 @@ class CapabilityRegistry:
             if not self._model_matches_adapter(adapter, native_model):
                 continue
             record = effective_model_record(adapter.provider_id, native_model, configured_models)
+            if record is None and self._capability_requires_declared_inputs(spec.capability_id):
+                continue
             catalog_modalities = _clean_string_list((record or {}).get("input_modalities") or profile.context_policy.default_input_modalities)
+            if record is not None and catalog_modalities and not self._record_supports_required_inputs(spec.capability_id, catalog_modalities):
+                continue
             resolved_modalities = _merge_modalities(catalog_modalities, spec.capability_id)
             source = self._candidate_source(adapter, profile, native_model, record)
             notes = self._eligibility_notes(spec, adapter, profile, native_model, record, source, catalog_modalities, resolved_modalities)
@@ -379,9 +398,12 @@ class CapabilityRegistry:
             f"Provider eligibility rule: {spec.provider_eligibility_rule}.",
         ]
         if record is None:
-            notes.append("Model is not currently present in the effective model catalog; adapter override or provider defaults keep it eligible.")
+            notes.append("Model is not currently present in the effective model catalog.")
         else:
             notes.append(f"Model catalog source status: {record.get('source_status') or 'unknown'}.")
+            modality_limits = dict(record.get("modality_limits") or {})
+            if modality_limits:
+                notes.append("Model-level modality limits are available in the runtime provider contract.")
         if native_model == profile.default_model:
             notes.append("Provider default model candidate.")
         elif native_model in profile.fallback_models:
@@ -391,6 +413,9 @@ class CapabilityRegistry:
                 "Resolved input modalities were expanded from catalog/profile defaults using capability-specific modality hints."
             )
         return notes
+
+    def _capability_requires_declared_inputs(self, capability_id: str) -> bool:
+        return bool(_CAPABILITY_REQUIRED_INPUT_MODALITIES.get(str(capability_id or "").strip(), ()))
 
     def _sort_candidates(self, candidates: list[CapabilityCandidate]) -> list[CapabilityCandidate]:
         source_rank = {
@@ -413,6 +438,13 @@ class CapabilityRegistry:
                 str(item.model or ""),
             ),
         )
+
+    def _record_supports_required_inputs(self, capability_id: str, catalog_modalities: list[str]) -> bool:
+        required = _CAPABILITY_REQUIRED_INPUT_MODALITIES.get(str(capability_id or "").strip(), ())
+        if not required:
+            return True
+        declared = {str(item or "").strip().lower() for item in catalog_modalities if str(item or "").strip()}
+        return all(modality in declared for modality in required)
 
 
 def _capability_model_rank(capability_id: str, model: str | None) -> int:

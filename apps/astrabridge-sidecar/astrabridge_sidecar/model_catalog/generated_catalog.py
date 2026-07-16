@@ -6,6 +6,12 @@ from typing import Any
 
 from ..common import app_data_dir, now_iso, read_json, write_json
 from ..providers import all_provider_profiles, get_provider_profile
+from .source_registry import (
+    SOURCE_REGISTRY_SCHEMA_VERSION,
+    default_provider_source_registry,
+    normalize_provider_source_record,
+    source_provenance_for_provider_source,
+)
 
 
 GENERATED_CATALOG_SCHEMA = "astrabridge-generated-catalog-v1"
@@ -31,74 +37,7 @@ class GeneratedCatalog:
 
 
 def default_catalog_sources() -> list[dict[str, Any]]:
-    return [
-        {
-            "provider_id": "yunwu",
-            "display_name": "Yunwu",
-            "urls": [
-                "https://yunwu.apifox.cn/api-232421952",
-                "https://yunwu.apifox.cn/api-425475208",
-                "https://yunwu.apifox.cn/api-425481728",
-                "https://yunwu.ai/pricing?group=Codex%E4%B8%93%E5%B1%9E",
-            ],
-            "source_status": "screenshot_seed",
-            "notes": "Apifox pages were not readable through the current fetcher; keep screenshot seed and manual verification notes.",
-        },
-        {
-            "provider_id": "openai",
-            "display_name": "OpenAI",
-            "urls": [
-                "https://developers.openai.com/api/docs/models",
-                "https://platform.openai.com/docs/guides/reasoning",
-            ],
-            "source_status": "official_docs",
-            "notes": "OpenAI stays as a normal API-key provider only. No official account login path.",
-        },
-        {
-            "provider_id": "deepseek",
-            "display_name": "DeepSeek",
-            "urls": [
-                "https://api-docs.deepseek.com/quick_start/pricing",
-                "https://api-docs.deepseek.com/api/list-models",
-            ],
-            "source_status": "official_docs",
-            "notes": "V4 line is the active AstraBridge coding baseline as of 2026-06-21.",
-        },
-        {
-            "provider_id": "kimi",
-            "display_name": "Kimi",
-            "urls": [
-                "https://platform.moonshot.ai/docs/overview",
-                "https://platform.moonshot.ai/docs/guide/start-using-kimi-api",
-                "https://platform.kimi.com/docs/api/overview",
-                "https://platform.kimi.com/docs/pricing/chat",
-            ],
-            "source_status": "official_docs",
-            "notes": "K2.7 Code is the preferred coding lane; K2.6 remains available.",
-        },
-        {
-            "provider_id": "qwen",
-            "display_name": "Qwen / DashScope",
-            "urls": [
-                "https://help.aliyun.com/zh/model-studio/models",
-                "https://help.aliyun.com/zh/model-studio/newly-released-models",
-                "https://help.aliyun.com/zh/model-studio/text-generation-model/",
-                "https://help.aliyun.com/zh/model-studio/vision",
-            ],
-            "source_status": "official_docs",
-            "notes": "Qwen3.7 Plus is the balanced default; Qwen3.7 Max remains the strongest reasoning tier.",
-        },
-        {
-            "provider_id": "glm",
-            "display_name": "GLM / Z.AI",
-            "urls": [
-                "https://open.bigmodel.cn/dev/api",
-                "https://open.bigmodel.cn/pricing",
-            ],
-            "source_status": "official_docs",
-            "notes": "Official pricing/docs surface GLM-5.2 as the flagship 1M-context model.",
-        },
-    ]
+    return default_provider_source_registry()
 
 
 def default_seed_providers() -> list[dict[str, Any]]:
@@ -229,11 +168,33 @@ def default_seed_models() -> list[dict[str, Any]]:
             confidence="high",
         ),
         _seed_model_from_profile(
+            "kimi",
+            "kimi-k2.7-code-highspeed",
+            "Kimi K2.7 Code Highspeed",
+            default_for_provider=False,
+            input_modalities=["text", "image"],
+            modality_limits={
+                "image_transport": "chat_completions_base64_image_url",
+                "remote_image_url_supported": False,
+                "supported_image_formats": ["png", "jpeg", "webp", "gif"],
+                "request_body_limit_mb": 100,
+                "video_input": "provider_supported_unverified_in_astrabridge",
+            },
+            source_status="official_docs",
+            confidence="high",
+        ),
+        _seed_model_from_profile(
             "qwen",
             "qwen3.7-plus",
             "Qwen3.7 Plus",
             recommended=True,
             default_for_provider=True,
+            input_modalities=["text", "image"],
+            modality_limits={
+                "image_transport": "chat_completions_image_url_or_data_uri",
+                "remote_image_url_supported": True,
+                "min_image_side_px": 11,
+            },
             source_status="official_docs",
             confidence="high",
         ),
@@ -250,6 +211,191 @@ def default_seed_models() -> list[dict[str, Any]]:
             "Qwen3.6 Flash",
             supported_reasoning_levels=["low", "medium", "high"],
             default_reasoning_level="medium",
+            input_modalities=["text", "image"],
+            modality_limits={
+                "image_transport": "chat_completions_image_url_or_data_uri",
+                "remote_image_url_supported": True,
+                "min_image_side_px": 11,
+            },
+            source_status="official_docs",
+            confidence="high",
+        ),
+        _seed_model_from_profile(
+            "qwen",
+            "qwen3-vl-plus",
+            "Qwen3 VL Plus",
+            default_for_provider=False,
+            input_modalities=["text", "image"],
+            modality_limits={
+                "image_transport": "chat_completions_image_url_or_data_uri",
+                "remote_image_url_supported": True,
+                "min_image_side_px": 11,
+            },
+            source_status="official_docs",
+            confidence="high",
+        ),
+        _seed_model_from_profile(
+            "qwen",
+            "qwen3-vl-flash",
+            "Qwen3 VL Flash",
+            default_for_provider=False,
+            input_modalities=["text", "image"],
+            modality_limits={
+                "image_transport": "chat_completions_image_url_or_data_uri",
+                "remote_image_url_supported": True,
+                "min_image_side_px": 11,
+            },
+            source_status="official_docs",
+            confidence="high",
+        ),
+        _seed_model_from_profile(
+            "qwen",
+            "qwen-image-plus",
+            "Qwen Image Plus",
+            default_for_provider=False,
+            input_modalities=["text"],
+            supported_reasoning_levels=["off"],
+            default_reasoning_level="off",
+            source_status="official_docs",
+            confidence="high",
+            verification_notes="Official DashScope image-generation docs-backed model intended for the dashscope_image family.",
+        ),
+        _seed_model_from_profile(
+            "qwen",
+            "qwen3-asr-flash",
+            "Qwen3 ASR Flash",
+            default_for_provider=False,
+            input_modalities=["text", "audio"],
+            supported_reasoning_levels=["off"],
+            default_reasoning_level="off",
+            modality_limits={
+                "audio_transport": "chat_completions_input_audio_data_uri",
+                "mixed_text_prompt_forwarding": False,
+            },
+            source_status="official_docs",
+            confidence="high",
+        ),
+        _seed_model_from_profile(
+            "qwen",
+            "qwen3-tts-flash",
+            "Qwen3 TTS Flash",
+            default_for_provider=False,
+            input_modalities=["text"],
+            supported_reasoning_levels=["off"],
+            default_reasoning_level="off",
+            modality_limits={
+                "tts_family": "dashscope_http_sse",
+                "tts_protocol_profile": "qwen_multimodal_generation",
+                "tts_instruction_field": "instructions",
+                "tts_voice_mode": "system_voice_or_named_voice",
+            },
+            source_status="official_docs",
+            confidence="high",
+        ),
+        _seed_model_from_profile(
+            "qwen",
+            "qwen3-tts-instruct-flash",
+            "Qwen3 TTS Instruct Flash",
+            default_for_provider=False,
+            input_modalities=["text"],
+            supported_reasoning_levels=["off"],
+            default_reasoning_level="off",
+            modality_limits={
+                "tts_family": "dashscope_http_sse",
+                "tts_protocol_profile": "qwen_multimodal_generation",
+                "tts_instruction_field": "instructions",
+                "tts_voice_mode": "system_voice_or_named_voice",
+            },
+            source_status="official_docs",
+            confidence="high",
+        ),
+        _seed_model_from_profile(
+            "qwen",
+            "cosyvoice-v2",
+            "CosyVoice V2",
+            default_for_provider=False,
+            input_modalities=["text"],
+            supported_reasoning_levels=["off"],
+            default_reasoning_level="off",
+            modality_limits={
+                "tts_family": "dashscope_http_sse",
+                "tts_protocol_profile": "cosyvoice_speech_synthesizer",
+                "tts_voice_requirement": "explicit_voice_required",
+                "tts_instruction_field": "instruction",
+                "tts_system_voice_support": "supported",
+            },
+            source_status="official_docs",
+            confidence="high",
+        ),
+        _seed_model_from_profile(
+            "qwen",
+            "cosyvoice-v3-flash",
+            "CosyVoice V3 Flash",
+            default_for_provider=False,
+            input_modalities=["text"],
+            supported_reasoning_levels=["off"],
+            default_reasoning_level="off",
+            modality_limits={
+                "tts_family": "dashscope_http_sse",
+                "tts_protocol_profile": "cosyvoice_speech_synthesizer",
+                "tts_voice_requirement": "explicit_voice_required",
+                "tts_instruction_field": "instruction",
+                "tts_system_voice_support": "supported",
+            },
+            source_status="official_docs",
+            confidence="high",
+        ),
+        _seed_model_from_profile(
+            "qwen",
+            "cosyvoice-v3-plus",
+            "CosyVoice V3 Plus",
+            default_for_provider=False,
+            input_modalities=["text"],
+            supported_reasoning_levels=["off"],
+            default_reasoning_level="off",
+            modality_limits={
+                "tts_family": "dashscope_http_sse",
+                "tts_protocol_profile": "cosyvoice_speech_synthesizer",
+                "tts_voice_requirement": "explicit_voice_required",
+                "tts_instruction_field": "instruction",
+                "tts_system_voice_support": "supported",
+            },
+            source_status="official_docs",
+            confidence="high",
+        ),
+        _seed_model_from_profile(
+            "qwen",
+            "cosyvoice-v3.5-flash",
+            "CosyVoice V3.5 Flash",
+            default_for_provider=False,
+            input_modalities=["text"],
+            supported_reasoning_levels=["off"],
+            default_reasoning_level="off",
+            modality_limits={
+                "tts_family": "dashscope_http_sse",
+                "tts_protocol_profile": "cosyvoice_speech_synthesizer",
+                "tts_voice_requirement": "explicit_voice_required",
+                "tts_instruction_field": "instruction",
+                "tts_system_voice_support": "unsupported",
+            },
+            source_status="official_docs",
+            confidence="high",
+        ),
+        _seed_model_from_profile(
+            "qwen",
+            "cosyvoice-v3.5-plus",
+            "CosyVoice V3.5 Plus",
+            default_for_provider=False,
+            input_modalities=["text"],
+            supported_reasoning_levels=["off"],
+            default_reasoning_level="off",
+            modality_limits={
+                "tts_family": "dashscope_http_sse",
+                "tts_protocol_profile": "cosyvoice_speech_synthesizer",
+                "tts_voice_requirement": "explicit_voice_required",
+                "tts_instruction_field": "instruction",
+                "tts_system_voice_support": "unsupported",
+            },
             source_status="official_docs",
             confidence="high",
         ),
@@ -275,7 +421,7 @@ def build_generated_catalog(
     fetched: list[dict[str, Any]] | None = None,
 ) -> GeneratedCatalog:
     generated_at = now_iso()
-    source_records = [dict(item) for item in (sources or default_catalog_sources())]
+    source_records = [normalize_provider_source_record(dict(item)) for item in (sources or default_catalog_sources())]
     provider_records = [dict(item) for item in (providers or default_seed_providers())]
     model_records = []
     source_map = {str(item.get("provider_id") or ""): dict(item) for item in source_records}
@@ -285,7 +431,7 @@ def build_generated_catalog(
         source = source_map.get(provider_id, {})
         model.setdefault("source_urls", list(source.get("urls") or []))
         model.setdefault("source_status", source.get("source_status") or "seeded")
-        model.setdefault("source_provenance", {"provider_id": provider_id, "source_status": model.get("source_status")})
+        model.setdefault("source_provenance", source_provenance_for_provider_source(source) if source else {"provider_id": provider_id, "source_status": model.get("source_status")})
         model.setdefault("catalog_version", GENERATED_CATALOG_SCHEMA)
         model_records.append(model)
     out_dir = catalog_generated_dir(output_root)
@@ -300,6 +446,7 @@ def build_generated_catalog(
     }
     sources_lock = {
         "schema_version": GENERATED_CATALOG_SCHEMA,
+        "source_registry_schema": SOURCE_REGISTRY_SCHEMA_VERSION,
         "generated_at": generated_at,
         "sources": source_records,
         "fetch_status": list(fetched or []),
@@ -338,9 +485,19 @@ def current_generated_catalog(output_root: Path | None = None) -> GeneratedCatal
     models_payload = read_json(out_dir / GENERATED_MODELS_LOCK_FILENAME, {})
     sources_payload = read_json(out_dir / GENERATED_SOURCES_LOCK_FILENAME, {})
     models = [dict(item) for item in list(models_payload.get("models") or []) if isinstance(item, dict)]
-    sources = [dict(item) for item in list(sources_payload.get("sources") or []) if isinstance(item, dict)]
+    sources = [normalize_provider_source_record(dict(item)) for item in list(sources_payload.get("sources") or []) if isinstance(item, dict)]
     generated_at = str(models_payload.get("generated_at") or sources_payload.get("generated_at") or "")
-    if not models or not sources:
+    seed_records = [item for item in default_seed_models() if str(item.get("id") or "").strip()]
+    default_seed_ids = {str(item.get("id") or "").strip() for item in seed_records}
+    seed_by_id = {str(item.get("id") or "").strip(): dict(item) for item in seed_records}
+    stored_model_ids = {str(item.get("id") or "").strip() for item in models if str(item.get("id") or "").strip()}
+    stored_by_id = {str(item.get("id") or "").strip(): dict(item) for item in models if str(item.get("id") or "").strip()}
+    if (
+        not models
+        or not sources
+        or not default_seed_ids.issubset(stored_model_ids)
+        or not _stored_models_match_seed_defaults(stored_by_id, seed_by_id)
+    ):
         return build_generated_catalog(output_root=output_root)
     return GeneratedCatalog(
         providers=default_seed_providers(),
@@ -352,3 +509,24 @@ def current_generated_catalog(output_root: Path | None = None) -> GeneratedCatal
         models_lock_path=str(out_dir / GENERATED_MODELS_LOCK_FILENAME),
         sources_lock_path=str(out_dir / GENERATED_SOURCES_LOCK_FILENAME),
     )
+
+
+def _stored_models_match_seed_defaults(
+    stored_by_id: dict[str, dict[str, Any]],
+    seed_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    for model_id, seed in seed_by_id.items():
+        stored = stored_by_id.get(model_id)
+        if not stored:
+            return False
+        for field in (
+            "input_modalities",
+            "supported_reasoning_levels",
+            "default_reasoning_level",
+            "deprecated",
+            "deprecated_after",
+            "modality_limits",
+        ):
+            if stored.get(field) != seed.get(field):
+                return False
+    return True

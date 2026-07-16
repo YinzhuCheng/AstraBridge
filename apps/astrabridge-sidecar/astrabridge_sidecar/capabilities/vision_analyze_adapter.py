@@ -1,17 +1,31 @@
 from __future__ import annotations
 
 import base64
+import binascii
+import ipaddress
 import mimetypes
 import os
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import requests
 
 from ..common import new_id, now_iso, path_for_host, write_json
+from ..security import DESKTOP_KEY_PATH_RE, SECRET_QUERY_RE
 
 
 VISION_ANALYZE_CAPABILITY_RESULT_SCHEMA = "astrabridge-vision-analyze-capability-result-v1"
+
+QWEN_VISION_MODELS = frozenset(
+    {
+        "qwen3.7-plus",
+        "qwen3.6-flash",
+        "qwen3-vl-plus",
+        "qwen3-vl-flash",
+    }
+)
+QWEN_MIN_IMAGE_SIDE_PX = 11
 
 
 def _clean_text(value: Any) -> str:
@@ -23,6 +37,59 @@ def _ensure_data_uri(value: str, mime_type: str) -> str:
     if text.startswith("data:image/"):
         return text
     return f"data:{mime_type};base64,{text}"
+
+
+def _native_model_id(value: str) -> str:
+    text = _clean_text(value)
+    return text.rsplit("/", 1)[-1] if "/" in text else text
+
+
+def _image_data_from_base64_or_data_uri(value: str) -> tuple[str, bytes] | None:
+    text = _clean_text(value)
+    if not text:
+        return None
+    mime_type = "image/png"
+    payload = text
+    if text.startswith("data:"):
+        header, sep, body = text.partition(",")
+        if not sep:
+            return None
+        if ";base64" not in header:
+            return None
+        mime_type = header[5:].split(";", 1)[0] or mime_type
+        payload = body
+    try:
+        return mime_type, base64.b64decode(payload, validate=False)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _image_dimensions_from_bytes(data: bytes) -> tuple[int, int] | None:
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if data.startswith((b"GIF87a", b"GIF89a")) and len(data) >= 10:
+        return int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little")
+    if data.startswith(b"\xff\xd8"):
+        index = 2
+        while index + 9 < len(data):
+            if data[index] != 0xFF:
+                index += 1
+                continue
+            marker = data[index + 1]
+            index += 2
+            if marker in {0xD8, 0xD9}:
+                continue
+            if index + 2 > len(data):
+                return None
+            segment_length = int.from_bytes(data[index : index + 2], "big")
+            if segment_length < 2 or index + segment_length > len(data):
+                return None
+            if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+                height = int.from_bytes(data[index + 3 : index + 5], "big")
+                width = int.from_bytes(data[index + 5 : index + 7], "big")
+                return width, height
+            index += segment_length
+    return None
 
 
 def _mime_type_for_path(path: Path, explicit_mime_type: str) -> str:
@@ -52,6 +119,30 @@ def _normalize_visible_text(content: Any) -> str:
     return ""
 
 
+def _is_provider_fetchable_image_url(value: str) -> bool:
+    if DESKTOP_KEY_PATH_RE.search(value) or SECRET_QUERY_RE.search(value):
+        return False
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return False
+    host = parsed.hostname or ""
+    lowered_host = host.lower()
+    if lowered_host in {"localhost", "127.0.0.1", "::1"} or lowered_host.endswith(".local"):
+        return False
+    try:
+        ip = ipaddress.ip_address(lowered_host)
+    except ValueError:
+        return True
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
 class ChatVisionAnalyzeAdapter:
     def __init__(
         self,
@@ -63,6 +154,10 @@ class ChatVisionAnalyzeAdapter:
         env_key: str | None = None,
         env_key_aliases: tuple[str, ...] = (),
         post_fn: Callable[..., Any] | None = None,
+        include_image_detail: bool = True,
+        supported_models: set[str] | frozenset[str] | None = None,
+        min_image_side_px: int | None = None,
+        allow_remote_image_urls: bool = True,
     ) -> None:
         self._provider_id = provider_id
         self._base_url = _clean_text(base_url).rstrip("/")
@@ -71,6 +166,10 @@ class ChatVisionAnalyzeAdapter:
         self._env_key = env_key or ""
         self._env_keys = tuple(key for key in (self._env_key, *env_key_aliases) if key)
         self._post = post_fn or requests.post
+        self._include_image_detail = include_image_detail
+        self._supported_models = frozenset(_native_model_id(item) for item in (supported_models or set()))
+        self._min_image_side_px = int(min_image_side_px or 0)
+        self._allow_remote_image_urls = bool(allow_remote_image_urls)
 
     def analyze(self, payload: dict[str, Any]) -> dict[str, Any]:
         api_key = _clean_text(payload.get("api_key")) or self._api_key
@@ -107,16 +206,20 @@ class ChatVisionAnalyzeAdapter:
         image_parts = self._normalize_image_inputs(payload.get("image_inputs") or [])
         if not image_parts:
             raise ValueError("vision.analyze requires at least one image input.")
+        model = _native_model_id(_clean_text(payload.get("model") or self._default_model))
+        if self._supported_models and model not in self._supported_models:
+            supported = ", ".join(sorted(self._supported_models))
+            raise ValueError(f"{self._provider_id} vision adapter does not support model `{model}`. Supported vision models: {supported}.")
         detail = _clean_text(payload.get("detail"))
         content: list[dict[str, Any]] = []
         for item in image_parts:
             part: dict[str, Any] = {"type": "image_url", "image_url": {"url": item["url"]}}
-            if detail:
+            if detail and self._include_image_detail:
                 part["image_url"]["detail"] = detail
             content.append(part)
         content.append({"type": "text", "text": prompt})
         request_body: dict[str, Any] = {
-            "model": _clean_text(payload.get("model") or self._default_model),
+            "model": model,
             "messages": [{"role": "user", "content": content}],
         }
         max_output_tokens = payload.get("max_output_tokens")
@@ -149,6 +252,7 @@ class ChatVisionAnalyzeAdapter:
             "finish_reason": _clean_text(first_choice.get("finish_reason")),
             "image_input_count": len((request_body.get("messages") or [{}])[0].get("content") or []) - 1,
             "detail": _clean_text(payload.get("detail")),
+            "request_detail_sent": bool(_clean_text(payload.get("detail")) and self._include_image_detail),
             "normalization_notes": [
                 "Vision request uses chat-completions content with image_url parts plus a trailing text prompt.",
                 "Visible answer text is extracted from message.content and provider reasoning is preserved as optional annotations when present.",
@@ -223,23 +327,66 @@ class ChatVisionAnalyzeAdapter:
             mime_type = _clean_text(item.get("mime_type")) or "image/png"
             data_uri = _clean_text(item.get("data_uri"))
             if data_uri:
+                self._validate_inline_image(data_uri)
                 normalized.append({"url": _ensure_data_uri(data_uri, mime_type)})
                 continue
             data = _clean_text(item.get("data"))
             if data:
+                self._validate_inline_image(data)
                 normalized.append({"url": _ensure_data_uri(data, mime_type)})
                 continue
             path_value = _clean_text(item.get("path"))
             if path_value:
                 path = path_for_host(path_value)
                 file_mime = _mime_type_for_path(path, mime_type)
-                encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+                image_bytes = path.read_bytes()
+                self._validate_image_bytes(image_bytes, source=str(path))
+                encoded = base64.b64encode(image_bytes).decode("ascii")
                 normalized.append({"url": f"data:{file_mime};base64,{encoded}"})
                 continue
             url = _clean_text(item.get("url"))
+            if not url:
+                continue
             if url.startswith("data:image/"):
+                self._validate_inline_image(url)
                 normalized.append({"url": url})
+                continue
+            if self._allow_remote_image_urls and _is_provider_fetchable_image_url(url):
+                normalized.append({"url": url})
+                continue
+            if self._allow_remote_image_urls:
+                raise ValueError(
+                    f"{self._provider_id} vision adapter requires public https image URLs or inline data:image payloads; "
+                    "loopback, private, non-https, and secret-bearing URLs are rejected."
+                )
+            raise ValueError(
+                f"{self._provider_id} vision adapter requires inline/base64 image inputs or local file paths; "
+                "remote image URLs are not supported."
+            )
         return normalized
+
+    def _validate_inline_image(self, value: str) -> None:
+        if self._min_image_side_px <= 0:
+            return
+        decoded = _image_data_from_base64_or_data_uri(value)
+        if decoded is None:
+            return
+        _mime_type, data = decoded
+        self._validate_image_bytes(data, source="inline image")
+
+    def _validate_image_bytes(self, data: bytes, *, source: str) -> None:
+        if self._min_image_side_px <= 0:
+            return
+        dimensions = _image_dimensions_from_bytes(data)
+        if dimensions is None:
+            return
+        width, height = dimensions
+        if width < self._min_image_side_px or height < self._min_image_side_px:
+            threshold = self._min_image_side_px - 1
+            raise ValueError(
+                f"{self._provider_id} vision adapter requires image width and height greater than {threshold}px; "
+                f"{source} is {width}x{height}px."
+            )
 
 
 class QwenVisionAnalyzeAdapter(ChatVisionAnalyzeAdapter):
@@ -251,6 +398,9 @@ class QwenVisionAnalyzeAdapter(ChatVisionAnalyzeAdapter):
             api_key=api_key,
             env_key="DASHSCOPE_API_KEY",
             post_fn=post_fn,
+            supported_models=QWEN_VISION_MODELS,
+            min_image_side_px=QWEN_MIN_IMAGE_SIDE_PX,
+            allow_remote_image_urls=True,
         )
 
 
@@ -264,4 +414,5 @@ class KimiVisionAnalyzeAdapter(ChatVisionAnalyzeAdapter):
             env_key="KIMI_API_KEY",
             env_key_aliases=("MOONSHOT_API_KEY",),
             post_fn=post_fn,
+            allow_remote_image_urls=False,
         )

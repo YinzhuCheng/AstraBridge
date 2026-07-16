@@ -10,14 +10,19 @@ from .runtime_transition import build_transition_plan
 
 
 FailureCategory = Literal[
-    "runtime_error",
+    "unknown",
     "provider_timeout",
     "rate_limit",
     "billing",
     "provider_5xx",
     "context_window_limit",
     "auth_failure",
+    "unsupported_model",
     "unsupported_feature",
+    "invalid_request_shape",
+    "semantic_no_output",
+    "artifact_issue",
+    "provider_model_mismatch",
     "tool_mismatch",
     "permission_denied",
     "runtime_state_corruption",
@@ -121,6 +126,122 @@ def classify_runtime_failure(
     fallback_models = _fallback_models(parsed.provider, parsed.model)
     downgrade_levels = _downgrade_reasoning_levels(profile)
 
+    if any(
+        token in lowered
+        for token in [
+            "provider/model mismatch",
+            "provider model mismatch",
+            "resolved candidate mismatch",
+            "provider-backed result came from",
+            "executed against the wrong provider",
+        ]
+    ):
+        return _notice(
+            category="provider_model_mismatch",
+            summary="The provider-backed result came from a different provider/model than the requested lane.",
+            message=parsed.message,
+            actionable_hint="Fail closed for this lane, mark the capability unverified, and inspect capability routing before retrying.",
+            provider=parsed.provider,
+            model=parsed.model,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            recommended_action="inspect_capability_route",
+            recoverability="fail_closed",
+            recommended_actions=_recommendations(
+                _action("inspect_capability_route", "Inspect Route", "Review capability routing and adapter selection before retrying."),
+                _action("mark_capability_unverified", "Mark Unverified", "Do not treat this capability lane as verified until the route mismatch is fixed."),
+                _action("handoff_provider", "Switch Provider", "Use another verified provider lane while the routing mismatch remains unresolved."),
+            ),
+        )
+    if any(
+        token in lowered
+        for token in [
+            "image width and height greater than",
+            "greater than 10px",
+            "public https image urls or inline data:image payloads",
+            "inline/base64 image inputs or local file paths",
+            "audio-only message content",
+            "audio parts only",
+            "invalid request shape",
+            "400 client error: bad request",
+            "invalid request",
+            "unprocessable entity",
+            "invalid image",
+            "invalid file format",
+        ]
+    ):
+        return _notice(
+            category="invalid_request_shape",
+            summary="The request shape is incompatible with the selected provider/model lane.",
+            message=parsed.message,
+            actionable_hint="Treat this as a local validation or request-construction issue, adjust the payload shape, and retry with a safer request.",
+            provider=parsed.provider,
+            model=parsed.model,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            recommended_action="retry_safer_request_shape",
+            recoverability="recoverable",
+            recommended_actions=_recommendations(
+                _action("inspect_request_shape", "Inspect Request", "Review request payload fields, modality parts, and provider-specific constraints."),
+                _action("retry_safer_request_shape", "Retry Safer Request", "Retry with a smaller or provider-safe request shape."),
+                _fallback_model_action(parsed.provider, fallback_models, "Switch to a fallback model only if the request shape is already valid for the target lane."),
+            ),
+        )
+    if any(
+        token in lowered
+        for token in [
+            "semantic output is empty",
+            "returned no visible text",
+            "returned no visible final answer",
+            "returned no visible answer",
+            "no usable visible answer",
+        ]
+    ):
+        return _notice(
+            category="semantic_no_output",
+            summary="The provider route completed but did not produce a usable visible answer.",
+            message=parsed.message,
+            actionable_hint="Mark the capability unverified, retry with a simpler fixture or safer prompt shape, and fall back to another lane if semantics stay empty.",
+            provider=parsed.provider,
+            model=parsed.model,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            provider_switch_recommended=True,
+            recommended_action="mark_capability_unverified",
+            recoverability="recoverable",
+            recommended_actions=_recommendations(
+                _action("mark_capability_unverified", "Mark Unverified", "Keep the capability lane in a partial or unverified state until semantic output is reliable."),
+                _action("retry_safer_request_shape", "Retry Simpler Fixture", "Retry with a simpler prompt or fixture to separate transport success from semantic success."),
+                _fallback_model_action(parsed.provider, fallback_models, "Try another model in the same provider family if the semantic empty-output issue appears model-specific."),
+            ),
+        )
+    if any(
+        token in lowered
+        for token in [
+            "no persisted local image artifact",
+            "returned no audio artifact",
+            "artifact missing",
+            "failed to persist",
+            "artifact persistence",
+        ]
+    ):
+        return _notice(
+            category="artifact_issue",
+            summary="The provider route completed but the required artifact was not persisted correctly.",
+            message=parsed.message,
+            actionable_hint="Treat the capability as unverified until artifact persistence is repaired and rerun.",
+            provider=parsed.provider,
+            model=parsed.model,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            recommended_action="inspect_artifact_persistence",
+            recoverability="recoverable",
+            recommended_actions=_recommendations(
+                _action("inspect_artifact_persistence", "Inspect Artifacts", "Check artifact persisters, manifests, and output-path wiring."),
+                _action("mark_capability_unverified", "Mark Unverified", "Do not promote the capability until output artifacts are durable and locally visible."),
+                _retry_same_lane_action(parsed.provider, parsed.model),
+            ),
+        )
     if "winerror 10060" in lowered or "timed out" in lowered or "timeout" in lowered:
         return _notice(
             category="provider_timeout",
@@ -254,6 +375,34 @@ def classify_runtime_failure(
                 _action("handoff_provider", "Switch Provider", "Use another provider lane until the key issue is fixed."),
             ),
         )
+    if any(
+        token in lowered
+        for token in [
+            "no_capability_candidate",
+            "does not support model",
+            "unsupported model",
+            "model not found",
+            "unknown model",
+        ]
+    ):
+        return _notice(
+            category="unsupported_model",
+            summary="The selected model does not expose an eligible capability route for this request.",
+            message=parsed.message,
+            actionable_hint="Switch to a supported model or disable the unsupported capability lane for this request.",
+            provider=parsed.provider,
+            model=parsed.model,
+            fallback_models=fallback_models,
+            reasoning_downgrade_levels=downgrade_levels,
+            provider_switch_recommended=True,
+            recommended_action="switch_model" if fallback_models else "disable_feature",
+            recoverability="recoverable",
+            recommended_actions=_recommendations(
+                _fallback_model_action(parsed.provider, fallback_models, "Switch to an eligible model for this capability lane."),
+                _action("disable_feature", "Disable Feature", "Retry without the unsupported capability lane."),
+                _action("handoff_provider", "Switch Provider", "Move to another provider lane with verified support."),
+            ),
+        )
     if any(token in lowered for token in ["unsupported", "not supported", "does not support"]):
         return _notice(
             category="unsupported_feature",
@@ -372,8 +521,8 @@ def classify_runtime_failure(
             ),
         )
     return _notice(
-        category="runtime_error",
-        summary=parsed.message,
+        category="unknown",
+        summary="Runtime failure did not match a known classified lane.",
         message=parsed.message,
         actionable_hint=str(parsed.parsed.get("actionable_hint") or "Inspect the runtime notice and retry with a narrower next step."),
         provider=parsed.provider,
@@ -398,16 +547,9 @@ def _provider_profile(provider_id: str) -> ProviderProfile | None:
 def _fallback_models(provider_id: str, current_model: str) -> tuple[str, ...]:
     if not provider_id:
         return ()
-    from ..model_catalog.catalog import fallback_model_ids
-
-    catalog_models = fallback_model_ids(provider_id, current_model, include_deprecated=False)
-    if catalog_models:
-        return catalog_models
     profile = _provider_profile(provider_id)
-    if profile is None:
-        return ()
     current_native_model = current_model.split("/", 1)[1] if "/" in current_model else current_model
-    preferred = profile.fallback_policy.fallback_models or profile.fallback_models
+    preferred = (profile.fallback_policy.fallback_models or profile.fallback_models) if profile is not None else ()
     seen: set[str] = set()
     models: list[str] = []
     for model in preferred:
@@ -416,6 +558,13 @@ def _fallback_models(provider_id: str, current_model: str) -> tuple[str, ...]:
             continue
         seen.add(normalized)
         models.append(normalized)
+    if models:
+        return tuple(models)
+    from ..model_catalog.catalog import fallback_model_ids
+
+    catalog_models = fallback_model_ids(provider_id, current_model, include_deprecated=False)
+    if catalog_models:
+        return catalog_models
     return tuple(models)
 
 

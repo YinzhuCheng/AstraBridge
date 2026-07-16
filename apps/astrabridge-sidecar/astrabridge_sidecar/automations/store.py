@@ -247,7 +247,7 @@ class AutomationStore:
 
     def _merge_automation(self, existing: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
         merged = dict(existing)
-        nested_fields = {"schedule", "runtime", "workspace", "triage", "limits"}
+        nested_fields = {"schedule", "runtime", "workspace", "triage", "limits", "agentic_update"}
         for key, value in dict(patch or {}).items():
             if key in {"schema_version", "automation_id", "project_id", "created_at", "archived_at", "archived_reason"}:
                 continue

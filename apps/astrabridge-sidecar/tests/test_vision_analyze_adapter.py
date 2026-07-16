@@ -3,9 +3,11 @@ from __future__ import annotations
 import base64
 import json
 import os
+import struct
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -16,6 +18,21 @@ from astrabridge_sidecar.capabilities import KimiVisionAnalyzeAdapter, QwenVisio
 _TINY_PNG_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+y3ioAAAAASUVORK5CYII="
 )
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+
+def _solid_png_base64(width: int = 64, height: int = 64) -> str:
+    raw = b"".join(b"\x00" + (b"\xf0\x3a\x2f" * width) for _ in range(height))
+    png = b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    png += _png_chunk(b"IDAT", zlib.compress(raw))
+    png += _png_chunk(b"IEND", b"")
+    return base64.b64encode(png).decode("ascii")
+
+
+_RED_SQUARE_PNG_BASE64 = _solid_png_base64()
 
 
 class _FakeResponse:
@@ -38,7 +55,7 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
                 "model": "qwen3.7-plus",
                 "prompt": "Read the large title and subtitle in this image. Keep the answer concise.",
                 "detail": "high",
-                "image_inputs": [{"mime_type": "image/png", "data": _TINY_PNG_BASE64}],
+                "image_inputs": [{"mime_type": "image/png", "data": _RED_SQUARE_PNG_BASE64}],
                 "max_output_tokens": 256,
             }
         )
@@ -50,6 +67,60 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
         self.assertTrue(content[0]["image_url"]["url"].startswith("data:image/png;base64,"))
         self.assertEqual(content[0]["image_url"]["detail"], "high")
         self.assertEqual(content[1], {"type": "text", "text": "Read the large title and subtitle in this image. Keep the answer concise."})
+
+    def test_qwen_build_request_accepts_public_https_image_url(self) -> None:
+        adapter = QwenVisionAnalyzeAdapter(api_key="sk-test")
+
+        request_body = adapter.build_request(
+            {
+                "model": "qwen3-vl-plus",
+                "prompt": "Name the dominant color.",
+                "image_inputs": [{"url": "https://example.com/fixtures/red-square.png"}],
+            }
+        )
+
+        content = request_body["messages"][0]["content"]
+        self.assertEqual(request_body["model"], "qwen3-vl-plus")
+        self.assertEqual(content[0]["type"], "image_url")
+        self.assertEqual(content[0]["image_url"]["url"], "https://example.com/fixtures/red-square.png")
+        self.assertEqual(content[1], {"type": "text", "text": "Name the dominant color."})
+
+    def test_qwen_build_request_rejects_non_fetchable_image_url_with_redacted_error(self) -> None:
+        adapter = QwenVisionAnalyzeAdapter(api_key="sk-test")
+
+        with self.assertRaisesRegex(ValueError, "public https image URLs or inline data:image payloads") as captured:
+            adapter.build_request(
+                {
+                    "prompt": "Name the dominant color.",
+                    "image_inputs": [{"url": "https://127.0.0.1/fixtures/red-square.png?sig=secret-token"}],
+                }
+            )
+        self.assertNotIn("127.0.0.1", str(captured.exception))
+        self.assertNotIn("secret-token", str(captured.exception))
+
+    def test_qwen_build_request_rejects_unsupported_vision_model(self) -> None:
+        adapter = QwenVisionAnalyzeAdapter(api_key="sk-test")
+
+        with self.assertRaisesRegex(ValueError, "does not support model `qwen3-coder-plus`"):
+            adapter.build_request(
+                {
+                    "model": "qwen3-coder-plus",
+                    "prompt": "Name the dominant color.",
+                    "image_inputs": [{"mime_type": "image/png", "data": _RED_SQUARE_PNG_BASE64}],
+                }
+            )
+
+    def test_qwen_build_request_rejects_too_small_inline_image(self) -> None:
+        adapter = QwenVisionAnalyzeAdapter(api_key="sk-test")
+
+        with self.assertRaisesRegex(ValueError, "greater than 10px"):
+            adapter.build_request(
+                {
+                    "model": "qwen3-vl-plus",
+                    "prompt": "Name the dominant color.",
+                    "image_inputs": [{"mime_type": "image/png", "data": _TINY_PNG_BASE64}],
+                }
+            )
 
     def test_qwen_analyze_normalizes_reasoning_and_persists_secret_free_artifacts(self) -> None:
         captured: dict[str, object] = {}
@@ -93,7 +164,7 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
                 {
                     "prompt": "Read the large title and subtitle in this image. Keep the answer concise.",
                     "detail": "high",
-                    "image_inputs": [{"mime_type": "image/png", "data": _TINY_PNG_BASE64}],
+                    "image_inputs": [{"mime_type": "image/png", "data": _RED_SQUARE_PNG_BASE64}],
                     "workspace_root": str(workspace),
                     "timeout_sec": 77,
                 }
@@ -109,6 +180,8 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
             self.assertEqual(result["finish_reason"], "stop")
             self.assertEqual(result["annotations"][0]["type"], "reasoning_content")
             self.assertEqual(result["usage"]["prompt_tokens_details"]["image_tokens"], 970)
+            self.assertEqual(result["detail"], "high")
+            self.assertTrue(result["request_detail_sent"])
             self.assertEqual(len(result["artifact_refs"]), 4)
 
             artifact_dir = Path(result["artifact_dir"])
@@ -119,6 +192,7 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
 
             self.assertNotIn("Authorization", json.dumps(request_payload))
             self.assertEqual(request_payload["json"]["messages"][0]["content"][0]["type"], "image_url")
+            self.assertEqual(request_payload["json"]["messages"][0]["content"][0]["image_url"]["detail"], "high")
             self.assertEqual(response_payload["body"]["model"], "qwen3.7-plus")
             self.assertIn("AstraBridge", text_value)
             self.assertEqual(summary_payload["provider_id"], "qwen")
@@ -140,6 +214,20 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
             self.assertEqual(request_body["model"], "kimi-k2.6")
             self.assertTrue(content[0]["image_url"]["url"].startswith("data:image/png;base64,"))
             self.assertEqual(content[1]["text"], "What is the title?")
+
+    def test_kimi_build_request_rejects_remote_image_url(self) -> None:
+        adapter = KimiVisionAnalyzeAdapter(api_key="sk-test")
+
+        with self.assertRaisesRegex(ValueError, "inline/base64 image inputs or local file paths") as captured:
+            adapter.build_request(
+                {
+                    "model": "kimi-k2.6",
+                    "prompt": "What is the title?",
+                    "image_inputs": [{"url": "https://example.com/vision.png?sig=secret-token"}],
+                }
+            )
+        self.assertNotIn("example.com", str(captured.exception))
+        self.assertNotIn("secret-token", str(captured.exception))
 
     def test_kimi_analyze_normalizes_smoke_response(self) -> None:
         def fake_post(url: str, *, headers: dict[str, str], json: dict[str, object], timeout: int) -> _FakeResponse:

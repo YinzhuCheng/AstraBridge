@@ -348,9 +348,13 @@ def default_capability_specs() -> list[CapabilitySpec]:
                 "artifact_policy": "persist_generated_assets",
                 "provider_eligibility_rule": "requires_image_generation_adapter",
                 "default_timeout_sec": 300,
+                "notes": [
+                    "Capability callers select image flow through an abstract operation field rather than provider-native endpoint names.",
+                ],
                 "input_schema": {
                     "fields": [
                         _field("prompt", "string", required=True, description="Primary generation prompt."),
+                        _field("operation", "string", description="Abstract image flow selection such as generate, edit, or transparent_asset."),
                         _field("image_inputs", "array[image_part]", description="Optional reference images."),
                         _field("size", "string", description="Requested canvas size."),
                         _field("quality", "string", description="Requested generation quality."),
@@ -363,6 +367,10 @@ def default_capability_specs() -> list[CapabilitySpec]:
                         _field("artifact_refs", "array[artifact_ref]", required=True, description="Generated asset references."),
                         _field("provider_id", "string", required=True, description="Resolved provider id."),
                         _field("model", "string", required=True, description="Resolved upstream model."),
+                        _field("operation", "string", required=True, description="Executed abstract image flow."),
+                        _field("requested_n", "integer", description="Requested image count after normalization."),
+                        _field("actual_n", "integer", description="Actual generated artifact count."),
+                        _field("count_mismatch", "boolean", description="Whether generated artifact count differed from the normalized request."),
                         _field("revised_prompt", "string", description="Upstream-revised prompt if returned."),
                     ]
                 },
@@ -404,7 +412,7 @@ def default_capability_specs() -> list[CapabilitySpec]:
                 "artifact_policy": "persist_audio_request_and_transcript",
                 "provider_eligibility_rule": "requires_transcription_adapter_and_audio_inputs",
                 "default_timeout_sec": 180,
-                "notes": ["Qwen ASR adapters must support the provider's audio-only content constraint."],
+                "notes": ["Adapters may require audio-only request content and capability callers should not depend on mixed media prompt semantics."],
                 "input_schema": {
                     "fields": [
                         _field("audio_inputs", "array[audio_part]", required=True, description="Audio parts to transcribe."),
@@ -416,6 +424,8 @@ def default_capability_specs() -> list[CapabilitySpec]:
                 "output_schema": {
                     "fields": [
                         _field("text", "string", required=True, description="Full transcript text."),
+                        _field("provider_id", "string", required=True, description="Resolved provider id."),
+                        _field("model", "string", required=True, description="Resolved upstream model."),
                         _field("language", "string", description="Detected or applied language."),
                         _field("segments", "array[object]", description="Optional time-coded segments."),
                         _field("annotations", "array[object]", description="Optional provider-specific annotations."),
@@ -444,9 +454,13 @@ def default_capability_specs() -> list[CapabilitySpec]:
                 "output_schema": {
                     "fields": [
                         _field("artifact_refs", "array[artifact_ref]", required=True, description="Persisted audio artifact references."),
+                        _field("provider_id", "string", required=True, description="Resolved provider id."),
+                        _field("model", "string", required=True, description="Resolved upstream model."),
                         _field("text", "string", description="Text emitted or confirmed by the provider."),
+                        _field("audio_format", "string", description="Normalized output audio format."),
                         _field("mime_type", "string", description="Output mime type."),
                         _field("duration_sec", "number", description="Audio duration when available."),
+                        _field("finish_reason", "string", description="Provider finish reason when available."),
                     ]
                 },
             }
@@ -461,13 +475,27 @@ def default_adapter_contracts() -> list[AdapterContract]:
                 "adapter_id": "yunwu.image.generate.v1",
                 "capability_id": "image.generate",
                 "provider_id": "yunwu",
-                "model_match": ["gpt-image-2", "gpt-image-2-all", "gpt-image-1", "flux-kontext-pro", "flux-kontext-max"],
+                "model_match": ["gpt-image-2", "gpt-image-2-all"],
                 "supports_batch": True,
                 "normalization_rules": ["persist_assets", "normalize_generation_result"],
                 "request_builder": "yunwu_image_service.generate/edit payload builder",
                 "response_parser": "yunwu_image_service result normalizer",
                 "artifact_persister": "yunwu_image_service._persist_assets",
                 "smoke_case_id": "yunwu_image_generate_smoke",
+            }
+        ),
+        normalize_adapter_contract(
+            {
+                "adapter_id": "qwen.image.dashscope.v1",
+                "capability_id": "image.generate",
+                "provider_id": "qwen",
+                "model_match": ["qwen-image-plus"],
+                "supports_batch": True,
+                "normalization_rules": ["dashscope_async_task_submission", "dashscope_task_polling", "persist_generated_assets"],
+                "request_builder": "dashscope image-synthesis async task builder",
+                "response_parser": "dashscope image task result normalizer",
+                "artifact_persister": "persist request, task responses, and downloaded assets",
+                "smoke_case_id": "qwen_image_generate_smoke",
             }
         ),
         normalize_adapter_contract(
@@ -511,16 +539,29 @@ def default_adapter_contracts() -> list[AdapterContract]:
         ),
         normalize_adapter_contract(
             {
-                "adapter_id": "qwen.tts.omni.v1",
+                "adapter_id": "qwen.tts.api.v1",
                 "capability_id": "speech.synthesize",
                 "provider_id": "qwen",
-                "model_match": ["qwen3.5-omni-plus", "qwen3.5-omni-flash", "qwen3-omni-flash"],
+                "model_match": [
+                    "qwen3-tts-flash",
+                    "qwen3-tts-instruct-flash",
+                    "cosyvoice-v2",
+                    "cosyvoice-v3-flash",
+                    "cosyvoice-v3-plus",
+                    "cosyvoice-v3.5-flash",
+                    "cosyvoice-v3.5-plus",
+                ],
                 "supports_streaming": True,
-                "normalization_rules": ["sse_delta_audio_data", "modalities_text_audio", "persist_audio_sidecar"],
-                "request_builder": "chat completions streaming audio builder",
-                "response_parser": "sse chunk text/audio accumulator",
+                "normalization_rules": [
+                    "family_specific_dashscope_tts_request_builder",
+                    "sse_output_text_audio_accumulator",
+                    "final_audio_url_preferred_for_non_pcm_artifacts",
+                    "persist_audio_sidecar",
+                ],
+                "request_builder": "family-profiled DashScope TTS builder for Qwen TTS and CosyVoice HTTP SSE endpoints",
+                "response_parser": "sse text/audio accumulator with family-specific final-audio selection",
                 "artifact_persister": "persist synthesized audio bytes and transcript text",
-                "smoke_case_id": "qwen_omni_tts_smoke",
+                "smoke_case_id": "qwen_tts_smoke",
             }
         ),
     ]

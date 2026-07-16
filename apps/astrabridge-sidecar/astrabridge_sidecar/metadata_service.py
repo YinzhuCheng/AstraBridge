@@ -15,6 +15,7 @@ from uuid import uuid4
 from .common import app_data_dir, now_iso, read_json, write_json
 from .model_catalog import (
     GeneratedCatalog,
+    SOURCE_REGISTRY_SCHEMA_VERSION,
     build_generated_catalog,
     catalog_entry_from_record,
     current_generated_catalog,
@@ -23,6 +24,7 @@ from .model_catalog import (
     default_seed_providers,
     effective_model_records,
     known_context_window,
+    normalize_provider_source_records,
 )
 
 
@@ -40,10 +42,12 @@ class MetadataService:
         payload = read_json(self.store_path, {})
         defaults = [dict(item) for item in default_catalog_sources()]
         if not isinstance(payload, dict) or not payload.get("providers"):
+            providers = normalize_provider_source_records(defaults)
             payload = {
-                "providers": defaults,
+                "providers": providers,
                 "updated_at": now_iso(),
                 "catalog_schema": "astrabridge-generated-catalog-v1",
+                "source_registry_schema": SOURCE_REGISTRY_SCHEMA_VERSION,
             }
             write_json(self.store_path, payload)
             return payload
@@ -52,16 +56,18 @@ class MetadataService:
         merged: list[dict[str, Any]] = []
         for default in defaults:
             provider_id = str(default.get("provider_id") or "")
-            merged.append({**existing_by_id.get(provider_id, {}), **default})
+            merged.append({**default, **existing_by_id.get(provider_id, {})})
         known_ids = {str(item.get("provider_id") or "") for item in defaults}
         for item in existing:
             provider_id = str(item.get("provider_id") or "")
             if provider_id and provider_id not in known_ids:
                 merged.append(item)
+        normalized_providers = normalize_provider_source_records(merged)
         normalized = {
-            "providers": merged,
+            "providers": normalized_providers,
             "updated_at": payload.get("updated_at") or now_iso(),
             "catalog_schema": "astrabridge-generated-catalog-v1",
+            "source_registry_schema": SOURCE_REGISTRY_SCHEMA_VERSION,
         }
         if normalized != payload:
             normalized["updated_at"] = now_iso()
@@ -69,8 +75,13 @@ class MetadataService:
         return normalized
 
     def save_sources(self, payload: dict[str, Any]) -> dict[str, Any]:
-        providers = [dict(item) for item in list(payload.get("providers") or []) if isinstance(item, dict)]
-        saved = {"providers": providers, "updated_at": now_iso(), "catalog_schema": "astrabridge-generated-catalog-v1"}
+        providers = normalize_provider_source_records([dict(item) for item in list(payload.get("providers") or []) if isinstance(item, dict)])
+        saved = {
+            "providers": providers,
+            "updated_at": now_iso(),
+            "catalog_schema": "astrabridge-generated-catalog-v1",
+            "source_registry_schema": SOURCE_REGISTRY_SCHEMA_VERSION,
+        }
         write_json(self.store_path, saved)
         return saved
 
@@ -84,16 +95,11 @@ class MetadataService:
         models = [_model_seed(item) for item in catalog.models]
         if apply:
             managed_provider_ids = {str(item.get("id") or item.get("provider_id") or "") for item in providers}
-            managed_model_ids = {str(item.get("id") or "") for item in models}
-            for existing in list(self._router_config.models()):
-                existing_provider = str(existing.get("provider") or "")
-                existing_id = str(existing.get("id") or "")
-                if existing_provider in managed_provider_ids and existing_id and existing_id not in managed_model_ids:
-                    self._router_config.delete_model(existing_id)
-            for provider in providers:
-                self._router_config.upsert_provider(provider)
-            for model in models:
-                self._router_config.upsert_model(model)
+            self._router_config.apply_catalog_seed(
+                providers,
+                models,
+                managed_provider_ids=managed_provider_ids,
+            )
             self.sources()
         return {
             "applied": apply,
@@ -442,10 +448,15 @@ class MetadataService:
         source_cards = []
         for provider in sources.get("providers") or []:
             links = "".join(f"<li><a href=\"{html.escape(str(url))}\">{html.escape(str(url))}</a></li>" for url in list(provider.get("urls") or []))
+            policy = dict(provider.get("promotion_policy") or {})
             source_cards.append(
                 f"<section><h2>{html.escape(str(provider.get('display_name') or provider.get('provider_id')))}</h2>"
                 f"<p>{html.escape(str(provider.get('notes') or ''))}</p>"
-                f"<p class=\"muted\">status={html.escape(str(provider.get('source_status') or 'unknown'))}</p><ul>{links}</ul></section>"
+                f"<p class=\"muted\">status={html.escape(str(provider.get('source_status') or 'unknown'))} "
+                f"trust={html.escape(str(provider.get('trust_level') or 'unknown'))} "
+                f"channel={html.escape(str(provider.get('channel') or 'unknown'))} "
+                f"parser={html.escape(str(provider.get('parser_strategy') or 'unknown'))} "
+                f"promotable={html.escape(str(policy.get('promotable', False)))}</p><ul>{links}</ul></section>"
             )
         fetch_rows = []
         for result in list(fetch_results.get("results") or []):

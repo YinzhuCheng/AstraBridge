@@ -4,15 +4,16 @@ import base64
 import hashlib
 import http.client
 import json
-import mimetypes
 import os
 import re
 import secrets
 import socket
 import ssl
+import struct
 import threading
 import time
 import urllib.parse
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
@@ -22,865 +23,20 @@ from .model_catalog import effective_model_record, known_context_window, model_c
 from .providers import classify_runtime_failure, get_provider_profile, resolve_provider_id, summarize_response_diagnostics
 from .providers.transports import (
     ChatCompletionsTransport as RegistryChatCompletionsTransport,
-    DeepSeekChatTransport as RegistryDeepSeekChatTransport,
-    GlmChatTransport as RegistryGlmChatTransport,
-    KimiChatTransport as RegistryKimiChatTransport,
-    OpenAIChatTransport as RegistryOpenAIChatTransport,
-    OpenAIResponsesTransport as RegistryOpenAIResponsesTransport,
-    QwenResponsesTransport as RegistryQwenResponsesTransport,
     ProviderTransport as RegistryProviderTransport,
+    transport_class_for_profile,
 )
+from .reasoning_policy import normalize_reasoning_effort
 from .security import redact_sensitive
 from .usage_signal import normalize_usage_signal, usage_not_available
 
 
 ROUTER_PORT = 8787
 ROUTER_ENV_KEY = "CODEX_ROUTER_API_KEY"
-QWEN_THINKING_ENABLED_EFFORTS = {"minimal", "low", "medium", "high", "xhigh", "max"}
-DEEPSEEK_MAX_EFFORTS = {"xhigh", "max"}
-KIMI_KEEP_ALL_EFFORTS = {"xhigh", "max"}
-KIMI_THINKING_OUTPUT_FLOOR = 32768
-LOCAL_IMAGE_MAX_BYTES = 100 * 1024 * 1024
-EMBEDDED_INPUT_IMAGE_BLOCK_RE = re.compile(
-    r'\{[^{}]*"type"\s*:\s*"input_image"[^{}]*"image_url"\s*:\s*"(data:image/[^"]+)"[^{}]*\}',
-    re.DOTALL,
-)
-EMBEDDED_IMAGE_URL_RE = re.compile(r'"image_url"\s*:\s*"(data:image/[^"]+)"')
 
 
-class ProviderAdapter:
-    def __init__(self, router: "RouterService", profile: dict[str, Any]) -> None:
-        self.router = router
-        self.profile = profile
-
-    def upstream_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        upstream_payload = dict(payload)
-        upstream_payload["model"] = str(self.profile.get("model") or "")
-        self.router.apply_temperature_config(self.profile, upstream_payload, payload.get("model"))
-        return upstream_payload
-
-    def endpoint_path(self) -> str:
-        return "/responses"
-
-    def wire_api(self) -> str:
-        return str(self.profile.get("wire_api") or "responses")
-
-    def describe(self) -> str:
-        return "responses"
-
-    def supports_passthrough_stream(self) -> bool:
-        return True
-
-    def apply_reasoning_config(self, payload: dict[str, Any]) -> dict[str, Any]:
-        upstream_payload = dict(payload)
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, dict):
-            return upstream_payload
-        effort = self.router.resolve_reasoning_effort(self.profile, payload.get("model"))
-        if effort:
-            upstream_payload["reasoning"] = {"effort": effort}
-        return upstream_payload
-
-    def client_response_from_upstream_json(self, upstream: dict[str, Any], original_payload: dict[str, Any]) -> dict[str, Any]:
-        return upstream
-
-    def client_stream_events_from_upstream_json(self, upstream: dict[str, Any], original_payload: dict[str, Any]) -> list[dict[str, Any]]:
-        response = self.client_response_from_upstream_json(upstream, original_payload)
-        response_id = str(response.get("id") or "response_router")
-        events = [{"type": "response.created", "response": {"id": response_id, "object": "response", "status": "in_progress"}}]
-        for output_index, item in enumerate(list(response.get("output") or [])):
-            if item.get("type") == "message":
-                item_id = item.get("id") or f"msg_{output_index}"
-                events.append(
-                    {
-                        "type": "response.output_item.added",
-                        "output_index": output_index,
-                        "item": {"id": item_id, "type": "message", "role": "assistant", "status": "in_progress", "content": []},
-                    }
-                )
-                for content_index, content in enumerate(list(item.get("content") or [])):
-                    if content.get("type") == "output_text":
-                        text = str(content.get("text") or "")
-                        part = {"type": "output_text", "text": ""}
-                        events.append(
-                            {
-                                "type": "response.content_part.added",
-                                "item_id": item_id,
-                                "output_index": output_index,
-                                "content_index": content_index,
-                                "part": part,
-                            }
-                        )
-                        if text:
-                            events.append(
-                                {
-                                    "type": "response.output_text.delta",
-                                    "item_id": item_id,
-                                    "output_index": output_index,
-                                    "content_index": content_index,
-                                    "delta": text,
-                                }
-                            )
-                        events.append(
-                            {
-                                "type": "response.output_text.done",
-                                "item_id": item_id,
-                                "output_index": output_index,
-                                "content_index": content_index,
-                                "text": text,
-                            }
-                        )
-                        events.append(
-                            {
-                                "type": "response.content_part.done",
-                                "item_id": item_id,
-                                "output_index": output_index,
-                                "content_index": content_index,
-                                "part": {"type": "output_text", "text": text},
-                            }
-                        )
-                events.append(
-                    {
-                        "type": "response.output_item.done",
-                        "output_index": output_index,
-                        "item": {**item, "id": item_id, "status": "completed"},
-                    }
-                )
-            elif item.get("type") == "reasoning":
-                events.append(
-                    {
-                        "type": "response.output_item.added",
-                        "output_index": output_index,
-                        "item": item,
-                    }
-                )
-                events.append(
-                    {
-                        "type": "response.output_item.done",
-                        "output_index": output_index,
-                        "item": {**item, "status": "completed"},
-                    }
-                )
-            elif item.get("type") == "function_call":
-                events.append(
-                    {
-                        "type": "response.output_item.added",
-                        "output_index": output_index,
-                        "item": item,
-                    }
-                )
-                events.append(
-                    {
-                        "type": "response.output_item.done",
-                        "output_index": output_index,
-                        "item": {**item, "status": "completed"},
-                    }
-                )
-        events.append({"type": "response.completed", "response": response})
-        return events
-
-
-class QwenResponsesAdapter(ProviderAdapter):
-    def upstream_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        upstream_payload = super().apply_reasoning_config(super().upstream_payload(payload))
-        reasoning = upstream_payload.get("reasoning")
-        effort = None
-        if isinstance(reasoning, dict):
-            effort = str(reasoning.get("effort") or "").strip().lower() or None
-        if effort is None:
-            effort = str(self.profile.get("reasoning_effort") or "").strip().lower() or None
-        if effort == "off":
-            upstream_payload["enable_thinking"] = False
-        elif effort == "auto":
-            upstream_payload.pop("enable_thinking", None)
-        elif effort in QWEN_THINKING_ENABLED_EFFORTS:
-            upstream_payload["enable_thinking"] = True
-        upstream_payload.pop("reasoning", None)
-        for key in ("top_p", "service_tier"):
-            upstream_payload.pop(key, None)
-        extra_defaults = self.profile.get("extra_body_defaults")
-        if isinstance(extra_defaults, dict):
-            for key, value in extra_defaults.items():
-                upstream_payload.setdefault(str(key), value)
-        return upstream_payload
-
-    def describe(self) -> str:
-        return "qwen_responses"
-
-
-class ChatCompletionsAdapter(ProviderAdapter):
-    def endpoint_path(self) -> str:
-        return "/chat/completions"
-
-    def wire_api(self) -> str:
-        return "chat"
-
-    def describe(self) -> str:
-        return "chat_completions"
-
-    def supports_passthrough_stream(self) -> bool:
-        return False
-
-    def supports_local_image_input(self) -> bool:
-        return False
-
-    def upstream_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        payload = self.apply_reasoning_config(payload)
-        tools = self._convert_tools(payload.get("tools"))
-        messages = self._convert_messages(payload)
-        guidance = self._tool_guidance(tools)
-        if guidance:
-            if messages and messages[0].get("role") == "system":
-                messages[0]["content"] = f"{messages[0].get('content')}\n\n{guidance}".strip()
-            else:
-                messages.insert(0, {"role": "system", "content": guidance})
-        messages = self._repair_tool_message_sequence(messages)
-        upstream_payload: dict[str, Any] = {
-            "model": str(self.profile.get("model") or ""),
-            "messages": messages,
-            "stream": bool(payload.get("stream")),
-        }
-        if "temperature" in payload:
-            upstream_payload["temperature"] = payload.get("temperature")
-            self.router.apply_temperature_config(self.profile, upstream_payload, payload.get("model"))
-        if upstream_payload["stream"]:
-            upstream_payload["stream_options"] = {"include_usage": True}
-        if tools:
-            upstream_payload["tools"] = tools
-        tool_choice = payload.get("tool_choice")
-        if tool_choice is not None:
-            upstream_payload["tool_choice"] = tool_choice
-        max_output_tokens = payload.get("max_output_tokens")
-        if max_output_tokens not in {None, ""}:
-            upstream_payload["max_tokens"] = max_output_tokens
-        return upstream_payload
-
-    def _tool_guidance(self, tools: list[dict[str, Any]]) -> str:
-        names = {
-            str((tool.get("function") or {}).get("name") or "")
-            for tool in tools
-            if isinstance(tool, dict)
-        }
-        names.discard("")
-        if not names:
-            return ""
-        lines = [
-            "Codex app-server tool bridge: when a listed tool is appropriate, call it as a structured tool call with valid JSON arguments; do not describe the call in prose.",
-        ]
-        if "request_user_input" in names:
-            lines.append("Use request_user_input for missing user choices; include 1-3 questions, a recommended option, and concise option descriptions.")
-        if "update_plan" in names:
-            lines.append("Use update_plan to publish or update the visible checklist when the mode allows it.")
-        return "\n".join(lines)
-
-    def client_response_from_upstream_json(self, upstream: dict[str, Any], original_payload: dict[str, Any]) -> dict[str, Any]:
-        choice = ((upstream.get("choices") or [{}])[0]) if isinstance(upstream.get("choices"), list) else {}
-        message = dict(choice.get("message") or {})
-        output: list[dict[str, Any]] = []
-        text = str(message.get("content") or "")
-        reasoning_content = str(message.get("reasoning_content") or "")
-        tool_calls = list(message.get("tool_calls") or [])
-        text = self._visible_text_or_reasoning_only_notice(text, reasoning_content, bool(tool_calls))
-        message_item_id = f"msg_{upstream.get('id') or int(time.time())}"
-        if reasoning_content:
-            output.append(
-                {
-                    "id": f"reasoning_{upstream.get('id') or int(time.time())}",
-                    "type": "reasoning",
-                    "summary": [reasoning_content],
-                    "content": [reasoning_content],
-                }
-            )
-        if text:
-            output.append(
-                {
-                    "id": message_item_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": text}],
-                }
-            )
-        for call in tool_calls:
-            function = dict(call.get("function") or {})
-            call_id = str(call.get("id") or "call_router")
-            output.append(
-                {
-                    "id": f"fc_{call_id}",
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": function.get("name") or "tool",
-                    "arguments": self._safe_tool_arguments(function.get("arguments")),
-                }
-            )
-        usage = dict(upstream.get("usage") or {})
-        response = {
-            "id": upstream.get("id") or f"resp_router_{int(time.time())}",
-            "object": "response",
-            "created_at": upstream.get("created") or int(time.time()),
-            "model": original_payload.get("model") or f"{self.profile.get('provider_id')}/{self.profile.get('model')}",
-            "status": "completed",
-            "output": output,
-            "output_text": text,
-        }
-        if usage:
-            response["usage"] = self._response_usage_from_chat_usage(usage)
-        return response
-
-    def _visible_text_or_reasoning_only_notice(self, text: str, reasoning_content: str, has_tool_calls: bool) -> str:
-        if text or not reasoning_content or has_tool_calls:
-            return text
-        return "(Provider returned reasoning content but no final assistant message. Open the reasoning preview or retry with an explicit final-answer instruction.)"
-
-    def _convert_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = []
-        instructions = payload.get("instructions")
-        if isinstance(instructions, str) and instructions.strip():
-            messages.append({"role": "system", "content": instructions.strip()})
-        raw_input = payload.get("input")
-        if isinstance(raw_input, str):
-            messages.append({"role": "user", "content": raw_input})
-            return messages
-        if isinstance(raw_input, list):
-            for item in raw_input:
-                converted = self._convert_input_item(item)
-                if converted:
-                    messages.extend(converted)
-            return messages
-        if isinstance(raw_input, dict):
-            converted = self._convert_input_item(raw_input)
-            if converted:
-                messages.extend(converted)
-        return messages or [{"role": "user", "content": ""}]
-
-    def _convert_input_item(self, item: Any) -> list[dict[str, Any]]:
-        if not isinstance(item, dict):
-            return [{"role": "user", "content": str(item)}]
-        if "role" in item:
-            role = self._map_role(str(item.get("role") or "user"))
-            if role == "tool":
-                tool_id = str(item.get("tool_call_id") or item.get("call_id") or "tool_call")
-                return [{"role": "tool", "tool_call_id": tool_id, "content": self._flatten_content(item.get("content"))}]
-            if role == "assistant" and item.get("tool_calls"):
-                return [
-                    {
-                        "role": "assistant",
-                        "content": self._chat_content(item.get("content")) or None,
-                        "tool_calls": self._sanitize_chat_tool_calls(item.get("tool_calls")),
-                    }
-                ]
-            if role == "assistant" and item.get("reasoning_content"):
-                return [
-                    {
-                        "role": "assistant",
-                        "content": f"{self._flatten_content(item.get('reasoning_content'))}\n{self._flatten_content(item.get('content'))}".strip(),
-                    }
-                ]
-            return [{"role": role, "content": self._chat_content(item.get("content"))}]
-        item_type = str(item.get("type") or "")
-        if item_type == "localImage":
-            return [{"role": "user", "content": self._chat_content(item)}]
-        if item_type == "function_call_output":
-            tool_id = str(item.get("call_id") or item.get("tool_call_id") or "tool_call")
-            return [{"role": "tool", "tool_call_id": tool_id, "content": self._flatten_content(item.get("output"))}]
-        if item_type == "commandExecution":
-            tool_id = str(item.get("id") or item.get("call_id") or "tool_call")
-            return [{"role": "tool", "tool_call_id": tool_id, "content": self._command_execution_tool_result(item)}]
-        if item_type == "reasoning":
-            summary = self._flatten_content(item.get("summary") or item.get("content") or item)
-            if summary:
-                return [{"role": "assistant", "content": f"[reasoning summary]\n{summary}"}]
-            return []
-        if item_type == "function_call":
-            call_id = str(item.get("call_id") or item.get("id") or "tool_call")
-            name = str(item.get("name") or "tool")
-            return [
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": call_id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": self._safe_tool_arguments(item.get("arguments")),
-                            },
-                        }
-                    ],
-                }
-            ]
-        if item_type == "message":
-            role = self._map_role(str(item.get("role") or "user"))
-            return [{"role": role, "content": self._chat_content(item.get("content"))}]
-        if item_type in {"contextCompaction", "enteredReviewMode", "exitedReviewMode", "collabAgentToolCall"}:
-            summary = self._transition_summary_message(item)
-            return [{"role": "assistant", "content": summary}] if summary else []
-        return [{"role": "user", "content": self._flatten_content(item)}]
-
-    def _chat_content(self, content: Any) -> Any:
-        if not self.supports_local_image_input():
-            return self._flatten_content(content)
-        parts = self._chat_content_parts(content)
-        if any(part.get("type") == "image_url" for part in parts):
-            return parts
-        return "\n".join(str(part.get("text") or "") for part in parts if part.get("type") == "text")
-
-    def _chat_content_parts(self, content: Any) -> list[dict[str, Any]]:
-        if content is None:
-            return []
-        if isinstance(content, str):
-            embedded = self._embedded_input_image_parts(content)
-            if embedded:
-                return embedded
-            return [{"type": "text", "text": content}]
-        if isinstance(content, list):
-            parts: list[dict[str, Any]] = []
-            for item in content:
-                parts.extend(self._chat_content_parts(item))
-            return parts
-        if isinstance(content, dict):
-            item_type = str(content.get("type") or "")
-            if item_type in {"input_text", "output_text", "text"}:
-                text = str(content.get("text") or "")
-                embedded = self._embedded_input_image_parts(text)
-                if embedded:
-                    return embedded
-                return [{"type": "text", "text": text}] if text else []
-            if item_type == "localImage":
-                return [self._local_image_chat_part(content)]
-            if item_type == "input_image":
-                image_url = str(content.get("image_url") or content.get("url") or "")
-                if image_url.startswith("data:image/"):
-                    return [{"type": "image_url", "image_url": {"url": image_url}}]
-                return [{"type": "text", "text": "[image attachment omitted: Kimi requires a base64 data URL]"}]
-            if item_type == "image_url":
-                image_url = dict(content.get("image_url") or {})
-                url = str(image_url.get("url") or content.get("url") or "")
-                if url.startswith("data:image/"):
-                    return [{"type": "image_url", "image_url": {"url": url}}]
-                return [{"type": "text", "text": "[image attachment omitted: provider requires base64 data URL, not remote/local URL]"}]
-            if "content" in content:
-                return self._chat_content_parts(content.get("content"))
-            flattened = self._flatten_content(content)
-            return [{"type": "text", "text": flattened}] if flattened else []
-        return [{"type": "text", "text": str(content)}]
-
-    def _embedded_input_image_parts(self, text: str) -> list[dict[str, Any]]:
-        matches = list(EMBEDDED_INPUT_IMAGE_BLOCK_RE.finditer(text))
-        if not matches:
-            url_matches = list(EMBEDDED_IMAGE_URL_RE.finditer(text))
-            if not url_matches:
-                return []
-            scrubbed = EMBEDDED_IMAGE_URL_RE.sub('"image_url":"[image attachment]"', text)
-            parts: list[dict[str, Any]] = []
-            if scrubbed.strip():
-                parts.append({"type": "text", "text": scrubbed.strip()})
-            parts.extend({"type": "image_url", "image_url": {"url": match.group(1)}} for match in url_matches)
-            return parts
-        parts: list[dict[str, Any]] = []
-        cursor = 0
-        for match in matches:
-            before = text[cursor : match.start()]
-            if before:
-                parts.append({"type": "text", "text": before.rstrip() + "\n[image attachment]"})
-            parts.append({"type": "image_url", "image_url": {"url": match.group(1)}})
-            cursor = match.end()
-        after = text[cursor:]
-        if after.strip():
-            parts.append({"type": "text", "text": after.lstrip()})
-        return parts
-
-    def _local_image_chat_part(self, content: dict[str, Any]) -> dict[str, Any]:
-        path = str(content.get("path") or "")
-        try:
-            data_url = self._local_image_data_url(path)
-            return {"type": "image_url", "image_url": {"url": data_url}}
-        except Exception as exc:  # noqa: BLE001 - convert attachment failures into model-visible context.
-            return {"type": "text", "text": f"[image attachment unavailable: {str(exc)[:160]}]"}
-
-    def _local_image_data_url(self, raw_path: str) -> str:
-        path = self._local_image_path(raw_path)
-        if not path.is_file():
-            raise FileNotFoundError(f"image file not found: {raw_path}")
-        size = path.stat().st_size
-        if size > LOCAL_IMAGE_MAX_BYTES:
-            raise ValueError(f"image file is too large for Kimi vision input: {size} bytes")
-        mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
-        if mime_type not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
-            raise ValueError(f"unsupported Kimi image format: {mime_type}")
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-        return f"data:{mime_type};base64,{encoded}"
-
-    def _local_image_path(self, raw_path: str) -> Path:
-        if not raw_path:
-            raise ValueError("missing local image path")
-        parsed = urllib.parse.urlparse(raw_path)
-        if parsed.scheme == "file":
-            value = urllib.parse.unquote(parsed.path)
-            if value.startswith("/") and len(value) > 3 and value[2] == ":":
-                value = value[1:]
-            return Path(value)
-        if raw_path.startswith("/mnt/") and len(raw_path) > 6 and raw_path[6] == "/":
-            drive = raw_path[5].upper()
-            rest = raw_path[7:].replace("/", "\\")
-            return Path(f"{drive}:\\{rest}")
-        return Path(raw_path)
-
-    def _command_execution_tool_result(self, item: dict[str, Any]) -> str:
-        command = str(item.get("command") or "").strip()
-        status = str(item.get("status") or "").strip()
-        output = str(item.get("aggregatedOutput") or "").strip()
-        exit_code = item.get("exitCode")
-        parts = []
-        if command:
-            parts.append(f"command: {command}")
-        if status:
-            parts.append(f"status: {status}")
-        if exit_code is not None:
-            parts.append(f"exit_code: {exit_code}")
-        if output:
-            parts.append(f"output:\n{output}")
-        return "\n".join(parts) or "Command completed with no captured output."
-
-    def _repair_tool_message_sequence(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        repaired: list[dict[str, Any]] = []
-        index = 0
-        while index < len(messages):
-            message = messages[index]
-            if message.get("role") != "assistant" or not message.get("tool_calls"):
-                if message.get("role") == "tool":
-                    repaired.append(
-                        {
-                            "role": "user",
-                            "content": f"[orphan tool output for {message.get('tool_call_id') or 'unknown'}]\n{message.get('content') or ''}".strip(),
-                        }
-                    )
-                else:
-                    repaired.append(message)
-                index += 1
-                continue
-
-            merged_assistant = dict(message)
-            merged_calls = [dict(call) for call in list(message.get("tool_calls") or []) if isinstance(call, dict)]
-            merged_content = self._flatten_content(merged_assistant.get("content"))
-            index += 1
-            while index < len(messages) and messages[index].get("role") == "assistant" and messages[index].get("tool_calls"):
-                next_assistant = dict(messages[index])
-                next_content = self._flatten_content(next_assistant.get("content"))
-                if next_content and next_content not in merged_content:
-                    merged_content = f"{merged_content}\n{next_content}".strip()
-                if next_assistant.get("reasoning_content") and not merged_assistant.get("reasoning_content"):
-                    merged_assistant["reasoning_content"] = next_assistant.get("reasoning_content")
-                merged_calls.extend(dict(call) for call in list(next_assistant.get("tool_calls") or []) if isinstance(call, dict))
-                index += 1
-            merged_assistant["tool_calls"] = merged_calls
-            merged_assistant["content"] = merged_content or None
-            repaired.append(merged_assistant)
-            expected = [str(call.get("id") or "") for call in merged_calls if isinstance(call, dict)]
-            seen: set[str] = set()
-            while index < len(messages) and messages[index].get("role") == "tool":
-                tool_message = dict(messages[index])
-                tool_id = str(tool_message.get("tool_call_id") or "")
-                if tool_id:
-                    seen.add(tool_id)
-                repaired.append(tool_message)
-                index += 1
-            for tool_id in expected:
-                if tool_id and tool_id not in seen:
-                    repaired.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_id,
-                            "content": "Tool result was unavailable in Codex history; continue from the available context.",
-                        }
-                    )
-        return repaired
-
-    def _flatten_content(self, content: Any) -> str:
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = [self._flatten_content(item) for item in content]
-            return "\n".join(part for part in parts if part)
-        if isinstance(content, dict):
-            item_type = str(content.get("type") or "")
-            if item_type in {"input_text", "output_text", "text"}:
-                return str(content.get("text") or "")
-            if item_type == "localImage":
-                return f"[local_image:{content.get('path')}]"
-            if item_type == "mention":
-                return f"[file:{content.get('path') or content.get('name')}]"
-            if item_type == "function_call":
-                return str(content.get("arguments") or "")
-            if "text" in content:
-                return str(content.get("text") or "")
-            if "content" in content:
-                return self._flatten_content(content.get("content"))
-        return json.dumps(content, ensure_ascii=False) if content is not None else ""
-
-    def _convert_tools(self, tools: Any) -> list[dict[str, Any]]:
-        if not isinstance(tools, list):
-            return []
-        converted = []
-        for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            if str(tool.get("type") or "") != "function":
-                continue
-            converted.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool.get("name") or "tool",
-                        "description": tool.get("description") or "",
-                        "parameters": tool.get("parameters") or {},
-                    },
-                }
-            )
-        return converted
-
-    def _sanitize_chat_tool_calls(self, value: Any) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        calls = []
-        for index, call in enumerate(value):
-            if not isinstance(call, dict):
-                continue
-            function = dict(call.get("function") or {})
-            call_id = str(call.get("id") or call.get("call_id") or f"call_{index}")
-            calls.append(
-                {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": str(function.get("name") or call.get("name") or "tool"),
-                        "arguments": self._safe_tool_arguments(function.get("arguments") or call.get("arguments")),
-                    },
-                }
-            )
-        return calls
-
-    def _safe_tool_arguments(self, value: Any) -> str:
-        if isinstance(value, (dict, list)):
-            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        text = str(value or "").strip()
-        if not text:
-            return "{}"
-        if text.startswith("```"):
-            text = text.strip("`").strip()
-            if "\n" in text:
-                text = text.split("\n", 1)[1].strip()
-        try:
-            json.loads(text)
-            return text
-        except Exception:
-            return json.dumps({"raw": text}, ensure_ascii=False, separators=(",", ":"))
-
-    def _transition_summary_message(self, item: dict[str, Any]) -> str:
-        item_type = str(item.get("type") or "")
-        if item_type == "contextCompaction":
-            return "[context compaction]\nThread context was compacted before this turn. Continue from the surviving summary, tool results, and recent file state."
-        if item_type == "enteredReviewMode":
-            review = str(item.get("review") or "").strip()
-            return f"[review mode entered]\n{review}".strip()
-        if item_type == "exitedReviewMode":
-            review = str(item.get("review") or "").strip()
-            return f"[review mode exited]\n{review}".strip()
-        if item_type != "collabAgentToolCall":
-            return ""
-        tool = str(item.get("tool") or "").strip()
-        receivers = [str(value).strip() for value in list(item.get("receiverThreadIds") or []) if str(value).strip()]
-        prompt = str(item.get("prompt") or "").strip()
-        model = str(item.get("model") or "").strip()
-        effort = str(item.get("reasoningEffort") or "").strip()
-        states = item.get("agentsStates") or {}
-        lines: list[str] = []
-        if tool == "spawnAgent":
-            lines.append("[forked collaborator thread]")
-            if receivers:
-                lines.append(f"Spawned collaborator thread(s): {', '.join(receivers)}")
-            else:
-                lines.append("Spawned a collaborator thread.")
-        elif tool == "sendInput":
-            lines.append("[collaborator follow-up]")
-            if receivers:
-                lines.append(f"Sent follow-up input to: {', '.join(receivers)}")
-        elif tool == "resumeAgent":
-            lines.append("[collaborator resumed]")
-            if receivers:
-                lines.append(f"Resumed collaborator thread(s): {', '.join(receivers)}")
-        elif tool == "wait":
-            lines.append("[collaborator wait]")
-            lines.append("Waiting for collaborator progress.")
-        elif tool == "closeAgent":
-            lines.append("[collaborator closed]")
-            if receivers:
-                lines.append(f"Closed collaborator thread(s): {', '.join(receivers)}")
-        else:
-            lines.append("[collaborator transition]")
-            lines.append(f"Recorded collaborator tool event: {tool or 'unknown'}")
-        if model:
-            lines.append(f"Model: {model}")
-        if effort:
-            lines.append(f"Reasoning effort: {effort}")
-        if prompt:
-            lines.append(f"Prompt summary: {prompt[:240]}")
-        if isinstance(states, dict) and states:
-            lines.append(f"Known collaborator states: {', '.join(sorted(states.keys()))}")
-        return "\n".join(lines).strip()
-
-    def _response_usage_from_chat_usage(self, usage: dict[str, Any]) -> dict[str, Any]:
-        token_details = dict(usage.get("completion_tokens_details") or {})
-        return {
-            "input_tokens": usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-            "output_tokens_details": {
-                "reasoning_tokens": token_details.get("reasoning_tokens", usage.get("reasoning_tokens", 0)),
-            },
-        }
-
-    def _map_role(self, role: str) -> str:
-        lowered = role.lower()
-        if lowered in {"assistant", "system", "tool", "user"}:
-            return lowered
-        if lowered == "developer":
-            return "system"
-        return "user"
-
-    def _merge_reasoning_content_into_assistant_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        merged: list[dict[str, Any]] = []
-        pending_reasoning: str | None = None
-        for message in messages:
-            role = str(message.get("role") or "")
-            content = message.get("content")
-            if role == "assistant" and isinstance(content, str) and content.startswith("[reasoning summary]\n"):
-                pending_reasoning = content.split("\n", 1)[1].strip()
-                continue
-            if pending_reasoning and role == "assistant":
-                message = dict(message)
-                message["reasoning_content"] = pending_reasoning
-                pending_reasoning = None
-            if role == "assistant" and message.get("tool_calls") and merged and merged[-1].get("role") == "assistant" and not merged[-1].get("tool_calls"):
-                previous = dict(merged.pop())
-                message = dict(message)
-                if previous.get("content") and not message.get("content"):
-                    message["content"] = previous.get("content")
-                if previous.get("reasoning_content") and not message.get("reasoning_content"):
-                    message["reasoning_content"] = previous.get("reasoning_content")
-            merged.append(message)
-        if pending_reasoning:
-            merged.append({"role": "assistant", "content": "", "reasoning_content": pending_reasoning})
-        return merged
-
-
-class DeepSeekChatAdapter(ChatCompletionsAdapter):
-    def describe(self) -> str:
-        return "deepseek_chat"
-
-    def upstream_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        upstream_payload = super().upstream_payload(payload)
-        merged_messages = self._merge_reasoning_content_into_assistant_messages(list(upstream_payload.get("messages") or []))
-        upstream_payload["messages"] = self._repair_tool_message_sequence(merged_messages)
-        effort = self._requested_effort(payload)
-        if effort == "off":
-            upstream_payload["thinking"] = {"type": "disabled"}
-            upstream_payload.pop("reasoning_effort", None)
-        elif effort in DEEPSEEK_MAX_EFFORTS:
-            upstream_payload["thinking"] = {"type": "enabled"}
-            upstream_payload["reasoning_effort"] = "max"
-        elif effort and effort != "auto":
-            upstream_payload["thinking"] = {"type": "enabled"}
-            upstream_payload["reasoning_effort"] = "high"
-        if upstream_payload.get("thinking", {}).get("type") == "enabled":
-            upstream_payload.pop("temperature", None)
-            upstream_payload.pop("top_p", None)
-        return upstream_payload
-
-    def _requested_effort(self, payload: dict[str, Any]) -> str | None:
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, dict):
-            effort = str(reasoning.get("effort") or "").strip().lower()
-            if effort:
-                return effort
-        effort = str(self.profile.get("reasoning_effort") or "").strip().lower()
-        return effort or None
-
-
-class KimiChatAdapter(ChatCompletionsAdapter):
-    def describe(self) -> str:
-        return "kimi_chat"
-
-    def supports_local_image_input(self) -> bool:
-        return True
-
-    def upstream_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        upstream_payload = super().upstream_payload(payload)
-        merged_messages = self._merge_reasoning_content_into_assistant_messages(list(upstream_payload.get("messages") or []))
-        upstream_payload["messages"] = self._repair_tool_message_sequence(merged_messages)
-        effort = self._requested_effort(payload)
-        explicit_effort = self._explicit_requested_effort(payload)
-        has_local_image = self._has_local_image_input(payload)
-        if effort == "off":
-            upstream_payload["thinking"] = {"type": "disabled"}
-        elif has_local_image and explicit_effort not in KIMI_KEEP_ALL_EFFORTS:
-            # Kimi K2.6 shares max_tokens between reasoning_content and visible content.
-            # Keep thinking enabled for vision turns, but reserve enough output window
-            # so reasoning does not starve the final visible answer.
-            upstream_payload["thinking"] = {"type": "enabled"}
-            max_tokens = int(upstream_payload.get("max_tokens") or 0)
-            if max_tokens < KIMI_THINKING_OUTPUT_FLOOR:
-                upstream_payload["max_tokens"] = KIMI_THINKING_OUTPUT_FLOOR
-        elif effort == "auto" or not effort:
-            upstream_payload.pop("thinking", None)
-        else:
-            thinking: dict[str, Any] = {"type": "enabled"}
-            if effort in KIMI_KEEP_ALL_EFFORTS:
-                thinking["keep"] = "all"
-            upstream_payload["thinking"] = thinking
-            tool_choice = upstream_payload.get("tool_choice")
-            if tool_choice not in {None, "auto", "none"}:
-                upstream_payload["tool_choice"] = "auto"
-            max_tokens = int(upstream_payload.get("max_tokens") or 0)
-            floor = KIMI_THINKING_OUTPUT_FLOOR if effort in KIMI_KEEP_ALL_EFFORTS else 16000
-            if max_tokens < floor:
-                upstream_payload["max_tokens"] = floor
-        return upstream_payload
-
-    def _requested_effort(self, payload: dict[str, Any]) -> str | None:
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, dict):
-            effort = str(reasoning.get("effort") or "").strip().lower()
-            if effort:
-                return effort
-        effort = str(self.profile.get("reasoning_effort") or "").strip().lower()
-        return effort or None
-
-    def _explicit_requested_effort(self, payload: dict[str, Any]) -> str | None:
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, dict):
-            effort = str(reasoning.get("effort") or "").strip().lower()
-            return effort or None
-        return None
-
-    def _has_local_image_input(self, payload: dict[str, Any]) -> bool:
-        raw_input = payload.get("input")
-
-        def walk(value: Any) -> bool:
-            if isinstance(value, dict):
-                item_type = str(value.get("type") or "")
-                if item_type in {"localImage", "input_image", "image_url"}:
-                    return True
-                return any(walk(child) for child in value.values())
-            if isinstance(value, list):
-                return any(walk(item) for item in value)
-            if isinstance(value, str):
-                return '"input_image"' in value and "data:image/" in value
-            return False
-
-        return walk(raw_input)
-
-
+# Active provider transports are selected exclusively through
+# astrabridge_sidecar.providers.transports.transport_class_for_profile(...).
 class RouterService:
     def __init__(self, profiles_service, router_config_service=None, *, host: str = "127.0.0.1", port: int = ROUTER_PORT) -> None:
         self._profiles = profiles_service
@@ -1066,6 +222,57 @@ class RouterService:
             ],
         }
 
+    def health_status(self) -> dict[str, Any]:
+        advertised_host = "127.0.0.1" if self._host in {"", "0.0.0.0"} else self._host
+        config_snapshot = self._router_config.health_snapshot() if self._router_config is not None else {}
+        raw_providers = [item for item in list(config_snapshot.get("providers") or []) if isinstance(item, dict)]
+        providers = [
+            {
+                "provider_id": str(item.get("id") or item.get("provider_id") or ""),
+                "label": str(item.get("display_name") or item.get("label") or item.get("id") or item.get("provider_id") or ""),
+                "base_url": str(item.get("base_url") or ""),
+                "model": str(item.get("default_model") or item.get("model") or ""),
+                "wire_api": str(item.get("adapter_type") or item.get("wire_api") or ""),
+                "secret_loaded": bool(os.environ.get(str(item.get("env_key") or ""))),
+            }
+            for item in raw_providers
+            if item.get("enabled", True)
+        ]
+        provider_count = int(config_snapshot.get("provider_count") or len(providers))
+        model_count = int(config_snapshot.get("model_count") or 0)
+        latest_test = config_snapshot.get("latest_test")
+        return {
+            "ok": True,
+            "service": "astrabridge",
+            "running": self._server is not None,
+            "listen_host": self._host,
+            "requested_port": self._requested_port,
+            "listen_port": self._port,
+            "port_auto_selected": self._port_auto_selected,
+            "base_url": f"http://{advertised_host}:{self._port}/v1",
+            "router_env_key": ROUTER_ENV_KEY,
+            "token_loaded": bool(self._token),
+            "token_fingerprint": hashlib.sha256(self._token.encode("utf-8")).hexdigest()[:12] if self._token else None,
+            "provider_count": provider_count,
+            "model_count": model_count,
+            "latest_test": latest_test,
+            "providers": providers,
+        }
+
+    def runtime_environment(self) -> dict[str, str]:
+        """Return the private router launch contract for this service instance.
+
+        This must only be passed to a child app-server environment. It is kept
+        separate from ``status`` so diagnostics never expose the router token.
+        """
+        with self._lock:
+            advertised_host = "127.0.0.1" if self._host in {"", "0.0.0.0"} else self._host
+            return {
+                "ASTRABRIDGE_BASE_URL": f"http://{advertised_host}:{self._port}/v1",
+                "ASTRABRIDGE_PORT": str(self._port),
+                ROUTER_ENV_KEY: self._token,
+            }
+
     def events(self, *, limit: int = 50) -> dict[str, Any]:
         safe_limit = max(1, min(int(limit or 50), 200))
         with self._lock:
@@ -1094,14 +301,12 @@ class RouterService:
         return models
 
     def forward_response(self, payload: dict[str, Any], handler: BaseHTTPRequestHandler) -> None:
-        chosen = self._resolve_profile(payload)
+        chosen, adapter, _warnings, upstream_payload = self._prepare_request(payload)
         secret = os.environ.get(str(chosen.get("env_key") or ""))
         if not secret:
             raise RuntimeError(f"Provider secret is not loaded for env key {chosen.get('env_key')}.")
-        adapter = self._adapter_for(chosen)
         base_url = str(chosen.get("base_url") or "").rstrip("/")
         wire_api = adapter.wire_api()
-        upstream_payload = adapter.upstream_payload(payload)
         parsed = urllib.parse.urlparse(f"{base_url}{adapter.endpoint_path()}")
         stream = bool(payload.get("stream"))
         upstream_stream = stream and (adapter.supports_passthrough_stream() or wire_api == "chat")
@@ -1192,13 +397,11 @@ class RouterService:
         response.close()
 
     def complete_response(self, payload: dict[str, Any]) -> dict[str, Any]:
-        chosen = self._resolve_profile(payload)
+        chosen, adapter, _warnings, upstream_payload = self._prepare_request(payload)
         secret = os.environ.get(str(chosen.get("env_key") or ""))
         if not secret:
             raise RuntimeError(f"Provider secret is not loaded for env key {chosen.get('env_key')}.")
-        adapter = self._adapter_for(chosen)
         base_url = str(chosen.get("base_url") or "").rstrip("/")
-        upstream_payload = adapter.upstream_payload(payload)
         parsed = urllib.parse.urlparse(f"{base_url}{adapter.endpoint_path()}")
         response = self._request_upstream(
             parsed=parsed,
@@ -1347,18 +550,8 @@ class RouterService:
             )
             or "openai"
         )
-        if provider_family == "qwen":
-            return RegistryQwenResponsesTransport(self, profile)
-        if provider_family == "deepseek":
-            return RegistryDeepSeekChatTransport(self, profile)
-        if provider_family == "kimi":
-            return RegistryKimiChatTransport(self, profile)
-        if provider_family == "glm":
-            return RegistryGlmChatTransport(self, profile)
-        wire_api = str(profile.get("wire_api") or "").strip().lower()
-        if wire_api == "chat":
-            return RegistryOpenAIChatTransport(self, profile)
-        return RegistryOpenAIResponsesTransport(self, profile)
+        transport_class = transport_class_for_profile(profile, provider_family=provider_family)
+        return transport_class(self, profile)
 
     def _adapter_for_provider(self, provider_id: str) -> RegistryProviderTransport:
         return self._adapter_for({"provider_id": provider_id, "provider_family": _provider_family(provider_id)})
@@ -1447,23 +640,96 @@ class RouterService:
 
     def resolve_reasoning_effort(self, profile: dict[str, Any], model_id: Any) -> str | None:
         if self._router_config is None:
-            return str(profile.get("reasoning_effort") or "").strip().lower() or None
+            return normalize_reasoning_effort(profile.get("reasoning_effort"))
         reasoning = self._router_config.reasoning()
         model_overrides = dict(reasoning.get("model_overrides") or {})
         provider_overrides = dict(reasoning.get("provider_overrides") or {})
         model_key = str(model_id or "")
         provider_key = str(profile.get("provider_id") or "")
-        return (
-            str(model_overrides.get(model_key) or "").strip().lower()
-            or str(provider_overrides.get(provider_key) or "").strip().lower()
-            or str(reasoning.get("global_effort") or profile.get("reasoning_effort") or "").strip().lower()
-            or None
-        )
+        for candidate in (
+            model_overrides.get(model_key),
+            provider_overrides.get(provider_key),
+            reasoning.get("global_effort"),
+            profile.get("reasoning_effort"),
+        ):
+            normalized = normalize_reasoning_effort(candidate)
+            if normalized is not None:
+                return normalized
+        return None
 
-    def preview_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _prepare_request(
+        self,
+        payload: dict[str, Any],
+        *,
+        include_warnings: bool = False,
+    ) -> tuple[dict[str, Any], RegistryProviderTransport, list[str], dict[str, Any]]:
         profile = self._resolve_profile(payload)
         adapter = self._adapter_for(profile)
-        warnings = self.temperature_warnings(profile, payload.get("model"), payload.get("temperature"))
+        warnings = (
+            [
+                *self.reasoning_warnings(payload),
+                *self.temperature_warnings(profile, payload.get("model"), payload.get("temperature")),
+            ]
+            if include_warnings
+            else []
+        )
+        self._validate_request_shape(profile, payload)
+        upstream_payload = adapter.upstream_payload(payload)
+        return profile, adapter, warnings, upstream_payload
+
+    def _validate_request_shape(self, profile: dict[str, Any], payload: dict[str, Any]) -> None:
+        provider_family = (
+            _provider_family(
+                profile.get("adapter_profile"),
+                provider_family=profile.get("provider_family"),
+                source_provider_id=profile.get("provider_id"),
+                base_url=profile.get("base_url"),
+                model=profile.get("model"),
+            )
+            or str(profile.get("provider_id") or "").strip()
+        )
+        if provider_family == "kimi":
+            self._validate_kimi_request_shape(profile, payload)
+
+    def _validate_kimi_request_shape(self, profile: dict[str, Any], payload: dict[str, Any]) -> None:
+        raw_model = str(payload.get("model") or profile.get("model") or "").strip()
+        native_model = raw_model.split("/", 1)[1] if "/" in raw_model else raw_model
+        if native_model not in {"kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"}:
+            return
+        reasoning_effort = self._effective_reasoning_effort(profile, payload)
+        if native_model in {"kimi-k2.7-code", "kimi-k2.7-code-highspeed"} and reasoning_effort == "off":
+            raise ValueError(f"{native_model} does not support reasoning effort 'off'; use low, medium, high, or xhigh.")
+        if _contains_non_data_image_reference(payload.get("input")):
+            raise ValueError("Kimi image inputs must use base64 data URLs or localImage paths; remote image URLs are not supported.")
+        thinking_restricted = native_model in {"kimi-k2.7-code", "kimi-k2.7-code-highspeed"} or reasoning_effort != "off"
+        if not thinking_restricted:
+            return
+        tool_choice = payload.get("tool_choice")
+        if tool_choice not in {None, "auto", "none"}:
+            raise ValueError(f"{native_model} only supports tool_choice 'auto' or 'none' for the current thinking mode.")
+        top_p = _optional_float(payload.get("top_p"))
+        if top_p is not None and abs(top_p - 0.95) > 0.000001:
+            raise ValueError(f"{native_model} only supports top_p=0.95 for the current thinking mode.")
+        n = _optional_int(payload.get("n"))
+        if n is not None and n != 1:
+            raise ValueError(f"{native_model} only supports n=1 for the current thinking mode.")
+        presence_penalty = _optional_float(payload.get("presence_penalty"))
+        if presence_penalty is not None and abs(presence_penalty) > 0.000001:
+            raise ValueError(f"{native_model} only supports presence_penalty=0 for the current thinking mode.")
+        frequency_penalty = _optional_float(payload.get("frequency_penalty"))
+        if frequency_penalty is not None and abs(frequency_penalty) > 0.000001:
+            raise ValueError(f"{native_model} only supports frequency_penalty=0 for the current thinking mode.")
+
+    def _effective_reasoning_effort(self, profile: dict[str, Any], payload: dict[str, Any]) -> str | None:
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            explicit = normalize_reasoning_effort(reasoning.get("effort"))
+            if explicit is not None:
+                return explicit
+        return normalize_reasoning_effort(self.resolve_reasoning_effort(profile, payload.get("model")))
+
+    def preview_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        profile, adapter, warnings, upstream_payload = self._prepare_request(payload, include_warnings=True)
         provider_id = str(profile.get("provider_id") or "")
         model_id = self._normalize_model_id(provider_id, payload.get("model") or profile.get("model"))
         return {
@@ -1471,7 +737,7 @@ class RouterService:
             "model": payload.get("model"),
             "adapter": adapter.describe(),
             "warnings": warnings,
-            "upstream_payload": redact_sensitive(adapter.upstream_payload(payload)),
+            "upstream_payload": redact_sensitive(upstream_payload),
             "usage_signal": usage_not_available(
                 source="router_preview",
                 reason="preview_only_no_provider_call",
@@ -1482,11 +748,58 @@ class RouterService:
             ),
         }
 
+    def reasoning_warnings(self, payload: dict[str, Any]) -> list[str]:
+        reasoning = payload.get("reasoning")
+        if not isinstance(reasoning, dict):
+            return []
+        raw_effort = str(reasoning.get("effort") or "").strip().lower()
+        if not raw_effort:
+            return []
+        normalized = normalize_reasoning_effort(raw_effort)
+        if normalized is None:
+            return [f"Unsupported reasoning effort '{raw_effort}' is omitted from the upstream payload; provider defaults will apply."]
+        if normalized != raw_effort:
+            return [f"Reasoning effort '{raw_effort}' is normalized to '{normalized}' for Codex/runtime compatibility."]
+        return []
+
     def test_provider(self, provider_id: str, model_id: str | None = None, *, stream: bool = False) -> dict[str, Any]:
         provider = self._provider_by_id(provider_id)
         model = self._normalize_model_id(provider_id, model_id or provider.get("default_model") or provider.get("model"))
         payload = {"model": model, "input": "Reply with exactly: ok", "stream": stream}
         result = self._provider_test_result(payload, stream=stream)
+        if self._router_config is not None:
+            self._router_config.record_test_result(result)
+        return result
+
+    def test_provider_vision(self, provider_id: str, model_id: str | None = None, *, stream: bool = False) -> dict[str, Any]:
+        """Run one bounded image-grounding probe without exposing provider credentials."""
+        provider = self._provider_by_id(provider_id)
+        model = self._normalize_model_id(provider_id, model_id or provider.get("default_model") or provider.get("model"))
+        payload = {
+            "model": model,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What is the dominant color of the attached image? Reply with one lowercase English word only."},
+                        {"type": "input_image", "image_url": _vision_probe_red_square_data_uri(), "detail": "low"},
+                    ],
+                }
+            ],
+            "stream": stream,
+            "reasoning": {"effort": "off"},
+            "astrabridge_probe_force_final": True,
+        }
+        result = self._provider_test_result(payload, stream=stream)
+        response_text = str(result.get("response_excerpt") or "").strip().lower()
+        grounded = bool(result.get("ok")) and response_text == "red"
+        result["ok"] = grounded
+        result["image_probe"] = {
+            "fixture": "red_square_png",
+            "expected_response": "red",
+            "grounded": grounded,
+        }
         if self._router_config is not None:
             self._router_config.record_test_result(result)
         return result
@@ -2022,12 +1335,48 @@ def _optional_positive_int(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _vision_probe_red_square_data_uri() -> str:
+    """Return a deterministic, dependency-free PNG fixture for live vision probes."""
+    width = height = 96
+    scanline = b"\x00" + (b"\xff\x00\x00\xff" * width)
+    raw = scanline * height
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
 def _optional_float(value: Any) -> float | None:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         return None
     return parsed
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _contains_non_data_image_reference(value: Any) -> bool:
+    if isinstance(value, dict):
+        item_type = str(value.get("type") or "")
+        if item_type in {"input_image", "image_url"}:
+            image_url = value.get("image_url")
+            if isinstance(image_url, dict):
+                candidate = str(image_url.get("url") or value.get("url") or "").strip()
+            else:
+                candidate = str(image_url or value.get("url") or "").strip()
+            return bool(candidate) and not candidate.startswith("data:image/")
+        return any(_contains_non_data_image_reference(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_non_data_image_reference(item) for item in value)
+    return False
 
 
 def _provider_family(

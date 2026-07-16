@@ -1,0 +1,4 @@
+interface:
+  display_name: "Provider Capability Repair"
+  short_description: "Diagnose and repair AstraBridge capability regressions"
+  default_prompt: "Use $provider-capability-repair to diagnose a failing provider/model/capability lane and patch the smallest correct AstraBridge surface."

@@ -23,6 +23,10 @@ class _FakeProfileService:
             "provider_id": "deepseek",
             "model": "deepseek-v4-pro",
             "reasoning_effort": "high",
+            "authority_tier": "A",
+            "authority_reason": "Test profile has guarded tool execution authority.",
+            "command_execution_status": "verified",
+            "command_execution_note": "Test fixture declares command execution verification.",
         }
 
 

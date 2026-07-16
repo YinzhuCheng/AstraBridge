@@ -7,7 +7,7 @@ from typing import Any
 
 from .common import WORKSPACE_STATE_DIRNAME, now_iso, read_json, write_json
 from .coding_kernel import ContextSection, build_context_budget, estimate_tool_schema_tokens
-from .model_catalog import compact_limit
+from .model_catalog import compact_limit, tool_output_truncation_limit
 from .providers import get_provider_profile
 from .security import SECRET_RE, SecurityError, redact_sensitive
 from .task_service import _display_thread_name
@@ -286,6 +286,10 @@ class ProjectContextService:
             context_window=target.get("context_window"),
             effective_context_window_percent=target.get("effective_context_window_percent") or 80,
             auto_compact_token_limit=target.get("auto_compact_token_limit"),
+            tool_output_token_limit=target.get("tool_output_token_limit"),
+            manual_compact_status=target.get("manual_compact_status") or "app_server_native",
+            auto_compact_status=target.get("auto_compact_status") or "configured_unverified",
+            compact_summary_quality_status=target.get("compact_summary_quality_status") or "untested",
             tool_schema_token_estimate=target.get("tool_schema_token_estimate") or 0,
         )
         pack = {
@@ -558,8 +562,12 @@ class ProjectContextService:
         context_window = int(model_record.get("advertised_context_window") or model_record.get("max_context_window") or 0) or None
         effective_percent = int(model_record.get("effective_context_window_percent") or 80)
         auto_compact_limit = model_record.get("auto_compact_token_limit")
+        tool_output_limit = model_record.get("tool_output_token_limit")
+        compaction_support = dict(model_record.get("context_compaction_support") or {})
         if context_window and not auto_compact_limit:
             auto_compact_limit = compact_limit(context_window)
+        if context_window and not tool_output_limit:
+            tool_output_limit = tool_output_truncation_limit(context_window)
         return {
             "profile_id": resolved_profile_id or None,
             "provider_id": resolved_provider_id or None,
@@ -567,6 +575,10 @@ class ProjectContextService:
             "context_window": context_window,
             "effective_context_window_percent": effective_percent,
             "auto_compact_token_limit": int(auto_compact_limit) if auto_compact_limit not in {None, ""} else None,
+            "tool_output_token_limit": int(tool_output_limit) if tool_output_limit not in {None, ""} else None,
+            "manual_compact_status": str(compaction_support.get("manual_compact") or "app_server_native"),
+            "auto_compact_status": str(compaction_support.get("auto_compact") or "configured_unverified"),
+            "compact_summary_quality_status": str(compaction_support.get("structured_summary_quality") or "untested"),
             "tool_schema_token_estimate": estimate_tool_schema_tokens(model_record),
         }
 

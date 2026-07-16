@@ -8,6 +8,7 @@ from ..common import normalize_path_for_host
 from ..profile_service import ProfileService
 from .capability_routes import resolve_capability_route_entry
 from .capability_registry import default_capability_registry
+from .dashscope_image_generate_adapter import DashScopeImageGenerateAdapter
 from .image_generate_adapter import YunwuImageGenerateAdapter
 from .speech_synthesize_adapter import QwenSpeechSynthesizeAdapter
 from .speech_transcribe_adapter import QwenSpeechTranscribeAdapter
@@ -35,7 +36,8 @@ class CapabilityRuntime:
         self._router_config = router_config
         self._key_injector = key_injector
         self._registry = default_capability_registry()
-        self._image = YunwuImageGenerateAdapter()
+        self._image_yunwu = YunwuImageGenerateAdapter()
+        self._image_qwen = DashScopeImageGenerateAdapter()
         self._speech_transcribe = QwenSpeechTranscribeAdapter()
         self._speech_synthesize = QwenSpeechSynthesizeAdapter()
         self._vision_qwen = QwenVisionAnalyzeAdapter()
@@ -100,11 +102,14 @@ class CapabilityRuntime:
         capability = _clean_text(capability_id)
         if capability == "image.generate":
             operation = _clean_text(payload.get("operation") or "generate").lower() or "generate"
+            provider_id = _clean_text(candidate.get("provider_id") or payload.get("provider_id"))
+            if provider_id == "qwen":
+                return self._image_qwen.generate(payload)
             if operation == "edit":
-                return self._image.edit_as_generation(payload)
+                return self._image_yunwu.edit_as_generation(payload)
             if operation == "transparent_asset":
-                return self._image.transparent_asset(payload)
-            return self._image.generate(payload)
+                return self._image_yunwu.transparent_asset(payload)
+            return self._image_yunwu.generate(payload)
         if capability == "speech.transcribe":
             return self._speech_transcribe.transcribe(_payload_with_audio_inputs(payload))
         if capability == "speech.synthesize":
@@ -118,8 +123,12 @@ class CapabilityRuntime:
 
 def _workspace_root() -> str | None:
     if os.name == "nt":
-        return _first_host_path_env("ASTRABRIDGE_WORKSPACE_ROOT", "ASTRABRIDGE_WORKSPACE_ROOT_WSL")
-    return _first_host_path_env("ASTRABRIDGE_WORKSPACE_ROOT_WSL", "ASTRABRIDGE_WORKSPACE_ROOT")
+        workspace_root = _first_host_path_env("ASTRABRIDGE_WORKSPACE_ROOT", "ASTRABRIDGE_WORKSPACE_ROOT_WSL")
+    else:
+        workspace_root = _first_host_path_env("ASTRABRIDGE_WORKSPACE_ROOT_WSL", "ASTRABRIDGE_WORKSPACE_ROOT")
+    if workspace_root:
+        return workspace_root
+    return normalize_path_for_host(os.getcwd(), host_os_name=os.name)
 
 
 def _first_host_path_env(*names: str) -> str | None:

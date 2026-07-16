@@ -37,6 +37,12 @@ class CapabilityRouteTests(unittest.TestCase):
             self.assertEqual(resolved["vision.analyze"]["route_record"]["provider_id"], "kimi")
             kimi_provider = next(item for item in snapshot["providers"] if item["id"] == "kimi")
             self.assertIn("vision.analyze", dict(kimi_provider.get("capability_summary") or {}))
+            self.assertTrue(
+                isinstance(
+                    route["resolved_candidate"]["runtime_provider_contract"]["capability_metadata"]["vision"]["modality_limits"],
+                    dict,
+                )
+            )
 
     def test_runtime_service_raises_clear_error_for_missing_pinned_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

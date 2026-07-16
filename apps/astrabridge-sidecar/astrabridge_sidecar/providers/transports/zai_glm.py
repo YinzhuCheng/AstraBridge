@@ -11,18 +11,16 @@ class GlmChatTransport(ChatCompletionsTransport):
 
     def build_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         upstream_payload = super().build_request(payload)
-        effort = self._requested_effort(payload)
-        if effort and effort not in {"auto", "off"}:
-            upstream_payload["reasoning_effort"] = effort
-        elif effort == "off":
+        effort = self._resolved_reasoning_effort(payload)
+        if effort == "off":
             upstream_payload["reasoning_effort"] = "none"
+        elif effort in {"minimal", "low", "medium", "high"}:
+            upstream_payload["reasoning_effort"] = "high"
+        elif effort in {"xhigh", "auto"}:
+            if effort == "xhigh":
+                upstream_payload["reasoning_effort"] = "max"
+            else:
+                upstream_payload.pop("reasoning_effort", None)
+        elif effort:
+            upstream_payload["reasoning_effort"] = "max"
         return upstream_payload
-
-    def _requested_effort(self, payload: dict[str, Any]) -> str | None:
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, dict):
-            effort = str(reasoning.get("effort") or "").strip().lower()
-            if effort:
-                return effort
-        effort = str(self.profile.get("reasoning_effort") or "").strip().lower()
-        return effort or None

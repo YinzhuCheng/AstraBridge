@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable
 
 from ..common import now_iso
@@ -18,12 +19,14 @@ class AutomationService:
         runtime_service: Any | None = None,
         profile_service: Any | None = None,
         runtime_config: Any | None = None,
+        agentic_update_service: Any | None = None,
         event_recorder: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._projects = project_service
         self._runtime = runtime_service
         self._profiles = profile_service
         self._runtime_config = runtime_config
+        self._agentic_updates = agentic_update_service
         self._event_recorder = event_recorder
         self._store = AutomationStore(project_service)
         self._scheduler = AutomationScheduler(self._store)
@@ -33,9 +36,12 @@ class AutomationService:
             runtime_service=runtime_service,
             profile_service=profile_service,
             runtime_config=runtime_config,
+            agentic_update_service=agentic_update_service,
         )
         self._triage = AutomationTriageService(project_service, self._store)
         self._executing_run_ids: set[str] = set()
+        self._background_run_threads: dict[str, threading.Thread] = {}
+        self._background_run_threads_lock = threading.RLock()
 
     def start(self) -> dict[str, Any]:
         if not self._has_open_project():
@@ -62,6 +68,70 @@ class AutomationService:
         self._record_event("automation_created", {"automation_id": created.get("automation_id")})
         return {"automation": created}
 
+    def create_agentic_update_check_template(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_project()
+        if self._agentic_updates is None:
+            raise ValueError("Agentic update service is not configured.")
+        project = dict(getattr(self._projects, "current_project", None) or {})
+        run_contract = self._agentic_update_run_contract_from_payload(payload)
+        automation_id = str(payload.get("automation_id") or "").strip() or self._default_agentic_update_automation_id(run_contract)
+        schedule = dict(payload.get("schedule") or {"mode": "daily", "expression": "03:00", "timezone": "UTC"})
+        limits = {
+            "timeout_sec": 1800,
+            "max_retries": 0,
+            "max_artifact_bytes": 2_000_000,
+            "max_parallel_runs": 1,
+            "daily_run_limit": 1,
+            **dict(payload.get("limits") or {}),
+        }
+        agentic_update = {
+            "template_version": "agentic-update-check-template-v1",
+            "run_contract": run_contract,
+            "network_policy": str(payload.get("network_policy") or ("official_docs_only" if run_contract.get("allow_network") else "fixture_only")),
+            "max_source_records": int(payload.get("max_source_records") or 10),
+        }
+        for key in (
+            "provider_sources",
+            "fixture_sources",
+            "provider_fixture_sources",
+            "current_models",
+            "complete_provider_snapshot",
+            "kernel_source_records",
+            "kernel_fixture_sources",
+        ):
+            if key in payload:
+                agentic_update[key] = payload.get(key)
+        spec = {
+            "automation_id": automation_id,
+            "project_id": str(payload.get("project_id") or project.get("project_id") or "project").strip(),
+            "name": str(payload.get("name") or "Agentic update check").strip(),
+            "description": str(
+                payload.get("description")
+                or "User-scoped recurring agentic update discovery/proposal check. It never applies changes, installs binaries, or calls providers."
+            ).strip(),
+            "enabled": bool(payload.get("enabled", False)),
+            "kind": "agentic_update_check",
+            "prompt": str(payload.get("prompt") or "Run AstraBridge agentic update proposal check.").strip(),
+            "schedule": schedule,
+            "runtime": {"permission_mode": "read-only", **dict(payload.get("runtime") or {})},
+            "workspace": {
+                "mode": "current_workspace",
+                "cleanup_policy": "manual",
+                **dict(payload.get("workspace") or {}),
+            },
+            "triage": {
+                "archive_no_signal": True,
+                "notify_on": "finding",
+                "finding_keywords": ["changes_detected", "proposal_only_complete"],
+                **dict(payload.get("triage") or {}),
+            },
+            "limits": limits,
+            "agentic_update": agentic_update,
+        }
+        created = self.create_automation(spec)
+        self._record_event("agentic_update_check_template_created", {"automation_id": automation_id})
+        return created
+
     def update_automation(self, automation_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         self._require_project()
         updated = self._store.update_automation(automation_id, patch)
@@ -86,7 +156,7 @@ class AutomationService:
         self._record_event("automation_updated", {"automation_id": automation_id, "enabled": True})
         return {"automation": resumed}
 
-    def run_now(self, automation_id: str) -> dict[str, Any]:
+    def run_now(self, automation_id: str, *, background: bool = False) -> dict[str, Any]:
         self._require_project()
         self._ensure_scheduler_started()
         queued = self._scheduler.trigger_now(automation_id)
@@ -100,7 +170,58 @@ class AutomationService:
                 "trigger": queued.get("trigger"),
             },
         )
+        if background:
+            queued_run_id = str(queued.get("run_id") or "").strip()
+            if not queued_run_id:
+                raise ValueError("Queued automation run is missing a run_id.")
+            self._launch_background_run(queued_run_id)
+            return {
+                "run": self._store.get_run(queued_run_id) or queued,
+                "inbox_item": None,
+                "artifact_ref": None,
+                "scheduler": self.scheduler_status(),
+            }
         return self.execute_run(str(queued.get("run_id") or ""))
+
+    def _launch_background_run(self, run_id: str) -> None:
+        clean_run_id = str(run_id or "").strip()
+        if not clean_run_id:
+            raise ValueError("run_id is required.")
+        thread = threading.Thread(
+            target=self._execute_run_background,
+            args=(clean_run_id,),
+            name=f"astrabridge-automation-{clean_run_id}",
+            daemon=True,
+        )
+        with self._background_run_threads_lock:
+            self._background_run_threads[clean_run_id] = thread
+        thread.start()
+
+    def _execute_run_background(self, run_id: str) -> None:
+        try:
+            self.execute_run(run_id)
+        except Exception as exc:  # noqa: BLE001
+            self._record_event(
+                "automation_run_background_dispatch_failed",
+                {
+                    "run_id": run_id,
+                    "error": str(exc)[:300] or "automation_background_dispatch_failed",
+                },
+            )
+        finally:
+            with self._background_run_threads_lock:
+                self._background_run_threads.pop(str(run_id or "").strip(), None)
+
+    def wait_for_background_run(self, run_id: str, *, timeout_sec: float | None = None) -> bool:
+        clean_run_id = str(run_id or "").strip()
+        if not clean_run_id:
+            return True
+        with self._background_run_threads_lock:
+            thread = self._background_run_threads.get(clean_run_id)
+        if thread is None:
+            return True
+        thread.join(timeout=timeout_sec)
+        return not thread.is_alive()
 
     def execute_run(self, run_id: str) -> dict[str, Any]:
         self._require_project()
@@ -138,59 +259,60 @@ class AutomationService:
                 "redacted_error": str(exc)[:300] or "automation_execute_failed",
                 "signal": "unknown",
             }
-        finally:
-            self._executing_run_ids.discard(str(running_run.get("run_id") or ""))
-        cleanup_result = None
-        if session is not None and str(runner_result.get("status") or "").lower() != "running":
-            classification = self._triage.classify_result(automation, running_run, runner_result)
-            cleanup_result = self._workspace.finalize_workspace(
-                session,
-                signal=classification.get("signal"),
-                status=classification.get("status"),
+        try:
+            cleanup_result = None
+            if session is not None and str(runner_result.get("status") or "").lower() != "running":
+                classification = self._triage.classify_result(automation, running_run, runner_result)
+                cleanup_result = self._workspace.finalize_workspace(
+                    session,
+                    signal=classification.get("signal"),
+                    status=classification.get("status"),
+                )
+            finalized = self._triage.finalize_run(
+                automation,
+                running_run,
+                runner_result,
+                workspace_session=session,
+                cleanup_result=cleanup_result,
             )
-        finalized = self._triage.finalize_run(
-            automation,
-            running_run,
-            runner_result,
-            workspace_session=session,
-            cleanup_result=cleanup_result,
-        )
-        final_run = finalized["run"]
-        final_status = str(final_run.get("status") or "").lower()
-        if final_status == "failed":
-            event_type = "automation_run_failed"
-        elif final_status == "running":
-            event_type = "automation_run_progress"
-        else:
-            event_type = "automation_run_completed"
-        self._record_event(
-            event_type,
-            {
-                "automation_id": final_run.get("automation_id"),
-                "run_id": final_run.get("run_id"),
-                "status": final_run.get("status"),
-                "signal": final_run.get("signal"),
-            },
-        )
-        inbox_item = finalized.get("inbox_item")
-        if inbox_item:
-            inbox_event = "automation_inbox_item_archived" if str(inbox_item.get("state") or "") == "archived" else "automation_inbox_item_created"
+            final_run = finalized["run"]
+            final_status = str(final_run.get("status") or "").lower()
+            if final_status == "failed":
+                event_type = "automation_run_failed"
+            elif final_status == "running":
+                event_type = "automation_run_progress"
+            else:
+                event_type = "automation_run_completed"
             self._record_event(
-                inbox_event,
+                event_type,
                 {
-                    "automation_id": inbox_item.get("automation_id"),
-                    "run_id": inbox_item.get("run_id"),
-                    "item_id": inbox_item.get("item_id"),
-                    "state": inbox_item.get("state"),
-                    "disposition": inbox_item.get("disposition"),
+                    "automation_id": final_run.get("automation_id"),
+                    "run_id": final_run.get("run_id"),
+                    "status": final_run.get("status"),
+                    "signal": final_run.get("signal"),
                 },
             )
-        return {
-            "run": final_run,
-            "inbox_item": inbox_item,
-            "artifact_ref": finalized.get("artifact_ref"),
-            "scheduler": self.scheduler_status(),
-        }
+            inbox_item = finalized.get("inbox_item")
+            if inbox_item:
+                inbox_event = "automation_inbox_item_archived" if str(inbox_item.get("state") or "") == "archived" else "automation_inbox_item_created"
+                self._record_event(
+                    inbox_event,
+                    {
+                        "automation_id": inbox_item.get("automation_id"),
+                        "run_id": inbox_item.get("run_id"),
+                        "item_id": inbox_item.get("item_id"),
+                        "state": inbox_item.get("state"),
+                        "disposition": inbox_item.get("disposition"),
+                    },
+                )
+            return {
+                "run": final_run,
+                "inbox_item": inbox_item,
+                "artifact_ref": finalized.get("artifact_ref"),
+                "scheduler": self.scheduler_status(),
+            }
+        finally:
+            self._executing_run_ids.discard(str(running_run.get("run_id") or ""))
 
     def list_runs(self, automation_id: str | None = None) -> dict[str, Any]:
         self._require_project()
@@ -489,3 +611,32 @@ class AutomationService:
         if self._event_recorder is None:
             return
         self._event_recorder(event_type, dict(payload))
+
+    def _agentic_update_run_contract_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(payload.get("run_contract"), dict):
+            contract = dict(payload["run_contract"])
+            contract.setdefault("apply_mode", "proposal_only")
+            contract.setdefault("allow_network", False)
+            contract.setdefault("allow_provider_calls", False)
+            contract.setdefault("allow_install", False)
+            contract.setdefault("allow_code_changes", False)
+            contract.setdefault("approval_policy", "manual_review_required")
+            return contract
+        return {
+            "scope": payload.get("scope") or "provider_metadata",
+            "providers": payload.get("providers") or [],
+            "models": payload.get("models") or [],
+            "version_policy": payload.get("version_policy") or "stable",
+            "target_version": payload.get("target_version") or None,
+            "apply_mode": payload.get("apply_mode") or "proposal_only",
+            "allow_network": payload.get("allow_network") if isinstance(payload.get("allow_network"), bool) else False,
+            "allow_provider_calls": payload.get("allow_provider_calls") if isinstance(payload.get("allow_provider_calls"), bool) else False,
+            "allow_install": payload.get("allow_install") if isinstance(payload.get("allow_install"), bool) else False,
+            "allow_code_changes": payload.get("allow_code_changes") if isinstance(payload.get("allow_code_changes"), bool) else False,
+            "approval_policy": payload.get("approval_policy") or "manual_review_required",
+        }
+
+    def _default_agentic_update_automation_id(self, run_contract: dict[str, Any]) -> str:
+        providers = [str(item).strip() for item in list(run_contract.get("providers") or []) if str(item).strip()]
+        suffix = "-".join(providers[:2]) if providers else "all"
+        return f"agentic-update-check-{suffix}"

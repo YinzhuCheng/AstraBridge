@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import hashlib
 import json
 import mimetypes
 import os
@@ -13,11 +14,14 @@ import socket
 import subprocess
 import threading
 import time
+import zlib
 from collections import deque
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .agent_orchestration_compiler import compile_agent_orchestration_graph
 from .app_server_client import AppServerClient, JsonRpcError, app_server_command
 from .coding_kernel import project_turn_to_coding_events
 from .common import WORKSPACE_STATE_DIRNAME, append_jsonl, new_id, now_iso, read_json, write_json
@@ -50,13 +54,17 @@ from .model_catalog import (
 )
 from .profile_service import ProfileService
 from .providers import HistoryProjector, NeutralMessage, ReasoningArtifact, classify_runtime_failure
+from .providers.transports import transport_class_for_profile
+from .providers.transports.base import transport_signature_for_class
 from .router_service import ROUTER_ENV_KEY, ROUTER_PORT
 from .runtime_config_service import RuntimeConfigService, codex_model_id, codex_reasoning_effort
 from .runtime_client_pool import RuntimeClientPool
 from .security import SecurityError, redact_sensitive, resolve_under, scan_text_for_secrets
 from .secret_service import SecretService
 from .task_service import _display_thread_name
+from .task_graph_contract import validate_graph_definition
 from .tool_context_service import ToolContextService, sanitize_tool_context
+from .usage_signal import normalize_usage_signal, usage_not_available
 from .web_tool_service import AstraBridgeWebService
 from .wsl_dependency_service import ASTRABRIDGE_WSL_BIN, ASTRABRIDGE_WSL_CODEX_HOME, ASTRABRIDGE_WSL_ROOT
 from .yunwu_image_mcp_server import _summarize_image_result as summarize_yunwu_image_result
@@ -76,14 +84,34 @@ APP_SERVER_INIT_TIMEOUT_SECONDS = 20.0
 THREAD_START_TIMEOUT_SECONDS = 20.0
 THREAD_FORK_TIMEOUT_SECONDS = 20.0
 THREAD_READ_TIMEOUT_SECONDS = 20.0
+STARTUP_THREAD_PROBE_TIMEOUT_SECONDS = 2.0
 THREAD_LIST_TIMEOUT_SECONDS = 20.0
+THREAD_CREATE_RUNTIME_LOCK_TIMEOUT_SECONDS = 12.0
+THREAD_CREATE_OPERATION_TTL_SECONDS = 60.0 * 60.0
+THREAD_CREATE_OPERATION_LIMIT = 128
 TURN_START_TIMEOUT_SECONDS = 45.0
+APP_SERVER_IMAGE_VERIFY_TIMEOUT_SECONDS = 60.0
+APP_SERVER_IMAGE_VERIFY_MAX_ATTEMPTS = 2
 TURN_RUNTIME_PIN_SECONDS = 300.0
+TERMINAL_TURN_NOTIFICATION_METHODS = {
+    "turn/completed",
+    "turn/failed",
+    "turn/cancelled",
+    "turn/errored",
+    "turn/aborted",
+}
+TERMINAL_TURN_STATUSES = {"completed", "failed", "cancelled", "errored"}
+TERMINAL_TURN_NOTIFICATION_LIMIT = 256
+TERMINAL_RESULT_GRACE_SECONDS = 2.0
 VALID_COLLABORATION_MODES = {"default", "plan"}
 VALID_CONTEXT_MODES = {"default", "full", "minimal_text", "minimal_visual", "no_context"}
 VALID_EXECUTION_BACKENDS = {"app_server", "native_kernel"}
+VALID_TURN_EXECUTION_POLICIES = {"standard", "patch_only", "no_tools"}
+PATCH_ONLY_EXECUTION_POLICY = "patch_only"
+NO_TOOLS_EXECUTION_POLICY = "no_tools"
 BROWSER_SMOKE_TOOL_NAME = "astrabridge_browser_smoke"
 BROWSER_SMOKE_TOOL_ALIASES = {BROWSER_SMOKE_TOOL_NAME}
+THREAD_CREATE_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,96}$")
 _OPENAI_DEFAULT_MODEL = str(
     (preferred_provider_model_record("openai", include_deprecated=False) or {}).get("native_model") or "gpt-5.5"
 )
@@ -148,6 +176,8 @@ class RuntimeService:
         self._thread_cache_lock = threading.RLock()
         self._runtime_operation_lock = threading.RLock()
         self._runtime_operation_local = threading.local()
+        self._thread_create_operation_lock = threading.RLock()
+        self._thread_create_operations: dict[str, dict[str, Any]] = {}
         self._runtime_start_turn_in_progress = False
         self._runtime_thread_start_in_progress = False
         self._runtime_pin_signature: tuple[Any, ...] | None = None
@@ -156,6 +186,11 @@ class RuntimeService:
         self._runtime_pin_turn_id: str | None = None
         self._mcp_status_thread_signature: tuple[Any, ...] | None = None
         self._mcp_status_thread_id: str | None = None
+        self._active_turn_execution_policies: dict[str, dict[str, Any]] = {}
+        self._terminal_snapshot_keys: set[str] = set()
+        self._terminal_turn_notifications: dict[tuple[str, str], dict[str, Any]] = {}
+        self._observed_turn_aliases: dict[tuple[str, str], dict[str, Any]] = {}
+        self._fail_closed_turn_interrupts: set[tuple[str, str]] = set()
 
     def resolve_capability_route(self, capability_id: str) -> dict[str, Any]:
         configured_models = self._router_config.models() if self._router_config is not None else None
@@ -206,6 +241,77 @@ class RuntimeService:
 
     def restart(self) -> dict[str, Any]:
         self._close_client("manual_restart")
+        return self.environment()
+
+    def health_environment(self) -> dict[str, Any]:
+        execution_host = self._execution_host()
+        codex_executable = self._launch_descriptor()
+        active_runtime = getattr(self, "_active_runtime", None)
+        client = getattr(self, "_client", None)
+        if active_runtime is not None:
+            runtime_config = {
+                "configured": bool(active_runtime.get("configured", True)),
+                "codex_home": str(active_runtime.get("codex_home") or self._runtime_config.codex_home),
+                "provider_id": active_runtime.get("provider_id"),
+                "provider_name": active_runtime.get("provider_name"),
+                "base_url": active_runtime.get("base_url"),
+                "model": active_runtime.get("model"),
+                "reasoning_effort": active_runtime.get("reasoning_effort"),
+                "wire_api": active_runtime.get("wire_api"),
+                "env_key": active_runtime.get("env_key"),
+                "secret_loaded": bool(os.environ.get(str(active_runtime.get("env_key") or ""))),
+                "proxy_mode": active_runtime.get("proxy_mode") or "direct",
+                "proxy_url": active_runtime.get("proxy_url") or "",
+                "execution_host": execution_host,
+                "wsl_distro": self._wsl_distro(),
+                "secret_source": active_runtime.get("secret_source"),
+                "secret_fingerprint": active_runtime.get("secret_fingerprint"),
+            }
+        else:
+            runtime_config = {
+                "configured": False,
+                "codex_home": str(self._runtime_config.codex_home),
+                "provider_id": None,
+                "provider_name": None,
+                "base_url": None,
+                "model": None,
+                "reasoning_effort": None,
+                "wire_api": None,
+                "env_key": None,
+                "secret_loaded": False,
+                "proxy_mode": "direct",
+                "proxy_url": "",
+                "execution_host": execution_host,
+                "wsl_distro": self._wsl_distro(),
+                "secret_source": None,
+                "secret_fingerprint": None,
+            }
+        return {
+            "codex_cli": codex_executable,
+            "execution_host": execution_host,
+            "wsl_distro": self._wsl_distro(),
+            "running": client.is_running() if client else False,
+            "runtime_config": runtime_config,
+        }
+
+    def restart_in_background(self) -> dict[str, Any]:
+        """Detach the active app-server client without blocking a UI request."""
+        client = self._detach_client()
+        if client is None:
+            return self.environment()
+
+        def close_detached_client() -> None:
+            try:
+                client.close()
+            finally:
+                self._record_event({"type": "runtime_stopped", "reason": "manual_restart"})
+
+        worker = threading.Thread(
+            target=close_detached_client,
+            name="astrabridge-runtime-restart",
+            daemon=True,
+        )
+        worker.start()
         return self.environment()
 
     def shutdown(self) -> dict[str, Any]:
@@ -504,7 +610,24 @@ class RuntimeService:
             clean_thread_id = str(recovery_hint.get("thread_id") or "").strip()
             result["thread_id"] = clean_thread_id or None
         if clean_thread_id:
-            exists = self._thread_exists(client, clean_thread_id)
+            try:
+                exists = self._thread_exists(
+                    client,
+                    clean_thread_id,
+                    timeout=STARTUP_THREAD_PROBE_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                # A stale app-server thread must not keep the sidecar from starting.
+                result["thread_exists"] = "unknown"
+                result["thread_probe_timeout"] = True
+                self._record_event(
+                    {
+                        "type": "startup_thread_probe_timeout",
+                        "profile_id": profile.get("profile_id"),
+                        "thread_id": clean_thread_id,
+                    }
+                )
+                return result
             result["thread_exists"] = exists
             if not exists:
                 self._mark_provider_thread_missing(clean_thread_id, reason="startup_thread_missing")
@@ -592,6 +715,28 @@ class RuntimeService:
         return runtime_status
 
     def list_models(self, profile: dict[str, Any]) -> dict[str, Any]:
+        # Model pickers poll this endpoint while users switch routes. Preparing a
+        # different profile here rewrites the shared Codex config and restarts an
+        # active provider runtime, which can interrupt thread creation or a turn.
+        # The desktop already has the effective catalog for picker options, so an
+        # alternate runtime is deliberately not started just to enumerate models.
+        active_runtime = self._active_runtime_status()
+        if active_runtime.get("configured") and self._profile_targets_different_runtime(profile, active_runtime):
+            self._record_event(
+                {
+                    "type": "models_list_deferred_active_runtime",
+                    "profile_id": profile.get("profile_id"),
+                    "requested_runtime": self._runtime_defer_preview(profile),
+                    "active_runtime_signature": list(self._runtime_signature or []),
+                    "reason": "model_picker_passive_read",
+                }
+            )
+            return {
+                "models": [],
+                "next_cursor": None,
+                "warning": "model_list_deferred_active_runtime",
+                "active_provider_id": active_runtime.get("provider_id"),
+            }
         runtime_status = self._prepare_runtime(profile, require_secret=False)
         try:
             client = self._runtime_request_client(runtime_status)
@@ -614,7 +759,26 @@ class RuntimeService:
     def list_threads(self, profile: dict[str, Any], *, archived: bool = False) -> dict[str, Any]:
         if archived:
             return {"threads": [], "next_cursor": None, "backwards_cursor": None}
-        runtime_status = self._runtime_status_for_profile(profile, require_secret=False)
+        active_runtime = self._active_runtime_status()
+        if active_runtime.get("configured") and self._profile_targets_different_runtime(profile, active_runtime):
+            # Sidebar polling must not replace the active provider just to list a
+            # different provider's historical threads. The active runtime can
+            # safely answer this read and the task cache remains the UI fallback.
+            runtime_status = {
+                **active_runtime,
+                "execution_host": self._execution_host(),
+                "wsl_distro": self._wsl_distro(),
+            }
+            self._record_event(
+                {
+                    "type": "threads_list_using_active_runtime",
+                    "profile_id": profile.get("profile_id"),
+                    "active_provider_id": active_runtime.get("provider_id"),
+                    "archived": archived,
+                }
+            )
+        else:
+            runtime_status = self._runtime_status_for_profile(profile, require_secret=False)
         if self._runtime_switch_is_pinned(runtime_status):
             cached = self._cached_threads_response(archived=archived, warning="runtime_switch_deferred_active_turn")
             self._record_event(
@@ -680,8 +844,29 @@ class RuntimeService:
             decorated = self._decorate_dynamic_tool_evidence(decorated)
             decorated = self._decorate_turn_coding_events(decorated)
             decorated = self._decorate_turn_completion_quality(decorated)
+            decorated = self._decorate_turn_execution_policy(decorated)
             self._record_task_thread_snapshot(decorated)
             return {"thread": decorated}
+        active_runtime = self._active_runtime_status()
+        # A configured profile is not necessarily an active process. This is
+        # common after a runtime restart and in handoff recovery, where the
+        # previous client has already been detached. Only defer a cross-
+        # provider read while a live client actually owns the runtime lane.
+        active_client_running = bool(self._client is not None and self._client.is_running())
+        if active_runtime.get("configured") and active_client_running and self._profile_targets_different_runtime(profile, active_runtime):
+            cached = self._cached_thread(thread_id, warning="thread_read_deferred_active_runtime")
+            if cached:
+                self._record_task_thread_snapshot(cached)
+                self._record_event(
+                    {
+                        "type": "thread_read_deferred_active_runtime",
+                        "thread_id": thread_id,
+                        "profile_id": profile.get("profile_id"),
+                        "active_provider_id": active_runtime.get("provider_id"),
+                    }
+                )
+                return {"thread": cached}
+            raise RuntimeError("thread_read_deferred_active_runtime")
         runtime_status = self._runtime_status_for_profile(profile, require_secret=False)
         if self._runtime_switch_is_pinned(runtime_status):
             cached = self._cached_thread(thread_id, warning="runtime_switch_deferred_active_turn")
@@ -719,6 +904,7 @@ class RuntimeService:
         thread = self._decorate_dynamic_tool_evidence(thread)
         thread = self._decorate_turn_coding_events(thread)
         thread = self._decorate_turn_completion_quality(thread)
+        thread = self._decorate_turn_execution_policy(thread)
         normalized_status = self._normalize_thread_status(thread)
         if isinstance(normalized_status, dict):
             if normalized_status != thread.get("status"):
@@ -726,12 +912,38 @@ class RuntimeService:
             normalized_status = self._overlay_cached_thread_status(thread["id"], normalized_status)
             if normalized_status != thread.get("status"):
                 thread = {**thread, "status": normalized_status}
+        self._maybe_clear_runtime_pin_from_thread(thread, reason="thread_read_terminal_turn")
         cache_patch: dict[str, Any] = {"name": thread.get("name")}
         if isinstance(thread.get("status"), dict):
             cache_patch["status"] = thread.get("status")
         self._cache_thread_entry(thread["id"], cache_patch)
         self._record_task_thread_snapshot(thread)
         return {"thread": thread}
+
+    def _maybe_clear_runtime_pin_from_thread(self, thread: dict[str, Any], *, reason: str) -> bool:
+        thread_id = str(thread.get("id") or "")
+        if not thread_id:
+            return False
+        turns = [item for item in list(thread.get("turns") or []) if isinstance(item, dict)]
+        if not turns:
+            return False
+        pinned_thread_id = str(self._runtime_pin_thread_id or "")
+        pinned_turn_id = str(self._runtime_pin_turn_id or "")
+        if pinned_thread_id and thread_id != pinned_thread_id:
+            return False
+        target_turn = None
+        if pinned_turn_id:
+            target_turn = next((turn for turn in turns if str(turn.get("id") or "") == pinned_turn_id), None)
+        if target_turn is None:
+            target_turn = turns[-1]
+        status = str(target_turn.get("status") or "").lower()
+        if status not in TERMINAL_TURN_STATUSES:
+            return False
+        return self._clear_runtime_pin(
+            thread_id=thread_id,
+            turn_id=str(target_turn.get("id") or ""),
+            reason=f"{reason}:{status}",
+        )
 
     def _record_task_thread_snapshot(self, thread: dict[str, Any]) -> None:
         if self._tasks is not None:
@@ -766,6 +978,107 @@ class RuntimeService:
                 }
             )
 
+    def _schedule_terminal_thread_snapshot(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        method: str,
+        keep_visible: bool,
+    ) -> None:
+        clean_thread_id = str(thread_id or "").strip()
+        if not clean_thread_id:
+            return
+        key = f"{clean_thread_id}:{str(turn_id or method).strip() or method}"
+        with self._lock:
+            if key in self._terminal_snapshot_keys:
+                return
+            self._terminal_snapshot_keys.add(key)
+        worker = threading.Thread(
+            target=self._terminal_thread_snapshot_worker,
+            kwargs={
+                "key": key,
+                "thread_id": clean_thread_id,
+                "turn_id": str(turn_id or "").strip(),
+                "method": method,
+                "keep_visible": keep_visible,
+            },
+            daemon=True,
+        )
+        worker.start()
+
+    def _terminal_thread_snapshot_worker(
+        self,
+        *,
+        key: str,
+        thread_id: str,
+        turn_id: str,
+        method: str,
+        keep_visible: bool,
+    ) -> None:
+        try:
+            time.sleep(0.25)
+            with self._lock:
+                client = self._client
+            if client is None or not client.is_running():
+                self._record_event(
+                    {
+                        "type": "terminal_thread_snapshot_skipped",
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "method": method,
+                        "reason": "runtime_client_unavailable",
+                    }
+                )
+                return
+            result = client.request(
+                "thread/read",
+                {"threadId": thread_id, "includeTurns": True},
+                timeout=min(THREAD_READ_TIMEOUT_SECONDS, 20.0),
+            )
+            thread = self._decorate_thread(dict(result.get("thread") or {}))
+            thread = self._overlay_dynamic_tool_events(thread)
+            thread = self._decorate_dynamic_tool_evidence(thread)
+            thread = self._decorate_turn_coding_events(thread)
+            thread = self._decorate_turn_completion_quality(thread)
+            thread = self._decorate_turn_execution_policy(thread)
+            normalized_status = self._normalize_thread_status(thread)
+            if isinstance(normalized_status, dict):
+                if normalized_status != thread.get("status"):
+                    thread = {**thread, "status": normalized_status}
+                normalized_status = self._overlay_cached_thread_status(thread["id"], normalized_status)
+                if normalized_status != thread.get("status"):
+                    thread = {**thread, "status": normalized_status}
+            self._cache_thread_entry(thread["id"], {"name": thread.get("name"), "status": thread.get("status")})
+            self._record_task_thread_snapshot(thread)
+            if keep_visible:
+                self._projects.switch_thread(thread_id)
+                if self._tasks is not None:
+                    self._tasks.force_visible_provider_thread(thread_id)
+            self._record_event(
+                {
+                    "type": "terminal_thread_snapshot_synced",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "method": method,
+                    "keep_visible": keep_visible,
+                    "turn_count": len(list(thread.get("turns") or [])),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._record_event(
+                {
+                    "type": "terminal_thread_snapshot_failed",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "method": method,
+                    "error": str(exc)[:300],
+                }
+            )
+        finally:
+            with self._lock:
+                self._terminal_snapshot_keys.discard(key)
+
     def create_thread(
         self,
         profile: dict[str, Any],
@@ -773,8 +1086,50 @@ class RuntimeService:
         model: str | None,
         effort: str | None,
         permission_mode: str,
+        task_id: str | None = None,
         name: str | None = None,
+        operation_id: str | None = None,
+        _operation_started: bool = False,
     ) -> dict[str, Any]:
+        if not _operation_started:
+            normalized_operation_id = self._normalize_thread_create_operation_id(operation_id)
+            operation, should_start = self._begin_thread_create_operation(
+                normalized_operation_id,
+                profile=profile,
+                model=model,
+                effort=effort,
+                permission_mode=permission_mode,
+                name=name,
+            )
+            if not should_start:
+                return self.recover_thread_create(profile, operation_id=normalized_operation_id)
+            try:
+                with self._runtime_operation_lock:
+                    self._runtime_thread_start_in_progress = True
+                    self._runtime_operation_local.in_thread_start = True
+                    try:
+                        response = self.create_thread(
+                            profile,
+                            model=model,
+                            effort=effort,
+                            permission_mode=permission_mode,
+                            task_id=task_id,
+                            name=name,
+                            operation_id=normalized_operation_id,
+                            _operation_started=True,
+                        )
+                    finally:
+                        self._runtime_operation_local.in_thread_start = False
+                        self._runtime_thread_start_in_progress = False
+            except Exception as exc:
+                self._finish_thread_create_operation(normalized_operation_id, status="failed", error=str(exc))
+                raise
+            self._finish_thread_create_operation(
+                normalized_operation_id,
+                status="completed",
+                thread_id=str(dict(response.get("thread") or {}).get("id") or ""),
+            )
+            return response
         if not getattr(self._runtime_operation_local, "in_thread_start", False):
             with self._runtime_operation_lock:
                 self._runtime_thread_start_in_progress = True
@@ -785,7 +1140,10 @@ class RuntimeService:
                         model=model,
                         effort=effort,
                         permission_mode=permission_mode,
+                        task_id=task_id,
                         name=name,
+                        operation_id=operation_id,
+                        _operation_started=True,
                     )
                 finally:
                     self._runtime_operation_local.in_thread_start = False
@@ -821,11 +1179,17 @@ class RuntimeService:
             },
         )
         if self._tasks is not None:
-            self._tasks.create_task(
-                name or thread.get("name") or "New task",
-                thread_id=thread_id,
-                settings=self._task_thread_settings(profile, model, effort, permission_mode, name=thread.get("name")),
-            )
+            task_settings = self._task_thread_settings(profile, model, effort, permission_mode, name=thread.get("name"))
+            if str(task_id or "").strip():
+                self._tasks.bind_thread_to_task_id(
+                    task_id=str(task_id),
+                    thread_id=thread_id,
+                    settings=task_settings,
+                    role="provider",
+                    make_active=True,
+                )
+            else:
+                self._tasks.create_task(name or thread.get("name") or "New task", thread_id=thread_id, settings=task_settings)
         self._update_project_runtime_defaults(profile, model, effort)
         self._record_event({"type": "thread_created", "thread_id": thread_id, "runtime": runtime_status})
         try:
@@ -833,6 +1197,228 @@ class RuntimeService:
         except Exception as exc:
             self._record_event({"type": "thread_read_after_create_fallback", "thread_id": thread_id, "error": str(exc)})
             return {"thread": self._decorate_thread({**thread, "id": thread_id, "turns": list(thread.get("turns") or [])})}
+
+    def recover_thread_create(self, profile: dict[str, Any], *, operation_id: str) -> dict[str, Any]:
+        normalized_operation_id = self._normalize_thread_create_operation_id(operation_id)
+        with self._thread_create_operation_lock:
+            self._prune_thread_create_operations_locked()
+            operation = dict(self._thread_create_operations.get(normalized_operation_id) or {})
+        if not operation:
+            raise ValueError("Unknown thread-create recovery operation.")
+        status = str(operation.get("status") or "pending")
+        payload: dict[str, Any] = {
+            "operation_id": normalized_operation_id,
+            "status": status,
+            "retry_after_ms": 1500 if status == "pending" else None,
+        }
+        if status == "failed":
+            payload["error"] = str(operation.get("error") or "Thread creation did not complete.")
+            return payload
+        if status != "completed":
+            return payload
+        thread_id = str(operation.get("thread_id") or "")
+        if not thread_id:
+            payload.update({"status": "failed", "error": "Thread creation completed without a thread id."})
+            return payload
+        cached = self._cached_thread(thread_id)
+        if cached:
+            payload["thread"] = cached
+            return payload
+        try:
+            payload.update(self.read_thread(profile, thread_id))
+        except Exception as exc:  # noqa: BLE001
+            payload.update(
+                {
+                    "thread": self._decorate_thread({"id": thread_id, "name": operation.get("name"), "turns": []}),
+                    "warning": f"thread_create_recovery_read_fallback:{str(exc)[:200]}",
+                }
+            )
+        return payload
+
+    def begin_thread_create(
+        self,
+        profile: dict[str, Any],
+        *,
+        model: str | None,
+        effort: str | None,
+        permission_mode: str,
+        name: str | None = None,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Start a user-requested thread without holding the HTTP response open.
+
+        The worker owns the existing serialized runtime start path. Callers only
+        receive the operation state and must reconcile a completed thread through
+        ``recover_thread_create``; this prevents a timeout from starting a second
+        provider thread.
+        """
+        normalized_operation_id = self._normalize_thread_create_operation_id(operation_id)
+        operation, should_start = self._begin_thread_create_operation(
+            normalized_operation_id,
+            profile=profile,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            name=name,
+        )
+        if should_start:
+            worker = threading.Timer(
+                0.01,
+                self._complete_thread_create_operation,
+                kwargs={
+                    "profile": dict(profile),
+                    "model": model,
+                    "effort": effort,
+                    "permission_mode": permission_mode,
+                    "name": name,
+                    "operation_id": normalized_operation_id,
+                },
+            )
+            worker.name = f"astrabridge-thread-create-{normalized_operation_id[-12:]}"
+            worker.daemon = True
+            worker.start()
+            # Return the receipt before the worker can contend for runtime or
+            # task state. The UI must always have this operation id available
+            # for bounded, idempotent recovery queries.
+            return {
+                "operation_id": normalized_operation_id,
+                "status": "pending",
+                "retry_after_ms": 1500,
+            }
+        return self.recover_thread_create(profile, operation_id=normalized_operation_id)
+
+    def _complete_thread_create_operation(
+        self,
+        *,
+        profile: dict[str, Any],
+        model: str | None,
+        effort: str | None,
+        permission_mode: str,
+        name: str | None,
+        operation_id: str,
+    ) -> None:
+        self._record_event(
+            {
+                "type": "thread_create_operation_started",
+                "operation_id": operation_id,
+                "profile_id": str(profile.get("profile_id") or ""),
+            }
+        )
+        acquired_runtime_lock = False
+        try:
+            acquired_runtime_lock = self._runtime_operation_lock.acquire(
+                timeout=THREAD_CREATE_RUNTIME_LOCK_TIMEOUT_SECONDS
+            )
+            if not acquired_runtime_lock:
+                raise RuntimeError(
+                    "Task creation could not acquire the runtime lane in time. "
+                    "Wait for the active operation to finish, then retry creating the task."
+                )
+            self._runtime_thread_start_in_progress = True
+            self._runtime_operation_local.in_thread_start = True
+            try:
+                response = self.create_thread(
+                    profile,
+                    model=model,
+                    effort=effort,
+                    permission_mode=permission_mode,
+                    name=name,
+                    operation_id=operation_id,
+                    _operation_started=True,
+                )
+            finally:
+                self._runtime_operation_local.in_thread_start = False
+                self._runtime_thread_start_in_progress = False
+        except Exception as exc:  # noqa: BLE001
+            self._finish_thread_create_operation(operation_id, status="failed", error=str(exc))
+            return
+        finally:
+            if acquired_runtime_lock:
+                self._runtime_operation_lock.release()
+        self._finish_thread_create_operation(
+            operation_id,
+            status="completed",
+            thread_id=str(dict(response.get("thread") or {}).get("id") or ""),
+        )
+
+    def _normalize_thread_create_operation_id(self, operation_id: str | None) -> str:
+        candidate = str(operation_id or "").strip() or new_id()
+        if not THREAD_CREATE_OPERATION_ID_RE.fullmatch(candidate):
+            raise ValueError("Invalid thread-create operation id.")
+        return candidate
+
+    def _begin_thread_create_operation(
+        self,
+        operation_id: str,
+        *,
+        profile: dict[str, Any],
+        model: str | None,
+        effort: str | None,
+        permission_mode: str,
+        name: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        with self._thread_create_operation_lock:
+            self._prune_thread_create_operations_locked()
+            existing = self._thread_create_operations.get(operation_id)
+            if existing is not None:
+                return dict(existing), False
+            operation = {
+                "operation_id": operation_id,
+                "status": "pending",
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+                "started_monotonic": time.monotonic(),
+                "profile_id": str(profile.get("profile_id") or ""),
+                "model": str(model or profile.get("model") or ""),
+                "effort": str(effort or profile.get("reasoning_effort") or ""),
+                "permission_mode": str(permission_mode or "auto"),
+                "name": str(name or "")[:160],
+            }
+            self._thread_create_operations[operation_id] = operation
+            return dict(operation), True
+
+    def _finish_thread_create_operation(
+        self,
+        operation_id: str,
+        *,
+        status: str,
+        thread_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        with self._thread_create_operation_lock:
+            operation = self._thread_create_operations.get(operation_id)
+            if operation is None:
+                return
+            operation["status"] = status
+            operation["updated_at"] = now_iso()
+            if thread_id:
+                operation["thread_id"] = thread_id
+            if error:
+                operation["error"] = str(redact_sensitive(error))[:500]
+        self._record_event(
+            {
+                "type": f"thread_create_operation_{status}",
+                "operation_id": operation_id,
+                "thread_id": thread_id or None,
+                "error": str(redact_sensitive(error))[:500] if error else None,
+            }
+        )
+
+    def _prune_thread_create_operations_locked(self) -> None:
+        cutoff = time.monotonic() - THREAD_CREATE_OPERATION_TTL_SECONDS
+        stale_ids = [
+            operation_id
+            for operation_id, operation in self._thread_create_operations.items()
+            if float(operation.get("started_monotonic") or 0) < cutoff
+        ]
+        for operation_id in stale_ids:
+            self._thread_create_operations.pop(operation_id, None)
+        while len(self._thread_create_operations) > THREAD_CREATE_OPERATION_LIMIT:
+            oldest = min(
+                self._thread_create_operations,
+                key=lambda operation_id: float(self._thread_create_operations[operation_id].get("started_monotonic") or 0),
+            )
+            self._thread_create_operations.pop(oldest, None)
 
     def fork_thread(
         self,
@@ -922,6 +1508,1989 @@ class RuntimeService:
         self._record_event({"type": "thread_renamed", "thread_id": thread_id, "name": name.strip()})
         return {"thread_id": thread_id, "name": name.strip()}
 
+    def start_graph_worker(
+        self,
+        profile: dict[str, Any],
+        *,
+        graph_id: str,
+        run_id: str,
+        node_id: str,
+        parent_thread_id: str,
+        model: str | None = None,
+        effort: str | None = None,
+        permission_mode: str = "auto",
+        artifact_refs: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if self._tasks is None:
+            raise ValueError("Task service is required for graph worker execution.")
+        clean_graph_id = str(graph_id or "").strip()
+        clean_run_id = str(run_id or "").strip()
+        clean_node_id = str(node_id or "").strip()
+        clean_parent_thread_id = str(parent_thread_id or "").strip()
+        if not clean_graph_id or not clean_run_id or not clean_node_id:
+            raise ValueError("graph_id, run_id, and node_id are required.")
+
+        graph = self._tasks.graph_definition(clean_graph_id)
+        if not graph:
+            raise ValueError("Unknown graph_id for graph worker execution.")
+        node = next(
+            (
+                dict(item)
+                for item in list(graph.get("nodes") or [])
+                if isinstance(item, dict) and str(item.get("node_id") or "").strip() == clean_node_id
+            ),
+            None,
+        )
+        if not node:
+            raise ValueError(f"Unknown graph worker node_id: {clean_node_id}")
+        execution_policy = dict(node.get("execution_policy") or {})
+        subagent_policy = dict(execution_policy.get("subagent_policy") or node.get("subagent_policy") or {})
+        tools = dict(node.get("tools") or {})
+        output_contract = dict(node.get("output_contract") or {})
+        spawn_mode = str(execution_policy.get("spawn_mode") or "isolated_lane").strip() or "isolated_lane"
+        worker_origin = "codex_subagent" if spawn_mode == "subagent_worker" else "provider_lane"
+        agent_role = str(node.get("kind") or "").strip() or "worker"
+        agent_nickname = str(node.get("label") or "").strip() or clean_node_id
+        effective_model = model or str(node.get("model_id") or "").strip() or profile.get("model")
+        effective_effort = effort or str(node.get("reasoning_effort") or "").strip() or profile.get("reasoning_effort")
+        requested_permission_mode = str(permission_mode or node.get("permission_mode") or "auto").strip().lower() or "auto"
+        requested_collaboration_mode = str(node.get("collaboration_mode") or "").strip() or None
+        effective_collaboration_mode = self._normalize_graph_worker_collaboration_mode(
+            node,
+            collaboration_mode=requested_collaboration_mode,
+        )
+        effective_execution_backend = str(node.get("execution_backend") or "").strip() or None
+        timeout_ms = self._graph_worker_timeout_ms(execution_policy.get("timeout_ms"))
+        normalized_subagent_policy = self._normalize_graph_worker_subagent_policy(
+            subagent_policy,
+            node_id=clean_node_id,
+            spawn_mode=spawn_mode,
+        )
+        tool_policy = self._graph_worker_tool_policy(tools)
+        turn_execution_policy = self._graph_worker_turn_execution_policy(tool_policy)
+        effective_permission_mode = "ask" if turn_execution_policy == NO_TOOLS_EXECUTION_POLICY else requested_permission_mode
+        runtime_contract = self._graph_worker_runtime_contract(
+            profile=profile,
+            node=node,
+            model=effective_model,
+            effort=effective_effort,
+            permission_mode=effective_permission_mode,
+            collaboration_mode=effective_collaboration_mode,
+            execution_backend=effective_execution_backend,
+            timeout_ms=timeout_ms,
+            spawn_mode=spawn_mode,
+            subagent_policy=normalized_subagent_policy,
+            tool_policy=tool_policy,
+        )
+        runtime_status = self._prepare_runtime(profile, require_secret=True)
+        client = self._ensure_client(runtime_status)
+
+        params = self._thread_start_params(
+            profile=profile,
+            model=effective_model,
+            permission_mode=effective_permission_mode,
+            include_dynamic_tools=turn_execution_policy != NO_TOOLS_EXECUTION_POLICY,
+        )
+        if spawn_mode == "subagent_worker" and clean_parent_thread_id:
+            params["source"] = {
+                "subagent": {
+                    "thread_spawn": {
+                        "parent_thread_id": clean_parent_thread_id,
+                        "depth": 1,
+                        "agent_path": None,
+                        "agent_nickname": agent_nickname,
+                        "agent_role": agent_role,
+                        "max_turns": int(normalized_subagent_policy.get("max_turns") or 1),
+                        "isolation_mode": str(normalized_subagent_policy.get("isolation_mode") or "lane"),
+                        "allow_direct_teammate_messages": bool(normalized_subagent_policy.get("allow_direct_teammate_messages")),
+                        "share_worktree": bool(normalized_subagent_policy.get("share_worktree")),
+                        "allow_nested_subagents": bool(normalized_subagent_policy.get("allow_nested_subagents")),
+                    }
+                }
+            }
+        result = client.request("thread/start", params, timeout=THREAD_START_TIMEOUT_SECONDS)
+        thread = dict(result.get("thread") or {})
+        worker_thread_id = str(thread.get("id") or "")
+        if not worker_thread_id:
+            raise RuntimeError("thread/start did not return a worker thread id.")
+        if agent_nickname:
+            try:
+                client.request("thread/name/set", {"threadId": worker_thread_id, "name": agent_nickname})
+            except Exception:
+                pass
+        settings = self._task_thread_settings(
+            profile,
+            effective_model,
+            effective_effort,
+            effective_permission_mode,
+            collaboration_mode=effective_collaboration_mode,
+            execution_backend=effective_execution_backend,
+            name=agent_nickname,
+        )
+        self._cache_thread_entry(worker_thread_id, settings)
+        lineage = self._tasks.record_graph_worker(
+            {
+                "graph_id": clean_graph_id,
+                "run_id": clean_run_id,
+                "node_id": clean_node_id,
+                "worker_thread_id": worker_thread_id,
+                "parent_thread_id": clean_parent_thread_id,
+                "spawn_mode": spawn_mode,
+                "worker_origin": worker_origin,
+                "agent_role": agent_role,
+                "agent_nickname": agent_nickname,
+                "status": "ready",
+                "execution_backend": settings.get("execution_backend"),
+                "artifact_refs": list(artifact_refs or []),
+                "runtime_contract": runtime_contract,
+            },
+            graph_definition=graph,
+        )
+        self._record_event(
+            {
+                "type": "graph_worker_started",
+                "graph_id": clean_graph_id,
+                "run_id": clean_run_id,
+                "node_id": clean_node_id,
+                "worker_thread_id": worker_thread_id,
+                "parent_thread_id": clean_parent_thread_id,
+                "spawn_mode": spawn_mode,
+                "worker_origin": worker_origin,
+                "agent_role": agent_role,
+                "agent_nickname": agent_nickname,
+                "output_contract_artifact_only": bool(output_contract.get("artifact_only")),
+                "runtime": runtime_status,
+                "runtime_contract": runtime_contract,
+                "turn_execution_policy": turn_execution_policy,
+            }
+        )
+        if requested_collaboration_mode and requested_collaboration_mode != effective_collaboration_mode:
+            self._record_event(
+                {
+                    "type": "graph_worker_collaboration_mode_normalized",
+                    "graph_id": clean_graph_id,
+                    "run_id": clean_run_id,
+                    "node_id": clean_node_id,
+                    "worker_thread_id": worker_thread_id,
+                    "requested_collaboration_mode": requested_collaboration_mode,
+                    "effective_collaboration_mode": effective_collaboration_mode or "default",
+                    "reason": "bounded_graph_workers_must_finish_in_one_structured_turn",
+                }
+            )
+        return {
+            "worker": {
+                "thread_id": worker_thread_id,
+                "parent_thread_id": clean_parent_thread_id,
+                "graph_id": clean_graph_id,
+                "run_id": clean_run_id,
+                "node_id": clean_node_id,
+                "spawn_mode": spawn_mode,
+                "worker_origin": worker_origin,
+                "agent_role": agent_role,
+                "agent_nickname": agent_nickname,
+                "settings": settings,
+            },
+            "lineage": lineage,
+        }
+
+    def execute_task_graph_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._tasks is None:
+            raise ValueError("Task service is required for live task-graph execution.")
+        if not isinstance(payload, dict):
+            raise TypeError("Task-graph live run payload must be a dict.")
+        graph_id = str(payload.get("graph_id") or "").strip()
+        if not graph_id:
+            raise ValueError("graph_id is required.")
+        raw_graph = self._tasks.graph_definition(graph_id)
+        if not raw_graph:
+            raise ValueError("Unknown graph_id for live task-graph execution.")
+        graph = validate_graph_definition(raw_graph)
+        task = self._tasks.current_task() or {}
+        run_budget = dict(payload.get("budget") or {}) if isinstance(payload.get("budget"), dict) else {}
+        run_token_limit = self._graph_live_run_token_limit(run_budget)
+        if run_token_limit is None:
+            raise ValueError(
+                "Live task-graph execution requires a positive budget.limits.total_tokens value."
+            )
+        profiles_snapshot = self._profiles.list_profiles() if self._profiles is not None else None
+        configured_models = self._router_config.models() if self._router_config is not None else None
+        dry_run_result = self._tasks.dry_run_graph(
+            {"graph_id": graph_id, "budget": run_budget, "validation_mode": "live"},
+            profiles_snapshot=profiles_snapshot,
+            configured_models=configured_models,
+        )
+        dry_run = dict(dry_run_result.get("dry_run") or {})
+        if str(dry_run.get("overall_status") or "").strip() != "pass":
+            graph_reasons = [
+                str(item).strip()
+                for item in list(dict(dry_run.get("graph_result") or {}).get("reasons") or [])
+                if str(item or "").strip()
+            ]
+            raise ValueError(
+                "Task graph live run is blocked until dry-run passes. "
+                + (graph_reasons[0] if graph_reasons else "Resolve the dry-run findings first.")
+            )
+
+        orchestration_graph = self._tasks._orchestration_graph_for_task_graph(graph)
+        compiled_plan = compile_agent_orchestration_graph(
+            orchestration_graph,
+            known_model_capabilities=self._tasks._known_model_capabilities_for_graph(orchestration_graph),
+        )
+        compiled_nodes = {
+            str(item.get("node_id") or "").strip(): dict(item)
+            for item in list(compiled_plan.get("nodes") or [])
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+        }
+        node_map = {
+            str(item.get("node_id") or "").strip(): dict(item)
+            for item in list(graph.get("nodes") or [])
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+        }
+        parent_thread_id = str(
+            payload.get("parent_thread_id")
+            or self._tasks.visible_provider_thread_id(include_missing_fallback=True)
+            or ""
+        ).strip()
+        if any(
+            str(dict(compiled_nodes.get(node_id) or {}).get("spawn_mode") or "").strip() == "subagent_worker"
+            for node_id in compiled_nodes
+        ) and not parent_thread_id:
+            raise ValueError(
+                "Live task-graph execution requires an active provider thread before starting subagent worker nodes."
+            )
+        prepared_nodes = self._prepare_graph_live_run_nodes(
+            task=task,
+            graph=graph,
+            compiled_nodes=compiled_nodes,
+            node_map=node_map,
+            run_token_limit=run_token_limit,
+        )
+
+        run_id = new_id("graph-run-live")
+        created_at = now_iso()
+        workspace_root = Path(self._projects.require_workspace_root())
+        artifact_root = workspace_root / "PRIVATE" / "task-graph" / "live-run" / run_id
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        compiled_plan_path = artifact_root / "compiled-plan.json"
+        summary_json_path = artifact_root / "summary.json"
+        report_md_path = artifact_root / "report.md"
+        run_manifest_path = artifact_root / "run-manifest.json"
+        write_json(compiled_plan_path, compiled_plan)
+
+        budget_snapshot = self._tasks._graph_run_budget_snapshot(
+            graph=graph,
+            compiled_plan=compiled_plan,
+            run_budget=run_budget,
+        )
+        parallel_groups = [dict(group) for group in list(compiled_plan.get("parallel_groups") or []) if isinstance(group, dict)]
+        node_states: dict[str, dict[str, Any]] = {}
+        event_refs: list[dict[str, Any]] = [
+            {
+                "event_id": f"{run_id}-created",
+                "run_id": run_id,
+                "task_id": graph["task_id"],
+                "trace_id": f"trace-{run_id}",
+                "event_type": "run_created",
+                "created_at": created_at,
+                "summary": f"{graph['title']} live task-graph run created.",
+            }
+        ]
+        for node_id, compiled_node in compiled_nodes.items():
+            dependency_node_ids = [
+                str(item).strip()
+                for item in list(compiled_node.get("dependency_node_ids") or [])
+                if str(item or "").strip()
+            ]
+            node_states[node_id] = {
+                "node_id": node_id,
+                "run_id": run_id,
+                "status": "waiting_on_dependencies" if dependency_node_ids else "queued",
+                "outcome": "pending",
+                "attempt_count": 0,
+                "started_at": created_at,
+                "updated_at": created_at,
+                "worker_origin": None,
+            }
+            event_refs.append(
+                {
+                    "event_id": f"{run_id}-{node_id}-queued",
+                    "run_id": run_id,
+                    "task_id": graph["task_id"],
+                    "trace_id": f"trace-{run_id}",
+                    "event_type": "node_queued",
+                    "created_at": created_at,
+                    "summary": f"{self._tasks._graph_node_label(graph, node_id)} queued for live execution.",
+                    "node_id": node_id,
+                }
+            )
+
+        run_artifact_refs = [
+            {
+                "artifact_id": f"{run_id}-compiled-plan-json",
+                "artifact_kind": "graph_definition",
+                "task_id": graph["task_id"],
+                "run_id": run_id,
+                "source_node_id": str((compiled_plan.get("entry_node_ids") or [next(iter(compiled_nodes), "")])[0] or ""),
+                "path": compiled_plan_path.relative_to(workspace_root).as_posix(),
+                "media_type": "application/json",
+                "status": "ready",
+                "created_at": created_at,
+            },
+            {
+                "artifact_id": f"{run_id}-run-manifest-json",
+                "artifact_kind": "structured_json",
+                "task_id": graph["task_id"],
+                "run_id": run_id,
+                "source_node_id": str((compiled_plan.get("entry_node_ids") or [next(iter(compiled_nodes), "")])[0] or ""),
+                "path": run_manifest_path.relative_to(workspace_root).as_posix(),
+                "media_type": "application/json",
+                "status": "ready",
+                "created_at": created_at,
+            },
+        ]
+        run_manifest = {
+            "schema_version": "astrabridge-task-graph-run-v1",
+            "run_id": run_id,
+            "graph_id": graph["graph_id"],
+            "task_id": graph["task_id"],
+            "trace_id": f"trace-{run_id}",
+            "context_id": f"context-{run_id}",
+            "status": "running",
+            "entry_node_ids": list(compiled_plan.get("entry_node_ids") or []),
+            "node_run_states": [deepcopy(item) for item in node_states.values()],
+            "artifact_refs": deepcopy(run_artifact_refs),
+            "event_refs": deepcopy(event_refs),
+            "approval_state": {"status": "not_required"},
+            "run_policy_snapshot": {
+                "mode": "live_run",
+                "scheduler": "provider_graph_live_v1",
+                "template_id": graph.get("template_id"),
+                "parallel_group_count": int(dict(compiled_plan.get("topology") or {}).get("parallel_group_count") or len(parallel_groups)),
+                "max_parallelism": int(dict(compiled_plan.get("topology") or {}).get("max_parallelism") or 1),
+                "parallel_group_ids": [
+                    str(group.get("group_id") or "").strip()
+                    for group in parallel_groups
+                    if str(group.get("group_id") or "").strip()
+                ],
+                "budget": budget_snapshot,
+            },
+            "created_at": created_at,
+            "updated_at": created_at,
+            "state_version": 1,
+        }
+        write_json(run_manifest_path, run_manifest)
+        live_run_ref = self._tasks.record_graph_run(run_manifest, graph_definition=graph)
+
+        incoming_handoffs: dict[str, list[dict[str, Any]]] = {}
+        original_visible_thread_id = self._tasks.visible_provider_thread_id(include_missing_fallback=True)
+        active_node_id: str | None = None
+        started_executions: list[dict[str, Any]] = []
+        settled_execution_keys: set[tuple[str, str]] = set()
+        reconciliation_records: list[dict[str, Any]] = []
+
+        try:
+            for group_index, group in enumerate(parallel_groups):
+                group_id = str(group.get("group_id") or "").strip() or f"group_{group_index}"
+                group_candidates: list[dict[str, Any]] = []
+                for node_id in [
+                    str(item).strip()
+                    for item in list(group.get("node_ids") or [])
+                    if str(item or "").strip() and str(item).strip() in compiled_nodes
+                ]:
+                    compiled_node = dict(compiled_nodes.get(node_id) or {})
+                    graph_node = dict(node_map.get(node_id) or {})
+                    dependency_node_ids = [
+                        str(item).strip()
+                        for item in list(compiled_node.get("dependency_node_ids") or [])
+                        if str(item or "").strip()
+                    ]
+                    dependency_states = [dict(node_states.get(dep_id) or {}) for dep_id in dependency_node_ids]
+                    if any(str(item.get("outcome") or "").strip() in {"blocked", "failed", "cancelled"} for item in dependency_states):
+                        continue
+                    if any(str(item.get("status") or "").strip() != "completed" for item in dependency_states):
+                        continue
+                    prepared = dict(prepared_nodes[node_id])
+                    prepared["compiled_node"] = compiled_node
+                    prepared["dependency_node_ids"] = dependency_node_ids
+                    prepared["prompt_text"] = self._graph_live_run_prompt(
+                        task=task,
+                        graph=graph,
+                        node=graph_node,
+                        incoming_handoffs=incoming_handoffs.get(node_id) or [],
+                    )
+                    group_candidates.append(prepared)
+
+                # Prepare every worker lane before dispatching any provider turn in the group.
+                # A lane-creation failure therefore cannot leave a sibling provider turn running.
+                runnable_nodes: list[dict[str, Any]] = []
+                for prepared in group_candidates:
+                    node_id = str(prepared["node_id"])
+                    graph_node = dict(prepared["graph_node"])
+                    profile = dict(prepared["profile"])
+                    worker_result = self.start_graph_worker(
+                        profile,
+                        graph_id=graph_id,
+                        run_id=run_id,
+                        node_id=node_id,
+                        parent_thread_id=parent_thread_id,
+                        model=str(graph_node.get("model_id") or "").strip() or None,
+                        effort=str(graph_node.get("reasoning_effort") or "").strip() or None,
+                        permission_mode=str(graph_node.get("permission_mode") or "auto").strip() or "auto",
+                    )
+                    worker = dict(worker_result.get("worker") or {})
+                    runnable_nodes.append({**prepared, "worker": worker})
+
+                for execution in runnable_nodes:
+                    node_id = str(execution["node_id"])
+                    graph_node = dict(execution["graph_node"])
+                    profile = dict(execution["profile"])
+                    worker = dict(execution["worker"])
+                    dependency_node_ids = list(execution.get("dependency_node_ids") or [])
+                    compiled_node = dict(execution.get("compiled_node") or {})
+                    started_at = now_iso()
+                    active_node_id = node_id
+                    tool_policy = self._graph_worker_tool_policy(dict(graph_node.get("tools") or {}))
+                    turn_execution_policy = self._graph_worker_turn_execution_policy(tool_policy)
+                    turn_result = self.start_turn(
+                        profile,
+                        thread_id=str(worker.get("thread_id") or ""),
+                        text=str(execution.get("prompt_text") or ""),
+                        attachments=None,
+                        model=str(graph_node.get("model_id") or "").strip() or None,
+                        effort=str(graph_node.get("reasoning_effort") or "").strip() or None,
+                        permission_mode=str(graph_node.get("permission_mode") or "auto").strip() or "auto",
+                        collaboration_mode=self._normalize_graph_worker_collaboration_mode(graph_node),
+                        context_mode="no_context",
+                        execution_policy=turn_execution_policy,
+                        token_budget=int(execution.get("token_budget") or 0) or None,
+                        token_budget_objective=(
+                            f"{str(graph.get('title') or graph_id).strip()} / "
+                            f"{self._tasks._graph_node_label(graph, node_id)}"
+                        ),
+                    )
+                    worker_thread_id = str(worker.get("thread_id") or "").strip()
+                    execution_thread_id = str(turn_result.get("thread_id") or worker_thread_id).strip()
+                    turn_id = str(dict(turn_result.get("turn") or {}).get("id") or "").strip()
+                    if not execution_thread_id:
+                        raise RuntimeError("Task-graph turn start did not return an execution thread id.")
+                    if not turn_id:
+                        raise RuntimeError("Task-graph turn start did not return a turn id.")
+                    node_states[node_id].update(
+                        {
+                            "status": "running",
+                            "outcome": "pending",
+                            "attempt_count": 1,
+                            "started_at": started_at,
+                            "updated_at": started_at,
+                            "worker_origin": str(worker.get("worker_origin") or "").strip() or "provider_lane",
+                            "worker_thread_id": worker_thread_id or None,
+                            "execution_thread_id": execution_thread_id,
+                            "turn_id": turn_id,
+                            "parent_thread_id": str(worker.get("parent_thread_id") or "").strip() or None,
+                            "spawn_mode": str(worker.get("spawn_mode") or "").strip() or None,
+                            "agent_role": str(worker.get("agent_role") or "").strip() or None,
+                            "agent_nickname": str(worker.get("agent_nickname") or "").strip() or None,
+                            "execution_backend": str(dict(worker.get("settings") or {}).get("execution_backend") or "app_server"),
+                            "token_budget": int(execution.get("token_budget") or 0) or None,
+                            "turn_execution_policy": turn_execution_policy,
+                        }
+                    )
+                    if dependency_node_ids:
+                        dependency_outcomes = [
+                            str(dict(node_states.get(dep_id) or {}).get("outcome") or "").strip() or "unknown"
+                            for dep_id in dependency_node_ids
+                        ]
+                        event_refs.append(
+                            {
+                                "event_id": f"{run_id}-{node_id}-join-ready",
+                                "run_id": run_id,
+                                "task_id": graph["task_id"],
+                                "trace_id": f"trace-{run_id}",
+                                "event_type": "node_progress",
+                                "created_at": started_at,
+                                "summary": (
+                                    f"{self._tasks._graph_node_label(graph, node_id)} satisfied join "
+                                    f"`{str(compiled_node.get('join_mode') or 'all_required')}` after dependencies "
+                                    f"{', '.join(dependency_node_ids)} resolved as {', '.join(dependency_outcomes)}."
+                                ),
+                                "node_id": node_id,
+                                "parallel_group_id": group_id,
+                            }
+                        )
+                    event_refs.append(
+                        {
+                            "event_id": f"{run_id}-{node_id}-started",
+                            "run_id": run_id,
+                            "task_id": graph["task_id"],
+                            "trace_id": f"trace-{run_id}",
+                            "event_type": "node_started",
+                            "created_at": started_at,
+                            "summary": f"{self._tasks._graph_node_label(graph, node_id)} live execution started.",
+                            "node_id": node_id,
+                            "parallel_group_id": group_id,
+                            "worker_thread_id": worker_thread_id or None,
+                            "execution_thread_id": execution_thread_id,
+                        }
+                    )
+                    self._record_event(
+                        {
+                            "type": "graph_worker_turn_thread_resolved",
+                            "graph_id": graph_id,
+                            "run_id": run_id,
+                            "node_id": node_id,
+                            "worker_thread_id": worker_thread_id,
+                            "execution_thread_id": execution_thread_id,
+                            "turn_id": turn_id,
+                            "provider_handoff": execution_thread_id != worker_thread_id,
+                            "token_budget": int(execution.get("token_budget") or 0) or None,
+                        }
+                    )
+                    execution.update(
+                        {
+                            "execution_thread_id": execution_thread_id,
+                            "turn_id": turn_id,
+                            "started_monotonic": time.monotonic(),
+                        }
+                    )
+                    started_executions.append(execution)
+                live_run_ref = self._graph_live_run_snapshot(
+                    run_ref=live_run_ref,
+                    node_states=node_states,
+                    event_refs=event_refs,
+                    artifact_refs=run_artifact_refs,
+                    policy_snapshot=run_manifest["run_policy_snapshot"],
+                    status="running",
+                )
+                self._write_graph_live_run_manifest_snapshot(
+                    run_manifest_path=run_manifest_path,
+                    run_manifest=run_manifest,
+                    node_states=node_states,
+                    artifact_refs=run_artifact_refs,
+                    event_refs=event_refs,
+                    status="running",
+                    updated_at=str(live_run_ref.get("updated_at") or ""),
+                )
+                for execution in runnable_nodes:
+                    node_id = str(execution["node_id"])
+                    active_node_id = node_id
+                    graph_node = dict(execution["graph_node"] or {})
+                    profile = dict(execution["profile"] or {})
+                    worker = dict(execution["worker"] or {})
+                    runtime_status = self._prepare_runtime(profile, require_secret=True)
+                    client = self._ensure_client(runtime_status)
+                    terminal_thread = self._wait_for_probe_turn_terminal(
+                        client,
+                        thread_id=str(execution.get("execution_thread_id") or worker.get("thread_id") or ""),
+                        turn_id=str(execution.get("turn_id") or ""),
+                        timeout_seconds=float(execution.get("timeout_seconds") or 210.0),
+                        operation_label=f"task graph node {self._tasks._graph_node_label(graph, node_id)}",
+                    )
+                    if int(execution.get("token_budget") or 0) > 0:
+                        self._stop_bounded_turn_follow_on_execution(
+                            profile,
+                            client,
+                            thread_id=str(execution.get("execution_thread_id") or worker.get("thread_id") or ""),
+                            completed_turn_id=str(execution.get("turn_id") or ""),
+                        )
+                    else:
+                        self._clear_active_turn_execution_policy(
+                            thread_id=str(execution.get("execution_thread_id") or worker.get("thread_id") or ""),
+                            turn_id=str(execution.get("turn_id") or ""),
+                        )
+                    thread_status, final_text, reasoning_text = self._probe_turn_result(
+                        terminal_thread,
+                        turn_id=str(execution.get("turn_id") or ""),
+                    )
+                    execution_key = (
+                        str(execution.get("execution_thread_id") or ""),
+                        str(execution.get("turn_id") or ""),
+                    )
+                    settled_execution_keys.add(execution_key)
+                    finished_at = now_iso()
+                    elapsed_ms = max(
+                        0,
+                        int((time.monotonic() - float(execution.get("started_monotonic") or time.monotonic())) * 1000),
+                    )
+                    usage_signal = self._graph_live_turn_usage_signal(
+                        thread_id=str(execution.get("execution_thread_id") or ""),
+                        turn_id=str(execution.get("turn_id") or ""),
+                        provider_id=str(profile.get("provider_id") or "").strip() or None,
+                        model=str(graph_node.get("model_id") or profile.get("model") or "").strip() or None,
+                    )
+                    policy_violation = self._turn_execution_policy_violation(
+                        thread_id=str(execution.get("execution_thread_id") or ""),
+                        turn_id=str(execution.get("turn_id") or ""),
+                    )
+                    token_budget = int(execution.get("token_budget") or 0)
+                    observed_tokens = dict(usage_signal.get("tokens") or {}).get("total_tokens")
+                    budget_exceeded = (
+                        token_budget > 0
+                        and isinstance(observed_tokens, int)
+                        and observed_tokens > token_budget
+                    )
+                    parsed_output = self._graph_live_run_parse_response(final_text)
+                    terminal_outcome = self._graph_live_run_terminal_outcome(
+                        node_label=self._tasks._graph_node_label(graph, node_id),
+                        thread_status=thread_status,
+                        final_text=final_text,
+                        reasoning_text=reasoning_text,
+                        parsed_output=parsed_output,
+                        policy_violation=policy_violation,
+                        budget_exceeded=budget_exceeded,
+                        observed_tokens=observed_tokens,
+                        token_budget=token_budget,
+                    )
+                    node_status = str(terminal_outcome.get("node_status") or "failed")
+                    outcome = str(terminal_outcome.get("outcome") or "failed")
+                    summary = str(terminal_outcome.get("summary") or "").strip() or (
+                        f"{self._tasks._graph_node_label(graph, node_id)} finished with status {thread_status or 'failed'}."
+                    )
+                    machine_result = dict(terminal_outcome.get("machine_result") or {})
+                    effective_policy_violation = dict(terminal_outcome.get("policy_violation") or {}) or None
+                    next_action_hints = [
+                        str(item).strip()
+                        for item in list(terminal_outcome.get("next_action_hints") or [])
+                        if str(item or "").strip()
+                    ]
+                    node_states[node_id].update(
+                        {
+                            "status": node_status,
+                            "outcome": outcome,
+                            "updated_at": finished_at,
+                            "elapsed_ms": elapsed_ms,
+                            "provider_call_count": 1,
+                            "tool_call_count": int(dict(effective_policy_violation or {}).get("blocked_tool_call_count") or 0),
+                            "execution_policy": effective_policy_violation,
+                            "usage_signal": usage_signal,
+                            "token_budget": token_budget or None,
+                        }
+                    )
+                    worker_output = self._tasks.record_graph_worker_output(
+                        {
+                            "graph_id": graph_id,
+                            "run_id": run_id,
+                            "node_id": node_id,
+                            "worker_thread_id": str(worker.get("thread_id") or ""),
+                            "human_summary": summary,
+                            "machine_result": machine_result,
+                            "next_action_hints": next_action_hints,
+                            "status": node_status,
+                            "provider_id": str(profile.get("provider_id") or "").strip() or None,
+                            "model": str(graph_node.get("model_id") or profile.get("model") or "").strip() or None,
+                            "provider_call_count": 1,
+                            "tool_call_count": int(dict(effective_policy_violation or {}).get("blocked_tool_call_count") or 0),
+                            "execution_policy": effective_policy_violation,
+                            "usage_signal": usage_signal,
+                            "elapsed_ms": elapsed_ms,
+                            "attempt_count": 1,
+                        },
+                        graph_definition=graph,
+                    )
+                    binding = dict(worker_output.get("worker_binding") or {})
+                    for handoff in list(binding.get("downstream_handoffs") or []):
+                        if not isinstance(handoff, dict):
+                            continue
+                        target_node_id = str(handoff.get("to_node_id") or "").strip()
+                        if not target_node_id:
+                            continue
+                        incoming_handoffs.setdefault(target_node_id, []).append(
+                            {
+                                "source_node_id": node_id,
+                                "source_label": self._tasks._graph_node_label(graph, node_id),
+                                "output_summary": dict(binding.get("output_summary") or {}),
+                                "handoff": deepcopy(handoff),
+                            }
+                        )
+                    run_artifact_refs = self._tasks._merge_graph_worker_artifact_refs(
+                        run_artifact_refs,
+                        [dict(item) for item in list(binding.get("artifact_refs") or []) if isinstance(item, dict)],
+                    )
+                    event_refs.append(
+                        {
+                            "event_id": f"{run_id}-{node_id}-{node_status}",
+                            "run_id": run_id,
+                            "task_id": graph["task_id"],
+                            "trace_id": f"trace-{run_id}",
+                            "event_type": "node_completed" if node_status == "completed" else ("node_cancelled" if node_status == "cancelled" else "node_failed"),
+                            "created_at": finished_at,
+                            "summary": summary,
+                            "node_id": node_id,
+                            "parallel_group_id": group_id,
+                        }
+                    )
+                    current_live_ref = dict(worker_output.get("run_ref") or self._tasks.graph_run_ref(run_id) or live_run_ref)
+                    live_run_ref = self._graph_live_run_snapshot(
+                        run_ref=current_live_ref,
+                        node_states=node_states,
+                        event_refs=event_refs,
+                        artifact_refs=run_artifact_refs,
+                        policy_snapshot=run_manifest["run_policy_snapshot"],
+                        status="running",
+                    )
+                    self._write_graph_live_run_manifest_snapshot(
+                        run_manifest_path=run_manifest_path,
+                        run_manifest=run_manifest,
+                        node_states=node_states,
+                        artifact_refs=run_artifact_refs,
+                        event_refs=event_refs,
+                        status="running",
+                        updated_at=str(live_run_ref.get("updated_at") or ""),
+                    )
+                    active_node_id = None
+
+            unresolved_nodes = [
+                node_id
+                for node_id in compiled_nodes
+                if str(dict(node_states.get(node_id) or {}).get("status") or "").strip()
+                not in {"completed", "failed", "cancelled"}
+            ]
+            for node_id in unresolved_nodes:
+                node_states[node_id].update(
+                    {
+                        "status": "blocked",
+                        "outcome": "blocked",
+                        "updated_at": now_iso(),
+                    }
+                )
+                event_refs.append(
+                    {
+                        "event_id": f"{run_id}-{node_id}-blocked-unstarted",
+                        "run_id": run_id,
+                        "task_id": graph["task_id"],
+                        "trace_id": f"trace-{run_id}",
+                        "event_type": "node_blocked",
+                        "created_at": str(node_states[node_id].get("updated_at") or now_iso()),
+                        "summary": f"{self._tasks._graph_node_label(graph, node_id)} remained blocked because upstream dependencies did not produce a runnable handoff.",
+                        "node_id": node_id,
+                    }
+                )
+
+            final_status = self._tasks._compiled_fixture_run_status(
+                node_states=node_states,
+                approval_state={"status": "not_required"},
+            )
+            final_updated_at = max(
+                [created_at, *[str(dict(state).get("updated_at") or created_at) for state in node_states.values() if isinstance(state, dict)]]
+            )
+            summary_payload = {
+                "schema_version": "astrabridge-task-graph-live-run-summary-v1",
+                "run_id": run_id,
+                "graph_id": graph["graph_id"],
+                "task_id": graph["task_id"],
+                "created_at": created_at,
+                "updated_at": final_updated_at,
+                "run_status": final_status,
+                "node_results": [
+                    {
+                        "node_id": node_id,
+                        "label": self._tasks._graph_node_label(graph, node_id),
+                        "status": str(state.get("status") or ""),
+                        "outcome": str(state.get("outcome") or ""),
+                    }
+                    for node_id, state in node_states.items()
+                ],
+                "artifact_paths": {
+                    "summary_json": summary_json_path.relative_to(workspace_root).as_posix(),
+                    "report_md": report_md_path.relative_to(workspace_root).as_posix(),
+                    "compiled_plan_json": compiled_plan_path.relative_to(workspace_root).as_posix(),
+                    "run_manifest_json": run_manifest_path.relative_to(workspace_root).as_posix(),
+                },
+            }
+            write_json(summary_json_path, summary_payload)
+            report_md_path.write_text(self._graph_live_run_report_markdown(summary_payload), encoding="utf-8")
+            run_artifact_refs = self._tasks._merge_graph_worker_artifact_refs(
+                run_artifact_refs,
+                [
+                    {
+                        "artifact_id": f"{run_id}-summary-json",
+                        "artifact_kind": "structured_json",
+                        "path": summary_json_path.relative_to(workspace_root).as_posix(),
+                        "status": "ready",
+                    },
+                    {
+                        "artifact_id": f"{run_id}-report-md",
+                        "artifact_kind": "run_summary",
+                        "path": report_md_path.relative_to(workspace_root).as_posix(),
+                        "status": "ready",
+                    },
+                ],
+            )
+            event_refs.append(
+                {
+                    "event_id": f"{run_id}-terminal",
+                    "run_id": run_id,
+                    "task_id": graph["task_id"],
+                    "trace_id": f"trace-{run_id}",
+                    "event_type": "run_completed" if final_status == "completed" else "run_failed",
+                    "created_at": final_updated_at,
+                    "summary": f"{graph['title']} live task-graph run finished with status {final_status}.",
+                }
+            )
+            self._write_graph_live_run_manifest_snapshot(
+                run_manifest_path=run_manifest_path,
+                run_manifest=run_manifest,
+                node_states=node_states,
+                artifact_refs=run_artifact_refs,
+                event_refs=event_refs,
+                status=final_status,
+                updated_at=final_updated_at,
+            )
+            live_run_ref = self._graph_live_run_snapshot(
+                run_ref=live_run_ref,
+                node_states=node_states,
+                event_refs=event_refs,
+                artifact_refs=run_artifact_refs,
+                policy_snapshot=run_manifest["run_policy_snapshot"],
+                status=final_status,
+            )
+            return {
+                "schema_version": "astrabridge-task-graph-live-run-v1",
+                "live_run": {
+                    "run_id": run_id,
+                    "run_status": final_status,
+                    "run_ref": live_run_ref,
+                    "artifact_paths": summary_payload["artifact_paths"],
+                },
+                "graph": graph,
+                "task": self._tasks.task_view(self._tasks.current_task(), compact_graph_runs=True),
+            }
+        except Exception as exc:
+            reconciliation_records = self._reconcile_graph_live_started_turns(
+                graph=graph,
+                run_id=run_id,
+                started_executions=started_executions,
+                settled_execution_keys=settled_execution_keys,
+                node_states=node_states,
+                event_refs=event_refs,
+                artifact_refs=run_artifact_refs,
+            )
+            failed_run = self._finalize_graph_live_run_failure(
+                exc=exc,
+                graph=graph,
+                run_id=run_id,
+                workspace_root=workspace_root,
+                artifact_root=artifact_root,
+                summary_json_path=summary_json_path,
+                report_md_path=report_md_path,
+                run_manifest_path=run_manifest_path,
+                run_manifest=run_manifest,
+                live_run_ref=live_run_ref,
+                node_states=node_states,
+                event_refs=event_refs,
+                artifact_refs=run_artifact_refs,
+                active_node_id=active_node_id,
+                reconciliation_records=reconciliation_records,
+            )
+            try:
+                setattr(
+                    exc,
+                    "public_payload",
+                    {
+                        "live_run": {
+                            "run_id": run_id,
+                            "run_status": str(
+                                dict(failed_run.get("run_ref") or {}).get("status") or "failed"
+                            ),
+                            "run_ref": dict(failed_run.get("run_ref") or {}),
+                            "artifact_paths": dict(failed_run.get("artifact_paths") or {}),
+                        },
+                        "graph": graph,
+                        "task": self._tasks.task_view(
+                            self._tasks.current_task(),
+                            compact_graph_runs=True,
+                        ),
+                    },
+                )
+            except Exception:
+                pass
+            raise
+        finally:
+            restore_thread_id = original_visible_thread_id or parent_thread_id
+            if restore_thread_id:
+                try:
+                    self._tasks.restore_active_provider_thread(restore_thread_id)
+                except Exception:
+                    pass
+
+    def _resolve_graph_worker_profile(self, node: dict[str, Any]) -> dict[str, Any]:
+        provider_id = str(node.get("provider_id") or "").strip()
+        if not provider_id:
+            raise ValueError(f"Graph node {str(node.get('node_id') or 'unknown')} is missing a provider.")
+        return self._profiles.resolve_runtime_profile(provider_id)
+
+    @staticmethod
+    def _graph_live_run_token_limit(run_budget: dict[str, Any]) -> int | None:
+        limits = dict(run_budget.get("limits") or {}) if isinstance(run_budget.get("limits"), dict) else {}
+        raw_value = limits.get("total_tokens", run_budget.get("total_tokens"))
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    def _prepare_graph_live_run_nodes(
+        self,
+        *,
+        task: dict[str, Any],
+        graph: dict[str, Any],
+        compiled_nodes: dict[str, dict[str, Any]],
+        node_map: dict[str, dict[str, Any]],
+        run_token_limit: int,
+    ) -> dict[str, dict[str, Any]]:
+        del task
+        ordered_node_ids = sorted(compiled_nodes)
+        if not ordered_node_ids:
+            raise ValueError("Task graph live run has no executable nodes.")
+        if run_token_limit < len(ordered_node_ids):
+            raise ValueError(
+                "Task graph token budget must allocate at least one token to every executable node."
+            )
+        base_allocation, remainder = divmod(run_token_limit, len(ordered_node_ids))
+        prepared: dict[str, dict[str, Any]] = {}
+        for index, node_id in enumerate(ordered_node_ids):
+            graph_node = dict(node_map.get(node_id) or {})
+            if not graph_node:
+                raise ValueError(f"Compiled graph node {node_id} is missing from the graph definition.")
+            provider_id = str(graph_node.get("provider_id") or "").strip()
+            model_id = str(graph_node.get("model_id") or "").strip()
+            prompt_template = str(graph_node.get("human_summary_template") or "").strip()
+            execution_policy = dict(graph_node.get("execution_policy") or {})
+            if not provider_id:
+                raise ValueError(f"Graph node {node_id} is missing an explicit provider.")
+            if not model_id:
+                raise ValueError(f"Graph node {node_id} is missing an explicit model.")
+            if not prompt_template:
+                raise ValueError(f"Graph node {node_id} is missing an explicit live-run prompt.")
+            if not bool(execution_policy.get("allow_provider_calls")):
+                raise ValueError(f"Graph node {node_id} does not allow provider calls.")
+            timeout_ms = execution_policy.get("timeout_ms")
+            try:
+                timeout_seconds = max(5.0, int(timeout_ms) / 1000.0) if timeout_ms is not None else 210.0
+            except (TypeError, ValueError):
+                timeout_seconds = 210.0
+            prepared[node_id] = {
+                "node_id": node_id,
+                "graph_node": graph_node,
+                "profile": self._resolve_graph_worker_profile(graph_node),
+                "token_budget": base_allocation + (1 if index < remainder else 0),
+                "timeout_seconds": timeout_seconds,
+            }
+        allocated = sum(int(item["token_budget"]) for item in prepared.values())
+        if allocated != run_token_limit:
+            raise RuntimeError("Task graph token-budget allocation did not reconcile to the run limit.")
+        return prepared
+
+    def _graph_live_turn_usage_signal(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        provider_id: str | None,
+        model: str | None,
+    ) -> dict[str, Any]:
+        token_usage = self._latest_context_token_usage(thread_id)
+        if not token_usage:
+            return usage_not_available(
+                source="task_graph_live_run",
+                reason="token_usage_notification_missing",
+                provider_id=provider_id,
+                model=model,
+                request_kind="task_graph_live_run",
+            )
+        observed_turn_id = str(token_usage.get("turn_id") or "").strip()
+        if (
+            turn_id
+            and observed_turn_id
+            and observed_turn_id != turn_id
+            and self._observed_turn_alias_target(
+                thread_id=thread_id,
+                observed_turn_id=observed_turn_id,
+            ) != turn_id
+        ):
+            return usage_not_available(
+                source="task_graph_live_run",
+                reason="latest_token_usage_belongs_to_another_turn",
+                provider_id=provider_id,
+                model=model,
+                request_kind="task_graph_live_run",
+            )
+        total = dict(token_usage.get("total") or {})
+        if not total:
+            return usage_not_available(
+                source="task_graph_live_run",
+                reason="token_usage_total_missing",
+                provider_id=provider_id,
+                model=model,
+                request_kind="task_graph_live_run",
+            )
+        return normalize_usage_signal(
+            source="task_graph_live_run",
+            provider_id=provider_id,
+            model=model,
+            usage={
+                "input_tokens": total.get("inputTokens"),
+                "output_tokens": total.get("outputTokens"),
+                "reasoning_tokens": total.get("reasoningOutputTokens"),
+                "cached_input_tokens": total.get("cachedInputTokens"),
+                "total_tokens": total.get("totalTokens"),
+            },
+            request_kind="task_graph_live_run",
+        )
+
+    def _graph_live_run_prompt(
+        self,
+        *,
+        task: dict[str, Any],
+        graph: dict[str, Any],
+        node: dict[str, Any],
+        incoming_handoffs: list[dict[str, Any]],
+    ) -> str:
+        goal = task.get("goal")
+        if isinstance(goal, str):
+            task_goal = goal.strip()
+        elif goal is None:
+            task_goal = ""
+        else:
+            task_goal = json.dumps(goal, ensure_ascii=False)
+        prompt_template = str(node.get("human_summary_template") or "").strip() or (
+            f"Complete the {str(node.get('label') or node.get('node_id') or 'current')} task."
+        )
+        sections = [
+            f"Task graph: {str(graph.get('title') or '').strip()}",
+            f"Current node: {str(node.get('label') or node.get('node_id') or '').strip()}",
+            f"Node role: {str(node.get('kind') or '').strip() or 'worker'}",
+            "Objective:",
+            prompt_template,
+        ]
+        if task_goal:
+            sections.extend(["Task context:", task_goal[:4000]])
+        if incoming_handoffs:
+            handoff_lines: list[str] = []
+            for index, item in enumerate(incoming_handoffs, start=1):
+                output_summary = dict(item.get("output_summary") or {})
+                handoff = dict(item.get("handoff") or {})
+                downstream_input = dict(handoff.get("downstream_input") or {})
+                artifact_paths = [
+                    str(path).strip()
+                    for path in list(downstream_input.get("artifact_paths") or [])
+                    if str(path or "").strip()
+                ]
+                handoff_lines.append(
+                    (
+                        f"{index}. From {str(item.get('source_label') or item.get('source_node_id') or 'upstream').strip()}: "
+                        f"summary={str(output_summary.get('human_summary') or '').strip()[:320] or 'none'}; "
+                        f"machine_result_preview={str(output_summary.get('machine_result_preview') or '').strip()[:320] or 'none'}; "
+                        f"artifacts={', '.join(artifact_paths) if artifact_paths else 'none'}"
+                    )
+                )
+            sections.extend(["Upstream handoffs:", *handoff_lines])
+        schema_hint = node.get("machine_result_schema")
+        if isinstance(schema_hint, dict) and schema_hint:
+            sections.extend(["Machine-result JSON schema hint:", json.dumps(schema_hint, ensure_ascii=False, indent=2)[:3000]])
+        sections.extend(
+            [
+                "Response contract:",
+                "This is one bounded task-graph node. Finish in a single reply and stop.",
+                "Return a single JSON object with keys `human_summary` and `machine_result`.",
+                "`human_summary` must be plain text. `machine_result` must be an object.",
+                "Do not open an extended planning loop, do not inspect the repository, and do not call tools unless the prompt explicitly requires them.",
+                "Do not include markdown fences, preambles, or trailing commentary outside the JSON object.",
+            ]
+        )
+        return "\n\n".join(section for section in sections if section)
+
+    def _normalize_graph_worker_collaboration_mode(
+        self,
+        node: dict[str, Any],
+        *,
+        collaboration_mode: str | None = None,
+    ) -> str | None:
+        requested = str(collaboration_mode if collaboration_mode is not None else node.get("collaboration_mode") or "").strip().lower()
+        if not requested:
+            return None
+        if requested == "plan":
+            return "default"
+        return requested
+
+    @staticmethod
+    def _graph_live_run_parse_response(final_text: str) -> dict[str, Any]:
+        text = str(final_text or "").strip()
+        parsed = RuntimeService._graph_live_run_extract_json(text)
+        if isinstance(parsed, dict):
+            human_summary = str(parsed.get("human_summary") or "").strip()
+            machine_result = parsed.get("machine_result")
+            if isinstance(machine_result, dict):
+                return {
+                    "human_summary": human_summary,
+                    "machine_result": machine_result,
+                }
+            if human_summary:
+                remainder = {key: value for key, value in parsed.items() if key != "human_summary"}
+                return {
+                    "human_summary": human_summary,
+                    "machine_result": remainder or {"raw_json": parsed},
+                }
+            return {"human_summary": "", "machine_result": parsed}
+        return {
+            "human_summary": text[:1200],
+            "machine_result": {"raw_text": text[:4000]} if text else {},
+        }
+
+    @staticmethod
+    def _graph_live_run_terminal_outcome(
+        *,
+        node_label: str,
+        thread_status: str,
+        final_text: str,
+        reasoning_text: str,
+        parsed_output: dict[str, Any],
+        policy_violation: dict[str, Any] | None,
+        budget_exceeded: bool,
+        observed_tokens: Any,
+        token_budget: int,
+    ) -> dict[str, Any]:
+        clean_label = str(node_label or "").strip() or "Node"
+        clean_status = str(thread_status or "").strip().lower()
+        clean_text = str(final_text or "").strip()
+        clean_reasoning = str(reasoning_text or "").strip()
+        human_summary = str(parsed_output.get("human_summary") or "").strip()
+        parsed_machine_result = parsed_output.get("machine_result")
+        violation_detail = dict(policy_violation or {}) if isinstance(policy_violation, dict) else None
+        parsed_json = RuntimeService._graph_live_run_extract_json(clean_text)
+
+        if violation_detail is not None:
+            if clean_status == "completed" and isinstance(parsed_json, dict) and isinstance(parsed_machine_result, dict) and parsed_machine_result:
+                violation_detail["compliant_success"] = True
+                violation_detail["recovery"] = "structured_response_salvaged_after_blocked_tools"
+                return {
+                    "node_status": "completed",
+                    "outcome": "partial",
+                    "summary": human_summary
+                    or f"{clean_label} returned a bounded result after blocked tool requests were ignored.",
+                    "machine_result": parsed_machine_result,
+                    "policy_violation": violation_detail,
+                    "next_action_hints": [
+                        "Review the blocked tool requests; this node completed via structured-response fallback.",
+                    ],
+                }
+            return {
+                "node_status": "failed",
+                "outcome": "policy_violated",
+                "summary": f"{clean_label} requested tools outside its no-tools contract.",
+                "machine_result": {
+                    "status": "policy_violated",
+                    "execution_policy": violation_detail,
+                    "response_text": clean_text[:4000],
+                },
+                "policy_violation": violation_detail,
+                "next_action_hints": [
+                    "Tighten the node prompt or tool policy before rerunning this graph.",
+                ],
+            }
+        if budget_exceeded:
+            return {
+                "node_status": "failed",
+                "outcome": "budget_exceeded",
+                "summary": (
+                    f"{clean_label} exceeded its enforced token allocation "
+                    f"({observed_tokens} / {token_budget})."
+                ),
+                "machine_result": {
+                    "status": "budget_exceeded",
+                    "observed_total_tokens": observed_tokens,
+                    "token_budget": token_budget,
+                    "response_text": clean_text[:4000],
+                },
+                "policy_violation": None,
+                "next_action_hints": [
+                    "Increase the node budget or reduce its prompt/context scope before retrying.",
+                ],
+            }
+        if clean_status == "completed":
+            machine_result = parsed_machine_result
+            if not isinstance(machine_result, dict) or not machine_result:
+                machine_result = {
+                    "response_text": clean_text[:4000],
+                    "reasoning_excerpt": clean_reasoning[:800] if clean_reasoning else None,
+                }
+            return {
+                "node_status": "completed",
+                "outcome": "passed",
+                "summary": human_summary or (clean_text[:400] if clean_text else f"{clean_label} completed."),
+                "machine_result": machine_result,
+                "policy_violation": None,
+                "next_action_hints": [],
+            }
+        if clean_status == "cancelled":
+            return {
+                "node_status": "cancelled",
+                "outcome": "cancelled",
+                "summary": f"{clean_label} was cancelled before completion.",
+                "machine_result": {"status": "cancelled", "response_text": clean_text[:4000]},
+                "policy_violation": None,
+                "next_action_hints": [],
+            }
+        return {
+            "node_status": "failed",
+            "outcome": "failed",
+            "summary": f"{clean_label} finished with status {clean_status or 'failed'}.",
+            "machine_result": {"status": clean_status or "failed", "response_text": clean_text[:4000]},
+            "policy_violation": None,
+            "next_action_hints": [],
+        }
+
+    @staticmethod
+    def _graph_live_run_extract_json(text: str) -> dict[str, Any] | None:
+        if not text:
+            return None
+        candidates = [text]
+        fenced = re.findall(r"```json\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
+        candidates.extend(fenced)
+        brace_match = re.search(r"(\{[\s\S]*\})", text)
+        if brace_match:
+            candidates.append(brace_match.group(1))
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    def _reconcile_graph_live_started_turns(
+        self,
+        *,
+        graph: dict[str, Any],
+        run_id: str,
+        started_executions: list[dict[str, Any]],
+        settled_execution_keys: set[tuple[str, str]],
+        node_states: dict[str, dict[str, Any]],
+        event_refs: list[dict[str, Any]],
+        artifact_refs: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for execution in started_executions:
+            thread_id = str(execution.get("execution_thread_id") or "").strip()
+            turn_id = str(execution.get("turn_id") or "").strip()
+            node_id = str(execution.get("node_id") or "").strip()
+            execution_key = (thread_id, turn_id)
+            if not thread_id or not turn_id or execution_key in settled_execution_keys:
+                continue
+            record: dict[str, Any] = {
+                "node_id": node_id or None,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "action": "inspect_then_interrupt",
+                "status": "pending",
+            }
+            try:
+                notification = self._terminal_turn_notification(thread_id=thread_id, turn_id=turn_id)
+                notification_status = str(dict(notification or {}).get("status") or "").strip().lower()
+                profile = dict(execution.get("profile") or {})
+                runtime_status = self._prepare_runtime(profile, require_secret=False)
+                client = self._ensure_client(runtime_status)
+                if notification_status in TERMINAL_TURN_STATUSES:
+                    terminal_thread = self._wait_for_probe_turn_terminal(
+                        client,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        timeout_seconds=5.0,
+                        operation_label=f"task graph reconciliation for {node_id or turn_id}",
+                    )
+                    terminal_status, _final_text, _reasoning = self._probe_turn_result(
+                        terminal_thread,
+                        turn_id=turn_id,
+                    )
+                    record.update({"status": "terminal_observed", "terminal_status": terminal_status or notification_status})
+                else:
+                    self.interrupt_turn(profile, thread_id, turn_id)
+                    terminal_thread = self._wait_for_probe_turn_terminal(
+                        client,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        timeout_seconds=5.0,
+                        operation_label=f"task graph cancellation for {node_id or turn_id}",
+                    )
+                    terminal_status, _final_text, _reasoning = self._probe_turn_result(
+                        terminal_thread,
+                        turn_id=turn_id,
+                    )
+                    record.update({"status": "interrupted", "terminal_status": terminal_status or "unknown"})
+                committed_status = self._commit_graph_live_reconciled_execution_result(
+                    graph=graph,
+                    run_id=run_id,
+                    execution=execution,
+                    terminal_thread=terminal_thread,
+                    node_states=node_states,
+                    event_refs=event_refs,
+                    artifact_refs=artifact_refs,
+                )
+                settled_execution_keys.add(execution_key)
+                if committed_status:
+                    record.update(
+                        {
+                            "status": "terminal_result_committed",
+                            "terminal_status": committed_status,
+                            "committed_output": True,
+                        }
+                    )
+                elif node_id and node_id in node_states:
+                    observed = str(record.get("terminal_status") or "").lower()
+                    node_states[node_id].update(
+                        {
+                            "status": "cancelled" if observed == "cancelled" else "failed",
+                            "outcome": "cancelled" if observed == "cancelled" else "failed",
+                            "updated_at": now_iso(),
+                            "turn_reconciliation": dict(record),
+                        }
+                    )
+                if node_id and node_id in node_states and committed_status:
+                    node_states[node_id]["turn_reconciliation"] = dict(record)
+            except Exception as reconcile_exc:
+                reconcile_error_type = type(reconcile_exc).__name__
+                reconcile_error_message = str(redact_sensitive(str(reconcile_exc))).strip()[:400]
+                recovered_commit_status: str | None = None
+                try:
+                    profile = dict(execution.get("profile") or {})
+                    runtime_status = self._prepare_runtime(profile, require_secret=False)
+                    client = self._ensure_client(runtime_status)
+                    terminal_thread = self._wait_for_probe_turn_terminal(
+                        client,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        timeout_seconds=5.0,
+                        operation_label=f"task graph recovery for {node_id or turn_id}",
+                    )
+                    recovered_commit_status = self._commit_graph_live_reconciled_execution_result(
+                        graph=graph,
+                        run_id=run_id,
+                        execution=execution,
+                        terminal_thread=terminal_thread,
+                        node_states=node_states,
+                        event_refs=event_refs,
+                        artifact_refs=artifact_refs,
+                    )
+                except Exception:
+                    recovered_commit_status = None
+                if recovered_commit_status:
+                    settled_execution_keys.add(execution_key)
+                    record.update(
+                        {
+                            "status": "terminal_result_committed_after_reconcile_error",
+                            "terminal_status": recovered_commit_status,
+                            "committed_output": True,
+                            "recovery_error_type": reconcile_error_type,
+                            "recovery_error_message": reconcile_error_message,
+                        }
+                    )
+                    if node_id and node_id in node_states:
+                        node_states[node_id]["turn_reconciliation"] = dict(record)
+                else:
+                    record.update(
+                        {
+                            "status": "interrupt_failed",
+                            "error_type": reconcile_error_type,
+                            "message": reconcile_error_message,
+                        }
+                    )
+                    if node_id and node_id in node_states:
+                        node_states[node_id].update(
+                            {
+                                "status": "failed",
+                                "outcome": "failed",
+                                "updated_at": now_iso(),
+                                "turn_reconciliation": dict(record),
+                            }
+                        )
+            records.append(record)
+            event_refs.append(
+                {
+                    "event_id": f"{run_id}-{node_id or turn_id}-turn-reconciled",
+                    "run_id": run_id,
+                    "task_id": graph["task_id"],
+                    "trace_id": f"trace-{run_id}",
+                    "event_type": "turn_reconciled",
+                    "created_at": now_iso(),
+                    "summary": (
+                        f"{self._tasks._graph_node_label(graph, node_id) if node_id else turn_id} "
+                        f"provider turn reconciliation finished as {record['status']}."
+                    ),
+                    "node_id": node_id or None,
+                    "reconciliation_status": record["status"],
+                }
+            )
+            reconciled_node_status = str(dict(node_states.get(node_id) or {}).get("status") or "").strip()
+            if node_id and reconciled_node_status in {"cancelled", "failed"}:
+                event_refs.append(
+                    {
+                        "event_id": f"{run_id}-{node_id}-reconciled-{reconciled_node_status}",
+                        "run_id": run_id,
+                        "task_id": graph["task_id"],
+                        "trace_id": f"trace-{run_id}",
+                        "event_type": "node_cancelled" if reconciled_node_status == "cancelled" else "node_failed",
+                        "created_at": now_iso(),
+                        "summary": (
+                            f"{self._tasks._graph_node_label(graph, node_id)} finished failure reconciliation "
+                            f"as {reconciled_node_status}."
+                        ),
+                        "node_id": node_id,
+                    }
+                )
+            self._record_event(
+                {
+                    "type": "task_graph_turn_reconciled",
+                    "graph_id": graph.get("graph_id"),
+                    "run_id": run_id,
+                    "node_id": node_id or None,
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "status": record["status"],
+                    "terminal_status": record.get("terminal_status"),
+                }
+            )
+        return records
+
+    def _commit_graph_live_reconciled_execution_result(
+        self,
+        *,
+        graph: dict[str, Any],
+        run_id: str,
+        execution: dict[str, Any],
+        terminal_thread: dict[str, Any],
+        node_states: dict[str, dict[str, Any]],
+        event_refs: list[dict[str, Any]],
+        artifact_refs: list[dict[str, Any]],
+    ) -> str | None:
+        node_id = str(execution.get("node_id") or "").strip()
+        if not node_id or node_id not in node_states:
+            return None
+        graph_id = str(graph.get("graph_id") or "").strip()
+        graph_node = dict(execution.get("graph_node") or {})
+        profile = dict(execution.get("profile") or {})
+        worker = dict(execution.get("worker") or {})
+        turn_id = str(execution.get("turn_id") or "").strip()
+        thread_status, final_text, reasoning_text = self._probe_turn_result(terminal_thread, turn_id=turn_id)
+        thread_status = str(thread_status or "").strip().lower()
+        if thread_status not in TERMINAL_TURN_STATUSES:
+            return None
+        finished_at = now_iso()
+        elapsed_ms = max(
+            0,
+            int((time.monotonic() - float(execution.get("started_monotonic") or time.monotonic())) * 1000),
+        )
+        usage_signal = self._graph_live_turn_usage_signal(
+            thread_id=str(execution.get("execution_thread_id") or ""),
+            turn_id=turn_id,
+            provider_id=str(profile.get("provider_id") or "").strip() or None,
+            model=str(graph_node.get("model_id") or profile.get("model") or "").strip() or None,
+        )
+        policy_violation = self._turn_execution_policy_violation(
+            thread_id=str(execution.get("execution_thread_id") or ""),
+            turn_id=turn_id,
+        )
+        token_budget = int(execution.get("token_budget") or 0)
+        observed_tokens = dict(usage_signal.get("tokens") or {}).get("total_tokens")
+        budget_exceeded = (
+            token_budget > 0
+            and isinstance(observed_tokens, int)
+            and observed_tokens > token_budget
+        )
+        parsed_output = self._graph_live_run_parse_response(final_text)
+        terminal_outcome = self._graph_live_run_terminal_outcome(
+            node_label=self._tasks._graph_node_label(graph, node_id),
+            thread_status=thread_status,
+            final_text=final_text,
+            reasoning_text=reasoning_text,
+            parsed_output=parsed_output,
+            policy_violation=policy_violation,
+            budget_exceeded=budget_exceeded,
+            observed_tokens=observed_tokens,
+            token_budget=token_budget,
+        )
+        node_status = str(terminal_outcome.get("node_status") or "failed")
+        outcome = str(terminal_outcome.get("outcome") or "failed")
+        summary = str(terminal_outcome.get("summary") or "").strip() or (
+            f"{self._tasks._graph_node_label(graph, node_id)} finished with status {thread_status or 'failed'}."
+        )
+        machine_result = dict(terminal_outcome.get("machine_result") or {})
+        effective_policy_violation = dict(terminal_outcome.get("policy_violation") or {}) or None
+        next_action_hints = [
+            str(item).strip()
+            for item in list(terminal_outcome.get("next_action_hints") or [])
+            if str(item or "").strip()
+        ]
+        node_states[node_id].update(
+            {
+                "status": node_status,
+                "outcome": outcome,
+                "updated_at": finished_at,
+                "elapsed_ms": elapsed_ms,
+                "provider_call_count": 1,
+                "tool_call_count": int(dict(effective_policy_violation or {}).get("blocked_tool_call_count") or 0),
+                "execution_policy": effective_policy_violation,
+                "usage_signal": usage_signal,
+                "token_budget": token_budget or None,
+            }
+        )
+        worker_output = self._tasks.record_graph_worker_output(
+            {
+                "graph_id": graph_id,
+                "run_id": run_id,
+                "node_id": node_id,
+                "worker_thread_id": str(worker.get("thread_id") or ""),
+                "human_summary": summary,
+                "machine_result": machine_result,
+                "next_action_hints": next_action_hints,
+                "status": node_status,
+                "provider_id": str(profile.get("provider_id") or "").strip() or None,
+                "model": str(graph_node.get("model_id") or profile.get("model") or "").strip() or None,
+                "provider_call_count": 1,
+                "tool_call_count": int(dict(effective_policy_violation or {}).get("blocked_tool_call_count") or 0),
+                "execution_policy": effective_policy_violation,
+                "usage_signal": usage_signal,
+                "elapsed_ms": elapsed_ms,
+                "attempt_count": 1,
+                "updated_at": finished_at,
+            },
+            graph_definition=graph,
+        )
+        binding = dict(worker_output.get("worker_binding") or {})
+        merged_artifact_refs = self._tasks._merge_graph_worker_artifact_refs(
+            artifact_refs,
+            [dict(item) for item in list(binding.get("artifact_refs") or []) if isinstance(item, dict)],
+        )
+        artifact_refs[:] = merged_artifact_refs
+        event_refs.append(
+            {
+                "event_id": f"{run_id}-{node_id}-recovered-{node_status}",
+                "run_id": run_id,
+                "task_id": graph["task_id"],
+                "trace_id": f"trace-{run_id}",
+                "event_type": (
+                    "node_completed" if node_status == "completed" else ("node_cancelled" if node_status == "cancelled" else "node_failed")
+                ),
+                "created_at": finished_at,
+                "summary": summary,
+                "node_id": node_id,
+            }
+        )
+        return node_status
+
+    def _finalize_graph_live_run_failure(
+        self,
+        *,
+        exc: Exception,
+        graph: dict[str, Any],
+        run_id: str,
+        workspace_root: Path,
+        artifact_root: Path,
+        summary_json_path: Path,
+        report_md_path: Path,
+        run_manifest_path: Path,
+        run_manifest: dict[str, Any],
+        live_run_ref: dict[str, Any],
+        node_states: dict[str, dict[str, Any]],
+        event_refs: list[dict[str, Any]],
+        artifact_refs: list[dict[str, Any]],
+        active_node_id: str | None,
+        reconciliation_records: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        persisted_ref = dict(self._tasks.graph_run_ref(run_id) or live_run_ref or {})
+        persisted_status = str(persisted_ref.get("status") or "").strip().lower()
+        if persisted_status in {"cancelled", "completed", "failed"}:
+            self._record_event(
+                {
+                    "type": "task_graph_live_run_failure_finalization_skipped",
+                    "run_id": run_id,
+                    "persisted_status": persisted_status,
+                    "error_type": type(exc).__name__,
+                }
+            )
+            return {
+                "run_ref": persisted_ref,
+                "artifact_paths": {},
+                "failure_kind": "already_terminal",
+            }
+
+        failed_at = now_iso()
+        failure_kind = "terminal_collection_timeout" if isinstance(exc, TimeoutError) else "runtime_error"
+        failure_message = str(redact_sensitive(str(exc))).strip()[:600] or type(exc).__name__
+        active_node = str(active_node_id or "").strip()
+        for node_id, state in node_states.items():
+            current_status = str(state.get("status") or "").strip().lower()
+            if current_status in {"completed", "failed", "cancelled", "blocked"}:
+                continue
+            if node_id == active_node or current_status == "running":
+                state.update({"status": "failed", "outcome": "failed", "updated_at": failed_at})
+                event_refs.append(
+                    {
+                        "event_id": f"{run_id}-{node_id}-runtime-failed",
+                        "run_id": run_id,
+                        "task_id": graph["task_id"],
+                        "trace_id": f"trace-{run_id}",
+                        "event_type": "node_failed",
+                        "created_at": failed_at,
+                        "summary": f"{self._tasks._graph_node_label(graph, node_id)} stopped because live runtime collection failed.",
+                        "node_id": node_id,
+                    }
+                )
+                continue
+            state.update({"status": "blocked", "outcome": "blocked", "updated_at": failed_at})
+            event_refs.append(
+                {
+                    "event_id": f"{run_id}-{node_id}-runtime-blocked",
+                    "run_id": run_id,
+                    "task_id": graph["task_id"],
+                    "trace_id": f"trace-{run_id}",
+                    "event_type": "node_blocked",
+                    "created_at": failed_at,
+                    "summary": f"{self._tasks._graph_node_label(graph, node_id)} did not run after an upstream runtime failure.",
+                    "node_id": node_id,
+                }
+            )
+
+        event_refs.append(
+            {
+                "event_id": f"{run_id}-runtime-failed",
+                "run_id": run_id,
+                "task_id": graph["task_id"],
+                "trace_id": f"trace-{run_id}",
+                "event_type": "run_failed",
+                "created_at": failed_at,
+                "summary": f"{graph['title']} live task-graph run failed during runtime result collection.",
+            }
+        )
+        failure_path = artifact_root / "failure.json"
+        failure_payload = {
+            "schema_version": "astrabridge-task-graph-live-run-failure-v1",
+            "run_id": run_id,
+            "graph_id": graph["graph_id"],
+            "task_id": graph["task_id"],
+            "failed_at": failed_at,
+            "failure_kind": failure_kind,
+            "error_type": type(exc).__name__,
+            "message": failure_message,
+            "active_node_id": active_node or None,
+            "turn_reconciliation": deepcopy(reconciliation_records),
+            "recovery": {
+                "action": "inspect_and_rerun",
+                "safe_to_resume": False,
+                "reason": "The terminal worker result was not committed to the graph run.",
+            },
+        }
+        write_json(failure_path, failure_payload)
+        summary_payload = {
+            "schema_version": "astrabridge-task-graph-live-run-summary-v1",
+            "run_id": run_id,
+            "graph_id": graph["graph_id"],
+            "task_id": graph["task_id"],
+            "created_at": str(run_manifest.get("created_at") or failed_at),
+            "updated_at": failed_at,
+            "run_status": "failed",
+            "failure": failure_payload,
+            "node_results": [
+                {
+                    "node_id": node_id,
+                    "label": self._tasks._graph_node_label(graph, node_id),
+                    "status": str(state.get("status") or ""),
+                    "outcome": str(state.get("outcome") or ""),
+                }
+                for node_id, state in node_states.items()
+            ],
+            "artifact_paths": {
+                "summary_json": summary_json_path.relative_to(workspace_root).as_posix(),
+                "report_md": report_md_path.relative_to(workspace_root).as_posix(),
+                "run_manifest_json": run_manifest_path.relative_to(workspace_root).as_posix(),
+                "failure_json": failure_path.relative_to(workspace_root).as_posix(),
+            },
+        }
+        write_json(summary_json_path, summary_payload)
+        report_md_path.write_text(self._graph_live_run_report_markdown(summary_payload), encoding="utf-8")
+        source_node_id = active_node or str((run_manifest.get("entry_node_ids") or [""])[0] or "")
+        next_artifact_refs = self._tasks._merge_graph_worker_artifact_refs(
+            artifact_refs,
+            [
+                {
+                    "artifact_id": f"{run_id}-failure-json",
+                    "artifact_kind": "diagnostic_bundle",
+                    "task_id": graph["task_id"],
+                    "run_id": run_id,
+                    "source_node_id": source_node_id,
+                    "path": failure_path.relative_to(workspace_root).as_posix(),
+                    "media_type": "application/json",
+                    "status": "ready",
+                    "created_at": failed_at,
+                },
+                {
+                    "artifact_id": f"{run_id}-failure-summary-json",
+                    "artifact_kind": "structured_json",
+                    "task_id": graph["task_id"],
+                    "run_id": run_id,
+                    "source_node_id": source_node_id,
+                    "path": summary_json_path.relative_to(workspace_root).as_posix(),
+                    "media_type": "application/json",
+                    "status": "ready",
+                    "created_at": failed_at,
+                },
+                {
+                    "artifact_id": f"{run_id}-failure-report-md",
+                    "artifact_kind": "validation_report",
+                    "task_id": graph["task_id"],
+                    "run_id": run_id,
+                    "source_node_id": source_node_id,
+                    "path": report_md_path.relative_to(workspace_root).as_posix(),
+                    "media_type": "text/markdown",
+                    "status": "ready",
+                    "created_at": failed_at,
+                },
+            ],
+        )
+        run_manifest.update(
+            {
+                "status": "failed",
+                "updated_at": failed_at,
+                "node_run_states": [deepcopy(item) for item in node_states.values()],
+                "artifact_refs": deepcopy(next_artifact_refs),
+                "event_refs": deepcopy(event_refs),
+                "failure": failure_payload,
+            }
+        )
+        write_json(run_manifest_path, run_manifest)
+        failed_ref = self._graph_live_run_snapshot(
+            run_ref=persisted_ref,
+            node_states=node_states,
+            event_refs=event_refs,
+            artifact_refs=next_artifact_refs,
+            policy_snapshot=dict(run_manifest.get("run_policy_snapshot") or {}),
+            status="failed",
+        )
+        self._record_event(
+            {
+                "type": "task_graph_live_run_failed",
+                "run_id": run_id,
+                "graph_id": graph["graph_id"],
+                "task_id": graph["task_id"],
+                "failure_kind": failure_kind,
+                "error_type": type(exc).__name__,
+                "active_node_id": active_node or None,
+            }
+        )
+        return {
+            "run_ref": failed_ref,
+            "artifact_paths": dict(summary_payload.get("artifact_paths") or {}),
+            "failure_kind": failure_kind,
+        }
+
+    def _graph_live_run_snapshot(
+        self,
+        *,
+        run_ref: dict[str, Any],
+        node_states: dict[str, dict[str, Any]],
+        event_refs: list[dict[str, Any]],
+        artifact_refs: list[dict[str, Any]],
+        policy_snapshot: dict[str, Any],
+        status: str,
+    ) -> dict[str, Any]:
+        run_id = str(dict(run_ref or {}).get("run_id") or "").strip()
+        persisted_run_ref = self._tasks.graph_run_ref(run_id) if run_id else None
+        next_run_ref = {
+            **dict(run_ref or {}),
+            **dict(persisted_run_ref or {}),
+        }
+        next_run_ref["status"] = status
+        next_run_ref["node_status_counts"] = {
+            key: sum(1 for item in node_states.values() if str(item.get("status") or "").strip() == key)
+            for key in sorted({str(item.get("status") or "").strip() for item in node_states.values() if str(item.get("status") or "").strip()})
+        }
+        next_run_ref["node_outcome_counts"] = {
+            key: sum(1 for item in node_states.values() if str(item.get("outcome") or "").strip() == key)
+            for key in sorted({str(item.get("outcome") or "").strip() for item in node_states.values() if str(item.get("outcome") or "").strip()})
+        }
+        next_run_ref["event_count"] = len(event_refs)
+        next_run_ref["artifact_refs"] = self._tasks._merge_graph_worker_artifact_refs(
+            list(next_run_ref.get("artifact_refs") or []),
+            [dict(item) for item in artifact_refs if isinstance(item, dict)],
+        )
+        next_run_ref["artifact_count"] = len(list(next_run_ref.get("artifact_refs") or []))
+        next_run_ref["diagnostic_refs"] = self._tasks._extract_graph_run_diagnostic_refs(
+            {"artifact_refs": list(next_run_ref.get("artifact_refs") or [])}
+        )
+        next_run_ref["timeline_events"] = self._tasks._compact_graph_run_timeline_events(event_refs)
+        next_run_ref["latest_event_type"] = str(dict(event_refs[-1]).get("event_type") or "").strip() if event_refs else None
+        next_run_ref["latest_event_at"] = str(dict(event_refs[-1]).get("created_at") or "").strip() if event_refs else None
+        next_run_ref["updated_at"] = str(next_run_ref.get("latest_event_at") or now_iso())
+        next_run_ref["policy_snapshot"] = redact_sensitive(dict(policy_snapshot or {}))
+        next_run_ref["approval_state"] = "not_required"
+        return dict(self._tasks.persist_graph_run_ref(next_run_ref).get("run_ref") or next_run_ref)
+
+    @staticmethod
+    def _write_graph_live_run_manifest_snapshot(
+        *,
+        run_manifest_path: Path,
+        run_manifest: dict[str, Any],
+        node_states: dict[str, dict[str, Any]],
+        artifact_refs: list[dict[str, Any]],
+        event_refs: list[dict[str, Any]],
+        status: str,
+        updated_at: str | None = None,
+    ) -> None:
+        manifest_updated_at = (
+            str(updated_at or "").strip()
+            or str(dict(event_refs[-1]).get("created_at") or "").strip()
+            or now_iso()
+        )
+        run_manifest["status"] = status
+        run_manifest["updated_at"] = manifest_updated_at
+        run_manifest["node_run_states"] = [deepcopy(item) for item in node_states.values()]
+        run_manifest["artifact_refs"] = deepcopy(artifact_refs)
+        run_manifest["event_refs"] = deepcopy(event_refs)
+        write_json(run_manifest_path, run_manifest)
+
+    @staticmethod
+    def _graph_live_run_report_markdown(summary_payload: dict[str, Any]) -> str:
+        lines = [
+            f"# {str(summary_payload.get('graph_id') or '').strip()}",
+            "",
+            f"- Run ID: {str(summary_payload.get('run_id') or '').strip()}",
+            f"- Status: {str(summary_payload.get('run_status') or '').strip()}",
+            "",
+            "## Nodes",
+            "",
+        ]
+        for item in list(summary_payload.get("node_results") or []):
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"- {str(item.get('label') or item.get('node_id') or '').strip()}: "
+                f"{str(item.get('status') or '').strip()} / {str(item.get('outcome') or '').strip()}"
+            )
+        failure = dict(summary_payload.get("failure") or {})
+        if failure:
+            lines.extend(
+                [
+                    "",
+                    "## Failure",
+                    "",
+                    f"- Kind: {str(failure.get('failure_kind') or 'runtime_error').strip()}",
+                    f"- Active node: {str(failure.get('active_node_id') or 'unknown').strip()}",
+                    f"- Message: {str(failure.get('message') or 'Live runtime collection failed.').strip()}",
+                ]
+            )
+        lines.append("")
+        return "\n".join(lines)
+
+    def _graph_worker_timeout_ms(self, value: Any) -> int:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return value if value > 0 else 0
+        try:
+            parsed = int(str(value or "").strip() or "0")
+        except Exception:
+            return 0
+        return parsed if parsed > 0 else 0
+
+    def _normalize_graph_worker_subagent_policy(
+        self,
+        value: dict[str, Any],
+        *,
+        node_id: str,
+        spawn_mode: str,
+    ) -> dict[str, Any]:
+        defaults = {
+            "isolation_mode": "lane",
+            "max_turns": 8,
+            "allow_direct_teammate_messages": False,
+            "share_worktree": False,
+            "allow_nested_subagents": False,
+        }
+        if spawn_mode != "subagent_worker":
+            return defaults
+        policy = {
+            "isolation_mode": str(value.get("isolation_mode") or defaults["isolation_mode"]).strip().lower() or "lane",
+            "max_turns": self._graph_worker_timeout_ms(value.get("max_turns")) or int(defaults["max_turns"]),
+            "allow_direct_teammate_messages": bool(value.get("allow_direct_teammate_messages")),
+            "share_worktree": bool(value.get("share_worktree")),
+            "allow_nested_subagents": bool(value.get("allow_nested_subagents")),
+        }
+        if policy["max_turns"] <= 0:
+            raise ValueError(f"Graph worker {node_id} requires a positive subagent max_turns value.")
+        isolation_mode = str(policy.get("isolation_mode") or "lane")
+        if isolation_mode not in {"lane", "worktree"}:
+            raise ValueError(f"Graph worker {node_id} requested unsupported isolation_mode={isolation_mode}.")
+        if bool(policy.get("allow_nested_subagents")):
+            raise ValueError(f"Graph worker {node_id} requested nested subagents, which are not supported yet.")
+        if bool(policy.get("share_worktree")) or isolation_mode == "worktree":
+            raise ValueError(f"Graph worker {node_id} requested worktree isolation, which is not supported yet.")
+        return policy
+
+    def _graph_worker_tool_policy(self, value: dict[str, Any]) -> dict[str, Any]:
+        allowed_tool_classes = [
+            str(item).strip()
+            for item in list(value.get("allowed_tool_classes") or [])
+            if str(item or "").strip()
+        ]
+        return {
+            "approval_mode": str(value.get("approval_mode") or "").strip().lower() or "ask",
+            "allowed_tool_classes": allowed_tool_classes,
+            "supports_mcp": bool(value.get("supports_mcp")),
+        }
+
+    @staticmethod
+    def _graph_worker_turn_execution_policy(tool_policy: dict[str, Any]) -> str:
+        allowed_tool_classes = [
+            str(item).strip()
+            for item in list(tool_policy.get("allowed_tool_classes") or [])
+            if str(item or "").strip()
+        ]
+        if not allowed_tool_classes and not bool(tool_policy.get("supports_mcp")):
+            return NO_TOOLS_EXECUTION_POLICY
+        return "standard"
+
+    def _graph_worker_runtime_contract(
+        self,
+        *,
+        profile: dict[str, Any],
+        node: dict[str, Any],
+        model: Any,
+        effort: Any,
+        permission_mode: str,
+        collaboration_mode: str | None,
+        execution_backend: str | None,
+        timeout_ms: int,
+        spawn_mode: str,
+        subagent_policy: dict[str, Any],
+        tool_policy: dict[str, Any],
+    ) -> dict[str, Any]:
+        mcp_preset_ids = [
+            str(item).strip()
+            for item in list(node.get("mcp_preset_ids") or [])
+            if str(item or "").strip()
+        ]
+        skill_ids = [
+            str(item).strip()
+            for item in list(node.get("skill_ids") or node.get("skills") or [])
+            if str(item or "").strip()
+        ]
+        return {
+            "profile_id": str(profile.get("profile_id") or "").strip(),
+            "provider_id": str(profile.get("provider_id") or "").strip(),
+            "model": str(model or "").strip(),
+            "reasoning_effort": str(effort or "").strip(),
+            "permission_mode": permission_mode,
+            "collaboration_mode": collaboration_mode or "default",
+            "execution_backend": self._normalize_execution_backend(execution_backend or profile.get("execution_backend")),
+            "spawn_mode": spawn_mode,
+            "timeout_ms": timeout_ms,
+            "tool_policy": tool_policy,
+            "turn_execution_policy": self._graph_worker_turn_execution_policy(tool_policy),
+            "subagent_policy": subagent_policy,
+            "mcp_preset_ids": mcp_preset_ids,
+            "skill_ids": skill_ids,
+            "prompt_template_mode": str(dict(node.get("prompt") or {}).get("template_mode") or "").strip(),
+        }
+
     def archive_thread(self, profile: dict[str, Any], thread_id: str) -> dict[str, Any]:
         if not thread_id.strip():
             raise ValueError("thread_id is required.")
@@ -978,7 +3547,19 @@ class RuntimeService:
         return self._thread_settings_for(thread_id)
 
     def get_goal(self, profile: dict[str, Any], thread_id: str) -> dict[str, Any]:
-        runtime_status = self._prepare_runtime(profile, require_secret=False)
+        active_runtime = self._active_runtime_status()
+        if active_runtime.get("configured") and self._profile_targets_different_runtime(profile, active_runtime):
+            self._record_event(
+                {
+                    "type": "goal_read_deferred_active_runtime",
+                    "thread_id": thread_id,
+                    "profile_id": profile.get("profile_id"),
+                    "active_provider_id": active_runtime.get("provider_id"),
+                }
+            )
+            return {"goal": None, "warning": "goal_read_deferred_active_runtime"}
+        runtime_status = self._runtime_status_for_profile(profile, require_secret=False)
+        self._refresh_client_if_runtime_changed(runtime_status)
         client = self._ensure_client(runtime_status)
         try:
             result = client.request("thread/goal/get", {"threadId": thread_id})
@@ -1083,6 +3664,9 @@ class RuntimeService:
         permission_mode: str,
         collaboration_mode: str | None = None,
         context_mode: str | None = None,
+        execution_policy: str | None = None,
+        token_budget: int | None = None,
+        token_budget_objective: str | None = None,
     ) -> dict[str, Any]:
         if not getattr(self._runtime_operation_local, "in_start_turn", False):
             with self._runtime_operation_lock:
@@ -1099,6 +3683,9 @@ class RuntimeService:
                         permission_mode=permission_mode,
                         collaboration_mode=collaboration_mode,
                         context_mode=context_mode,
+                        execution_policy=execution_policy,
+                        token_budget=token_budget,
+                        token_budget_objective=token_budget_objective,
                     )
                 finally:
                     self._runtime_operation_local.in_start_turn = False
@@ -1107,8 +3694,29 @@ class RuntimeService:
         if not requested_thread_id:
             raise ValueError("thread_id is required.")
         normalized_context_mode = self._normalize_context_mode(context_mode)
+        normalized_execution_policy = self._normalize_turn_execution_policy(execution_policy)
+        effective_permission_mode = "ask" if normalized_execution_policy == NO_TOOLS_EXECUTION_POLICY else permission_mode
         execution_backend = self._thread_execution_backend(requested_thread_id, profile)
+        if normalized_execution_policy == PATCH_ONLY_EXECUTION_POLICY and not self._supports_patch_only_execution_policy(profile, execution_backend):
+            self._record_event(
+                {
+                    "type": "turn_execution_policy_rejected",
+                    "thread_id": requested_thread_id,
+                    "profile_id": profile.get("profile_id"),
+                    "provider_id": profile.get("provider_id"),
+                    "policy": normalized_execution_policy,
+                    "reason": "verified_native_apply_patch_only_enforcement_unavailable",
+                }
+            )
+            raise ValueError(
+                "Patch-only execution is unavailable for this runtime. AstraBridge blocked the turn rather than silently allowing shell edits. "
+                "Use Standard execution with approvals, or choose a runtime that advertises verified native patch-only enforcement."
+            )
         if execution_backend == "native_kernel":
+            if token_budget is not None:
+                raise ValueError(
+                    "Token-budget-enforced task-graph turns require the App Server execution backend."
+                )
             return self._start_native_turn(
                 profile,
                 thread_id=requested_thread_id,
@@ -1116,12 +3724,48 @@ class RuntimeService:
                 attachments=attachments or [],
                 model=model,
                 effort=effort,
-                permission_mode=permission_mode,
+                permission_mode=effective_permission_mode,
                 collaboration_mode=collaboration_mode,
                 context_mode=normalized_context_mode,
             )
         runtime_status = self._prepare_runtime(profile, require_secret=True)
+        self._assert_attachment_route_supported(
+            attachments or [],
+            runtime_status=runtime_status,
+            execution_backend=execution_backend,
+            provider_id=str(profile.get("provider_id") or ""),
+            model_id=str(model or profile.get("model") or ""),
+        )
         client = self._ensure_client(runtime_status)
+
+        def apply_turn_budget(active_client: AppServerClient, target_thread_id: str) -> None:
+            if token_budget is None:
+                return
+            try:
+                normalized_budget = int(token_budget)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("token_budget must be a positive integer.") from exc
+            if normalized_budget <= 0:
+                raise ValueError("token_budget must be a positive integer.")
+            objective = str(token_budget_objective or text).strip()[:500]
+            if not objective:
+                objective = "Bounded AstraBridge task-graph node execution"
+            active_client.request(
+                "thread/goal/set",
+                {
+                    "threadId": target_thread_id,
+                    "objective": objective,
+                    "tokenBudget": normalized_budget,
+                },
+            )
+            self._record_event(
+                {
+                    "type": "turn_token_budget_set",
+                    "thread_id": target_thread_id,
+                    "token_budget": normalized_budget,
+                    "objective_present": True,
+                }
+            )
 
         def prepare_effective_thread(active_client: AppServerClient) -> tuple[str, dict[str, Any] | None]:
             force_fresh_context_thread = normalized_context_mode in {"minimal_text", "minimal_visual", "no_context"} and self._tasks is not None
@@ -1130,7 +3774,7 @@ class RuntimeService:
                     profile,
                     model,
                     effort,
-                    permission_mode,
+                    effective_permission_mode,
                     collaboration_mode=collaboration_mode,
                 )
                 reason = f"{normalized_context_mode}_fresh_thread"
@@ -1140,9 +3784,10 @@ class RuntimeService:
                     profile=profile,
                     model=model,
                     effort=effort,
-                    permission_mode=permission_mode,
+                    permission_mode=effective_permission_mode,
                     desired=desired,
                     reason=reason,
+                    include_dynamic_tools=normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY,
                 )
             else:
                 prepared_thread_id, prepared_handoff = self._ensure_provider_thread_for_turn(
@@ -1151,9 +3796,10 @@ class RuntimeService:
                     profile=profile,
                     model=model,
                     effort=effort,
-                    permission_mode=permission_mode,
+                    permission_mode=effective_permission_mode,
                     collaboration_mode=collaboration_mode,
                     context_mode=normalized_context_mode,
+                    include_dynamic_tools=normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY,
                 )
             if normalized_context_mode == "minimal_visual" and self._tasks is not None:
                 guard_state = self._context_guard_state(prepared_thread_id)
@@ -1162,7 +3808,7 @@ class RuntimeService:
                         profile,
                         model,
                         effort,
-                        permission_mode,
+                        effective_permission_mode,
                         collaboration_mode=collaboration_mode,
                     )
                     prepared_thread_id, prepared_handoff = self._start_fresh_provider_thread_for_turn(
@@ -1171,9 +3817,10 @@ class RuntimeService:
                         profile=profile,
                         model=model,
                         effort=effort,
-                        permission_mode=permission_mode,
+                        permission_mode=effective_permission_mode,
                         desired=desired,
                         reason="minimal_visual_hot_thread",
+                        include_dynamic_tools=normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY,
                     )
             self._raise_if_context_guard_blocks_turn(active_client, prepared_thread_id)
             return prepared_thread_id, prepared_handoff
@@ -1198,7 +3845,7 @@ class RuntimeService:
             effective_thread_id, handoff_event = prepare_effective_thread(client)
         try:
             inputs = self._build_user_inputs(
-                text,
+                self._execution_policy_prompt(normalized_execution_policy, text),
                 attachments or [],
                 thread_id=effective_thread_id,
                 context_mode=normalized_context_mode,
@@ -1233,6 +3880,7 @@ class RuntimeService:
             model_id=str(model or profile.get("model") or ""),
             context_mode=normalized_context_mode,
         )
+        apply_turn_budget(client, effective_thread_id)
         params = {
             "threadId": effective_thread_id,
             "input": inputs,
@@ -1240,7 +3888,7 @@ class RuntimeService:
             "approvalsReviewer": "user",
             "model": codex_model_id(profile, model),
             "effort": codex_reasoning_effort(effort or profile.get("reasoning_effort")),
-            **self._turn_permission_overrides(permission_mode),
+            **self._turn_permission_overrides(effective_permission_mode),
         }
         mode_params = self._collaboration_mode_params(
             profile=profile,
@@ -1250,6 +3898,7 @@ class RuntimeService:
         )
         if mode_params:
             params["collaborationMode"] = mode_params
+        self._register_active_turn_execution_policy(effective_thread_id, normalized_execution_policy)
         try:
             result = client.request("turn/start", params, timeout=TURN_START_TIMEOUT_SECONDS)
         except TimeoutError as exc:
@@ -1260,9 +3909,10 @@ class RuntimeService:
                 profile=profile,
                 model=model,
                 effort=effort,
-                permission_mode=permission_mode,
+                permission_mode=effective_permission_mode,
                 collaboration_mode=collaboration_mode,
                 context_mode=normalized_context_mode,
+                execution_policy=normalized_execution_policy,
                 runtime_status=runtime_status,
                 attachments=attachments or [],
             )
@@ -1276,13 +3926,14 @@ class RuntimeService:
                 profile=profile,
                 model=model,
                 effort=effort,
-                permission_mode=permission_mode,
+                permission_mode=effective_permission_mode,
                 collaboration_mode=collaboration_mode,
                 reason="turn_start_thread_missing",
+                include_dynamic_tools=normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY,
             )
             try:
                 inputs = self._build_user_inputs(
-                    text,
+                    self._execution_policy_prompt(normalized_execution_policy, text),
                     attachments or [],
                     thread_id=effective_thread_id,
                     context_mode=normalized_context_mode,
@@ -1319,6 +3970,7 @@ class RuntimeService:
             )
             params["threadId"] = effective_thread_id
             params["input"] = inputs
+            apply_turn_budget(client, effective_thread_id)
             try:
                 result = client.request("turn/start", params, timeout=TURN_START_TIMEOUT_SECONDS)
             except TimeoutError as retry_exc:
@@ -1329,9 +3981,10 @@ class RuntimeService:
                     profile=profile,
                     model=model,
                     effort=effort,
-                    permission_mode=permission_mode,
+                    permission_mode=effective_permission_mode,
                     collaboration_mode=collaboration_mode,
                     context_mode=normalized_context_mode,
+                    execution_policy=normalized_execution_policy,
                     runtime_status=runtime_status,
                     attachments=attachments or [],
                 )
@@ -1351,7 +4004,20 @@ class RuntimeService:
             client = self._runtime_request_client(runtime_status)
             result = client.request("turn/start", params, timeout=TURN_START_TIMEOUT_SECONDS)
         turn = dict(result.get("turn") or {})
-        self._pin_runtime_for_turn(runtime_status, effective_thread_id, str(turn.get("id") or ""))
+        turn_id = str(turn.get("id") or "")
+        turn_status = self._normalize_terminal_turn_status(turn.get("status"))
+        self._pin_runtime_for_turn(runtime_status, effective_thread_id, turn_id)
+        # Some compatible runtimes return a terminal turn directly from
+        # turn/start and do not emit a later terminal notification. Do not
+        # leave provider switching and thread reads pinned in that case.
+        if turn_status in TERMINAL_TURN_STATUSES:
+            self._clear_runtime_pin(
+                thread_id=effective_thread_id,
+                turn_id=turn_id,
+                reason="turn_start_terminal_response",
+            )
+            if normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY:
+                self._clear_active_turn_execution_policy(thread_id=effective_thread_id, turn_id=turn_id)
         self._projects.switch_thread(effective_thread_id)
         if self._tasks is not None:
             self._tasks.force_visible_provider_thread(effective_thread_id)
@@ -1362,7 +4028,7 @@ class RuntimeService:
                 "provider_id": profile.get("provider_id"),
                 "model": model or profile.get("model"),
                 "reasoning_effort": effort or profile.get("reasoning_effort"),
-                "permission_mode": permission_mode,
+                "permission_mode": effective_permission_mode,
                 "collaboration_mode": collaboration_mode or "default",
             },
         )
@@ -1371,7 +4037,7 @@ class RuntimeService:
             {
                 "type": "turn_started_request",
                 "thread_id": effective_thread_id,
-                "turn_id": turn.get("id"),
+                "turn_id": turn_id,
                 "runtime": runtime_status,
                 "attachments": self._attachment_event_items(attachments or []),
                 "attachment_diagnostics": attachment_diagnostics,
@@ -1379,11 +4045,948 @@ class RuntimeService:
                 "context_mode": normalized_context_mode,
             }
         )
+        self._record_execution_policy_started(
+            thread_id=effective_thread_id,
+            turn_id=str(turn.get("id") or ""),
+            policy=normalized_execution_policy,
+        )
         return {
             "turn": turn,
             "thread_id": effective_thread_id,
             "handoff": handoff_event,
             "attachment_diagnostics": attachment_diagnostics,
+        }
+
+    def verify_app_server_image_transport(
+        self,
+        profile: dict[str, Any],
+        *,
+        model: str | None,
+    ) -> dict[str, Any]:
+        provider_id = str(profile.get("provider_id") or "").strip()
+        model_id = str(model or profile.get("model") or "").strip()
+        if not provider_id or not model_id:
+            raise ValueError("provider and model are required for App Server image verification.")
+        runtime_status = self._prepare_runtime(profile, require_secret=True)
+        if "image" not in {str(item).strip().lower() for item in list(runtime_status.get("input_modalities") or [])}:
+            raise ValueError("The selected model does not declare image input.")
+        execution_backend = self._normalize_execution_backend(runtime_status.get("execution_backend") or profile.get("execution_backend"))
+        if execution_backend != "app_server":
+            raise ValueError("App Server image verification only applies to App Server routes.")
+        client = self._runtime_request_client(runtime_status)
+        probe_path, fixture_digest = self._materialize_app_server_image_probe_fixture()
+        transport_contract = self._app_server_image_transport_contract(profile, model=model_id)
+        probe_attempts: list[dict[str, Any]] = []
+        probe_outcome: dict[str, Any] | None = None
+        terminal_thread: dict[str, Any] | None = None
+        for index, attempt in enumerate(self._app_server_image_probe_attempt_specs(model_id=model_id), start=1):
+            outcome = self._run_app_server_image_probe_attempt(
+                client,
+                profile=profile,
+                model_id=model_id,
+                probe_path=probe_path,
+                prompt=str(attempt.get("prompt") or ""),
+                effort=str(attempt.get("effort") or "high"),
+                attempt_index=index,
+                variant=str(attempt.get("variant") or f"attempt_{index}"),
+            )
+            probe_attempts.append(outcome)
+            probe_outcome = outcome
+            terminal_thread = outcome.get("terminal_thread")
+            if bool(outcome.get("grounded")):
+                break
+        if probe_outcome is None:
+            raise RuntimeError("App Server image verification did not produce a probe attempt.")
+        probe_thread_id = str(probe_outcome.get("thread_id") or "")
+        turn_id = str(probe_outcome.get("turn_id") or "")
+        terminal_status = str(probe_outcome.get("thread_status") or "failed")
+        final_text = str(probe_outcome.get("final_text") or "")
+        reasoning_text = str(probe_outcome.get("reasoning_text") or "")
+        grounded = bool(probe_outcome.get("grounded"))
+        verification_record = {
+            "status": "verified" if grounded else "unverified",
+            "verified_at": now_iso() if grounded else None,
+            "verification_mode": "bounded_app_server_local_image_probe",
+            "fixture": "red_square_png",
+            "fixture_sha256": fixture_digest,
+            "expected_response": "red",
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "native_model": str(profile.get("model") or model_id).strip(),
+            "profile_id": str(profile.get("profile_id") or "").strip(),
+            "runtime_backend": execution_backend,
+            "transport_adapter": transport_contract["transport_adapter"],
+            "transport_signature": transport_contract["transport_signature"],
+            "thread_id": probe_thread_id,
+            "turn_id": turn_id,
+            "response_excerpt": final_text[:120],
+            "reasoning_excerpt": reasoning_text[:240],
+            "attempt_count": len(probe_attempts),
+            "verified_attempt": int(probe_outcome.get("attempt") or 0) if grounded else None,
+            "failure_reason": str(probe_outcome.get("failure_reason") or ""),
+            "attempts": [
+                {
+                    "attempt": int(item.get("attempt") or 0),
+                    "variant": str(item.get("variant") or ""),
+                    "effort": str(item.get("effort") or ""),
+                    "thread_status": str(item.get("thread_status") or ""),
+                    "grounded": bool(item.get("grounded")),
+                    "failure_reason": str(item.get("failure_reason") or ""),
+                    "response_excerpt": str(item.get("final_text") or "")[:120],
+                    "reasoning_excerpt": str(item.get("reasoning_text") or "")[:240],
+                }
+                for item in probe_attempts
+            ],
+            "usage_signal": usage_not_available(
+                source="app_server_image_transport_verification",
+                reason="app_server_thread_read_has_no_usage_projection",
+                provider_id=provider_id,
+                model=model_id,
+                request_kind="app_server_local_image_probe",
+            ),
+        }
+        if self._router_config is not None:
+            self._router_config.record_app_server_image_transport_verification(
+                model_id,
+                verification_record if grounded else None,
+            )
+        result = {
+            "ok": grounded,
+            "provider": provider_id,
+            "model": model_id,
+            "stream": False,
+            "status": 200 if terminal_thread is not None else 500,
+            "content_type": "application/json; charset=utf-8",
+            "preview": {
+                "verification_mode": "bounded_app_server_local_image_probe",
+                "execution_backend": execution_backend,
+                "fixture": "red_square_png",
+                "transport_adapter": transport_contract["transport_adapter"],
+                "transport_signature": transport_contract["transport_signature"],
+            },
+            "response_excerpt": final_text[:120],
+            "timestamp": now_iso(),
+            "image_probe": {
+                "fixture": "red_square_png",
+                "expected_response": "red",
+                "grounded": grounded,
+                "thread_status": terminal_status,
+                "attempt_count": len(probe_attempts),
+                "failure_reason": str(probe_outcome.get("failure_reason") or ""),
+                "attempts": [
+                    {
+                        "attempt": int(item.get("attempt") or 0),
+                        "variant": str(item.get("variant") or ""),
+                        "effort": str(item.get("effort") or ""),
+                        "thread_status": str(item.get("thread_status") or ""),
+                        "grounded": bool(item.get("grounded")),
+                        "failure_reason": str(item.get("failure_reason") or ""),
+                        "response_excerpt": str(item.get("final_text") or "")[:120],
+                    }
+                    for item in probe_attempts
+                ],
+            },
+            "route_verification": redact_sensitive(verification_record),
+        }
+        if self._router_config is not None:
+            self._router_config.record_test_result(result)
+        self._record_event(
+            {
+                "type": "app_server_image_transport_verification",
+                "provider_id": provider_id,
+                "model": model_id,
+                "ok": grounded,
+                "thread_status": terminal_status,
+                "response_excerpt": final_text[:120],
+                "reasoning_excerpt": reasoning_text[:240],
+                "verification": redact_sensitive(verification_record),
+            }
+        )
+        return result
+
+    def _app_server_image_probe_attempt_specs(self, *, model_id: str | None = None) -> list[dict[str, str]]:
+        return [
+            {
+                "variant": "default_high_effort",
+                "effort": "high",
+                "prompt": "What is the dominant color of the attached image? Reply with one lowercase English word only.",
+            },
+            {
+                "variant": "strict_final_low_reasoning",
+                "effort": self._app_server_image_probe_fallback_effort(model_id=model_id),
+                "prompt": (
+                    "Identify the dominant color of the attached image. "
+                    "Reply with exactly one lowercase English color word and nothing else. "
+                    "Valid answer shape examples: red, blue, green, black, white, gray, yellow, orange, purple, brown, pink. "
+                    "Do not explain and do not omit the final answer."
+                ),
+            },
+        ][:APP_SERVER_IMAGE_VERIFY_MAX_ATTEMPTS]
+
+    def _app_server_image_probe_fallback_effort(self, *, model_id: str | None = None) -> str:
+        model_record: dict[str, Any] | None = None
+        if model_id and self._router_config is not None:
+            for item in self._router_config.models():
+                if str(item.get("id") or "").strip() == str(model_id).strip():
+                    model_record = dict(item)
+                    break
+        supported = {
+            str(item).strip().lower()
+            for item in list((model_record or {}).get("supported_reasoning_levels") or [])
+            if str(item).strip()
+        }
+        native_supported = {
+            str(item).strip().lower()
+            for item in list((model_record or {}).get("native_supported_reasoning_levels") or [])
+            if str(item).strip()
+        }
+        if "off" in supported and "off" in native_supported:
+            return "off"
+        for effort in ("minimal", "low", "medium", "high", "xhigh"):
+            if effort in supported or effort in native_supported:
+                return effort
+        return "off"
+
+    def _run_app_server_image_probe_attempt(
+        self,
+        client: Any,
+        *,
+        profile: dict[str, Any],
+        model_id: str,
+        probe_path: Path,
+        prompt: str,
+        effort: str,
+        attempt_index: int,
+        variant: str,
+    ) -> dict[str, Any]:
+        probe_thread_id = ""
+        turn_id = ""
+        terminal_thread: dict[str, Any] | None = None
+        terminal_status = "failed"
+        final_text = ""
+        reasoning_text = ""
+        try:
+            started = client.request(
+                "thread/start",
+                self._thread_start_params(profile=profile, model=model_id, permission_mode="ask"),
+                timeout=THREAD_START_TIMEOUT_SECONDS,
+            )
+            probe_thread_id = str(dict(started.get("thread") or {}).get("id") or "").strip()
+            if not probe_thread_id:
+                raise RuntimeError("thread/start did not return a probe thread id.")
+            try:
+                client.request(
+                    "thread/name/set",
+                    {"threadId": probe_thread_id, "name": f"AstraBridge image transport probe {attempt_index}"},
+                )
+            except Exception:
+                pass
+            started_turn = client.request(
+                "turn/start",
+                {
+                    "threadId": probe_thread_id,
+                    "input": self._app_server_image_probe_inputs(probe_path, prompt=prompt),
+                    "cwd": self._runtime_workspace_root(),
+                    "approvalsReviewer": "user",
+                    "model": codex_model_id(profile, model_id),
+                    "effort": codex_reasoning_effort(effort),
+                    **self._turn_permission_overrides("ask"),
+                },
+                timeout=TURN_START_TIMEOUT_SECONDS,
+            )
+            turn_id = str(dict(started_turn.get("turn") or {}).get("id") or "").strip()
+            if not turn_id:
+                raise RuntimeError("turn/start did not return a probe turn id.")
+            terminal_thread = self._wait_for_probe_turn_terminal(
+                client,
+                thread_id=probe_thread_id,
+                turn_id=turn_id,
+                timeout_seconds=APP_SERVER_IMAGE_VERIFY_TIMEOUT_SECONDS,
+            )
+            terminal_status, final_text, reasoning_text = self._probe_turn_result(terminal_thread, turn_id=turn_id)
+        finally:
+            if probe_thread_id:
+                try:
+                    client.request("thread/archive", {"threadId": probe_thread_id}, timeout=THREAD_READ_TIMEOUT_SECONDS)
+                except Exception:
+                    pass
+        grounded = terminal_status == "completed" and final_text.strip().lower() == "red"
+        return {
+            "attempt": attempt_index,
+            "variant": variant,
+            "effort": codex_reasoning_effort(effort),
+            "thread_id": probe_thread_id,
+            "turn_id": turn_id,
+            "thread_status": terminal_status,
+            "final_text": final_text,
+            "reasoning_text": reasoning_text,
+            "grounded": grounded,
+            "failure_reason": self._app_server_image_probe_failure_reason(
+                status=terminal_status,
+                final_text=final_text,
+                reasoning_text=reasoning_text,
+            ),
+            "terminal_thread": terminal_thread,
+        }
+
+    def _app_server_image_probe_failure_reason(self, *, status: str, final_text: str, reasoning_text: str) -> str:
+        normalized_status = str(status or "").strip().lower()
+        normalized_final = final_text.strip().lower()
+        if normalized_status != "completed":
+            return f"turn_{normalized_status or 'unknown'}"
+        if normalized_final == "red":
+            return ""
+        if normalized_final:
+            return "unexpected_final_text"
+        if reasoning_text.strip():
+            return "reasoning_only_without_final_message"
+        return "missing_final_message"
+
+    def _app_server_image_transport_contract(self, profile: dict[str, Any], *, model: str) -> dict[str, str]:
+        transport_class = transport_class_for_profile(profile, provider_family=str(profile.get("provider_family") or "").strip() or None)
+        transport = transport_class(self._router, profile)
+        return {
+            "provider_id": str(profile.get("provider_id") or "").strip(),
+            "model_id": str(model or "").strip(),
+            "native_model": str(profile.get("model") or "").strip(),
+            "transport_adapter": transport.describe(),
+            "transport_signature": transport_signature_for_class(transport_class),
+        }
+
+    def _app_server_image_probe_inputs(self, probe_path: Path, *, prompt: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "text",
+                "text": str(prompt or "").strip(),
+                "text_elements": [],
+            },
+            {
+                "type": "localImage",
+                "path": self._path_for_runtime(probe_path),
+                "detail": "low",
+            },
+        ]
+
+    def _materialize_app_server_image_probe_fixture(self) -> tuple[Path, str]:
+        fixtures_root = self._projects.require_shell_state_root() / "verification-fixtures"
+        fixtures_root.mkdir(parents=True, exist_ok=True)
+        probe_path = fixtures_root / "app-server-image-probe-red-square.png"
+        payload = self._app_server_image_probe_png_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        if not probe_path.is_file() or probe_path.read_bytes() != payload:
+            probe_path.write_bytes(payload)
+        return probe_path, digest
+
+    def _app_server_image_probe_png_bytes(self) -> bytes:
+        width = height = 96
+        scanline = b"\x00" + (b"\xff\x00\x00\xff" * width)
+        raw = scanline * height
+
+        def chunk(kind: bytes, payload: bytes) -> bytes:
+            checksum = binascii.crc32(kind + payload) & 0xFFFFFFFF
+            return len(payload).to_bytes(4, "big") + kind + payload + checksum.to_bytes(4, "big")
+
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x06\x00\x00\x00")
+            + chunk(b"IDAT", zlib.compress(raw))
+            + chunk(b"IEND", b"")
+        )
+
+    @staticmethod
+    def _normalize_terminal_turn_status(value: Any) -> str:
+        normalized = str(value or "").strip().lower().replace("_", "")
+        if normalized in {"aborted", "interrupted", "canceled", "cancelled"}:
+            return "cancelled"
+        if normalized in {"inprogress", "running"}:
+            return "inprogress"
+        return normalized
+
+    @staticmethod
+    def _probe_turn_exact(thread: dict[str, Any], *, turn_id: str) -> dict[str, Any] | None:
+        clean_turn_id = str(turn_id or "").strip()
+        if not clean_turn_id:
+            return None
+        for turn in [item for item in list(thread.get("turns") or []) if isinstance(item, dict)]:
+            if str(turn.get("id") or "") == clean_turn_id:
+                return turn
+        return None
+
+    def _terminal_turn_recovery_thread(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        latest_thread: dict[str, Any] | None,
+        notification: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        target_turn_id = str(turn_id or "").strip()
+        if not target_turn_id:
+            return latest_thread
+        notification_turn = dict((notification or {}).get("turn") or {})
+        observed_turn_id = str(
+            notification_turn.get("observedTurnId") or notification_turn.get("id") or ""
+        ).strip()
+        candidates: list[dict[str, Any]] = []
+        if isinstance(latest_thread, dict):
+            candidates.append(latest_thread)
+        cached_native_thread = self._read_native_thread(thread_id)
+        if isinstance(cached_native_thread, dict):
+            candidates.append(self._decorate_thread(cached_native_thread))
+        best_candidate: dict[str, Any] | None = None
+        best_score = (-1, -1, -1, -1)
+        for candidate in candidates:
+            turn = self._probe_turn_exact(candidate, turn_id=target_turn_id)
+            if turn is None:
+                continue
+            score = self._turn_snapshot_quality_score(candidate, turn_id=target_turn_id)
+            if score > best_score:
+                best_candidate = candidate
+                best_score = score
+        if best_candidate is not None:
+            return best_candidate
+        if observed_turn_id and observed_turn_id != target_turn_id:
+            prior_candidate = self._thread_with_prior_completed_turn_mapped_to_target(
+                candidates=candidates,
+                observed_turn_id=observed_turn_id,
+                target_turn_id=target_turn_id,
+                observed_started_at=notification_turn.get("startedAt"),
+                observed_completed_at=notification_turn.get("completedAt"),
+            )
+            if prior_candidate is not None:
+                return prior_candidate
+            observed_candidate = self._thread_with_observed_turn_mapped_to_target(
+                candidates=candidates,
+                observed_turn_id=observed_turn_id,
+                target_turn_id=target_turn_id,
+            )
+            if observed_candidate is not None:
+                return observed_candidate
+        if not notification_turn:
+            return latest_thread
+        base_thread = dict(latest_thread or {})
+        turns = [item for item in list(base_thread.get("turns") or []) if isinstance(item, dict)]
+        turns.append(
+            {
+                **notification_turn,
+                "id": target_turn_id or str(notification_turn.get("id") or ""),
+            }
+        )
+        return {
+            **base_thread,
+            "id": str(base_thread.get("id") or thread_id or ""),
+            "turns": turns,
+        }
+
+    def _thread_with_observed_turn_mapped_to_target(
+        self,
+        *,
+        candidates: list[dict[str, Any]],
+        observed_turn_id: str,
+        target_turn_id: str,
+    ) -> dict[str, Any] | None:
+        clean_observed_turn_id = str(observed_turn_id or "").strip()
+        clean_target_turn_id = str(target_turn_id or "").strip()
+        if not clean_observed_turn_id or not clean_target_turn_id:
+            return None
+        best_candidate: dict[str, Any] | None = None
+        best_turn: dict[str, Any] | None = None
+        best_score = (-1, -1, -1, -1)
+        for candidate in candidates:
+            observed_turn = self._probe_turn_exact(candidate, turn_id=clean_observed_turn_id)
+            if observed_turn is None:
+                continue
+            score = self._turn_snapshot_quality_score(candidate, turn_id=clean_observed_turn_id)
+            if score > best_score:
+                best_candidate = candidate
+                best_turn = observed_turn
+                best_score = score
+        if best_candidate is None or best_turn is None:
+            return None
+        turns: list[dict[str, Any]] = []
+        replaced = False
+        for item in [entry for entry in list(best_candidate.get("turns") or []) if isinstance(entry, dict)]:
+            item_id = str(item.get("id") or "").strip()
+            if item_id == clean_target_turn_id:
+                turns.append(
+                    {
+                        **best_turn,
+                        "id": clean_target_turn_id,
+                        "observedTurnId": clean_observed_turn_id,
+                    }
+                )
+                replaced = True
+                continue
+            turns.append(item)
+        if not replaced:
+            turns.append(
+                {
+                    **best_turn,
+                    "id": clean_target_turn_id,
+                    "observedTurnId": clean_observed_turn_id,
+                }
+            )
+        return {**best_candidate, "turns": turns}
+
+    @staticmethod
+    def _turn_sort_timestamp_value(value: Any) -> float:
+        if value is None:
+            return float("-inf")
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value or "").strip()
+        if not text:
+            return float("-inf")
+        try:
+            return float(text)
+        except Exception:
+            pass
+        try:
+            return dt.datetime.fromisoformat(text).timestamp()
+        except Exception:
+            return float("-inf")
+
+    def _thread_with_prior_completed_turn_mapped_to_target(
+        self,
+        *,
+        candidates: list[dict[str, Any]],
+        observed_turn_id: str,
+        target_turn_id: str,
+        observed_started_at: Any = None,
+        observed_completed_at: Any = None,
+    ) -> dict[str, Any] | None:
+        clean_observed_turn_id = str(observed_turn_id or "").strip()
+        clean_target_turn_id = str(target_turn_id or "").strip()
+        if not clean_observed_turn_id or not clean_target_turn_id:
+            return None
+        observed_boundary = self._turn_sort_timestamp_value(observed_started_at)
+        if observed_boundary == float("-inf"):
+            observed_boundary = self._turn_sort_timestamp_value(observed_completed_at)
+        best_candidate: dict[str, Any] | None = None
+        best_turn: dict[str, Any] | None = None
+        best_rank = ((-1, -1, -1, -1), float("-inf"))
+        for candidate in candidates:
+            turns = [entry for entry in list(candidate.get("turns") or []) if isinstance(entry, dict)]
+            for turn in turns:
+                turn_id = str(turn.get("id") or "").strip()
+                if not turn_id or turn_id == clean_observed_turn_id:
+                    continue
+                status = self._normalize_terminal_turn_status(turn.get("status"))
+                if status not in TERMINAL_TURN_STATUSES:
+                    continue
+                turn_boundary = self._turn_sort_timestamp_value(turn.get("completedAt"))
+                if turn_boundary == float("-inf"):
+                    turn_boundary = self._turn_sort_timestamp_value(turn.get("completed_at"))
+                if turn_boundary == float("-inf"):
+                    turn_boundary = self._turn_sort_timestamp_value(turn.get("startedAt"))
+                if turn_boundary == float("-inf"):
+                    turn_boundary = self._turn_sort_timestamp_value(turn.get("started_at"))
+                if observed_boundary != float("-inf") and turn_boundary > observed_boundary:
+                    continue
+                score = self._turn_snapshot_quality_score(candidate, turn_id=turn_id)
+                if score[1] <= 0 and score[2] <= 0:
+                    continue
+                rank = (score, turn_boundary)
+                if rank > best_rank:
+                    best_candidate = candidate
+                    best_turn = turn
+                    best_rank = rank
+        if best_candidate is None or best_turn is None:
+            return None
+        source_turn_id = str(best_turn.get("id") or "").strip()
+        turns: list[dict[str, Any]] = []
+        replaced = False
+        for item in [entry for entry in list(best_candidate.get("turns") or []) if isinstance(entry, dict)]:
+            item_id = str(item.get("id") or "").strip()
+            if item_id == clean_target_turn_id:
+                turns.append(
+                    {
+                        **best_turn,
+                        "id": clean_target_turn_id,
+                        "observedTurnId": clean_observed_turn_id,
+                        "recoveredFromTurnId": source_turn_id or None,
+                    }
+                )
+                replaced = True
+                continue
+            turns.append(item)
+        if not replaced:
+            turns.append(
+                {
+                    **best_turn,
+                    "id": clean_target_turn_id,
+                    "observedTurnId": clean_observed_turn_id,
+                    "recoveredFromTurnId": source_turn_id or None,
+                }
+            )
+        return {**best_candidate, "turns": turns}
+
+    def _enrich_terminal_turn_thread(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        thread: dict[str, Any],
+    ) -> dict[str, Any]:
+        clean_thread_id = str(thread_id or "").strip()
+        clean_turn_id = str(turn_id or "").strip()
+        if not clean_thread_id or not clean_turn_id:
+            return thread
+        current_score = self._turn_snapshot_quality_score(thread, turn_id=clean_turn_id)
+        cached_native_thread = self._read_native_thread(clean_thread_id)
+        if not isinstance(cached_native_thread, dict):
+            return thread
+        cached_candidate = self._decorate_thread(cached_native_thread)
+        cached_score = self._turn_snapshot_quality_score(cached_candidate, turn_id=clean_turn_id)
+        return cached_candidate if cached_score > current_score else thread
+
+    def _turn_snapshot_quality_score(self, thread: dict[str, Any], *, turn_id: str) -> tuple[int, int, int, int]:
+        turn = self._probe_turn_exact(thread, turn_id=turn_id)
+        if turn is None:
+            return (-1, -1, -1, -1)
+        status = self._normalize_terminal_turn_status(turn.get("status"))
+        _thread_status, final_text, reasoning_text = self._probe_turn_result(thread, turn_id=turn_id)
+        item_count = len([item for item in list(turn.get("items") or []) if isinstance(item, dict)])
+        terminal_rank = 1 if status in TERMINAL_TURN_STATUSES else 0
+        return (
+            terminal_rank,
+            1 if bool(final_text.strip()) else 0,
+            1 if bool(reasoning_text.strip()) else 0,
+            item_count,
+        )
+
+    def _wait_for_probe_turn_terminal(
+        self,
+        client: Any,
+        *,
+        thread_id: str,
+        turn_id: str,
+        timeout_seconds: float,
+        operation_label: str = "the App Server image probe",
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + max(5.0, timeout_seconds)
+        latest_thread: dict[str, Any] | None = None
+        latest_projected_status = "missing"
+        latest_notification_status = ""
+        latest_read_error_type = ""
+        latest_read_error_message = ""
+        while time.monotonic() < deadline:
+            try:
+                result = client.request(
+                    "thread/read",
+                    {"threadId": thread_id, "includeTurns": True},
+                    timeout=THREAD_READ_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                latest_read_error_type = type(exc).__name__
+                latest_read_error_message = str(redact_sensitive(str(exc))).strip()[:400]
+                notification = self._terminal_turn_notification(thread_id=thread_id, turn_id=turn_id)
+                latest_notification_status = self._normalize_terminal_turn_status(
+                    dict(notification or {}).get("status")
+                )
+                fallback_thread = latest_thread
+                if fallback_thread is None:
+                    cached_native_thread = self._read_native_thread(thread_id)
+                    if isinstance(cached_native_thread, dict):
+                        fallback_thread = self._decorate_thread(cached_native_thread)
+                if (
+                    fallback_thread is not None
+                    and latest_notification_status in TERMINAL_TURN_STATUSES
+                ):
+                    reconciled_thread = self._reconcile_terminal_turn_notification(
+                        fallback_thread,
+                        turn_id=turn_id,
+                        notification=dict(notification or {}),
+                    )
+                    reconciled_status, final_text, _reasoning_text = self._probe_turn_result(
+                        reconciled_thread,
+                        turn_id=turn_id,
+                    )
+                    if reconciled_status in {"failed", "cancelled", "errored"} or bool(
+                        final_text.strip()
+                    ):
+                        self._record_event(
+                            {
+                                "type": "runtime_turn_terminal_notification_reconciled",
+                                "thread_id": thread_id,
+                                "turn_id": turn_id,
+                                "operation": str(operation_label or "runtime turn"),
+                                "projected_status": latest_projected_status,
+                                "notification_status": latest_notification_status,
+                                "final_text_present": bool(final_text.strip()),
+                                "thread_read_error_type": latest_read_error_type,
+                                "thread_read_error_message": latest_read_error_message or None,
+                            }
+                        )
+                        return reconciled_thread
+                time.sleep(1.0)
+                continue
+            latest_read_error_type = ""
+            latest_read_error_message = ""
+            latest_thread = self._decorate_thread(dict(result.get("thread") or {}))
+            target_turn = self._probe_turn_exact(latest_thread, turn_id=turn_id)
+            latest_projected_status = self._normalize_terminal_turn_status(dict(target_turn or {}).get("status")) or "missing"
+            if target_turn and latest_projected_status in TERMINAL_TURN_STATUSES:
+                return self._enrich_terminal_turn_thread(
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    thread=latest_thread,
+                )
+            notification = self._terminal_turn_notification(thread_id=thread_id, turn_id=turn_id)
+            latest_notification_status = self._normalize_terminal_turn_status(dict(notification or {}).get("status"))
+            if latest_notification_status in TERMINAL_TURN_STATUSES:
+                recovery_thread = self._terminal_turn_recovery_thread(
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    latest_thread=latest_thread,
+                    notification=dict(notification or {}),
+                )
+                if recovery_thread is None:
+                    time.sleep(1.0)
+                    continue
+                reconciled_thread = self._reconcile_terminal_turn_notification(
+                    recovery_thread,
+                    turn_id=turn_id,
+                    notification=dict(notification or {}),
+                )
+                reconciled_status, final_text, _reasoning_text = self._probe_turn_result(
+                    reconciled_thread,
+                    turn_id=turn_id,
+                )
+                notification_age = time.monotonic() - float(
+                    dict(notification or {}).get("observed_at_monotonic") or time.monotonic()
+                )
+                if (
+                    reconciled_status in {"failed", "cancelled", "errored"}
+                    or bool(final_text.strip())
+                    or notification_age >= TERMINAL_RESULT_GRACE_SECONDS
+                ):
+                    self._record_event(
+                        {
+                            "type": "runtime_turn_terminal_notification_reconciled",
+                            "thread_id": thread_id,
+                            "turn_id": turn_id,
+                            "operation": str(operation_label or "runtime turn"),
+                            "projected_status": latest_projected_status,
+                            "notification_status": latest_notification_status,
+                            "final_text_present": bool(final_text.strip()),
+                        }
+                    )
+                    return reconciled_thread
+            time.sleep(1.0)
+        clean_operation_label = str(operation_label or "the runtime turn").strip() or "the runtime turn"
+        self._record_event(
+            {
+                "type": "runtime_turn_terminal_timeout",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "operation": clean_operation_label,
+                "projected_status": latest_projected_status,
+                "notification_status": latest_notification_status or None,
+                "turn_count": len(list(dict(latest_thread or {}).get("turns") or [])),
+                "thread_read_error_type": latest_read_error_type or None,
+                "thread_read_error_message": latest_read_error_message or None,
+            }
+        )
+        raise TimeoutError(f"Timed out waiting for {clean_operation_label} to reach a terminal state.")
+
+    def _reconcile_terminal_turn_notification(
+        self,
+        thread: dict[str, Any],
+        *,
+        turn_id: str,
+        notification: dict[str, Any],
+    ) -> dict[str, Any]:
+        notified_turn = dict(notification.get("turn") or {})
+        notified_status = self._normalize_terminal_turn_status(
+            notification.get("status") or notified_turn.get("status")
+        )
+        if notified_status not in TERMINAL_TURN_STATUSES:
+            return thread
+        target = self._probe_turn_exact(thread, turn_id=turn_id)
+        target_id = str(dict(target or {}).get("id") or "")
+        turns: list[dict[str, Any]] = []
+        changed = False
+        for item in list(thread.get("turns") or []):
+            if not isinstance(item, dict):
+                continue
+            if item is target or (target_id and str(item.get("id") or "") == target_id):
+                turns.append(
+                    {
+                        **item,
+                        "status": notified_status,
+                        "error": notified_turn.get("error", item.get("error")),
+                        "completedAt": notified_turn.get("completedAt", item.get("completedAt")),
+                        "durationMs": notified_turn.get("durationMs", item.get("durationMs")),
+                    }
+                )
+                changed = True
+            else:
+                turns.append(item)
+        if changed:
+            return {**thread, "turns": turns}
+        synthetic_turn_id = str(turn_id or notified_turn.get("id") or "").strip()
+        if not synthetic_turn_id:
+            return thread
+        return {
+            **thread,
+            "turns": [
+                *turns,
+                {
+                    **notified_turn,
+                    "id": synthetic_turn_id,
+                    "status": notified_status,
+                },
+            ],
+        }
+
+    def _probe_turn(self, thread: dict[str, Any], *, turn_id: str) -> dict[str, Any] | None:
+        turns = [item for item in list(thread.get("turns") or []) if isinstance(item, dict)]
+        if not turns:
+            return None
+        exact = self._probe_turn_exact(thread, turn_id=turn_id)
+        if exact is not None:
+            return exact
+        return turns[-1]
+
+    def _probe_turn_result(self, thread: dict[str, Any], *, turn_id: str) -> tuple[str, str, str]:
+        turn = self._probe_turn(thread, turn_id=turn_id)
+        if not turn:
+            return "missing", "", ""
+        status = self._normalize_terminal_turn_status(turn.get("status")) or "unknown"
+        final_text = ""
+        reasoning_text = ""
+        for item in list(turn.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip()
+            if item_type not in {"agentMessage", "assistantMessage", "agent_message", "assistant_message"}:
+                if item_type == "reasoning":
+                    reasoning_text = self._reasoning_item_text(item) or reasoning_text
+                continue
+            provider_data = dict(item.get("providerData") or item.get("provider_data") or {})
+            normalized = dict(provider_data.get("normalized") or {})
+            text = self._projection_item_text(item, normalized)
+            if text:
+                final_text = text.strip()
+        return status, final_text, reasoning_text
+
+    def _reasoning_item_text(self, item: dict[str, Any]) -> str:
+        summary = item.get("summary")
+        parts: list[str] = []
+        if isinstance(summary, list):
+            for entry in summary:
+                if isinstance(entry, str) and entry.strip():
+                    parts.append(entry.strip())
+                    continue
+                if isinstance(entry, dict):
+                    text = str(entry.get("text") or "").strip()
+                    if text:
+                        parts.append(text)
+        if parts:
+            return "\n".join(parts)
+        content = item.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        return ""
+
+    def _clear_bounded_turn_goal(
+        self,
+        client: Any,
+        *,
+        thread_id: str,
+        turn_id: str,
+    ) -> bool:
+        clean_thread_id = str(thread_id or "").strip()
+        if not clean_thread_id:
+            return False
+        try:
+            client.request("thread/goal/clear", {"threadId": clean_thread_id})
+        except Exception as exc:  # noqa: BLE001
+            self._record_event(
+                {
+                    "type": "bounded_turn_goal_clear_failed",
+                    "thread_id": clean_thread_id,
+                    "turn_id": str(turn_id or "").strip() or None,
+                    "error": str(exc)[:300],
+                }
+            )
+            return False
+        self._record_event(
+            {
+                "type": "bounded_turn_goal_cleared",
+                "thread_id": clean_thread_id,
+                "turn_id": str(turn_id or "").strip() or None,
+            }
+        )
+        return True
+
+    def _stop_bounded_turn_follow_on_execution(
+        self,
+        profile: dict[str, Any],
+        client: Any,
+        *,
+        thread_id: str,
+        completed_turn_id: str,
+    ) -> dict[str, Any]:
+        clean_thread_id = str(thread_id or "").strip()
+        clean_completed_turn_id = str(completed_turn_id or "").strip()
+        if not clean_thread_id or not clean_completed_turn_id:
+            return {"goal_cleared": False, "follow_on_turn_id": None, "follow_on_turn_interrupted": False}
+        goal_cleared = self._clear_bounded_turn_goal(
+            client,
+            thread_id=clean_thread_id,
+            turn_id=clean_completed_turn_id,
+        )
+        follow_on_turn_id: str | None = None
+        follow_on_turn_interrupted = False
+        try:
+            result = client.request(
+                "thread/read",
+                {"threadId": clean_thread_id, "includeTurns": True},
+                timeout=THREAD_READ_TIMEOUT_SECONDS,
+            )
+            thread = self._decorate_thread(dict(result.get("thread") or {}))
+            turns = [item for item in list(thread.get("turns") or []) if isinstance(item, dict)]
+            latest_turn = turns[-1] if turns else None
+            latest_turn_id = str(dict(latest_turn or {}).get("id") or "").strip()
+            latest_status = self._normalize_terminal_turn_status(dict(latest_turn or {}).get("status"))
+            if (
+                latest_turn is not None
+                and latest_turn_id
+                and latest_turn_id != clean_completed_turn_id
+                and latest_status not in TERMINAL_TURN_STATUSES
+            ):
+                follow_on_turn_id = latest_turn_id
+                self.interrupt_turn(profile, clean_thread_id, follow_on_turn_id)
+                follow_on_turn_interrupted = True
+        except Exception as exc:  # noqa: BLE001
+            self._record_event(
+                {
+                    "type": "bounded_turn_follow_on_cleanup_failed",
+                    "thread_id": clean_thread_id,
+                    "turn_id": clean_completed_turn_id,
+                    "error": str(exc)[:300],
+                }
+            )
+        self._record_event(
+            {
+                "type": "bounded_turn_follow_on_cleanup",
+                "thread_id": clean_thread_id,
+                "turn_id": clean_completed_turn_id,
+                "goal_cleared": goal_cleared,
+                "follow_on_turn_id": follow_on_turn_id,
+                "follow_on_turn_interrupted": follow_on_turn_interrupted,
+            }
+        )
+        self._clear_active_turn_execution_policy(
+            thread_id=clean_thread_id,
+            turn_id=clean_completed_turn_id,
+        )
+        return {
+            "goal_cleared": goal_cleared,
+            "follow_on_turn_id": follow_on_turn_id,
+            "follow_on_turn_interrupted": follow_on_turn_interrupted,
         }
 
     def _resolve_requested_thread_id(self, thread_id: str) -> str:
@@ -1461,6 +5064,7 @@ class RuntimeService:
         permission_mode: str,
         collaboration_mode: str | None,
         context_mode: str,
+        execution_policy: str,
         runtime_status: dict[str, Any],
         attachments: list[dict[str, Any]],
     ) -> dict[str, Any]:
@@ -1471,6 +5075,11 @@ class RuntimeService:
             "background_start": True,
         }
         self._projects.switch_thread(effective_thread_id)
+        self._record_execution_policy_started(
+            thread_id=effective_thread_id,
+            turn_id=str(synthetic_turn.get("id") or ""),
+            policy=execution_policy,
+        )
         self._cache_thread_entry(
             effective_thread_id,
             {
@@ -1966,6 +5575,7 @@ class RuntimeService:
         permission_mode: str,
         collaboration_mode: str | None,
         context_mode: str = "default",
+        include_dynamic_tools: bool = True,
     ) -> tuple[str, dict[str, Any] | None]:
         if self._tasks is None:
             return source_thread_id, None
@@ -2000,6 +5610,7 @@ class RuntimeService:
                 permission_mode=permission_mode,
                 desired=desired,
                 reason="no_context_fresh_thread",
+                include_dynamic_tools=include_dynamic_tools,
             )
 
         reusable = self._tasks.find_provider_thread(
@@ -2054,6 +5665,7 @@ class RuntimeService:
                 permission_mode=permission_mode,
                 collaboration_mode=collaboration_mode,
                 reason="provider_handoff_source_missing",
+                include_dynamic_tools=include_dynamic_tools,
             )
 
         if not source_thread_id:
@@ -2066,6 +5678,7 @@ class RuntimeService:
                 permission_mode=permission_mode,
                 desired=desired,
                 reason="provider_handoff_no_source_thread",
+                include_dynamic_tools=include_dynamic_tools,
             )
 
         if handoff_needed:
@@ -2083,11 +5696,17 @@ class RuntimeService:
                 permission_mode=permission_mode,
                 desired=desired,
                 reason="provider_handoff_cross_provider_fresh_thread",
+                include_dynamic_tools=include_dynamic_tools,
             )
 
         params = {
             "threadId": source_thread_id,
-            **self._thread_start_params(profile=profile, model=model, permission_mode=permission_mode),
+            **self._thread_start_params(
+                profile=profile,
+                model=model,
+                permission_mode=permission_mode,
+                include_dynamic_tools=include_dynamic_tools,
+            ),
         }
         try:
             result = client.request("thread/fork", params, timeout=THREAD_FORK_TIMEOUT_SECONDS)
@@ -2116,6 +5735,7 @@ class RuntimeService:
                 permission_mode=permission_mode,
                 collaboration_mode=collaboration_mode,
                 reason="provider_handoff_source_missing",
+                include_dynamic_tools=include_dynamic_tools,
             )
         thread = dict(result.get("thread") or {})
         target_thread_id = str(thread.get("id") or "")
@@ -2164,8 +5784,14 @@ class RuntimeService:
         permission_mode: str,
         desired: dict[str, Any],
         reason: str,
+        include_dynamic_tools: bool = True,
     ) -> tuple[str, dict[str, Any] | None]:
-        params = self._thread_start_params(profile=profile, model=model, permission_mode=permission_mode)
+        params = self._thread_start_params(
+            profile=profile,
+            model=model,
+            permission_mode=permission_mode,
+            include_dynamic_tools=include_dynamic_tools,
+        )
         result = client.request("thread/start", params, timeout=THREAD_START_TIMEOUT_SECONDS)
         thread = dict(result.get("thread") or {})
         target_thread_id = str(thread.get("id") or "")
@@ -2217,6 +5843,7 @@ class RuntimeService:
         permission_mode: str,
         collaboration_mode: str | None,
         reason: str,
+        include_dynamic_tools: bool = True,
     ) -> tuple[str, dict[str, Any] | None]:
         desired = self._task_thread_settings(
             profile,
@@ -2226,7 +5853,12 @@ class RuntimeService:
             collaboration_mode=collaboration_mode,
             name="Recovered provider thread",
         )
-        params = self._thread_start_params(profile=profile, model=model, permission_mode=permission_mode)
+        params = self._thread_start_params(
+            profile=profile,
+            model=model,
+            permission_mode=permission_mode,
+            include_dynamic_tools=include_dynamic_tools,
+        )
         result = client.request("thread/start", params, timeout=THREAD_START_TIMEOUT_SECONDS)
         thread = dict(result.get("thread") or {})
         target_thread_id = str(thread.get("id") or "")
@@ -2316,6 +5948,7 @@ class RuntimeService:
                 "runtime": runtime_status,
             }
         )
+        self._clear_runtime_pin(thread_id=thread_id, turn_id=resolved_turn_id, reason="turn_interrupted")
         cancelled_modals = self._modals.cancel_for_turn(
             thread_id,
             resolved_turn_id,
@@ -2337,11 +5970,15 @@ class RuntimeService:
             or "invalid thread id" in message
         )
 
-    def _thread_exists(self, client: AppServerClient, thread_id: str) -> bool:
+    def _thread_exists(self, client: AppServerClient, thread_id: str, *, timeout: float | None = None) -> bool:
         if not str(thread_id or "").strip():
             return False
         try:
-            client.request("thread/read", {"threadId": thread_id, "includeTurns": False}, timeout=THREAD_READ_TIMEOUT_SECONDS)
+            client.request(
+                "thread/read",
+                {"threadId": thread_id, "includeTurns": False},
+                timeout=THREAD_READ_TIMEOUT_SECONDS if timeout is None else timeout,
+            )
             return True
         except JsonRpcError as exc:
             if self._is_thread_not_found_error(exc):
@@ -2566,6 +6203,7 @@ class RuntimeService:
                 "context_window": context_window,
                 "context_percent": percent,
                 "turn_id": str(params.get("turnId") or ""),
+                "total": total,
                 "last": last,
                 "last_updated_at": event.get("timestamp"),
             }
@@ -2666,6 +6304,7 @@ class RuntimeService:
             environment=runtime_environment,
             codex_home=lane_codex_home,
         )
+        runtime_status = self._refresh_runtime_model_route_metadata(runtime_status, profile=profile)
         runtime_status["execution_host"] = self._execution_host()
         runtime_status["wsl_distro"] = self._wsl_distro()
         try:
@@ -2736,6 +6375,42 @@ class RuntimeService:
         )
         return base_home.parent / "runtime-lanes" / RuntimeClientPool.lane_id_for(lane_hint)
 
+    def _refresh_runtime_model_route_metadata(
+        self,
+        runtime_status: dict[str, Any],
+        *,
+        profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._router_config is None:
+            return runtime_status
+        provider_id = str(runtime_status.get("provider_id") or profile.get("provider_id") or "").strip()
+        model_name = str(runtime_status.get("model") or profile.get("model") or "").strip()
+        if not provider_id or not model_name:
+            return runtime_status
+        exact_model_id = f"{provider_id}/{model_name}"
+        configured_model = next(
+            (
+                item
+                for item in self._router_config.models()
+                if str(item.get("id") or "").strip() == exact_model_id
+                or (
+                    str(item.get("provider") or item.get("provider_id") or "").strip() == provider_id
+                    and str(item.get("native_model") or "").strip() == model_name
+                )
+            ),
+            None,
+        )
+        if not configured_model:
+            return runtime_status
+        refreshed = dict(runtime_status)
+        configured_modalities = list(configured_model.get("input_modalities") or [])
+        if configured_modalities:
+            refreshed["input_modalities"] = configured_modalities
+        configured_limits = dict(configured_model.get("modality_limits") or {})
+        if configured_limits:
+            refreshed["modality_limits"] = configured_limits
+        return refreshed
+
     def _should_defer_runtime_prepare(self, profile: dict[str, Any]) -> bool:
         if not (self._runtime_start_turn_in_progress or self._runtime_thread_start_in_progress):
             return False
@@ -2789,6 +6464,10 @@ class RuntimeService:
             if requested and current and requested != current:
                 return True
         return False
+
+    def _active_runtime_status(self) -> dict[str, Any]:
+        status = getattr(self._runtime_config, "status", None)
+        return dict(status() or {}) if callable(status) else {}
 
     def _runtime_defer_preview(self, profile: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -3010,6 +6689,9 @@ class RuntimeService:
             return False
         if getattr(self._runtime_operation_local, "in_start_turn", False):
             return False
+        if self._runtime_pin_signature is not None and time.monotonic() >= self._runtime_pin_until_monotonic:
+            self._clear_runtime_pin(reason="runtime_pin_expired")
+            return False
         return (
             self._client is not None
             and self._client.is_running()
@@ -3019,6 +6701,40 @@ class RuntimeService:
             and requested_signature != self._runtime_signature
             and time.monotonic() < self._runtime_pin_until_monotonic
         )
+
+    def _clear_runtime_pin(
+        self,
+        *,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        reason: str,
+    ) -> bool:
+        cleared_thread_id = ""
+        cleared_turn_id = ""
+        with self._lock:
+            if self._runtime_pin_signature is None:
+                return False
+            pinned_thread_id = str(self._runtime_pin_thread_id or "")
+            pinned_turn_id = str(self._runtime_pin_turn_id or "")
+            if thread_id and pinned_thread_id and thread_id != pinned_thread_id:
+                return False
+            if turn_id and pinned_turn_id and turn_id != pinned_turn_id:
+                return False
+            cleared_thread_id = pinned_thread_id
+            cleared_turn_id = pinned_turn_id
+            self._runtime_pin_signature = None
+            self._runtime_pin_until_monotonic = 0.0
+            self._runtime_pin_thread_id = None
+            self._runtime_pin_turn_id = None
+        self._record_event(
+            {
+                "type": "runtime_turn_pin_cleared",
+                "thread_id": cleared_thread_id,
+                "turn_id": cleared_turn_id,
+                "reason": reason,
+            }
+        )
+        return True
 
     def _close_client(self, reason: str) -> None:
         with self._lock:
@@ -3030,10 +6746,62 @@ class RuntimeService:
                 self._client = None
                 self._mcp_status_thread_signature = None
                 self._mcp_status_thread_id = None
-            self._record_event({"type": "runtime_stopped", "reason": reason})
+                self._record_event({"type": "runtime_stopped", "reason": reason})
 
     def _on_notification(self, method: str, params: Any) -> None:
         payload = redact_sensitive(params)
+        if isinstance(payload, dict):
+            self._bind_observed_turn_to_active_policy(payload, source_method=method)
+            self._record_no_tools_notification_violation(method, payload)
+        if isinstance(payload, dict) and method in TERMINAL_TURN_NOTIFICATION_METHODS:
+            thread_id = str(payload.get("threadId") or "")
+            terminal_turn = dict(payload.get("turn") or {})
+            observed_turn_id = str(payload.get("turnId") or terminal_turn.get("id") or "")
+            active_policy = self._active_turn_execution_policy_for(
+                {"threadId": thread_id, "turnId": observed_turn_id}
+            )
+            canonical_turn_id = str(dict(active_policy or {}).get("turn_id") or "").strip()
+            turn_id = canonical_turn_id or observed_turn_id
+            turn_status = self._normalize_terminal_turn_status(
+                "cancelled" if method == "turn/aborted" else terminal_turn.get("status") or method.removeprefix("turn/")
+            )
+            self._remember_terminal_turn_notification(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                method=method,
+                status=turn_status,
+                turn={**terminal_turn, "observedTurnId": observed_turn_id or None},
+            )
+            keep_visible = self._should_keep_terminal_snapshot_visible(thread_id=thread_id, turn_id=turn_id)
+            self._schedule_terminal_thread_snapshot(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                method=method,
+                keep_visible=keep_visible,
+            )
+            self._clear_runtime_pin(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                reason=f"notification:{method}",
+            )
+            preserve_execution_policy = bool(
+                active_policy is not None
+                and active_policy.get("policy") == NO_TOOLS_EXECUTION_POLICY
+                and bool(active_policy.get("strict_thread_scope"))
+                and turn_status == "completed"
+            )
+            if preserve_execution_policy:
+                self._record_event(
+                    {
+                        "type": "turn_execution_policy_clear_deferred",
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "policy": NO_TOOLS_EXECUTION_POLICY,
+                        "reason": "wait_for_bounded_follow_on_cleanup",
+                    }
+                )
+            else:
+                self._clear_active_turn_execution_policy(thread_id=thread_id, turn_id=turn_id)
         self._record_project_context_notification(method, payload)
         if method == "thread/name/updated" and isinstance(payload, dict):
             self._cache_thread_entry(str(payload.get("threadId") or ""), {"name": payload.get("threadName")})
@@ -3046,9 +6814,130 @@ class RuntimeService:
                 self._cache_thread_entry(thread_id, {"name": thread.get("name")})
         self._record_event({"type": "notification", "method": method, "params": payload})
 
+    def _remember_terminal_turn_notification(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        method: str,
+        status: str,
+        turn: dict[str, Any],
+    ) -> None:
+        clean_thread_id = str(thread_id or "").strip()
+        clean_turn_id = str(turn_id or "").strip()
+        clean_status = self._normalize_terminal_turn_status(status)
+        if not clean_thread_id or clean_status not in TERMINAL_TURN_STATUSES:
+            return
+        record = {
+            "thread_id": clean_thread_id,
+            "turn_id": clean_turn_id,
+            "method": str(method or "").strip(),
+            "status": clean_status,
+            "turn": deepcopy(turn),
+            "observed_at": now_iso(),
+            "observed_at_monotonic": time.monotonic(),
+        }
+        with self._lock:
+            self._terminal_turn_notifications[(clean_thread_id, clean_turn_id)] = record
+            while len(self._terminal_turn_notifications) > TERMINAL_TURN_NOTIFICATION_LIMIT:
+                oldest_key = next(iter(self._terminal_turn_notifications))
+                self._terminal_turn_notifications.pop(oldest_key, None)
+
+    def _terminal_turn_notification(self, *, thread_id: str, turn_id: str) -> dict[str, Any] | None:
+        clean_thread_id = str(thread_id or "").strip()
+        clean_turn_id = str(turn_id or "").strip()
+        if not clean_thread_id:
+            return None
+        with self._lock:
+            exact = self._terminal_turn_notifications.get((clean_thread_id, clean_turn_id))
+            if exact is not None:
+                return deepcopy(exact)
+            if clean_turn_id:
+                fallback = self._terminal_turn_notifications.get((clean_thread_id, ""))
+                if fallback is not None:
+                    return deepcopy(fallback)
+        return None
+
+    def _should_keep_terminal_snapshot_visible(self, *, thread_id: str, turn_id: str) -> bool:
+        clean_thread_id = str(thread_id or "").strip()
+        clean_turn_id = str(turn_id or "").strip()
+        if not clean_thread_id:
+            return False
+        pinned_thread_id = str(self._runtime_pin_thread_id or "").strip()
+        pinned_turn_id = str(self._runtime_pin_turn_id or "").strip()
+        if clean_thread_id != pinned_thread_id:
+            return False
+        if pinned_turn_id and clean_turn_id and clean_turn_id != pinned_turn_id:
+            return False
+        project_thread_id = str((self._projects.current_project or {}).get("current_thread_id") or "").strip()
+        if project_thread_id == clean_thread_id:
+            return True
+        if self._tasks is None:
+            return False
+        current_task = self._tasks.current_task() or {}
+        if not isinstance(current_task, dict) or not current_task:
+            return False
+        if str(current_task.get("active_provider_thread_id") or "").strip() == clean_thread_id:
+            return True
+        for item in list(current_task.get("provider_threads") or []):
+            if isinstance(item, dict) and str(item.get("thread_id") or "").strip() == clean_thread_id:
+                return True
+        return False
+
     def _on_server_request(self, method: str, params: Any) -> Any:
+        active_policy = self._active_turn_execution_policy_for(params)
+        if active_policy is not None and active_policy.get("policy") == NO_TOOLS_EXECUTION_POLICY:
+            payload = dict(params or {}) if isinstance(params, dict) else {}
+            if method == "item/tool/call":
+                self._record_execution_policy_tool_blocked(
+                    payload,
+                    policy=NO_TOOLS_EXECUTION_POLICY,
+                    request_method=method,
+                    tool_name=str(payload.get("tool") or payload.get("name") or "dynamic_tool"),
+                )
+                return {
+                    "success": False,
+                    "contentItems": [
+                        {
+                            "type": "inputText",
+                            "text": "AstraBridge blocked this tool call because the task-graph node declares no tools.",
+                        }
+                    ],
+                }
+            if method in {
+                "item/commandExecution/requestApproval",
+                "item/fileChange/requestApproval",
+                "item/tool/requestUserInput",
+                "mcpServer/elicitation/request",
+                "item/permissions/requestApproval",
+                "applyPatchApproval",
+                "execCommandApproval",
+            }:
+                self._record_execution_policy_tool_blocked(
+                    payload,
+                    policy=NO_TOOLS_EXECUTION_POLICY,
+                    request_method=method,
+                )
+                return self._execution_policy_decline_response(method)
         if method == "item/tool/call":
             return self._handle_dynamic_tool_call(params)
+        if (
+            active_policy is not None
+            and active_policy.get("policy") == PATCH_ONLY_EXECUTION_POLICY
+            and method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval", "execCommandApproval"}
+        ):
+            payload = dict(params or {}) if isinstance(params, dict) else {}
+            self._record_event(
+                {
+                    "type": "turn_execution_policy_approval_blocked",
+                    "thread_id": payload.get("threadId"),
+                    "turn_id": payload.get("turnId"),
+                    "policy": PATCH_ONLY_EXECUTION_POLICY,
+                    "request_method": method,
+                    "reason": "shell_or_file_change_not_allowed_by_patch_only_contract",
+                }
+            )
+            return {"decision": "denied" if method == "execCommandApproval" else "decline"}
         if method in {
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",
@@ -3764,6 +7653,54 @@ class RuntimeService:
                 }
             )
         return items
+
+    def _assert_attachment_route_supported(
+        self,
+        attachments: list[dict[str, Any]],
+        *,
+        runtime_status: dict[str, Any],
+        execution_backend: str,
+        provider_id: str,
+        model_id: str,
+    ) -> None:
+        has_images = any(
+            str(item.get("kind") or "").strip().lower() == "image"
+            or str(item.get("mime_type") or item.get("mimeType") or "").strip().lower().startswith("image/")
+            for item in attachments
+            if isinstance(item, dict)
+        )
+        if not has_images:
+            return
+        modalities = {str(item).strip().lower() for item in list(runtime_status.get("input_modalities") or [])}
+        if "image" not in modalities:
+            reason = "model_declares_no_image_input"
+            message = "Image attachments are unavailable for the selected model. Remove the images or choose a model that declares image input."
+        elif execution_backend == "app_server" and str(
+            dict(runtime_status.get("modality_limits") or {}).get("app_server_image_input_status") or "unverified"
+        ).strip().lower() != "verified":
+            reason = "app_server_image_transport_unverified"
+            message = (
+                "Image attachments are blocked before dispatch because this App Server route has not verified image transport. "
+                "Choose a verified vision route or use the dedicated vision capability."
+            )
+        else:
+            return
+        diagnostics = self._attachment_diagnostics(
+            attachments,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+        self._record_event(
+            {
+                "type": "attachment_route_rejected",
+                "reason": reason,
+                "provider_id": provider_id,
+                "model": model_id,
+                "execution_backend": execution_backend,
+                "attachment_diagnostics": diagnostics,
+            }
+        )
+        raise ValueError(message)
 
     def _attachment_event_items(self, attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -4946,7 +8883,14 @@ for host in candidates:
             assignments.append(f'{name}="${{{name}:-}}"')
         return (" ".join(assignments) + " ") if assignments else ""
 
-    def _thread_start_params(self, *, profile: dict[str, Any], model: str | None, permission_mode: str) -> dict[str, Any]:
+    def _thread_start_params(
+        self,
+        *,
+        profile: dict[str, Any],
+        model: str | None,
+        permission_mode: str,
+        include_dynamic_tools: bool = True,
+    ) -> dict[str, Any]:
         params = {
             "cwd": self._runtime_workspace_root(),
             "approvalsReviewer": "user",
@@ -4954,7 +8898,7 @@ for host in candidates:
             "model": codex_model_id(profile, model),
             "serviceName": "astrabridge_desktop",
         }
-        dynamic_tools = self._dynamic_tools()
+        dynamic_tools = self._dynamic_tools() if include_dynamic_tools else []
         if dynamic_tools:
             params["dynamicTools"] = dynamic_tools
         params.update(self._thread_permission_overrides(permission_mode))
@@ -5161,6 +9105,395 @@ for host in candidates:
             },
         }
 
+    def _normalize_turn_execution_policy(self, value: str | None) -> str:
+        normalized = str(value or "standard").strip().lower().replace("-", "_")
+        if normalized not in VALID_TURN_EXECUTION_POLICIES:
+            raise ValueError(f"Unsupported execution_policy={value!r}. Expected one of: {', '.join(sorted(VALID_TURN_EXECUTION_POLICIES))}.")
+        return normalized
+
+    def _supports_patch_only_execution_policy(self, profile: dict[str, Any], execution_backend: str) -> bool:
+        """Fail closed until a runtime explicitly advertises a native patch-only guard.
+
+        Provider metadata saying that a model understands `apply_patch` is not enough:
+        AstraBridge also needs an app-server execution boundary that excludes shell
+        and arbitrary file-change requests. This explicit flag is intentionally
+        absent from current profiles until that boundary is verified end to end.
+        """
+        return bool(
+            execution_backend == "app_server"
+            and profile.get("verified_native_patch_only_enforcement") is True
+        )
+
+    def _execution_policy_prompt(self, policy: str, text: str) -> str:
+        if policy == NO_TOOLS_EXECUTION_POLICY:
+            return (
+                "AstraBridge execution contract: answer directly from the supplied task context and declared artifacts. "
+                "Do not invoke shell commands, file tools, web search, MCP, dynamic tools, user-input tools, or any other tool. "
+                "If the task cannot be completed without a tool, return a concise blocked result instead of requesting one.\n\n"
+                f"{text}"
+            )
+        if policy != PATCH_ONLY_EXECUTION_POLICY:
+            return text
+        return (
+            "AstraBridge execution contract: use only the native apply_patch tool for code changes. "
+            "Do not invoke shell commands or direct file-change tools. If native apply_patch is unavailable, stop and explain why.\n\n"
+            f"{text}"
+        )
+
+    def _register_active_turn_execution_policy(self, thread_id: str, policy: str) -> None:
+        if not thread_id:
+            return
+        with self._lock:
+            if policy in {PATCH_ONLY_EXECUTION_POLICY, NO_TOOLS_EXECUTION_POLICY}:
+                self._active_turn_execution_policies[thread_id] = {
+                    "policy": policy,
+                    "turn_id": "",
+                    "strict_thread_scope": policy == NO_TOOLS_EXECUTION_POLICY,
+                }
+            else:
+                self._active_turn_execution_policies.pop(thread_id, None)
+
+    def _record_execution_policy_started(self, *, thread_id: str, turn_id: str, policy: str) -> None:
+        if policy not in {PATCH_ONLY_EXECUTION_POLICY, NO_TOOLS_EXECUTION_POLICY}:
+            return
+        with self._lock:
+            active = self._active_turn_execution_policies.get(thread_id)
+            if active is not None:
+                active["turn_id"] = turn_id
+            stale_alias_keys = [
+                key for key in self._observed_turn_aliases
+                if key[0] == thread_id
+            ]
+            for key in stale_alias_keys:
+                self._observed_turn_aliases.pop(key, None)
+            self._fail_closed_turn_interrupts = {
+                key for key in self._fail_closed_turn_interrupts if key[0] != thread_id
+            }
+        self._record_event(
+            {
+                "type": "turn_execution_policy_started",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "policy": policy,
+                "enforcement": (
+                    "no_dynamic_tools_read_only_with_auto_decline_and_trace_audit"
+                    if policy == NO_TOOLS_EXECUTION_POLICY
+                    else "native_apply_patch_only_with_approval_fallback"
+                ),
+            }
+        )
+
+    def _observed_turn_alias_target(self, *, thread_id: str, observed_turn_id: str) -> str:
+        clean_thread_id = str(thread_id or "").strip()
+        clean_observed_turn_id = str(observed_turn_id or "").strip()
+        if not clean_thread_id or not clean_observed_turn_id:
+            return ""
+        with self._lock:
+            record = dict(self._observed_turn_aliases.get((clean_thread_id, clean_observed_turn_id)) or {})
+        return str(record.get("canonical_turn_id") or "").strip()
+
+    def _remember_observed_turn_alias(
+        self,
+        *,
+        thread_id: str,
+        observed_turn_id: str,
+        canonical_turn_id: str,
+        source_method: str,
+    ) -> None:
+        clean_thread_id = str(thread_id or "").strip()
+        clean_observed_turn_id = str(observed_turn_id or "").strip()
+        clean_canonical_turn_id = str(canonical_turn_id or "").strip()
+        if (
+            not clean_thread_id
+            or not clean_observed_turn_id
+            or not clean_canonical_turn_id
+            or clean_observed_turn_id == clean_canonical_turn_id
+        ):
+            return
+        record = {
+            "canonical_turn_id": clean_canonical_turn_id,
+            "observed_turn_id": clean_observed_turn_id,
+            "source_method": str(source_method or "").strip() or None,
+            "updated_at": now_iso(),
+        }
+        with self._lock:
+            self._observed_turn_aliases[(clean_thread_id, clean_observed_turn_id)] = record
+            while len(self._observed_turn_aliases) > TERMINAL_TURN_NOTIFICATION_LIMIT:
+                oldest_key = next(iter(self._observed_turn_aliases))
+                self._observed_turn_aliases.pop(oldest_key, None)
+        self._record_event(
+            {
+                "type": "turn_execution_policy_observed_turn_alias",
+                "thread_id": clean_thread_id,
+                "turn_id": clean_canonical_turn_id,
+                "observed_turn_id": clean_observed_turn_id,
+                "source_method": str(source_method or "").strip() or None,
+            }
+        )
+
+    def _bind_observed_turn_to_active_policy(self, payload: dict[str, Any], *, source_method: str) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        alias_payload = dict(payload)
+        if not str(alias_payload.get("turnId") or "").strip():
+            nested_turn = dict(alias_payload.get("turn") or {})
+            if nested_turn:
+                alias_payload["turnId"] = nested_turn.get("id")
+        thread_id = str(alias_payload.get("threadId") or "").strip()
+        observed_turn_id = str(alias_payload.get("turnId") or "").strip()
+        if not thread_id or not observed_turn_id:
+            return ""
+        active = self._active_turn_execution_policy_for(alias_payload)
+        canonical_turn_id = str(dict(active or {}).get("turn_id") or "").strip()
+        if not canonical_turn_id or canonical_turn_id == observed_turn_id:
+            return canonical_turn_id
+        terminal_notification = self._terminal_turn_notification(
+            thread_id=thread_id,
+            turn_id=canonical_turn_id,
+        )
+        terminal_status = self._normalize_terminal_turn_status(
+            dict(terminal_notification or {}).get("status")
+        )
+        if terminal_status in TERMINAL_TURN_STATUSES:
+            return canonical_turn_id
+        self._remember_observed_turn_alias(
+            thread_id=thread_id,
+            observed_turn_id=observed_turn_id,
+            canonical_turn_id=canonical_turn_id,
+            source_method=source_method,
+        )
+        return canonical_turn_id
+
+    def _active_turn_execution_policy_for(self, params: Any) -> dict[str, Any] | None:
+        payload = dict(params or {}) if isinstance(params, dict) else {}
+        thread_id = str(payload.get("threadId") or "")
+        turn_id = str(payload.get("turnId") or "")
+        if not thread_id:
+            return None
+        with self._lock:
+            active = dict(self._active_turn_execution_policies.get(thread_id) or {})
+        if not active:
+            return None
+        active_turn_id = str(active.get("turn_id") or "")
+        if (
+            active_turn_id
+            and turn_id
+            and active_turn_id != turn_id
+            and not bool(active.get("strict_thread_scope"))
+        ):
+            if self._observed_turn_alias_target(thread_id=thread_id, observed_turn_id=turn_id) != active_turn_id:
+                return None
+        return active
+
+    def _clear_active_turn_execution_policy(self, *, thread_id: str, turn_id: str) -> None:
+        clean_thread_id = str(thread_id or "").strip()
+        clean_turn_id = str(turn_id or "").strip()
+        if not clean_thread_id:
+            return
+        with self._lock:
+            active = dict(self._active_turn_execution_policies.get(clean_thread_id) or {})
+            if not active:
+                return
+            active_turn_id = str(active.get("turn_id") or "").strip()
+            if (
+                active_turn_id
+                and clean_turn_id
+                and active_turn_id != clean_turn_id
+                and not bool(active.get("strict_thread_scope"))
+            ):
+                if self._observed_turn_alias_target(thread_id=clean_thread_id, observed_turn_id=clean_turn_id) != active_turn_id:
+                    return
+            self._active_turn_execution_policies.pop(clean_thread_id, None)
+            stale_alias_keys = [
+                key for key in self._observed_turn_aliases
+                if key[0] == clean_thread_id
+            ]
+            for key in stale_alias_keys:
+                self._observed_turn_aliases.pop(key, None)
+            self._fail_closed_turn_interrupts = {
+                key for key in self._fail_closed_turn_interrupts if key[0] != clean_thread_id
+            }
+
+    @staticmethod
+    def _execution_policy_decline_response(method: str) -> dict[str, Any]:
+        if method == "execCommandApproval":
+            return {"decision": "denied"}
+        if method == "item/tool/requestUserInput":
+            return {"answers": {}}
+        if method == "mcpServer/elicitation/request":
+            return {"action": "decline"}
+        return {"decision": "decline"}
+
+    def _record_execution_policy_tool_blocked(
+        self,
+        payload: dict[str, Any],
+        *,
+        policy: str,
+        request_method: str,
+        tool_name: str | None = None,
+        item_type: str | None = None,
+        item_id: str | None = None,
+    ) -> None:
+        active = self._active_turn_execution_policy_for(payload)
+        observed_turn_id = str(payload.get("turnId") or "").strip()
+        canonical_turn_id = str(dict(active or {}).get("turn_id") or observed_turn_id).strip()
+        self._record_event(
+            {
+                "type": "turn_execution_policy_tool_blocked",
+                "thread_id": payload.get("threadId"),
+                "turn_id": canonical_turn_id or None,
+                "observed_turn_id": observed_turn_id or None,
+                "policy": policy,
+                "request_method": request_method,
+                "tool_name": str(tool_name or "").strip() or None,
+                "item_type": str(item_type or "").strip() or None,
+                "item_id": str(item_id or "").strip() or None,
+                "reason": "tool_not_declared_by_task_graph_node",
+                "compliant_success": False,
+            }
+        )
+
+    def _record_no_tools_notification_violation(self, method: str, payload: dict[str, Any]) -> None:
+        if method not in {"item/started", "item/completed", "item/updated"}:
+            return
+        active = self._active_turn_execution_policy_for(payload)
+        if active is None or active.get("policy") != NO_TOOLS_EXECUTION_POLICY:
+            return
+        item = dict(payload.get("item") or {})
+        item_type = str(item.get("type") or "").strip()
+        compact_type = re.sub(r"[^a-z]", "", item_type.lower())
+        if not any(
+            marker in compact_type
+            for marker in ("commandexecution", "filechange", "toolcall", "websearch", "applypatch")
+        ):
+            return
+        self._record_execution_policy_tool_blocked(
+            payload,
+            policy=NO_TOOLS_EXECUTION_POLICY,
+            request_method=method,
+            tool_name=str(item.get("tool") or item.get("name") or "").strip() or None,
+            item_type=item_type,
+            item_id=str(item.get("id") or "").strip() or None,
+        )
+        if method == "item/started":
+            self._interrupt_fail_closed_no_tools_turn(
+                payload,
+                request_method=method,
+                item_type=item_type,
+                item_id=str(item.get("id") or "").strip() or None,
+            )
+
+    def _interrupt_fail_closed_no_tools_turn(
+        self,
+        payload: dict[str, Any],
+        *,
+        request_method: str,
+        item_type: str | None = None,
+        item_id: str | None = None,
+    ) -> None:
+        active = self._active_turn_execution_policy_for(payload)
+        if active is None or active.get("policy") != NO_TOOLS_EXECUTION_POLICY:
+            return
+        thread_id = str(payload.get("threadId") or "").strip()
+        observed_turn_id = str(payload.get("turnId") or "").strip()
+        canonical_turn_id = str(dict(active).get("turn_id") or "").strip()
+        if not thread_id or not observed_turn_id:
+            return
+        if canonical_turn_id:
+            terminal_notification = self._terminal_turn_notification(
+                thread_id=thread_id,
+                turn_id=canonical_turn_id,
+            )
+            terminal_status = self._normalize_terminal_turn_status(
+                dict(terminal_notification or {}).get("status")
+            )
+            if terminal_status in TERMINAL_TURN_STATUSES:
+                return
+        interrupt_key = (thread_id, observed_turn_id)
+        with self._lock:
+            if interrupt_key in self._fail_closed_turn_interrupts:
+                return
+            self._fail_closed_turn_interrupts.add(interrupt_key)
+        settings = self._thread_settings_for(thread_id)
+        profile = self._resolve_shell_profile(str(settings.get("profile_id") or ""))
+        self._record_event(
+            {
+                "type": "turn_execution_policy_fail_closed_interrupt_requested",
+                "thread_id": thread_id,
+                "turn_id": canonical_turn_id or None,
+                "observed_turn_id": observed_turn_id,
+                "policy": NO_TOOLS_EXECUTION_POLICY,
+                "request_method": request_method,
+                "item_type": str(item_type or "").strip() or None,
+                "item_id": str(item_id or "").strip() or None,
+            }
+        )
+        try:
+            interrupt_result = self.interrupt_turn(profile, thread_id, observed_turn_id)
+        except Exception as exc:
+            self._record_event(
+                {
+                    "type": "turn_execution_policy_fail_closed_interrupt_failed",
+                    "thread_id": thread_id,
+                    "turn_id": canonical_turn_id or None,
+                    "observed_turn_id": observed_turn_id,
+                    "policy": NO_TOOLS_EXECUTION_POLICY,
+                    "request_method": request_method,
+                    "error": str(exc)[:300],
+                }
+            )
+            return
+        resolved_turn_id = str(
+            dict(dict(interrupt_result or {}).get("interrupt") or {}).get("turnId")
+            or observed_turn_id
+        ).strip() or observed_turn_id
+        self._record_event(
+            {
+                "type": "turn_execution_policy_fail_closed_interrupt_succeeded",
+                "thread_id": thread_id,
+                "turn_id": canonical_turn_id or None,
+                "observed_turn_id": observed_turn_id,
+                "resolved_turn_id": resolved_turn_id,
+                "policy": NO_TOOLS_EXECUTION_POLICY,
+                "request_method": request_method,
+            }
+        )
+
+    def _turn_execution_policy_violation(self, *, thread_id: str, turn_id: str) -> dict[str, Any] | None:
+        clean_thread_id = str(thread_id or "").strip()
+        clean_turn_id = str(turn_id or "").strip()
+        with self._lock:
+            self._hydrate_events_from_disk_locked()
+            events = list(self._events)
+        matches = [
+            event
+            for event in events
+            if event.get("type") == "turn_execution_policy_tool_blocked"
+            and str(event.get("thread_id") or "").strip() == clean_thread_id
+            and (not clean_turn_id or not str(event.get("turn_id") or "").strip() or str(event.get("turn_id") or "").strip() == clean_turn_id)
+        ]
+        if not matches:
+            return None
+        unique: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for event in matches:
+            key = (
+                str(event.get("request_method") or ""),
+                str(event.get("item_id") or ""),
+                str(event.get("item_type") or ""),
+                str(event.get("tool_name") or ""),
+            )
+            unique[key] = event
+        return {
+            "status": "violated",
+            "policy": NO_TOOLS_EXECUTION_POLICY,
+            "blocked_tool_call_count": len(unique),
+            "request_methods": sorted({str(item.get("request_method") or "") for item in unique.values()}),
+            "tool_names": sorted({str(item.get("tool_name") or "") for item in unique.values() if item.get("tool_name")}),
+            "item_types": sorted({str(item.get("item_type") or "") for item in unique.values() if item.get("item_type")}),
+            "reason": "model_requested_tools_outside_task_graph_contract",
+            "compliant_success": False,
+        }
+
     def _collaboration_mode_params(
         self,
         *,
@@ -5263,8 +9596,25 @@ for host in candidates:
         entry = dict((cache.get("by_id") or {}).get(thread_id) or {})
         native_thread = entry.get("thread")
         if not isinstance(native_thread, dict):
-            return None
-        return dict(native_thread)
+            native_thread = None
+        transcript_thread = None
+        if self._task_conversation is not None:
+            try:
+                transcript_thread = self._task_conversation.thread_snapshot(thread_id)
+            except Exception:
+                transcript_thread = None
+        if isinstance(native_thread, dict) and isinstance(transcript_thread, dict):
+            native_turns = len([item for item in list(native_thread.get("turns") or []) if isinstance(item, dict)])
+            transcript_turns = len([item for item in list(transcript_thread.get("turns") or []) if isinstance(item, dict)])
+            return dict(transcript_thread if transcript_turns > native_turns else native_thread)
+        if isinstance(native_thread, dict):
+            return dict(native_thread)
+        # An empty task transcript is only a route placeholder created during
+        # thread setup. It must not hide a later provider-backed thread/read,
+        # otherwise a fresh handoff appears to have no assistant output.
+        if isinstance(transcript_thread, dict) and list(transcript_thread.get("turns") or []):
+            return dict(transcript_thread)
+        return None
 
     def _cache_thread_entry(self, thread_id: str, patch: dict[str, Any]) -> None:
         if not thread_id:
@@ -5864,6 +10214,79 @@ for host in candidates:
             "final_preview": final_text[:240],
             "recommended_action": "continue_or_retry_final_answer",
         }
+
+    def _decorate_turn_execution_policy(self, thread: dict[str, Any]) -> dict[str, Any]:
+        turns = list(thread.get("turns") or [])
+        thread_id = str(thread.get("id") or "")
+        if not turns or not thread_id:
+            return thread
+        with self._lock:
+            self._hydrate_events_from_disk_locked()
+            events = list(self._events)
+        policy_events = [
+            event
+            for event in events
+            if event.get("type") == "turn_execution_policy_started" and str(event.get("thread_id") or "") == thread_id
+        ]
+        if not policy_events:
+            return thread
+        decorated_turns: list[dict[str, Any]] = []
+        changed = False
+        for turn in turns:
+            if not isinstance(turn, dict):
+                decorated_turns.append(turn)
+                continue
+            turn_id = str(turn.get("id") or "")
+            matching = [event for event in policy_events if str(event.get("turn_id") or "") == turn_id]
+            if not matching:
+                decorated_turns.append(turn)
+                continue
+            policy_event = matching[-1]
+            policy = str(policy_event.get("policy") or "standard")
+            items = [item for item in list(turn.get("items") or []) if isinstance(item, dict)]
+            if policy == NO_TOOLS_EXECUTION_POLICY:
+                prohibited = [
+                    str(item.get("type") or "unknown")
+                    for item in items
+                    if any(
+                        marker in re.sub(r"[^a-z]", "", str(item.get("type") or "").lower())
+                        for marker in ("commandexecution", "filechange", "toolcall", "websearch", "applypatch")
+                    )
+                ]
+            else:
+                prohibited = [
+                    str(item.get("type") or "unknown")
+                    for item in items
+                    if str(item.get("type") or "") in {"commandExecution", "fileChange"}
+                ]
+            recorded_violation = self._turn_execution_policy_violation(thread_id=thread_id, turn_id=turn_id)
+            status = "enforcing"
+            if self._normalize_terminal_turn_status(turn.get("status")) in TERMINAL_TURN_STATUSES:
+                status = "violated" if prohibited or recorded_violation is not None else "passed"
+            detail: dict[str, Any] = {
+                "policy": policy,
+                "status": status,
+                "enforcement": policy_event.get("enforcement"),
+                "prohibited_tool_types": prohibited,
+                "blocked_tool_calls": recorded_violation,
+            }
+            if status == "violated":
+                detail.update(
+                    {
+                        "reason": "prohibited_execution_observed_in_turn_trace",
+                        "recommended_action": (
+                            "retry_in_a_fresh_no_tools_graph_lane"
+                            if policy == NO_TOOLS_EXECUTION_POLICY
+                            else "review_changes_and_retry_in_a_fresh_patch_only_turn"
+                        ),
+                        "compliant_success": False,
+                    }
+                )
+            elif status == "passed":
+                detail["compliant_success"] = True
+            decorated_turns.append({**turn, "executionPolicy": detail})
+            changed = True
+        return {**thread, "turns": decorated_turns} if changed else thread
 
     def _thread_cache_name(self, thread_id: str) -> str | None:
         if not thread_id:

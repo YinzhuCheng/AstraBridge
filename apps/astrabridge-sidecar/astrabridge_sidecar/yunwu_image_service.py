@@ -44,9 +44,6 @@ EDIT_SIZES = {
 GENERATION_IMAGE_MODELS = {"gpt-image-2", "gpt-image-2-all"}
 EDIT_IMAGE_MODELS = {
     "gpt-image-1",
-    "gpt-image-1-all",
-    "flux-kontext-pro",
-    "flux-kontext-max",
     "gpt-image-2",
     "gpt-image-2-all",
 }

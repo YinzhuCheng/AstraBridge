@@ -10,7 +10,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .automations import AutomationRunner, AutomationWorkspaceManager
+from .automations.runner import AutomationRunner
+from .automations.workspace import AutomationWorkspaceManager
 from .codex_app_server_probe import probe_app_server_protocol
 from .codex_kernel_probe import discover_codex_binary_and_version
 from .codex_kernel_snapshot import build_codex_kernel_probe_snapshot, observe_protocol_features
@@ -489,7 +490,15 @@ def _probe_automation_exec_help(
         "due_at": now_iso(),
     }
     session = AutomationWorkspaceManager(project_service).prepare_workspace(automation, run)
-    env = runner._standalone_env(profile=profile, workspace_session=session, automation=automation, run=run)
+    # `codex exec --help` only probes the local CLI surface; it must not require
+    # a provider secret or create a model request.
+    env = runner._standalone_env(
+        profile=profile,
+        workspace_session=session,
+        automation=automation,
+        run=run,
+        require_secret=False,
+    )
     preview_command = runner._standalone_command(automation, session)
     help_command = [preview_command[0], "exec", "--help"]
     details: dict[str, Any] = {

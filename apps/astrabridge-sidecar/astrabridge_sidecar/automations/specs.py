@@ -3,14 +3,16 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from ..agentic_updates import assert_secret_free_agentic_update_payload, normalize_update_scope_contract
 from ..common import now_iso
 
 
 AUTOMATION_SPEC_SCHEMA_VERSION = "astrabridge-automation-spec-v1"
 AUTOMATION_RUN_SCHEMA_VERSION = "astrabridge-automation-run-v1"
 AUTOMATION_INBOX_ITEM_SCHEMA_VERSION = "astrabridge-automation-inbox-item-v1"
+AGENTIC_UPDATE_AUTOMATION_SCHEMA_VERSION = "astrabridge-agentic-update-automation-v1"
 
-AUTOMATION_KINDS = {"standalone", "thread"}
+AUTOMATION_KINDS = {"standalone", "thread", "agentic_update_check"}
 AUTOMATION_SCHEDULE_MODES = {"manual", "interval", "daily"}
 AUTOMATION_PERMISSION_MODES = {"read-only", "workspace-write", "full-access"}
 AUTOMATION_RUN_STATUSES = {"queued", "running", "needs_review", "completed", "failed", "skipped", "cancelled"}
@@ -21,6 +23,8 @@ AUTOMATION_EXECUTION_HOSTS = {"windows", "wsl", "auto"}
 AUTOMATION_WORKSPACE_MODES = {"current_workspace", "dedicated_worktree"}
 AUTOMATION_CLEANUP_POLICIES = {"keep_on_finding", "keep_on_failure", "delete_on_no_signal", "manual"}
 AUTOMATION_CATCH_UP_POLICIES = {"skip_missed", "run_once"}
+AGENTIC_UPDATE_CHECK_APPLY_MODES = {"discover_only", "proposal_only"}
+AGENTIC_UPDATE_NETWORK_POLICIES = {"fixture_only", "official_docs_only"}
 
 SECRET_FIELD_TOKENS = ("authorization", "cookie", "secret", "token", "api_key", "password", "bearer")
 
@@ -185,6 +189,71 @@ def _normalize_limits(payload: Any) -> dict[str, Any]:
     }
 
 
+def _normalize_agentic_update(payload: Any, *, kind: str) -> dict[str, Any]:
+    source = dict(payload or {})
+    if kind != "agentic_update_check":
+        return _redact_secret_like(source)
+    if not source:
+        raise ValueError("agentic_update is required for agentic_update_check automations.")
+    assert_secret_free_agentic_update_payload(source, label="automation.agentic_update")
+    contract = normalize_update_scope_contract(dict(source.get("run_contract") or {}))
+    if contract["apply_mode"] not in AGENTIC_UPDATE_CHECK_APPLY_MODES:
+        raise ValueError("agentic_update_check automations only support discover_only or proposal_only apply_mode.")
+    if contract["allow_provider_calls"]:
+        raise ValueError("agentic_update_check automations cannot call providers.")
+    if contract["allow_install"]:
+        raise ValueError("agentic_update_check automations cannot install binaries or dependencies.")
+    if contract["allow_code_changes"]:
+        raise ValueError("agentic_update_check automations cannot change code.")
+    network_policy = _clean_text(
+        source.get("network_policy") or ("official_docs_only" if contract["allow_network"] else "fixture_only")
+    ).lower()
+    if network_policy not in AGENTIC_UPDATE_NETWORK_POLICIES:
+        raise ValueError(f"Unsupported agentic update automation network_policy: {network_policy or '<missing>'}.")
+    if network_policy == "fixture_only" and contract["allow_network"]:
+        raise ValueError("fixture_only agentic update automation requires allow_network=false.")
+    if network_policy == "official_docs_only" and not contract["allow_network"]:
+        raise ValueError("official_docs_only agentic update automation requires allow_network=true.")
+    normalized = {
+        "schema_version": AGENTIC_UPDATE_AUTOMATION_SCHEMA_VERSION,
+        "template_version": _clean_text(source.get("template_version") or "agentic-update-check-template-v1"),
+        "run_contract": contract,
+        "network_policy": network_policy,
+        "max_source_records": _positive_int(source.get("max_source_records"), field="max_source_records", default=10),
+        "allowed_side_effects": {
+            "apply_changes": False,
+            "install_binaries": False,
+            "provider_calls": False,
+            "code_changes": False,
+        },
+    }
+    for key in (
+        "provider_sources",
+        "fixture_sources",
+        "provider_fixture_sources",
+        "current_models",
+        "complete_provider_snapshot",
+        "kernel_source_records",
+        "kernel_fixture_sources",
+    ):
+        if key in source:
+            normalized[key] = _redact_secret_like(source.get(key))
+    assert_secret_free_agentic_update_payload(normalized, label="automation.agentic_update")
+    return normalized
+
+
+def _validate_agentic_update_check_bounds(
+    *,
+    schedule: dict[str, Any],
+    runtime: dict[str, Any],
+    limits: dict[str, Any],
+) -> None:
+    if str(runtime.get("permission_mode") or "").lower() != "read-only":
+        raise ValueError("agentic_update_check automations require read-only runtime permission.")
+    if str(schedule.get("mode") or "").lower() != "manual" and int(limits.get("daily_run_limit") or 0) <= 0:
+        raise ValueError("Recurring agentic_update_check automations require daily_run_limit >= 1.")
+
+
 @dataclass(frozen=True)
 class AutomationSpec:
     schema_version: str
@@ -200,6 +269,7 @@ class AutomationSpec:
     workspace: dict[str, Any]
     triage: dict[str, Any]
     limits: dict[str, Any]
+    agentic_update: dict[str, Any]
     created_at: str
     updated_at: str
     last_run_at: str | None
@@ -212,6 +282,14 @@ class AutomationSpec:
         kind = _clean_text(payload.get("kind") or "standalone").lower()
         if kind not in AUTOMATION_KINDS:
             raise ValueError(f"Unsupported automation kind: {kind or '<missing>'}.")
+        schedule = _normalize_schedule(payload.get("schedule"))
+        runtime = _normalize_runtime(payload.get("runtime"))
+        workspace = _normalize_workspace(payload.get("workspace"))
+        triage = _normalize_triage(payload.get("triage"))
+        limits = _normalize_limits(payload.get("limits"))
+        agentic_update = _normalize_agentic_update(payload.get("agentic_update"), kind=kind)
+        if kind == "agentic_update_check":
+            _validate_agentic_update_check_bounds(schedule=schedule, runtime=runtime, limits=limits)
         return cls(
             schema_version=AUTOMATION_SPEC_SCHEMA_VERSION,
             automation_id=_required_text(payload, "automation_id"),
@@ -221,11 +299,12 @@ class AutomationSpec:
             enabled=bool(payload.get("enabled", True)),
             kind=kind,
             prompt=_required_text(payload, "prompt"),
-            schedule=_normalize_schedule(payload.get("schedule")),
-            runtime=_normalize_runtime(payload.get("runtime")),
-            workspace=_normalize_workspace(payload.get("workspace")),
-            triage=_normalize_triage(payload.get("triage")),
-            limits=_normalize_limits(payload.get("limits")),
+            schedule=schedule,
+            runtime=runtime,
+            workspace=workspace,
+            triage=triage,
+            limits=limits,
+            agentic_update=agentic_update,
             created_at=_clean_text(payload.get("created_at")) or now_iso(),
             updated_at=_clean_text(payload.get("updated_at")) or now_iso(),
             last_run_at=_clean_text(payload.get("last_run_at")) or None,
@@ -321,6 +400,7 @@ class AutomationInboxItem:
     summary: str
     created_at: str
     updated_at: str
+    artifact_refs: list[str]
     promotion_ref: str | None
 
     @classmethod
@@ -349,6 +429,7 @@ class AutomationInboxItem:
             summary=_clean_text(payload.get("summary")),
             created_at=_clean_text(payload.get("created_at")) or now_iso(),
             updated_at=_clean_text(payload.get("updated_at")) or now_iso(),
+            artifact_refs=_clean_string_list(payload.get("artifact_refs") or []),
             promotion_ref=_clean_text(payload.get("promotion_ref")) or None,
         )
 

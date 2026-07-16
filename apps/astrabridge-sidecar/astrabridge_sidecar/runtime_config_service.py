@@ -36,6 +36,34 @@ RESERVED_CODEX_PROVIDER_IDS = {"openai"}
 PROXY_URL_RE = re.compile(r"^(https?|socks5)://(127\.0\.0\.1|localhost):([1-9][0-9]{0,4})$")
 PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
 LOCAL_NO_PROXY = "127.0.0.1,localhost,::1"
+EXACT_MODEL_RUNTIME_FALLBACK_FIELDS = (
+    "context_window",
+    "max_context_window",
+    "advertised_context_window",
+    "effective_context_window_percent",
+    "auto_compact_token_limit",
+    "tool_output_token_limit",
+    "input_modalities",
+    "apply_patch_tool_type",
+    "web_search_tool_type",
+    "supports_parallel_tool_calls",
+    "supports_reasoning_summaries",
+    "supports_search_tool",
+    "supports_mcp_tools",
+    "mcp_tool_call_policy",
+    "mcp_verified_servers",
+    "mcp_smoke_status",
+    "mcp_tool_argument_validation",
+    "tool_mode",
+    "multi_agent_version",
+    "use_responses_lite",
+    "codex_builtin_tools",
+    "planner_support",
+    "goal_support",
+    "context_compaction_support",
+    "modality_limits",
+    "ui_warnings",
+)
 
 
 class RuntimeConfigService:
@@ -154,6 +182,15 @@ class RuntimeConfigService:
             "secret_loaded": False,
             "proxy_mode": "direct",
             "proxy_url": "",
+            "input_modalities": None,
+            "context_window": None,
+            "effective_context_window_percent": None,
+            "auto_compact_token_limit": None,
+            "tool_output_token_limit": None,
+            "apply_patch_tool_type": None,
+            "codex_apply_patch_tool_type": None,
+            "apply_patch_mapping_status": None,
+            "context_compaction_support": None,
             "secret_source": None,
             "secret_fingerprint": None,
         }
@@ -175,7 +212,13 @@ class RuntimeConfigService:
             "execution_host": runtime.get("execution_host") or "windows",
             "wsl_distro": runtime.get("wsl_distro"),
             "input_modalities": runtime.get("input_modalities"),
+            "context_window": runtime.get("context_window"),
+            "effective_context_window_percent": runtime.get("effective_context_window_percent"),
+            "auto_compact_token_limit": runtime.get("auto_compact_token_limit"),
+            "tool_output_token_limit": runtime.get("tool_output_token_limit"),
             "apply_patch_tool_type": runtime.get("apply_patch_tool_type"),
+            "codex_apply_patch_tool_type": runtime.get("codex_apply_patch_tool_type"),
+            "apply_patch_mapping_status": runtime.get("apply_patch_mapping_status"),
             "web_search_tool_type": runtime.get("web_search_tool_type"),
             "supports_parallel_tool_calls": runtime.get("supports_parallel_tool_calls"),
             "supports_reasoning_summaries": runtime.get("supports_reasoning_summaries"),
@@ -194,6 +237,7 @@ class RuntimeConfigService:
             "mcp_verified_servers": runtime.get("mcp_verified_servers"),
             "mcp_smoke_status": runtime.get("mcp_smoke_status"),
             "mcp_tool_argument_validation": runtime.get("mcp_tool_argument_validation"),
+            "context_compaction_support": runtime.get("context_compaction_support"),
             "computer_use_plugins_enabled": bool(runtime.get("computer_use_plugins_enabled")),
             "secret_source": runtime.get("secret_source"),
             "secret_fingerprint": runtime.get("secret_fingerprint"),
@@ -216,7 +260,13 @@ class RuntimeConfigService:
             runtime_status.get("wsl_distro"),
             runtime_status.get("mcp_config_updated_at"),
             tuple(runtime_status.get("input_modalities") or []),
+            runtime_status.get("context_window"),
+            runtime_status.get("effective_context_window_percent"),
+            runtime_status.get("auto_compact_token_limit"),
+            runtime_status.get("tool_output_token_limit"),
             runtime_status.get("apply_patch_tool_type"),
+            runtime_status.get("codex_apply_patch_tool_type"),
+            runtime_status.get("apply_patch_mapping_status"),
             runtime_status.get("web_search_tool_type"),
             runtime_status.get("supports_parallel_tool_calls"),
             runtime_status.get("supports_reasoning_summaries"),
@@ -235,6 +285,7 @@ class RuntimeConfigService:
             tuple(runtime_status.get("mcp_verified_servers") or []),
             runtime_status.get("mcp_smoke_status"),
             runtime_status.get("mcp_tool_argument_validation"),
+            json_compaction_support_signature(runtime_status.get("context_compaction_support")),
             bool(runtime_status.get("computer_use_plugins_enabled")),
         )
 
@@ -272,6 +323,41 @@ class RuntimeConfigService:
             {**profile, "provider_id": provider_id, "model": model},
             configured_models,
         )
+        exact_configured_model = _exact_configured_model(configured_models, provider_id, model)
+        if exact_configured_model:
+            for key in EXACT_MODEL_RUNTIME_FALLBACK_FIELDS:
+                existing = merged_profile.get(key)
+                is_empty = (
+                    existing is None
+                    or existing == ""
+                    or existing == ()
+                    or (isinstance(existing, list) and not existing)
+                    or (isinstance(existing, dict) and not existing)
+                )
+                if is_empty:
+                    if key in exact_configured_model:
+                        merged_profile[key] = exact_configured_model.get(key)
+        modality_limits = dict(merged_profile.get("modality_limits") or {})
+        known_input_modalities = normalize_input_modalities(None, provider_id, model)
+        configured_input_modalities = normalize_input_modalities(merged_profile.get("input_modalities"), provider_id, model)
+        normalized_input_modalities = list(dict.fromkeys([*known_input_modalities, *configured_input_modalities]))
+        if "image" in normalized_input_modalities:
+            modality_limits.setdefault("app_server_image_input_status", "unverified")
+        apply_patch_tool_type = merged_profile.get("apply_patch_tool_type")
+        codex_apply_patch_tool_type = codex_apply_patch_tool_type_for_runtime(apply_patch_tool_type)
+        context_window = (
+            _optional_positive_int(merged_profile.get("context_window"))
+            or _optional_positive_int(merged_profile.get("max_context_window"))
+            or _optional_positive_int(merged_profile.get("advertised_context_window"))
+            or known_context_window(provider_id, model)
+        )
+        effective_context_window_percent = int(merged_profile.get("effective_context_window_percent") or 80)
+        auto_compact_token_limit = _optional_positive_int(merged_profile.get("auto_compact_token_limit"))
+        if context_window and not auto_compact_token_limit:
+            auto_compact_token_limit = compact_limit(context_window)
+        tool_output_token_limit = _optional_positive_int(merged_profile.get("tool_output_token_limit"))
+        if context_window and not tool_output_token_limit:
+            tool_output_token_limit = tool_output_truncation_limit(context_window)
         metadata = self._secrets.metadata(
             env_key=env_key,
             auth_mode=str(profile.get("auth_mode") or "env_ref"),
@@ -284,10 +370,17 @@ class RuntimeConfigService:
             "provider_name": str(profile.get("label") or provider_id),
             "base_url": base_url,
             "model": model,
-            "context_window": _optional_positive_int(merged_profile.get("context_window")) or known_context_window(provider_id, model),
-            "auto_compact_token_limit": _optional_positive_int(merged_profile.get("auto_compact_token_limit")),
-            "input_modalities": normalize_input_modalities(merged_profile.get("input_modalities"), provider_id, model),
-            "apply_patch_tool_type": merged_profile.get("apply_patch_tool_type"),
+            "context_window": context_window,
+            "effective_context_window_percent": effective_context_window_percent,
+            "auto_compact_token_limit": auto_compact_token_limit,
+            "tool_output_token_limit": tool_output_token_limit,
+            "input_modalities": normalized_input_modalities,
+            "apply_patch_tool_type": apply_patch_tool_type,
+            "codex_apply_patch_tool_type": codex_apply_patch_tool_type,
+            "apply_patch_mapping_status": apply_patch_mapping_status_for_runtime(
+                apply_patch_tool_type,
+                codex_apply_patch_tool_type,
+            ),
             "web_search_tool_type": merged_profile.get("web_search_tool_type"),
             "supports_parallel_tool_calls": merged_profile.get("supports_parallel_tool_calls"),
             "supports_reasoning_summaries": merged_profile.get("supports_reasoning_summaries"),
@@ -310,7 +403,7 @@ class RuntimeConfigService:
             "planner_support": merged_profile.get("planner_support"),
             "goal_support": merged_profile.get("goal_support"),
             "context_compaction_support": merged_profile.get("context_compaction_support"),
-            "modality_limits": merged_profile.get("modality_limits"),
+            "modality_limits": modality_limits,
             "ui_warnings": merged_profile.get("ui_warnings"),
             "reasoning_effort": reasoning_effort,
             "wire_api": wire_api,
@@ -465,7 +558,15 @@ class RuntimeConfigService:
             )
         return lines
 
-    def _write_model_catalog(self, runtime: dict[str, Any], codex_model: str, context_window: int, auto_compact_limit: int) -> Path:
+    def _write_model_catalog(
+        self,
+        runtime: dict[str, Any],
+        codex_model: str,
+        context_window: int,
+        auto_compact_limit: int,
+        *,
+        codex_home: Path | None = None,
+    ) -> Path:
         configured_model = {
             "input_modalities": runtime.get("input_modalities"),
             "apply_patch_tool_type": runtime.get("apply_patch_tool_type"),
@@ -482,7 +583,8 @@ class RuntimeConfigService:
             "tool_mode": runtime.get("tool_mode"),
             "multi_agent_version": runtime.get("multi_agent_version"),
             "use_responses_lite": runtime.get("use_responses_lite"),
-            "tool_output_token_limit": tool_output_truncation_limit(context_window),
+            "effective_context_window_percent": runtime.get("effective_context_window_percent"),
+            "tool_output_token_limit": _optional_positive_int(runtime.get("tool_output_token_limit")) or tool_output_truncation_limit(context_window),
             "supports_mcp_tools": runtime.get("supports_mcp_tools"),
             "mcp_tool_call_policy": runtime.get("mcp_tool_call_policy"),
             "mcp_verified_servers": runtime.get("mcp_verified_servers"),
@@ -537,6 +639,22 @@ def _optional_positive_int(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _exact_configured_model(configured_models: list[dict[str, Any]] | None, provider_id: str, model: str) -> dict[str, Any] | None:
+    provider_text = str(provider_id or "").strip()
+    model_text = str(model or "").strip()
+    if not provider_text or not model_text:
+        return None
+    full_id = f"{provider_text}/{model_text}"
+    for item in list(configured_models or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id") or "").strip() == full_id:
+            return dict(item)
+        if str(item.get("provider") or "").strip() == provider_text and str(item.get("native_model") or "").strip() == model_text:
+            return dict(item)
+    return None
+
+
 def codex_reasoning_effort(effort: Any) -> str:
     normalized = str(effort or "high").strip().lower()
     if normalized == "max":
@@ -544,6 +662,30 @@ def codex_reasoning_effort(effort: Any) -> str:
     if normalized in CODEX_REASONING_EFFORTS:
         return normalized
     return "high"
+
+
+def codex_apply_patch_tool_type_for_runtime(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"freeform", "json"}:
+        return "freeform"
+    return None
+
+
+def apply_patch_mapping_status_for_runtime(provider_value: Any, codex_value: str | None) -> str | None:
+    normalized = str(provider_value or "").strip().lower()
+    if not normalized and codex_value is None:
+        return None
+    if normalized == "freeform" and codex_value == "freeform":
+        return "native_freeform"
+    if normalized == "json" and codex_value == "freeform":
+        return "json_to_codex_freeform"
+    return "unsupported"
+
+
+def json_compaction_support_signature(value: Any) -> tuple[tuple[str, Any], ...]:
+    if not isinstance(value, dict):
+        return ()
+    return tuple(sorted((str(key), item) for key, item in value.items()))
 
 
 def codex_model_id(profile_or_runtime: dict[str, Any], model: Any | None = None) -> str:

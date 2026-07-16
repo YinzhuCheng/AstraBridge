@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Orchestration Operator"
+  short_description: "Design, validate, and operate bounded AstraBridge Agent Graph workflows"
+  default_prompt: "Use $agent-orchestration-operator to design, modify, validate, migrate, or operate a bounded AstraBridge Agent Graph workflow through canonical graph files, focused runtime checks, and click-verified product workflows."

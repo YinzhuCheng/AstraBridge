@@ -10,12 +10,20 @@ from pathlib import Path
 from typing import Any
 
 from .common import app_data_dir, new_id, now_iso, read_json, write_json
-from .model_catalog import current_generated_catalog, effective_model_records, resolved_web_capability_fields, resolved_workflow_contract_fields
+from .model_catalog import (
+    current_generated_catalog,
+    effective_model_records,
+    resolved_provider_source_of_truth_fields,
+    resolved_web_capability_fields,
+    resolved_workflow_contract_fields,
+)
 from .usage_signal import usage_not_available
+from .secret_service import SecretService
 
 
 VAULT_SCHEMA = "astrabridge-llm-vault-v1"
 ENCRYPTED_VAULT_SCHEMA = "astrabridge-llm-vault-encrypted-v1"
+SESSION_RESUME_SCHEMA = "astrabridge-llm-vault-session-resume-v1"
 SESSION_MODES = {"anonymous", "managed_user"}
 SENSITIVE_FIELD_NAMES = {"secret", "api_key", "key", "token", "authorization", "password"}
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -23,15 +31,19 @@ ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 
 class LlmApiManagerService:
-    def __init__(self, router_config, router, root_path: Path | None = None) -> None:
+    def __init__(self, router_config, router, root_path: Path | None = None, secret_service: SecretService | None = None) -> None:
         self._router_config = router_config
         self._router = router
         self.root_path = root_path or (app_data_dir() / "llm_api_manager")
         self.users_root = self.root_path / "users"
         self.health_path = self.root_path / "health_results.json"
+        self.session_resume_path = self.root_path / "session_resume.json"
+        self._secret_service = secret_service or SecretService()
+        self._session_resume_enabled = root_path is None or secret_service is not None
         self._session: dict[str, Any] = self._anonymous_session()
         self._vault_plain: dict[str, Any] | None = None
         self._injected_env: dict[str, str | None] = {}
+        self._restore_resumable_session()
 
     def session(self) -> dict[str, Any]:
         users = self.list_users()["users"]
@@ -41,6 +53,7 @@ class LlmApiManagerService:
             **public_session,
             "users": users,
             "profile": current_profile,
+            "preferred_username": self._preferred_username(users),
             "key_count": len(self._vault_plain.get("keys", [])) if self._vault_plain else 0,
             "active_key_ids": dict((self._vault_plain or {}).get("active_key_ids") or {}),
         }
@@ -72,6 +85,7 @@ class LlmApiManagerService:
             "auth_surface": "llm_api_manager_vault",
             "_unlock_key": unlock_key,
         }
+        self._remember_unlocked_session(username, unlock_key)
         return {"session": self.session(), "user": {"username": username, "created": True}}
 
     def login(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -93,9 +107,11 @@ class LlmApiManagerService:
             "auth_surface": "llm_api_manager_vault",
             "_unlock_key": unlock_key,
         }
+        self._remember_unlocked_session(username, unlock_key)
         return {"session": self.session()}
 
     def logout(self) -> dict[str, Any]:
+        self._clear_resumable_session()
         self._clear_injected_env()
         self._vault_plain = None
         self._session = self._anonymous_session()
@@ -116,6 +132,7 @@ class LlmApiManagerService:
         if self._session.get("mode") == "managed_user" and self._session.get("username") == username:
             self._vault_plain = vault
             self._session["_unlock_key"] = unlock_key
+            self._remember_unlocked_session(username, unlock_key)
         return {"changed": True, "session": self.session()}
 
     def save_user_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -232,6 +249,7 @@ class LlmApiManagerService:
     def effective_catalog(self) -> dict[str, Any]:
         mode = str(self._session.get("mode") or "anonymous")
         providers = self._effective_providers()
+        configured_models = self._router_config.models()
         models = effective_model_records(self._router_config.models(), include_disabled=False)
         health = self.health_results()
         model_health = dict(health.get("model_health") or {})
@@ -253,7 +271,7 @@ class LlmApiManagerService:
         return {
             "mode": mode,
             "username": self._session.get("username"),
-            "providers": [self._redact_provider(item, key_provider_ids) for item in providers],
+            "providers": [self._redact_provider(item, key_provider_ids, configured_models) for item in providers],
             "models": models,
             "model_count": len(models),
             "verified_model_ids": sorted([model_id for model_id, item in model_health.items() if self._health_record_passes(item)]),
@@ -487,6 +505,100 @@ class LlmApiManagerService:
             raise ValueError("Unsupported decrypted vault schema.")
         return vault, key.hex()
 
+    def _read_encrypted_vault_with_unlock_key(self, username: str, unlock_key: str) -> dict[str, Any]:
+        path = self._user_dir(username) / "vault.abvault"
+        payload = read_json(path, {})
+        if payload.get("schema_version") != ENCRYPTED_VAULT_SCHEMA:
+            raise ValueError("Unsupported vault file schema.")
+        crypto = dict(payload.get("crypto") or {})
+        nonce = _unb64(str(crypto.get("nonce") or ""))
+        try:
+            key_bytes = bytes.fromhex(unlock_key)
+            plaintext = self._aesgcm_decrypt(key_bytes, nonce, _unb64(str(payload.get("ciphertext") or "")), username.encode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise PermissionError("Remembered vault unlock is invalid.") from exc
+        vault = json.loads(plaintext.decode("utf-8"))
+        if vault.get("schema_version") != VAULT_SCHEMA or str(vault.get("username") or "") != username:
+            raise ValueError("Remembered vault does not match the selected user.")
+        return vault
+
+    def _resume_secret_name(self, username: str) -> str:
+        return f"llm-api-manager-vault-unlock:{username}"
+
+    def _preferred_username(self, users: list[dict[str, Any]]) -> str | None:
+        current = str(self._session.get("username") or "").strip()
+        if current:
+            return current
+        remembered = read_json(self.session_resume_path, {})
+        candidate = str(remembered.get("username") or "").strip() if isinstance(remembered, dict) else ""
+        known = {str(item.get("username") or "") for item in users}
+        if candidate and candidate in known:
+            return candidate
+        return str(users[0].get("username") or "") if users else None
+
+    def _remember_unlocked_session(self, username: str, unlock_key: str) -> None:
+        if not self._session_resume_enabled or os.name != "nt" or not username or not unlock_key:
+            return
+        try:
+            secret_ref = self._secret_service.store(self._resume_secret_name(username), unlock_key)
+            write_json(
+                self.session_resume_path,
+                {
+                    "schema_version": SESSION_RESUME_SCHEMA,
+                    "username": username,
+                    "secret_ref": secret_ref,
+                    "updated_at": now_iso(),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            # Keychain persistence is best-effort; an unlocked session still works.
+            return
+
+    def _restore_resumable_session(self) -> None:
+        if not self._session_resume_enabled or os.name != "nt":
+            return
+        payload = read_json(self.session_resume_path, {})
+        if not isinstance(payload, dict) or payload.get("schema_version") != SESSION_RESUME_SCHEMA:
+            return
+        username = str(payload.get("username") or "").strip()
+        secret_ref = str(payload.get("secret_ref") or "").strip()
+        if not username or not secret_ref:
+            self._clear_resumable_session()
+            return
+        try:
+            unlock_key = self._secret_service.load(secret_ref)
+            if not unlock_key:
+                raise PermissionError("Remembered vault unlock is unavailable.")
+            vault = self._read_encrypted_vault_with_unlock_key(username, unlock_key)
+        except Exception:  # noqa: BLE001
+            self._clear_resumable_session()
+            return
+        self._vault_plain = vault
+        self._session = {
+            "mode": "managed_user",
+            "username": username,
+            "unlocked": True,
+            "started_at": now_iso(),
+            "auth_surface": "windows_credential_manager_resume",
+            "_unlock_key": unlock_key,
+        }
+
+    def _clear_resumable_session(self) -> None:
+        if not self._session_resume_enabled:
+            return
+        payload = read_json(self.session_resume_path, {})
+        if isinstance(payload, dict):
+            secret_ref = str(payload.get("secret_ref") or "").strip()
+            if secret_ref:
+                try:
+                    self._secret_service.delete(secret_ref)
+                except Exception:  # noqa: BLE001
+                    pass
+        try:
+            self.session_resume_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def _save_current_vault(self) -> None:
         if not self._vault_plain or self._session.get("mode") != "managed_user":
             return
@@ -595,11 +707,21 @@ class LlmApiManagerService:
             "updated_at": item.get("updated_at"),
         }
 
-    def _redact_provider(self, provider: dict[str, Any], key_provider_ids: set[str]) -> dict[str, Any]:
+    def _redact_provider(
+        self,
+        provider: dict[str, Any],
+        key_provider_ids: set[str],
+        configured_models: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        contract = resolved_provider_source_of_truth_fields(provider, configured_models)
         return {
             **provider,
             "auth_key_ref": None,
             "managed_key_available": str(provider.get("id")) in key_provider_ids,
+            "effective_default_model": contract.get("effective_default_model"),
+            "effective_default_model_id": contract.get("effective_default_model_id"),
+            "default_model_alignment": contract.get("default_model_alignment"),
+            "provider_contract_warnings": list(contract.get("warnings") or []),
         }
 
     def _annotate_model(self, model: dict[str, Any], model_health: dict[str, Any]) -> dict[str, Any]:

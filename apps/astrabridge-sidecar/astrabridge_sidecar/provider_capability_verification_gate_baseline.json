@@ -1,0 +1,38 @@
+{
+  "schema_version": "astrabridge-provider-capability-verification-gate-v1",
+  "updated_at": "2026-07-06T15:00:00+09:00",
+  "notes": [
+    "This baseline records the currently accepted dry-run non-pass cases for the provider capability verification gate.",
+    "Unexpected preview blockers or new conflicting capability cases should fail the gate.",
+    "Generic unsupported cases are expected when a model does not declare the required modality for a capability lane."
+  ],
+  "allowed_nonpass_preview_cases": [
+    {
+      "case_id": "preview-kimi-kimi-k2.7-code-off_probe",
+      "allowed_statuses": ["blocked"],
+      "note": "Kimi code models do not currently support an off reasoning-effort probe."
+    },
+    {
+      "case_id": "preview-kimi-kimi-k2.7-code-highspeed-off_probe",
+      "allowed_statuses": ["blocked"],
+      "note": "Kimi highspeed code models do not currently support an off reasoning-effort probe."
+    }
+  ],
+  "allowed_problem_capability_cases": [
+    {
+      "case_id": "qwen-qwen3-tts-flash-speech.transcribe-dry-run",
+      "allowed_capability_statuses": ["conflicting"],
+      "note": "The current catalog still declares audio input on this TTS-focused model, while capability routing correctly rejects speech.transcribe."
+    },
+    {
+      "case_id": "qwen-qwen3-tts-instruct-flash-speech.transcribe-dry-run",
+      "allowed_capability_statuses": ["conflicting"],
+      "note": "The current catalog still declares audio input on this TTS-instruct model, while capability routing correctly rejects speech.transcribe."
+    },
+    {
+      "case_id": "qwen-qwen3.7-max-2026-06-08-vision.analyze-dry-run",
+      "allowed_capability_statuses": ["conflicting"],
+      "note": "The current catalog still implies image input for this model family, but no vision.analyze route is presently eligible."
+    }
+  ]
+}

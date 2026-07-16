@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from ..reasoning_policy import normalize_reasoning_effort, normalize_reasoning_efforts
+
 
 def default_builtin_tool_support() -> dict[str, dict[str, str]]:
     return {
@@ -72,6 +74,8 @@ class ReasoningPolicy:
     preserve_for_tool_turns: bool = False
     supported_levels: tuple[str, ...] = ("low", "medium", "high", "xhigh")
     default_level: str = "high"
+    native_supported_levels: tuple[str, ...] = ()
+    native_default_level: str = ""
 
 
 @dataclass(frozen=True)
@@ -96,6 +100,8 @@ class ToolPolicy:
     mcp_web_support: str = "unverified"
     web_smoke_status: str = "untested"
     citation_quality: str = "untested"
+    command_execution_status: str = "unknown"
+    command_execution_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -220,7 +226,10 @@ class ProviderProfile:
         return {
             "supported_reasoning_levels": list(self.reasoning_levels()),
             "default_reasoning_level": self.default_reasoning_level(),
+            "native_supported_reasoning_levels": list(self.native_reasoning_levels()),
+            "native_default_reasoning_level": self.native_default_reasoning_level(),
             "reasoning_policy_mode": self.reasoning_policy.mode,
+            "preserve_reasoning_for_tool_turns": self.reasoning_policy.preserve_for_tool_turns,
             "input_modalities": list(self.context_policy.default_input_modalities),
             "edit_policy": self.edit_policy_payload(),
             "runtime_backend": self.runtime_backend,
@@ -233,6 +242,8 @@ class ProviderProfile:
             "mcp_verified_servers": list(self.tool_policy.mcp_verified_servers),
             "mcp_smoke_status": self.tool_policy.mcp_smoke_status,
             "mcp_tool_argument_validation": self.tool_policy.mcp_tool_argument_validation,
+            "command_execution_status": self.tool_policy.command_execution_status,
+            "command_execution_note": self.tool_policy.command_execution_note,
             "native_web_search_support": self.tool_policy.native_web_search_support,
             "tool_web_search_support": self.tool_policy.tool_web_search_support,
             "mcp_web_support": self.tool_policy.mcp_web_support,
@@ -265,14 +276,25 @@ class ProviderProfile:
         }
 
     def reasoning_levels(self) -> tuple[str, ...]:
-        levels = tuple(str(item).strip().lower() for item in self.reasoning_policy.supported_levels if str(item).strip())
+        levels = tuple(normalize_reasoning_efforts(self.reasoning_policy.supported_levels, default="high"))
         return levels or ("high",)
 
+    def native_reasoning_levels(self) -> tuple[str, ...]:
+        raw = self.reasoning_policy.native_supported_levels or self.reasoning_policy.supported_levels
+        levels = tuple(str(item).strip().lower() for item in raw if str(item).strip())
+        return levels or self.reasoning_levels()
+
     def default_reasoning_level(self) -> str:
-        preferred = str(self.reasoning_policy.default_level or "").strip().lower()
+        preferred = normalize_reasoning_effort(self.reasoning_policy.default_level)
         if preferred:
             return preferred
         return self.reasoning_levels()[-1]
+
+    def native_default_reasoning_level(self) -> str:
+        preferred = str(self.reasoning_policy.native_default_level or self.reasoning_policy.default_level or "").strip().lower()
+        if preferred:
+            return preferred
+        return self.native_reasoning_levels()[-1]
 
     def default_profile_reasoning_effort(self) -> str:
         preferred = self.default_reasoning_level()
@@ -287,6 +309,11 @@ class ProviderProfile:
             "input_modalities": list(self.context_policy.default_input_modalities),
             "supported_reasoning_levels": list(self.reasoning_levels()),
             "default_reasoning_level": self.default_reasoning_level(),
+            "native_supported_reasoning_levels": list(self.native_reasoning_levels()),
+            "native_default_reasoning_level": self.native_default_reasoning_level(),
+            "reasoning_policy_mode": self.reasoning_policy.mode,
+            "supports_reasoning_replay": self.capabilities.supports_reasoning_replay,
+            "preserve_reasoning_for_tool_turns": self.reasoning_policy.preserve_for_tool_turns,
             "supports_parallel_tool_calls": self.capabilities.supports_parallel_tool_calls,
             "supports_search_tool": self.tool_policy.supports_search_tool,
             "native_web_search_support": self.tool_policy.native_web_search_support,
@@ -301,6 +328,8 @@ class ProviderProfile:
             "mcp_verified_servers": list(self.tool_policy.mcp_verified_servers),
             "mcp_smoke_status": self.tool_policy.mcp_smoke_status,
             "mcp_tool_argument_validation": self.tool_policy.mcp_tool_argument_validation,
+            "command_execution_status": self.tool_policy.command_execution_status,
+            "command_execution_note": self.tool_policy.command_execution_note,
             "codex_builtin_tools": default_builtin_tool_support(),
             "planner_support": default_planner_support(),
             "goal_support": default_goal_support(),

@@ -382,10 +382,16 @@ class RuntimeSupervisorService:
                 raw_message = str(error.get("message") or error)
             elif method == "turn/completed":
                 turn = params.get("turn") or {}
-                if str(turn.get("status") or "").lower() != "failed" and status_type != "systemerror":
+                completed_status = str(turn.get("status") or "").lower()
+                completed_error = turn.get("error")
+                # Events are scanned newest first. A successful terminal turn
+                # supersedes older error notifications for the same provider lane.
+                if completed_status == "completed" and (completed_error is None or completed_error == "" or completed_error == {}):
+                    return None
+                if completed_status != "failed" and status_type != "systemerror":
                     continue
                 turn_id = str(turn.get("id") or turn_id)
-                error = turn.get("error") or {}
+                error = completed_error or {}
                 raw_message = str(error.get("message") or error)
             elif method == "thread/status/changed":
                 status = params.get("status") or {}

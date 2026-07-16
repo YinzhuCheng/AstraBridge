@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from astrabridge_sidecar.project_service import ProjectService
 from astrabridge_sidecar.task_service import TaskService
@@ -39,6 +41,17 @@ class ProjectSidebarSnapshotTests(unittest.TestCase):
                 thread_id="thread-first",
                 settings={"profile_id": "qwen-default", "provider_id": "qwen", "model": "qwen3.7-plus", "reasoning_effort": "high"},
             )
+            tasks.bind_thread(
+                thread_id="thread-openai",
+                settings={"profile_id": "openai-default", "provider_id": "openai", "model": "gpt-5.5", "reasoning_effort": "high"},
+                make_active=False,
+            )
+            tasks.record_provider_handoff(
+                from_thread_id="thread-openai",
+                to_thread_id="thread-first",
+                settings={"profile_id": "qwen-default", "provider_id": "qwen", "model": "qwen3.7-plus", "reasoning_effort": "high"},
+                reused_existing=True,
+            )
             projects.create_project("Second Project", root / "second.abproj", workspace_root=second_workspace)
             current_before = str(projects.current_project["project_file"])
 
@@ -51,8 +64,44 @@ class ProjectSidebarSnapshotTests(unittest.TestCase):
             self.assertFalse(first_node["is_current"])
             self.assertEqual(first_node["tasks"][0]["title"], "Inspect pricing API")
             self.assertEqual(first_node["tasks"][0]["threads"][0]["thread_id"], "thread-first")
-            self.assertEqual(first_node["tasks"][0]["lane_count"], 1)
+            self.assertEqual(first_node["tasks"][0]["lane_count"], 2)
             self.assertEqual(first_node["tasks"][0]["active_lane_label"], "qwen / qwen3.7-plus")
+            self.assertEqual(first_node["tasks"][0]["previous_lane_label"], "openai / gpt-5.5")
+
+    def test_sidebar_snapshot_reads_task_state_through_cross_host_project_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "cross-host-workspace"
+            workspace.mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            project_path = root / "cross-host.abproj"
+            projects.create_project("Cross Host", project_path, workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task("Keep task navigation visible", thread_id="thread-cross-host")
+
+            windows_project_path = r"D:\workspace\cross-host.abproj"
+            windows_workspace_root = r"D:\workspace"
+            project_payload = json.loads(project_path.read_text(encoding="utf-8"))
+            project_payload["project_file"] = windows_project_path
+            project_payload["workspace_root"] = windows_workspace_root
+            project_path.write_text(json.dumps(project_payload), encoding="utf-8")
+
+            recent_payload = json.loads((root / "projects.json").read_text(encoding="utf-8"))
+            recent_payload["projects"][0]["project_file"] = windows_project_path
+            recent_payload["projects"][0]["workspace_root"] = windows_workspace_root
+            (root / "projects.json").write_text(json.dumps(recent_payload), encoding="utf-8")
+            projects.close_project()
+
+            aliases = {
+                windows_project_path: project_path,
+                windows_workspace_root: workspace,
+            }
+            with patch("astrabridge_sidecar.project_service.path_for_host", side_effect=lambda value: aliases.get(str(value), Path(str(value)))):
+                snapshot = projects.sidebar_snapshot()
+
+            self.assertEqual(len(snapshot["projects"]), 1)
+            self.assertEqual(snapshot["projects"][0]["project_file"], windows_project_path)
+            self.assertEqual([task["title"] for task in snapshot["projects"][0]["tasks"]], ["Keep task navigation visible"])
 
     def test_sidebar_snapshot_contains_warning_for_corrupt_task_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -69,6 +118,65 @@ class ProjectSidebarSnapshotTests(unittest.TestCase):
 
             self.assertEqual(snapshot["projects"][0]["tasks"], [])
             self.assertTrue(any("task_state_read_failed" in warning for warning in snapshot["projects"][0]["warnings"]))
+
+    def test_sidebar_snapshot_prefers_task_state_current_task_over_stale_project_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            project_file = root / "stale-sidebar.abproj"
+            projects.create_project("Sidebar Repair", project_file, workspace_root=workspace)
+            tasks = TaskService(projects)
+
+            stale = tasks.create_task(
+                "Stale Task",
+                thread_id="thread-qwen",
+                settings={"profile_id": "qwen-default", "provider_id": "qwen", "model": "qwen3.7-plus", "reasoning_effort": "high"},
+            )
+            target = tasks.create_task("Current DG Task")
+            tasks.switch_task(str(target["task_id"]))
+
+            projects.update_project({"current_task_id": stale["task_id"], "current_thread_id": "thread-qwen"})
+
+            snapshot = projects.sidebar_snapshot()
+
+            node = snapshot["projects"][0]
+            stale_item = next(item for item in node["tasks"] if item["task_id"] == stale["task_id"])
+            target_item = next(item for item in node["tasks"] if item["task_id"] == target["task_id"])
+            self.assertFalse(stale_item["is_current"])
+            self.assertTrue(target_item["is_current"])
+
+    def test_sidebar_snapshot_strips_smoke_prefix_from_lane_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Lane Labels", root / "lane-labels.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Step 11 source for compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run",
+                thread_id="thread-step11",
+                settings={"profile_id": "qwen-default", "provider_id": "qwen", "model": "qwen3.7-plus", "reasoning_effort": "high"},
+            )
+            tasks.bind_thread(
+                thread_id="thread-step11",
+                settings={
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3.7-plus",
+                    "reasoning_effort": "high",
+                    "name": "Step 11 source for compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run",
+                },
+                make_active=True,
+            )
+
+            snapshot = projects.sidebar_snapshot()
+
+            task = snapshot["projects"][0]["tasks"][0]
+            self.assertEqual(task["title"], "compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run")
+            self.assertEqual(task["active_lane_label"], "compact_handoff-yunwu-gpt-5.5-same_task.handoff_target-run")
 
 
 class TitleSuggestionServiceTests(unittest.TestCase):

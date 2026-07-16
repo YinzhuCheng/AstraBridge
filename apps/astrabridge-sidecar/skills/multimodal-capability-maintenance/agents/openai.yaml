@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multimodal Capability Maintenance"
+  short_description: "Sync sources, reconcile matrix, run smoke, and gate rollout"
+  default_prompt: "Use $multimodal-capability-maintenance to refresh multimodal provider evidence, reconcile route exposure, run smoke, and prepare a safe rollout decision."

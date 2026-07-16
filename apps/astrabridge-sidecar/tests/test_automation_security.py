@@ -23,6 +23,10 @@ class _FakeProfileService:
             "model": "qwen3.7-plus",
             "reasoning_effort": "high",
             "env_key": "DASHSCOPE_API_KEY",
+            "authority_tier": "A",
+            "authority_reason": "Test profile has guarded tool execution authority.",
+            "command_execution_status": "verified",
+            "command_execution_note": "Test fixture declares command execution verification.",
         }
 
 

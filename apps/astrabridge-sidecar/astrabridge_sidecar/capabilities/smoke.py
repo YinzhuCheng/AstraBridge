@@ -64,9 +64,10 @@ def capability_smoke_snapshot(
         raise ValueError("Provider-backed smoke requires allow_provider=true.")
 
     fixture = dict(_DRY_RUN_FIXTURES[capability_id])
-    route = resolve_capability_route_entry(
+    route = _resolve_smoke_route(
         capability_id,
-        configured_models,
+        payload,
+        configured_models=configured_models,
         route_record=route_record,
         registry=registry,
     )
@@ -90,6 +91,8 @@ def capability_smoke_snapshot(
             provider_result = runtime.invoke(capability_id, actual_payload)
             provider_invoked = True
             elapsed_ms = int((time.perf_counter() - started) * 1000)
+            route = _route_from_provider_result(provider_result, fallback_route=route)
+            candidate = dict(route.get("resolved_candidate") or {})
             status, provider_notes = _provider_status_notes(capability_id, provider_result)
             artifact_refs = _sanitize_artifact_refs(provider_result.get("artifact_refs") or [])
             evidence_refs = _evidence_refs_from_artifacts(artifact_refs)
@@ -145,6 +148,90 @@ def capability_smoke_snapshot(
         ),
         "created_at": now_iso(),
     }
+
+
+def _resolve_smoke_route(
+    capability_id: str,
+    payload: dict[str, Any],
+    *,
+    configured_models: list[dict[str, Any]] | None,
+    route_record: dict[str, Any] | None,
+    registry: Any,
+) -> dict[str, Any]:
+    provider_override = _clean_route_text(payload.get("provider_id"))
+    model_override = _clean_route_text(payload.get("model"))
+    if provider_override or model_override:
+        candidates = registry.resolve_candidates(capability_id, configured_models)
+        for candidate in candidates:
+            if provider_override and _clean_route_text(candidate.get("provider_id")) != provider_override:
+                continue
+            if model_override and _clean_route_text(candidate.get("model")) != model_override:
+                continue
+            return {
+                "capability_id": capability_id,
+                "route_mode": "explicit",
+                "resolution_status": "ok",
+                "resolved_candidate": dict(candidate),
+                "candidates": candidates,
+                "error": None,
+            }
+        return {
+            "capability_id": capability_id,
+            "route_mode": "explicit",
+            "resolution_status": "no_capability_candidate",
+            "resolved_candidate": None,
+            "candidates": candidates,
+            "error": _explicit_route_error(capability_id, provider_override=provider_override, model_override=model_override),
+        }
+    return resolve_capability_route_entry(
+        capability_id,
+        configured_models,
+        route_record=route_record,
+        registry=registry,
+    )
+
+
+def _route_from_provider_result(
+    provider_result: dict[str, Any] | None,
+    *,
+    fallback_route: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(provider_result, dict):
+        return fallback_route
+    fallback_candidate = dict(fallback_route.get("resolved_candidate") or {})
+    runtime_route = dict(provider_result.get("route") or {})
+    runtime_candidate = dict(runtime_route.get("resolved_candidate") or {})
+    provider_id = _clean_route_text(provider_result.get("provider_id"))
+    model = _clean_route_text(provider_result.get("model"))
+    if not runtime_candidate and (provider_id or model):
+        runtime_candidate = {
+            "provider_id": provider_id or None,
+            "model": model or None,
+        }
+    for key in ("provider_id", "model", "adapter_id"):
+        if not runtime_candidate.get(key) and fallback_candidate.get(key):
+            runtime_candidate[key] = fallback_candidate[key]
+    if not runtime_candidate:
+        return fallback_route
+    return {
+        "capability_id": _clean_route_text(runtime_route.get("capability_id")) or _clean_route_text(provider_result.get("capability_id")) or fallback_route.get("capability_id"),
+        "route_mode": _clean_route_text(runtime_route.get("route_mode")) or _clean_route_text(fallback_route.get("route_mode")) or "explicit",
+        "resolution_status": _clean_route_text(runtime_route.get("resolution_status")) or "ok",
+        "resolved_candidate": runtime_candidate,
+        "error": _clean_route_text(runtime_route.get("error")) or _clean_route_text(fallback_route.get("error")) or None,
+    }
+
+
+def _explicit_route_error(capability_id: str, *, provider_override: str, model_override: str) -> str:
+    if provider_override and model_override:
+        target = f"{provider_override}/{model_override}"
+    else:
+        target = provider_override or model_override or "<empty>"
+    return f"no_capability_candidate: capability `{capability_id}` explicit route `{target}` has no eligible candidate."
+
+
+def _clean_route_text(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def _provider_smoke_payload(capability_id: str, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -207,32 +294,73 @@ def _provider_smoke_payload(capability_id: str, payload: dict[str, Any]) -> tupl
             "max_output_tokens": 48,
             "timeout_sec": timeout_sec,
         }
+        for key in ("provider_id", "model", "workspace_root"):
+            if payload.get(key):
+                actual[key] = payload[key]
         sample = {
             "prompt": actual["prompt"],
             "image_inputs": [{"fixture": "generated_red_square_png", "mime_type": "image/png"}],
             "detail": actual["detail"],
             "max_output_tokens": actual["max_output_tokens"],
         }
+        for key in ("provider_id", "model", "workspace_root"):
+            if actual.get(key):
+                sample[key] = actual[key]
         return actual, sample
     if capability_id == "speech.transcribe":
+        custom_audio_inputs = [item for item in list(payload.get("audio_inputs") or []) if isinstance(item, dict)]
+        custom_audio_paths = _clean_string_list(payload.get("audio_paths"))
+        if custom_audio_inputs or custom_audio_paths:
+            actual = {
+                "audio_inputs": custom_audio_inputs or [{"path": path} for path in custom_audio_paths],
+                "language_hint": str(payload.get("language_hint") or "en").strip(),
+                "timeout_sec": timeout_sec,
+            }
+            for key in ("provider_id", "model", "workspace_root"):
+                if payload.get(key):
+                    actual[key] = payload[key]
+            sample = {
+                "audio_inputs": _sanitize_audio_input_samples(actual["audio_inputs"]),
+                "language_hint": actual["language_hint"],
+            }
+            if actual.get("provider_id"):
+                sample["provider_id"] = actual["provider_id"]
+            if actual.get("model"):
+                sample["model"] = actual["model"]
+            if actual.get("workspace_root"):
+                sample["workspace_root"] = actual["workspace_root"]
+            return actual, sample
         actual = {
             "audio_inputs": [{"data_uri": _tone_wav_data_uri(), "mime_type": "audio/wav"}],
             "language_hint": "en",
             "timeout_sec": timeout_sec,
         }
+        for key in ("provider_id", "model", "workspace_root"):
+            if payload.get(key):
+                actual[key] = payload[key]
         sample = {
             "audio_inputs": [{"fixture": "generated_tone_wav", "mime_type": "audio/wav", "duration_sec": 0.8}],
             "language_hint": actual["language_hint"],
         }
+        for key in ("provider_id", "model", "workspace_root"):
+            if actual.get(key):
+                sample[key] = actual[key]
         return actual, sample
     if capability_id == "speech.synthesize":
         actual = {
             "text": "AstraBridge provider smoke test.",
-            "voice": str(payload.get("voice") or "Tina"),
+            "voice": str(payload.get("voice") or "Cherry"),
             "audio_format": "wav",
             "timeout_sec": int(payload.get("timeout_sec") or 240),
         }
-        return actual, {key: actual[key] for key in ("text", "voice", "audio_format")}
+        for key in ("provider_id", "model", "workspace_root", "language_type", "instructions"):
+            if payload.get(key):
+                actual[key] = payload[key]
+        sample = {key: actual[key] for key in ("text", "voice", "audio_format")}
+        for key in ("provider_id", "model", "workspace_root", "language_type", "instructions"):
+            if actual.get(key):
+                sample[key] = actual[key]
+        return actual, sample
     raise ValueError(f"Unsupported provider smoke capability: {capability_id}")
 
 
@@ -248,6 +376,19 @@ def _sanitize_image_input_samples(items: list[dict[str, Any]]) -> list[dict[str,
         sample = {key: item.get(key) for key in ("path", "url", "mime_type") if item.get(key)}
         if item.get("data_uri") or item.get("data"):
             sample["fixture"] = "inline_image_data"
+            if item.get("mime_type"):
+                sample["mime_type"] = item.get("mime_type")
+        if sample:
+            sanitized.append(sample)
+    return sanitized
+
+
+def _sanitize_audio_input_samples(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for item in items:
+        sample = {key: item.get(key) for key in ("path", "mime_type", "duration_sec") if item.get(key)}
+        if item.get("data_uri") or item.get("data"):
+            sample["fixture"] = "inline_audio_data"
             if item.get("mime_type"):
                 sample["mime_type"] = item.get("mime_type")
         if sample:

@@ -19,6 +19,8 @@ PROVIDER_DEFAULT_METADATA_FIELDS = (
     "supported_reasoning_levels",
     "default_reasoning_level",
     "reasoning_policy_mode",
+    "supports_reasoning_replay",
+    "preserve_reasoning_for_tool_turns",
     "input_modalities",
     "capabilities",
     "edit_policy",

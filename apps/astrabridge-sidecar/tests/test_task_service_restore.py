@@ -7,6 +7,133 @@ from astrabridge_sidecar.task_service import TaskService
 
 
 class TaskServiceRestoreActiveProviderThreadTests(unittest.TestCase):
+    def test_current_task_prefers_task_state_over_stale_project_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            project_file = root / "projection.abproj"
+            projects.create_project("Projection repair", project_file, workspace_root=workspace)
+            tasks = TaskService(projects)
+
+            stale = tasks.create_task(
+                "Stale projected task",
+                thread_id="thread-qwen",
+                settings={
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3.7-plus",
+                    "reasoning_effort": "high",
+                },
+            )
+            target = tasks.create_task("Lane-less DG task")
+            tasks.switch_task(str(stale["task_id"]))
+            tasks.switch_task(str(target["task_id"]))
+
+            projects.update_project({"current_task_id": stale["task_id"], "current_thread_id": "thread-qwen"})
+
+            current = tasks.current_task()
+
+            self.assertIsNotNone(current)
+            self.assertEqual(current["task_id"], target["task_id"])
+            self.assertEqual(projects.current_project["current_task_id"], target["task_id"])
+            self.assertIsNone(projects.current_project["current_thread_id"])
+
+            persisted = project_file.read_text(encoding="utf-8")
+            self.assertIn(f'"current_task_id": "{target["task_id"]}"', persisted)
+            self.assertIn('"current_thread_id": null', persisted)
+
+    def test_switch_task_returns_full_current_task_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Switch task shape", root / "switch-shape.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+
+            created = tasks.create_task(
+                "Switch target",
+                thread_id="thread-qwen",
+                settings={
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3.7-plus",
+                    "reasoning_effort": "high",
+                },
+            )
+            tasks.create_task("Other task")
+
+            switched = tasks.switch_task(str(created["task_id"]))
+
+            self.assertEqual(switched["task_id"], created["task_id"])
+            self.assertEqual(switched["active_provider_thread_id"], "thread-qwen")
+            self.assertIn("provider_threads", switched)
+            self.assertEqual(switched["provider_threads"][0]["thread_id"], "thread-qwen")
+
+    def test_snapshot_and_switch_task_use_persisted_current_task_projection_without_normalizing_current_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Fast task projection", root / "fast-projection.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+
+            target = tasks.create_task(
+                "Target task",
+                thread_id="thread-qwen",
+                settings={
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3.7-plus",
+                    "reasoning_effort": "high",
+                },
+            )
+            current = tasks.create_task("Other task")
+
+            def _fail_current_task() -> dict[str, object] | None:
+                raise AssertionError("current_task normalization should not run for snapshot/switch fast path")
+
+            tasks.current_task = _fail_current_task  # type: ignore[method-assign]
+
+            snapshot = tasks.snapshot()
+            switched = tasks.switch_task(str(target["task_id"]))
+
+            self.assertEqual(snapshot["current_task"]["task_id"], current["task_id"])
+            self.assertEqual(switched["task_id"], target["task_id"])
+            self.assertIn("provider_threads", switched)
+            self.assertEqual(switched["provider_threads"][0]["thread_id"], "thread-qwen")
+
+    def test_bind_thread_to_explicit_lane_less_task_preserves_task_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Task binding", root / "task-binding.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+
+            selected = tasks.create_task("DG Multimodal UI")
+            bound = tasks.bind_thread_to_task_id(
+                task_id=str(selected["task_id"]),
+                thread_id="thread-qwen-vision",
+                settings={
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3-vl-plus",
+                    "reasoning_effort": "medium",
+                },
+            )
+
+            self.assertEqual(bound["task_id"], selected["task_id"])
+            self.assertEqual(bound["title"], "DG Multimodal UI")
+            self.assertEqual(bound["active_provider_thread_id"], "thread-qwen-vision")
+            self.assertEqual(projects.current_project["current_task_id"], selected["task_id"])
+            self.assertEqual(projects.current_project["current_thread_id"], "thread-qwen-vision")
+            self.assertEqual(len(tasks.snapshot()["tasks"]), 1)
+
     def test_restore_active_provider_thread_switches_to_thread_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -48,7 +175,7 @@ class TaskServiceRestoreActiveProviderThreadTests(unittest.TestCase):
 
             snapshot = tasks.snapshot()
             self.assertEqual(snapshot["current_task"]["task_id"], owner_task["task_id"])
-            old_snapshot = next(item for item in snapshot["tasks"] if item["task_id"] == old_task["task_id"])
+            old_snapshot = next(item for item in tasks._state()["tasks"] if item["task_id"] == old_task["task_id"])
             old_thread_ids = {item["thread_id"] for item in old_snapshot["provider_threads"]}
             self.assertNotIn("thread-deepseek", old_thread_ids)
 
