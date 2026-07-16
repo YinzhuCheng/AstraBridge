@@ -1,0 +1,478 @@
+{
+  "schema_version": "astrabridge-agent-orchestration-graph-v1",
+  "graph_id": "graph_supervisor_worker_synthesizer_v1",
+  "task_id": "task_example",
+  "title": "Supervisor / Worker / Synthesizer",
+  "template_id": "supervisor_worker_synthesizer",
+  "status": "ready",
+  "metadata": {
+    "description": "Supervisor / Worker / Synthesizer",
+    "tags": [
+      "supervisor",
+      "worker",
+      "synthesis"
+    ],
+    "owners": [],
+    "created_at": "2026-07-07T00:00:00+09:00",
+    "updated_at": "2026-07-07T00:05:00+09:00"
+  },
+  "graph_policy": {
+    "entry_node_ids": [
+      "node_supervisor"
+    ],
+    "max_depth": 2,
+    "default_permission_mode": "ask",
+    "default_collaboration_mode": "default",
+    "default_execution_backend": "app_server",
+    "requires_dry_run_before_live": true
+  },
+  "nodes": [
+    {
+      "node_id": "node_supervisor",
+      "kind": "supervisor",
+      "label": "Supervisor",
+      "role": "supervisor",
+      "card_ref": "agent_card_supervisor",
+      "routing": {
+        "selection_mode": "explicit",
+        "provider_id": "qwen",
+        "model_id": "qwen3-coder-plus",
+        "capability_claims": {
+          "input_port_types": [
+            "text"
+          ],
+          "output_port_types": [
+            "structured_json"
+          ]
+        }
+      },
+      "prompt": {
+        "template_mode": "inline",
+        "template": "Define a bounded plan, a success bar, and the worker evidence requirements."
+      },
+      "tools": {
+        "approval_mode": "ask",
+        "allowed_tool_classes": [
+          "read_file",
+          "web"
+        ]
+      },
+      "ports": {
+        "inputs": [
+          {
+            "port_id": "task_context",
+            "label": "Task Context",
+            "port_type": "text",
+            "shape": "single",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "port_id": "machine_result",
+            "label": "Machine Result",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.supervisor_plan"
+          },
+          {
+            "port_id": "supervisor_plan",
+            "label": "Supervisor Plan",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": false,
+            "artifact_kind": "structured_json"
+          }
+        ]
+      },
+      "input_contract": {
+        "mode": "task_context_and_typed_ports",
+        "port_ids": [
+          "task_context"
+        ]
+      },
+      "output_contract": {
+        "mode": "structured_and_artifacts",
+        "machine_result_schema_ref": "schema.supervisor_plan",
+        "artifact_specs": [
+          {
+            "kind": "structured_json",
+            "id": "supervisor_plan"
+          }
+        ],
+        "human_summary_required": true
+      },
+      "execution": {
+        "spawn_mode": "inline_lane",
+        "timeout_ms": 120000,
+        "retry_policy": {
+          "max_attempts": 1
+        },
+        "execution_backend": "app_server",
+        "collaboration_mode": "default",
+        "subagent_policy": null
+      },
+      "safety": {
+        "risk_class": "moderate",
+        "allow_provider_calls": true,
+        "allow_code_changes": false,
+        "allow_install": false,
+        "requires_human_approval": false
+      },
+      "ui": {
+        "position": {
+          "x": 80,
+          "y": 200
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    },
+    {
+      "node_id": "node_worker",
+      "kind": "worker",
+      "label": "Worker",
+      "role": "worker",
+      "card_ref": "agent_card_worker",
+      "routing": {
+        "selection_mode": "explicit",
+        "provider_id": "qwen",
+        "model_id": "qwen3-coder-plus",
+        "capability_claims": {
+          "input_port_types": [
+            "text",
+            "structured_json"
+          ],
+          "output_port_types": [
+            "structured_json",
+            "text"
+          ]
+        }
+      },
+      "prompt": {
+        "template_mode": "inline",
+        "template": "Execute only the approved task slice and return evidence-backed output."
+      },
+      "tools": {
+        "approval_mode": "ask",
+        "allowed_tool_classes": [
+          "read_file",
+          "shell"
+        ]
+      },
+      "ports": {
+        "inputs": [
+          {
+            "port_id": "task_context",
+            "label": "Task Context",
+            "port_type": "text",
+            "shape": "single",
+            "required": true
+          },
+          {
+            "port_id": "supervisor_plan",
+            "label": "Supervisor Plan",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.supervisor_plan"
+          }
+        ],
+        "outputs": [
+          {
+            "port_id": "machine_result",
+            "label": "Machine Result",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.worker_result"
+          },
+          {
+            "port_id": "worker_report",
+            "label": "Worker Report",
+            "port_type": "text",
+            "shape": "single",
+            "required": false,
+            "artifact_kind": "text_report"
+          }
+        ]
+      },
+      "input_contract": {
+        "mode": "typed_ports",
+        "port_ids": [
+          "supervisor_plan"
+        ]
+      },
+      "output_contract": {
+        "mode": "structured_and_artifacts",
+        "machine_result_schema_ref": "schema.worker_result",
+        "artifact_specs": [
+          {
+            "kind": "text_report",
+            "id": "worker_report"
+          }
+        ],
+        "human_summary_required": true
+      },
+      "execution": {
+        "spawn_mode": "subagent_worker",
+        "timeout_ms": 180000,
+        "retry_policy": {
+          "max_attempts": 1
+        },
+        "execution_backend": "app_server",
+        "collaboration_mode": "default",
+        "subagent_policy": {
+          "isolation_mode": "lane",
+          "max_turns": 8,
+          "allow_direct_teammate_messages": false,
+          "share_worktree": false,
+          "allow_nested_subagents": false
+        }
+      },
+      "safety": {
+        "risk_class": "moderate",
+        "allow_provider_calls": true,
+        "allow_code_changes": false,
+        "allow_install": false,
+        "requires_human_approval": false
+      },
+      "ui": {
+        "position": {
+          "x": 350,
+          "y": 200
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    },
+    {
+      "node_id": "node_synth",
+      "kind": "synthesizer",
+      "label": "Synthesizer",
+      "role": "synthesizer",
+      "card_ref": "agent_card_synthesizer",
+      "routing": {
+        "selection_mode": "explicit",
+        "provider_id": "qwen",
+        "model_id": "qwen3-coder-plus",
+        "capability_claims": {
+          "input_port_types": [
+            "text",
+            "structured_json"
+          ],
+          "output_port_types": [
+            "structured_json",
+            "agent_report"
+          ]
+        }
+      },
+      "prompt": {
+        "template_mode": "inline",
+        "template": "Merge the worker result into one bounded answer and keep unresolved questions explicit."
+      },
+      "tools": {
+        "approval_mode": "ask",
+        "allowed_tool_classes": [
+          "read_file"
+        ]
+      },
+      "ports": {
+        "inputs": [
+          {
+            "port_id": "task_context",
+            "label": "Task Context",
+            "port_type": "text",
+            "shape": "single",
+            "required": true
+          },
+          {
+            "port_id": "worker_result",
+            "label": "Worker Result",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.worker_result"
+          }
+        ],
+        "outputs": [
+          {
+            "port_id": "machine_result",
+            "label": "Machine Result",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.synthesis_result"
+          },
+          {
+            "port_id": "final_summary",
+            "label": "Final Summary",
+            "port_type": "agent_report",
+            "shape": "single",
+            "required": false,
+            "artifact_kind": "run_summary"
+          }
+        ]
+      },
+      "input_contract": {
+        "mode": "typed_ports",
+        "port_ids": [
+          "worker_result"
+        ]
+      },
+      "output_contract": {
+        "mode": "structured_and_artifacts",
+        "machine_result_schema_ref": "schema.synthesis_result",
+        "artifact_specs": [
+          {
+            "kind": "run_summary",
+            "id": "final_summary"
+          }
+        ],
+        "human_summary_required": true
+      },
+      "execution": {
+        "spawn_mode": "isolated_lane",
+        "timeout_ms": 120000,
+        "retry_policy": {
+          "max_attempts": 1
+        },
+        "execution_backend": "app_server",
+        "collaboration_mode": "default",
+        "subagent_policy": null
+      },
+      "safety": {
+        "risk_class": "moderate",
+        "allow_provider_calls": false,
+        "allow_code_changes": false,
+        "allow_install": false,
+        "requires_human_approval": false
+      },
+      "ui": {
+        "position": {
+          "x": 620,
+          "y": 200
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "edge_supervisor_worker",
+      "from_node_id": "node_supervisor",
+      "to_node_id": "node_worker",
+      "edge_type": "context_handoff",
+      "handoff_contract": {
+        "message_template": "Use the supervisor plan as the worker contract.",
+        "message_part_modes": [
+          "machine_result",
+          "human_summary"
+        ],
+        "required_output_schema_refs": [
+          "schema.supervisor_plan"
+        ],
+        "port_bindings": [
+          {
+            "from_port_id": "machine_result",
+            "to_port_id": "supervisor_plan"
+          }
+        ]
+      },
+      "context_policy": {
+        "policy_id": "policy_edge_supervisor_worker",
+        "history_mode": "latest_summary_only",
+        "artifact_mode": "required_output_only",
+        "exclude_private_memory": true,
+        "include_machine_results": true,
+        "include_human_summaries": true,
+        "summary_strategy": "human_and_machine"
+      },
+      "ui": {
+        "position": {
+          "x": 215,
+          "y": 200
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    },
+    {
+      "edge_id": "edge_worker_synth",
+      "from_node_id": "node_worker",
+      "to_node_id": "node_synth",
+      "edge_type": "artifact_handoff",
+      "handoff_contract": {
+        "message_template": "Synthesize the worker result into the final bounded answer.",
+        "message_part_modes": [
+          "machine_result",
+          "human_summary"
+        ],
+        "required_output_schema_refs": [
+          "schema.worker_result"
+        ],
+        "port_bindings": [
+          {
+            "from_port_id": "machine_result",
+            "to_port_id": "worker_result"
+          }
+        ]
+      },
+      "context_policy": {
+        "policy_id": "policy_edge_worker_synth",
+        "history_mode": "latest_summary_only",
+        "artifact_mode": "required_output_only",
+        "exclude_private_memory": true,
+        "include_machine_results": true,
+        "include_human_summaries": true,
+        "summary_strategy": "human_and_machine"
+      },
+      "ui": {
+        "position": {
+          "x": 485,
+          "y": 200
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    }
+  ],
+  "schema_registry": {
+    "schema.supervisor_plan": {
+      "type": "object",
+      "required": [
+        "goal",
+        "constraints"
+      ]
+    },
+    "schema.worker_result": {
+      "type": "object",
+      "required": [
+        "result",
+        "evidence"
+      ]
+    },
+    "schema.synthesis_result": {
+      "type": "object",
+      "required": [
+        "summary",
+        "open_questions"
+      ]
+    }
+  },
+  "migration": {
+    "source_kind": "native_authoring",
+    "compiled_task_graph_version": "astrabridge-task-graph-v1",
+    "compatibility": {
+      "lowering_mode": "lossy_legacy_task_graph",
+      "preserves_unknown_fields": false,
+      "notes": [
+        "Canonical graphs remain the source of truth for GUI, code, dry-run, and runtime work.",
+        "Lowering into legacy task graphs is a compatibility shim while the generic scheduler is still under construction."
+      ]
+    }
+  },
+  "state_version": 1
+}

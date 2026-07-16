@@ -27,6 +27,7 @@ function parseArgs(argv) {
     navigationTimeoutMs: 20000,
     viewportWidth: 1365,
     viewportHeight: 900,
+    fullPage: true,
     actions: [],
     expectTexts: [],
   };
@@ -44,6 +45,7 @@ function parseArgs(argv) {
     else if (arg === "--navigation-timeout-ms") parsed.navigationTimeoutMs = Number(next()) || parsed.navigationTimeoutMs;
     else if (arg === "--viewport-width") parsed.viewportWidth = Number(next()) || parsed.viewportWidth;
     else if (arg === "--viewport-height") parsed.viewportHeight = Number(next()) || parsed.viewportHeight;
+    else if (arg === "--full-page") parsed.fullPage = String(next()).toLowerCase() !== "false";
     else if (arg === "--actions-json") parsed.actions = JSON.parse(next());
     else if (arg === "--actions-file") parsed.actions = JSON.parse(awaitReadText(next()));
     else if (arg === "--expect-text") parsed.expectTexts.push(next());
@@ -146,6 +148,11 @@ async function runAction(page, action) {
     await page.locator(selector).first().waitFor({ state: "visible", timeout });
     return { type, ok: true, selector };
   }
+  if (type === "scroll_selector_into_view") {
+    const selector = String(action.selector || "");
+    await page.locator(selector).first().scrollIntoViewIfNeeded({ timeout });
+    return { type, ok: true, selector };
+  }
   throw new Error(`Unsupported action type: ${type}`);
 }
 
@@ -190,8 +197,8 @@ async function main() {
     }
     await fs.mkdir(path.dirname(path.resolve(args.out)), { recursive: true });
     try {
-      await page.screenshot({ path: args.out, fullPage: true });
-      screenshotStatus = "captured_full_page";
+      await page.screenshot({ path: args.out, fullPage: args.fullPage });
+      screenshotStatus = args.fullPage ? "captured_full_page" : "captured_viewport";
     } catch (error) {
       consoleIssues.push(`screenshot-fullpage: ${String(error?.message || error).slice(0, 300)}`);
       await page.screenshot({ path: args.out, fullPage: false });

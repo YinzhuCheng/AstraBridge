@@ -9,6 +9,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import unquote
 
 
 TEXT_SUFFIXES = {
@@ -32,8 +33,10 @@ TEXT_SUFFIXES = {
 SKIP_DIRS = {
     ".git",
     ".mypy_cache",
+    ".pnpm-store",
     ".pytest_cache",
     ".ruff_cache",
+    ".tmp",
     ".venv",
     "__pycache__",
     "build",
@@ -42,6 +45,7 @@ SKIP_DIRS = {
     "playwright-report",
     "target",
     "test-results",
+    "tmp",
 }
 
 MOJIBAKE_PATTERNS = [
@@ -61,6 +65,14 @@ MOJIBAKE_PATTERNS = [
     "鏄",
     "熸",
     "ˉ",
+    "妫€",
+    "杩斿洖",
+    "浠诲姟",
+    "澶瑰",
+    "杈撳嚭",
+    "鏈€",
+    "鍥綻",
+    "鏌ュ櫒",
 ]
 
 LEGACY_PATTERNS = [
@@ -76,6 +88,14 @@ LEGACY_PATTERNS = [
 LEGACY_REGEXES = [
     re.compile(r"\blcr_[A-Za-z0-9_]*\b"),
 ]
+
+RETIRED_RUNTIME_SYMBOLS = {
+    "ProviderAdapter",
+    "QwenResponsesAdapter",
+    "ChatCompletionsAdapter",
+    "DeepSeekChatAdapter",
+    "KimiChatAdapter",
+}
 
 SECRET_REGEXES = [
     re.compile(r"Authorization\s*:\s*Bearer\s+(?!\[?REDACTED\]?|<|xxx|example)[A-Za-z0-9._\-]{12,}", re.I),
@@ -112,6 +132,20 @@ NEGATIVE_OR_GUARDRAIL_WORDS = {
 }
 
 ALLOWED_PRIVATE_TRACKED = {"PRIVATE/README.md"}
+DOCUMENT_REGISTRY_PATH = "docs/DOCUMENT_REGISTRY.json"
+DOCUMENT_REGISTRY_REQUIRED_FIELDS = {
+    "path",
+    "status",
+    "owner",
+    "scope",
+    "last_verified",
+    "replacement",
+    "archive_policy",
+}
+DOCUMENT_REGISTRY_STATUSES = {"active", "complete", "superseded", "archived", "reference"}
+CURRENT_GUIDANCE_STATUSES = {"active", "reference"}
+HISTORICAL_DOCUMENT_STATUSES = {"complete", "superseded", "archived"}
+MARKDOWN_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 
 
 @dataclass(frozen=True)
@@ -149,6 +183,13 @@ def is_governance_rule_path(rel: str) -> bool:
     }
 
 
+def is_interface_inventory_path(rel: str) -> bool:
+    return rel in {
+        "scripts/interface_registry_audit.py",
+        "docs/INTERFACE_GOVERNANCE.md",
+    }
+
+
 def is_allowed_guardrail_code_path(rel: str) -> bool:
     return rel in {
         "apps/astrabridge-sidecar/astrabridge_sidecar/isolation_audit_service.py",
@@ -177,7 +218,11 @@ def iter_text_files(repo: Path) -> Iterable[Path]:
         if any(part in SKIP_DIRS for part in rel_parts):
             dirs[:] = []
             continue
-        dirs[:] = [name for name in dirs if name not in SKIP_DIRS and name != "PRIVATE"]
+        dirs[:] = [
+            name
+            for name in dirs
+            if name not in SKIP_DIRS and name != "PRIVATE" and not name.endswith(".egg-info")
+        ]
         for name in files:
             path = root_path / name
             if path.suffix.lower() in TEXT_SUFFIXES:
@@ -186,6 +231,197 @@ def iter_text_files(repo: Path) -> Iterable[Path]:
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def expected_document_registry_paths(repo: Path) -> set[str]:
+    paths: set[str] = set()
+    for rel in {"AGENTS.md", "README.md", DOCUMENT_REGISTRY_PATH}:
+        if (repo / rel).is_file():
+            paths.add(rel)
+    docs_root = repo / "docs"
+    if docs_root.is_dir():
+        paths.update(normalize_path(path, repo) for path in docs_root.rglob("*.md") if path.is_file())
+    plan_root = repo / "PLAN"
+    if plan_root.is_dir():
+        paths.update(normalize_path(path, repo) for path in plan_root.iterdir() if path.is_file())
+    return paths
+
+
+def load_document_registry(repo: Path) -> tuple[dict[str, str], list[Finding]]:
+    registry_path = repo / DOCUMENT_REGISTRY_PATH
+    if not registry_path.is_file():
+        return {}, []
+
+    findings: list[Finding] = []
+    try:
+        payload = json.loads(read_text(registry_path))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, [
+            Finding(
+                severity="error",
+                code="document-registry-invalid",
+                path=DOCUMENT_REGISTRY_PATH,
+                line=0,
+                message=f"Document registry is not valid UTF-8 JSON: {exc}",
+            )
+        ]
+
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return {}, [
+            Finding(
+                severity="error",
+                code="document-registry-invalid",
+                path=DOCUMENT_REGISTRY_PATH,
+                line=0,
+                message="Document registry must contain an entries array.",
+            )
+        ]
+
+    status_by_path: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="document-registry-entry-invalid",
+                    path=DOCUMENT_REGISTRY_PATH,
+                    line=0,
+                    message="Every document registry entry must be an object.",
+                )
+            )
+            continue
+        rel = entry.get("path")
+        if not isinstance(rel, str) or not rel:
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="document-registry-entry-invalid",
+                    path=DOCUMENT_REGISTRY_PATH,
+                    line=0,
+                    message="Every document registry entry must have a non-empty path.",
+                )
+            )
+            continue
+        missing_fields = sorted(DOCUMENT_REGISTRY_REQUIRED_FIELDS - set(entry))
+        if missing_fields:
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="document-registry-fields",
+                    path=rel,
+                    line=0,
+                    message=f"Registry entry is missing required fields: {', '.join(missing_fields)}.",
+                )
+            )
+        if rel in status_by_path:
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="document-registry-duplicate",
+                    path=rel,
+                    line=0,
+                    message="Document registry contains a duplicate path.",
+                )
+            )
+        status = entry.get("status")
+        if status not in DOCUMENT_REGISTRY_STATUSES:
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="document-registry-status",
+                    path=rel,
+                    line=0,
+                    message=f"Unknown document registry status: {status!r}.",
+                )
+            )
+        else:
+            status_by_path[rel] = status
+        if not (repo / rel).is_file():
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="document-registry-target-missing",
+                    path=rel,
+                    line=0,
+                    message="Registered document or plan does not exist.",
+                )
+            )
+        replacement = entry.get("replacement")
+        if status == "superseded" and not replacement:
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="document-registry-replacement",
+                    path=rel,
+                    line=0,
+                    message="Superseded registry entry must name a replacement.",
+                )
+            )
+        if replacement and (not isinstance(replacement, str) or not (repo / replacement).is_file()):
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="document-registry-replacement",
+                    path=rel,
+                    line=0,
+                    message=f"Registry replacement does not exist: {replacement!r}.",
+                )
+            )
+
+    expected = expected_document_registry_paths(repo)
+    actual = set(status_by_path)
+    for rel in sorted(expected - actual):
+        findings.append(
+            Finding(
+                severity="error",
+                code="document-registry-unregistered",
+                path=rel,
+                line=0,
+                message="Current documentation or plan file is missing from the registry.",
+            )
+        )
+    for rel in sorted(actual - expected):
+        findings.append(
+            Finding(
+                severity="error",
+                code="document-registry-extra",
+                path=rel,
+                line=0,
+                message="Registry path is outside the canonical documentation and plan inventory.",
+            )
+        )
+
+    current_plan = payload.get("current_execution_plan")
+    conditional = payload.get("conditional_execution_plans", [])
+    conditional_paths = {
+        item.get("path")
+        for item in conditional
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    allowed_active_plans = ({current_plan} if isinstance(current_plan, str) else set()) | conditional_paths
+    active_plans = {rel for rel, status in status_by_path.items() if rel.startswith("PLAN/") and status == "active"}
+    for rel in sorted(active_plans - allowed_active_plans):
+        findings.append(
+            Finding(
+                severity="error",
+                code="document-registry-active-plan",
+                path=rel,
+                line=0,
+                message="Active plan is not the current plan or an explicitly conditional plan.",
+            )
+        )
+    for rel in sorted(allowed_active_plans - active_plans):
+        findings.append(
+            Finding(
+                severity="error",
+                code="document-registry-active-plan",
+                path=str(rel),
+                line=0,
+                message="Current or conditional execution plan is not registered as active.",
+            )
+        )
+    return status_by_path, findings
 
 
 def git_ls_files(repo: Path, pattern: str) -> list[str]:
@@ -222,12 +458,18 @@ def check_private_tracking(repo: Path) -> list[Finding]:
     return findings
 
 
-def check_mojibake(rel: str, lines: list[str]) -> list[Finding]:
+def check_mojibake(rel: str, lines: list[str], registry_status: str | None = None) -> list[Finding]:
     findings: list[Finding] = []
     for index, line in enumerate(lines, start=1):
         for marker in MOJIBAKE_PATTERNS:
             if marker in line:
-                severity = "info" if is_test_path(rel) or is_governance_rule_path(rel) else "error"
+                severity = (
+                    "info"
+                    if is_test_path(rel)
+                    or is_governance_rule_path(rel)
+                    or registry_status in HISTORICAL_DOCUMENT_STATUSES
+                    else "error"
+                )
                 findings.append(
                     Finding(
                         severity=severity,
@@ -268,10 +510,13 @@ def line_has_legacy_marker(line: str) -> bool:
     return any(pattern.search(line) for pattern in LEGACY_REGEXES)
 
 
-def check_legacy(rel: str, lines: list[str]) -> list[Finding]:
+def check_legacy(rel: str, lines: list[str], registry_status: str | None = None) -> list[Finding]:
     findings: list[Finding] = []
+    history_path_allowed = is_archive_or_history_path(rel)
+    if rel.startswith("PLAN/") and registry_status in CURRENT_GUIDANCE_STATUSES:
+        history_path_allowed = False
     allowed_context = (
-        is_archive_or_history_path(rel)
+        history_path_allowed
         or is_test_path(rel)
         or is_allowed_shim_path(rel)
         or is_allowed_guardrail_code_path(rel)
@@ -280,12 +525,16 @@ def check_legacy(rel: str, lines: list[str]) -> list[Finding]:
     for index, line in enumerate(lines, start=1):
         if not line_has_legacy_marker(line):
             continue
+        nearby_context = " ".join(lines[max(0, index - 5) : index])
         if allowed_context:
             severity = "info"
-            message = "Legacy marker appears in archive, plan, shim, or test context."
-        elif has_guardrail_language(line):
+            message = "Legacy marker appears in archive, completed history, shim, or test context."
+        elif has_guardrail_language(nearby_context):
             severity = "info"
             message = "Legacy marker appears with guardrail or compatibility language."
+        elif registry_status in CURRENT_GUIDANCE_STATUSES:
+            severity = "error"
+            message = "Legacy marker appears in registered current guidance without clear guardrail wording."
         elif rel.startswith("apps/") or rel.startswith("scripts/"):
             severity = "error"
             message = "Legacy marker appears in active code outside an allowed shim, test, or guardrail context."
@@ -302,6 +551,92 @@ def check_legacy(rel: str, lines: list[str]) -> list[Finding]:
                 excerpt=line.strip()[:180],
             )
         )
+    return findings
+
+
+def check_retired_runtime_symbols(rel: str, lines: list[str]) -> list[Finding]:
+    findings: list[Finding] = []
+    allowed_context = (
+        is_test_path(rel)
+        or is_governance_rule_path(rel)
+        or is_interface_inventory_path(rel)
+        or is_archive_or_history_path(rel)
+    )
+    for index, line in enumerate(lines, start=1):
+        for symbol in RETIRED_RUNTIME_SYMBOLS:
+            if not re.search(rf"\b{re.escape(symbol)}\b", line):
+                continue
+            if allowed_context:
+                severity = "info"
+                message = "Retired runtime symbol appears in inventory, history, archive, or test context."
+            elif rel.startswith("apps/") or rel.startswith("scripts/"):
+                severity = "error"
+                message = "Retired runtime symbol appears in current code outside the canonical transport registry."
+            else:
+                severity = "warning"
+                message = "Retired runtime symbol appears in current documentation without an explicit historical context."
+            findings.append(
+                Finding(
+                    severity=severity,
+                    code="retired-runtime-symbol",
+                    path=rel,
+                    line=index,
+                    message=message,
+                    excerpt=line.strip()[:180],
+                )
+            )
+    return findings
+
+
+def resolve_markdown_target(repo: Path, source: Path, raw_target: str) -> Path | None:
+    target = unquote(raw_target.strip().strip("<>")).split("#", 1)[0]
+    if not target or target.startswith("#"):
+        return None
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", target) or target.startswith("mailto:"):
+        return None
+    if re.match(r"^/[A-Za-z]:[/\\]", target):
+        candidate = Path(target[1:])
+    elif re.match(r"^[A-Za-z]:[/\\]", target):
+        candidate = Path(target)
+    else:
+        candidate = source.parent / target
+    if candidate.exists():
+        return candidate
+    line_suffix = re.match(r"^(.*?):\d+(?::\d+)?$", str(candidate))
+    if line_suffix:
+        without_line = Path(line_suffix.group(1))
+        if without_line.exists():
+            return without_line
+    return candidate
+
+
+def check_markdown_links(repo: Path, rel: str, lines: list[str], registry_status: str | None) -> list[Finding]:
+    if registry_status not in CURRENT_GUIDANCE_STATUSES or not rel.endswith(".md"):
+        return []
+    source = repo / rel
+    findings: list[Finding] = []
+    in_fence = False
+    for index, line in enumerate(lines, start=1):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        for match in MARKDOWN_LINK_RE.finditer(line):
+            raw_target = match.group(1)
+            target = resolve_markdown_target(repo, source, raw_target)
+            if target is None or target.exists():
+                continue
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="current-doc-link-missing",
+                    path=rel,
+                    line=index,
+                    message=f"Registered current guidance links to a missing local target: {raw_target}.",
+                    excerpt=line.strip()[:180],
+                )
+            )
     return findings
 
 
@@ -338,16 +673,21 @@ def check_repo(repo: Path) -> dict[str, object]:
     repo = repo.resolve()
     findings: list[Finding] = []
     findings.extend(check_private_tracking(repo))
+    status_by_path, registry_findings = load_document_registry(repo)
+    findings.extend(registry_findings)
 
     scanned_files = 0
     for path in iter_text_files(repo):
         rel = normalize_path(path, repo)
         text = read_text(path)
         lines = text.splitlines()
+        registry_status = status_by_path.get(rel)
         scanned_files += 1
-        findings.extend(check_mojibake(rel, lines))
+        findings.extend(check_mojibake(rel, lines, registry_status))
         findings.extend(check_secrets(rel, lines))
-        findings.extend(check_legacy(rel, lines))
+        findings.extend(check_legacy(rel, lines, registry_status))
+        findings.extend(check_retired_runtime_symbols(rel, lines))
+        findings.extend(check_markdown_links(repo, rel, lines, registry_status))
         findings.extend(check_active_plan_language(rel, lines))
 
     counts = {"error": 0, "warning": 0, "info": 0}

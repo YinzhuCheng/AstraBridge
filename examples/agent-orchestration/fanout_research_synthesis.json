@@ -1,0 +1,687 @@
+{
+  "schema_version": "astrabridge-agent-orchestration-graph-v1",
+  "graph_id": "graph_fanout_research_synthesis_v1",
+  "task_id": "task_example",
+  "title": "Fan-out Research / Fan-in Synthesis",
+  "template_id": "fanout_fanin_research",
+  "status": "ready",
+  "metadata": {
+    "description": "Fan-out Research / Fan-in Synthesis",
+    "tags": [
+      "research",
+      "fanout",
+      "synthesis"
+    ],
+    "owners": [],
+    "created_at": "2026-07-07T00:00:00+09:00",
+    "updated_at": "2026-07-07T00:05:00+09:00"
+  },
+  "graph_policy": {
+    "entry_node_ids": [
+      "node_plan"
+    ],
+    "max_depth": 2,
+    "default_permission_mode": "ask",
+    "default_collaboration_mode": "default",
+    "default_execution_backend": "app_server",
+    "requires_dry_run_before_live": true
+  },
+  "nodes": [
+    {
+      "node_id": "node_plan",
+      "kind": "supervisor",
+      "label": "Research Planner",
+      "role": "planner",
+      "card_ref": "agent_card_research_supervisor",
+      "routing": {
+        "selection_mode": "explicit",
+        "provider_id": "qwen",
+        "model_id": "qwen3-coder-plus",
+        "capability_claims": {
+          "input_port_types": [
+            "text"
+          ],
+          "output_port_types": [
+            "structured_json",
+            "structured_json"
+          ]
+        }
+      },
+      "prompt": {
+        "template_mode": "inline",
+        "template": "Decompose the research goal into bounded branch questions and expected outputs."
+      },
+      "tools": {
+        "approval_mode": "ask",
+        "allowed_tool_classes": [
+          "web",
+          "read_file"
+        ]
+      },
+      "ports": {
+        "inputs": [
+          {
+            "port_id": "task_context",
+            "label": "Task Context",
+            "port_type": "text",
+            "shape": "single",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "port_id": "machine_result",
+            "label": "Machine Result",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.research_plan"
+          },
+          {
+            "port_id": "branch_plan",
+            "label": "Branch Plan",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": false,
+            "artifact_kind": "structured_json"
+          }
+        ]
+      },
+      "input_contract": {
+        "mode": "task_context_and_typed_ports",
+        "port_ids": [
+          "task_context"
+        ]
+      },
+      "output_contract": {
+        "mode": "structured_and_artifacts",
+        "machine_result_schema_ref": "schema.research_plan",
+        "artifact_specs": [
+          {
+            "kind": "structured_json",
+            "id": "branch_plan"
+          }
+        ],
+        "human_summary_required": true
+      },
+      "execution": {
+        "spawn_mode": "inline_lane",
+        "timeout_ms": 120000,
+        "retry_policy": {
+          "max_attempts": 1
+        },
+        "execution_backend": "app_server",
+        "collaboration_mode": "default",
+        "subagent_policy": null
+      },
+      "safety": {
+        "risk_class": "moderate",
+        "allow_provider_calls": true,
+        "allow_code_changes": false,
+        "allow_install": false,
+        "requires_human_approval": false
+      },
+      "ui": {
+        "position": {
+          "x": 80,
+          "y": 200
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    },
+    {
+      "node_id": "node_branch_a",
+      "kind": "worker",
+      "label": "Research Branch A",
+      "role": "researcher",
+      "card_ref": "agent_card_research_worker",
+      "routing": {
+        "selection_mode": "explicit",
+        "provider_id": "qwen",
+        "model_id": "qwen3-coder-plus",
+        "capability_claims": {
+          "input_port_types": [
+            "text",
+            "structured_json"
+          ],
+          "output_port_types": [
+            "structured_json",
+            "text"
+          ]
+        }
+      },
+      "prompt": {
+        "template_mode": "inline",
+        "template": "Research branch A only and attribute every finding."
+      },
+      "tools": {
+        "approval_mode": "ask",
+        "allowed_tool_classes": [
+          "web",
+          "read_file"
+        ]
+      },
+      "ports": {
+        "inputs": [
+          {
+            "port_id": "task_context",
+            "label": "Task Context",
+            "port_type": "text",
+            "shape": "single",
+            "required": true
+          },
+          {
+            "port_id": "branch_plan",
+            "label": "Branch Plan",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.research_plan"
+          }
+        ],
+        "outputs": [
+          {
+            "port_id": "machine_result",
+            "label": "Machine Result",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.branch_findings"
+          },
+          {
+            "port_id": "branch_a_report",
+            "label": "Branch A Report",
+            "port_type": "text",
+            "shape": "single",
+            "required": false,
+            "artifact_kind": "text_report"
+          }
+        ]
+      },
+      "input_contract": {
+        "mode": "task_context_and_typed_ports",
+        "port_ids": [
+          "task_context",
+          "branch_plan"
+        ]
+      },
+      "output_contract": {
+        "mode": "structured_and_artifacts",
+        "machine_result_schema_ref": "schema.branch_findings",
+        "artifact_specs": [
+          {
+            "kind": "text_report",
+            "id": "branch_a_report"
+          }
+        ],
+        "human_summary_required": true
+      },
+      "execution": {
+        "spawn_mode": "subagent_worker",
+        "timeout_ms": 180000,
+        "retry_policy": {
+          "max_attempts": 1
+        },
+        "execution_backend": "app_server",
+        "collaboration_mode": "default",
+        "subagent_policy": {
+          "isolation_mode": "lane",
+          "max_turns": 8,
+          "allow_direct_teammate_messages": false,
+          "share_worktree": false,
+          "allow_nested_subagents": false
+        }
+      },
+      "safety": {
+        "risk_class": "moderate",
+        "allow_provider_calls": true,
+        "allow_code_changes": false,
+        "allow_install": false,
+        "requires_human_approval": false
+      },
+      "ui": {
+        "position": {
+          "x": 360,
+          "y": 120
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    },
+    {
+      "node_id": "node_branch_b",
+      "kind": "worker",
+      "label": "Research Branch B",
+      "role": "researcher",
+      "card_ref": "agent_card_research_worker",
+      "routing": {
+        "selection_mode": "explicit",
+        "provider_id": "qwen",
+        "model_id": "qwen3-coder-plus",
+        "capability_claims": {
+          "input_port_types": [
+            "text",
+            "structured_json"
+          ],
+          "output_port_types": [
+            "structured_json",
+            "text"
+          ]
+        }
+      },
+      "prompt": {
+        "template_mode": "inline",
+        "template": "Research branch B only and attribute every finding."
+      },
+      "tools": {
+        "approval_mode": "ask",
+        "allowed_tool_classes": [
+          "web",
+          "read_file"
+        ]
+      },
+      "ports": {
+        "inputs": [
+          {
+            "port_id": "task_context",
+            "label": "Task Context",
+            "port_type": "text",
+            "shape": "single",
+            "required": true
+          },
+          {
+            "port_id": "branch_plan",
+            "label": "Branch Plan",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.research_plan"
+          }
+        ],
+        "outputs": [
+          {
+            "port_id": "machine_result",
+            "label": "Machine Result",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.branch_findings"
+          },
+          {
+            "port_id": "branch_b_report",
+            "label": "Branch B Report",
+            "port_type": "text",
+            "shape": "single",
+            "required": false,
+            "artifact_kind": "text_report"
+          }
+        ]
+      },
+      "input_contract": {
+        "mode": "task_context_and_typed_ports",
+        "port_ids": [
+          "task_context",
+          "branch_plan"
+        ]
+      },
+      "output_contract": {
+        "mode": "structured_and_artifacts",
+        "machine_result_schema_ref": "schema.branch_findings",
+        "artifact_specs": [
+          {
+            "kind": "text_report",
+            "id": "branch_b_report"
+          }
+        ],
+        "human_summary_required": true
+      },
+      "execution": {
+        "spawn_mode": "subagent_worker",
+        "timeout_ms": 180000,
+        "retry_policy": {
+          "max_attempts": 1
+        },
+        "execution_backend": "app_server",
+        "collaboration_mode": "default",
+        "subagent_policy": {
+          "isolation_mode": "lane",
+          "max_turns": 8,
+          "allow_direct_teammate_messages": false,
+          "share_worktree": false,
+          "allow_nested_subagents": false
+        }
+      },
+      "safety": {
+        "risk_class": "moderate",
+        "allow_provider_calls": true,
+        "allow_code_changes": false,
+        "allow_install": false,
+        "requires_human_approval": false
+      },
+      "ui": {
+        "position": {
+          "x": 360,
+          "y": 280
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    },
+    {
+      "node_id": "node_synth",
+      "kind": "synthesizer",
+      "label": "Research Synthesizer",
+      "role": "synthesizer",
+      "card_ref": "agent_card_research_synthesizer",
+      "routing": {
+        "selection_mode": "explicit",
+        "provider_id": "qwen",
+        "model_id": "qwen3-coder-plus",
+        "capability_claims": {
+          "input_port_types": [
+            "text",
+            "structured_json"
+          ],
+          "output_port_types": [
+            "structured_json",
+            "agent_report"
+          ]
+        }
+      },
+      "prompt": {
+        "template_mode": "inline",
+        "template": "Merge branch findings into one bounded synthesis and call out unresolved gaps."
+      },
+      "tools": {
+        "approval_mode": "ask",
+        "allowed_tool_classes": [
+          "read_file"
+        ]
+      },
+      "ports": {
+        "inputs": [
+          {
+            "port_id": "task_context",
+            "label": "Task Context",
+            "port_type": "text",
+            "shape": "single",
+            "required": true
+          },
+          {
+            "port_id": "branch_a_findings",
+            "label": "Branch A Findings",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.branch_findings"
+          },
+          {
+            "port_id": "branch_b_findings",
+            "label": "Branch B Findings",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.branch_findings"
+          }
+        ],
+        "outputs": [
+          {
+            "port_id": "machine_result",
+            "label": "Machine Result",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.research_synthesis"
+          },
+          {
+            "port_id": "research_synthesis",
+            "label": "Research Synthesis",
+            "port_type": "agent_report",
+            "shape": "single",
+            "required": false,
+            "artifact_kind": "run_summary"
+          }
+        ]
+      },
+      "input_contract": {
+        "mode": "task_context_and_typed_ports",
+        "port_ids": [
+          "task_context",
+          "branch_a_findings",
+          "branch_b_findings"
+        ]
+      },
+      "output_contract": {
+        "mode": "structured_and_artifacts",
+        "machine_result_schema_ref": "schema.research_synthesis",
+        "artifact_specs": [
+          {
+            "kind": "run_summary",
+            "id": "research_synthesis"
+          }
+        ],
+        "human_summary_required": true
+      },
+      "execution": {
+        "spawn_mode": "isolated_lane",
+        "timeout_ms": 120000,
+        "retry_policy": {
+          "max_attempts": 1
+        },
+        "execution_backend": "app_server",
+        "collaboration_mode": "default",
+        "subagent_policy": null
+      },
+      "safety": {
+        "risk_class": "moderate",
+        "allow_provider_calls": false,
+        "allow_code_changes": false,
+        "allow_install": false,
+        "requires_human_approval": false
+      },
+      "ui": {
+        "position": {
+          "x": 650,
+          "y": 200
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "edge_plan_a",
+      "from_node_id": "node_plan",
+      "to_node_id": "node_branch_a",
+      "edge_type": "fanout_branch",
+      "handoff_contract": {
+        "message_template": "Use only branch A of the research plan.",
+        "message_part_modes": [
+          "machine_result",
+          "human_summary"
+        ],
+        "required_output_schema_refs": [
+          "schema.research_plan"
+        ],
+        "port_bindings": [
+          {
+            "from_port_id": "machine_result",
+            "to_port_id": "branch_plan"
+          }
+        ]
+      },
+      "context_policy": {
+        "policy_id": "policy_edge_plan_a",
+        "history_mode": "latest_summary_only",
+        "artifact_mode": "required_output_only",
+        "exclude_private_memory": true,
+        "include_machine_results": true,
+        "include_human_summaries": true,
+        "summary_strategy": "human_and_machine"
+      },
+      "ui": {
+        "position": {
+          "x": 220,
+          "y": 150
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    },
+    {
+      "edge_id": "edge_plan_b",
+      "from_node_id": "node_plan",
+      "to_node_id": "node_branch_b",
+      "edge_type": "fanout_branch",
+      "handoff_contract": {
+        "message_template": "Use only branch B of the research plan.",
+        "message_part_modes": [
+          "machine_result",
+          "human_summary"
+        ],
+        "required_output_schema_refs": [
+          "schema.research_plan"
+        ],
+        "port_bindings": [
+          {
+            "from_port_id": "machine_result",
+            "to_port_id": "branch_plan"
+          }
+        ]
+      },
+      "context_policy": {
+        "policy_id": "policy_edge_plan_b",
+        "history_mode": "latest_summary_only",
+        "artifact_mode": "required_output_only",
+        "exclude_private_memory": true,
+        "include_machine_results": true,
+        "include_human_summaries": true,
+        "summary_strategy": "human_and_machine"
+      },
+      "ui": {
+        "position": {
+          "x": 220,
+          "y": 250
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    },
+    {
+      "edge_id": "edge_a_synth",
+      "from_node_id": "node_branch_a",
+      "to_node_id": "node_synth",
+      "edge_type": "fanin_merge",
+      "handoff_contract": {
+        "message_template": "Merge branch A findings into the synthesis.",
+        "message_part_modes": [
+          "machine_result",
+          "human_summary"
+        ],
+        "required_output_schema_refs": [
+          "schema.branch_findings"
+        ],
+        "port_bindings": [
+          {
+            "from_port_id": "machine_result",
+            "to_port_id": "branch_a_findings"
+          }
+        ]
+      },
+      "context_policy": {
+        "policy_id": "policy_edge_a_synth",
+        "history_mode": "latest_summary_only",
+        "artifact_mode": "required_output_only",
+        "exclude_private_memory": true,
+        "include_machine_results": true,
+        "include_human_summaries": true,
+        "summary_strategy": "human_and_machine"
+      },
+      "ui": {
+        "position": {
+          "x": 510,
+          "y": 150
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    },
+    {
+      "edge_id": "edge_b_synth",
+      "from_node_id": "node_branch_b",
+      "to_node_id": "node_synth",
+      "edge_type": "fanin_merge",
+      "handoff_contract": {
+        "message_template": "Merge branch B findings into the synthesis.",
+        "message_part_modes": [
+          "machine_result",
+          "human_summary"
+        ],
+        "required_output_schema_refs": [
+          "schema.branch_findings"
+        ],
+        "port_bindings": [
+          {
+            "from_port_id": "machine_result",
+            "to_port_id": "branch_b_findings"
+          }
+        ]
+      },
+      "context_policy": {
+        "policy_id": "policy_edge_b_synth",
+        "history_mode": "latest_summary_only",
+        "artifact_mode": "required_output_only",
+        "exclude_private_memory": true,
+        "include_machine_results": true,
+        "include_human_summaries": true,
+        "summary_strategy": "human_and_machine"
+      },
+      "ui": {
+        "position": {
+          "x": 510,
+          "y": 250
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    }
+  ],
+  "schema_registry": {
+    "schema.research_plan": {
+      "type": "object",
+      "required": [
+        "questions",
+        "branches"
+      ]
+    },
+    "schema.branch_findings": {
+      "type": "object",
+      "required": [
+        "findings",
+        "sources"
+      ]
+    },
+    "schema.research_synthesis": {
+      "type": "object",
+      "required": [
+        "synthesis",
+        "gaps"
+      ]
+    }
+  },
+  "migration": {
+    "source_kind": "native_authoring",
+    "compiled_task_graph_version": "astrabridge-task-graph-v1",
+    "compatibility": {
+      "lowering_mode": "lossy_legacy_task_graph",
+      "preserves_unknown_fields": false,
+      "notes": [
+        "Canonical graphs remain the source of truth for GUI, code, dry-run, and runtime work.",
+        "Lowering into legacy task graphs is a compatibility shim while the generic scheduler is still under construction."
+      ]
+    }
+  },
+  "state_version": 1
+}

@@ -1,7 +1,7 @@
 {
   "schema_version": "astrabridge-document-registry-v1",
-  "last_verified": "2026-07-10",
-  "current_execution_plan": "PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md",
+  "last_verified": "2026-07-16",
+  "current_execution_plan": "PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md",
   "conditional_execution_plans": [
     {
       "path": "PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md",
@@ -67,7 +67,8 @@
     {"path":"PLAN/AGENTIC_UPDATE_PIPELINE_EXECUTION_PLAN.md","status":"complete","owner":"agentic-update","scope":"Completed safe automated-update pipeline execution record.","last_verified":"2026-07-10","replacement":"docs/AGENTIC_UPDATE_PIPELINE_RUNBOOK.md","archive_policy":"preserve_execution_record"},
     {"path":"PLAN/ASTRABRIDGE_APP_HARDENING_EXECUTION_PLAN.md","status":"complete","owner":"app-hardening","scope":"Completed first-round app-hardening execution record.","last_verified":"2026-07-10","replacement":"PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md","archive_policy":"preserve_execution_record"},
     {"path":"PLAN/ASTRABRIDGE_BRAND_SYSTEM_EXECUTION_PLAN.md","status":"complete","owner":"ui-brand","scope":"Completed twenty-step brand-system round-one record.","last_verified":"2026-07-10","replacement":"docs/BRAND_SYSTEM_ROUND1_SUMMARY.md","archive_policy":"preserve_execution_record"},
-    {"path":"PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md","status":"active","owner":"repository-governance-ui-dogfood","scope":"Current default execution queue for documentation/API normalization, UI renewal, and live dogfood.","last_verified":"2026-07-10","replacement":null,"archive_policy":"keep_in_place"},
+    {"path":"PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md","status":"active","owner":"stability-protocol","scope":"Canonical execution queue for provider isolation, MCP capability boundaries, agent envelopes, durable task-graph runtime, and cross-provider reliability gates.","last_verified":"2026-07-16","replacement":null,"archive_policy":"keep_in_place"},
+    {"path":"PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md","status":"superseded","owner":"repository-governance-ui-dogfood","scope":"Prior UI normalization and live-dogfood record retained as evidence while the stability plan owns remaining reliability work.","last_verified":"2026-07-16","replacement":"PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md","archive_policy":"preserve_history_do_not_resume"},
     {"path":"PLAN/AUTOMATIONS_IMPLEMENTATION_PLAN.md","status":"complete","owner":"automation","scope":"Completed core automation implementation record.","last_verified":"2026-07-10","replacement":"PLAN/AUTOMATIONS_SURFACE_MAP.md","archive_policy":"preserve_execution_record"},
     {"path":"PLAN/AUTOMATIONS_SURFACE_MAP.md","status":"reference","owner":"automation","scope":"Current automation routes, storage, UI, and non-goal map.","last_verified":"2026-07-10","replacement":null,"archive_policy":"keep_in_place"},
     {"path":"PLAN/CAPABILITY_ENTRY_WEB_VALIDATION_PLAN.md","status":"complete","owner":"capability-runtime","scope":"Completed capability-entry and standalone Web UI validation record.","last_verified":"2026-07-10","replacement":"PLAN/CAPABILITY_RUNTIME_SURFACE_MAP.md","archive_policy":"preserve_execution_record"},

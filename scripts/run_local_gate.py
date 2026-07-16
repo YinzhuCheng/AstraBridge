@@ -27,6 +27,7 @@ def quick_commands() -> list[tuple[list[str], Path]]:
     return [
         ([sys.executable, "scripts/repo_governance_check.py", "--repo", "."], REPO_ROOT),
         ([sys.executable, "scripts/app_hardening_secret_scan.py", "--repo", "."], REPO_ROOT),
+        ([sys.executable, "scripts/contract_boundary_audit.py"], REPO_ROOT),
         (
             [
                 sys.executable,

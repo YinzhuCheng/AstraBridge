@@ -35,10 +35,10 @@ Do not use file modification time, filename wording, or an old progress paragrap
 
 | Path | Activation | Owner | Scope |
 | --- | --- | --- | --- |
-| [ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md) | Current default queue | `repository-governance-ui-dogfood` | Documentation/API normalization, UI renewal, and live dogfood. |
+| [ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md) | Current default queue | `stability-protocol` | Provider isolation, MCP capability boundaries, agent envelopes, durable task-graph runtime, and cross-provider reliability gates. |
 | [CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md](/D:/AstraBridge/PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md) | Only when the user explicitly requests capability-runtime implementation or advancement | `capability-runtime` | Remaining capability-runtime implementation beginning at its recorded Step 2. |
 
-These activation conditions do not conflict: the capability-runtime queue is dormant unless the user explicitly invokes that scope. All other execution plans are `complete` or `superseded` in the registry.
+These activation conditions do not conflict: the capability-runtime queue is dormant unless the user explicitly invokes that scope. The prior UI/live-dogfood queue remains preserved as historical evidence and is superseded by the stability plan for remaining reliability work. All other execution plans are `complete` or `superseded` in the registry.
 
 ## Active Policy And Memory
 
@@ -140,12 +140,12 @@ When adding or changing a guiding document or execution plan:
 
 ## Current Counts
 
-As verified on 2026-07-10, the registry contains 103 entries:
+As verified on 2026-07-16, the registry contains 104 entries:
 
 | Status | Count |
 | --- | ---: |
 | `active` | 14 |
 | `complete` | 25 |
 | `reference` | 43 |
-| `superseded` | 19 |
+| `superseded` | 20 |
 | `archived` | 1 |

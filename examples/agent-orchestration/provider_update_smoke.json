@@ -1,0 +1,461 @@
+{
+  "schema_version": "astrabridge-agent-orchestration-graph-v1",
+  "graph_id": "graph_provider_update_smoke_v1",
+  "task_id": "task_example",
+  "title": "Provider Update / Smoke / Gate",
+  "template_id": "provider_update_smoke_gate",
+  "status": "ready",
+  "metadata": {
+    "description": "Provider Update / Smoke / Gate",
+    "tags": [
+      "providers",
+      "smoke",
+      "gate"
+    ],
+    "owners": [],
+    "created_at": "2026-07-07T00:00:00+09:00",
+    "updated_at": "2026-07-07T00:05:00+09:00"
+  },
+  "graph_policy": {
+    "entry_node_ids": [
+      "node_discover"
+    ],
+    "max_depth": 2,
+    "default_permission_mode": "ask",
+    "default_collaboration_mode": "default",
+    "default_execution_backend": "app_server",
+    "requires_dry_run_before_live": true
+  },
+  "nodes": [
+    {
+      "node_id": "node_discover",
+      "kind": "extractor",
+      "label": "Discover Provider Update",
+      "role": "researcher",
+      "card_ref": "agent_card_provider_discovery",
+      "routing": {
+        "selection_mode": "explicit",
+        "provider_id": "qwen",
+        "model_id": "qwen3-coder-plus",
+        "capability_claims": {
+          "input_port_types": [
+            "text"
+          ],
+          "output_port_types": [
+            "structured_json",
+            "structured_json"
+          ]
+        }
+      },
+      "prompt": {
+        "template_mode": "inline",
+        "template": "Collect provider release changes and normalize the findings into a candidate update bundle."
+      },
+      "tools": {
+        "approval_mode": "ask",
+        "allowed_tool_classes": [
+          "web",
+          "read_file"
+        ]
+      },
+      "ports": {
+        "inputs": [
+          {
+            "port_id": "task_context",
+            "label": "Task Context",
+            "port_type": "text",
+            "shape": "single",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "port_id": "machine_result",
+            "label": "Machine Result",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.provider_update_discovery"
+          },
+          {
+            "port_id": "provider_change_bundle",
+            "label": "Provider Change Bundle",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": false,
+            "artifact_kind": "structured_json"
+          }
+        ]
+      },
+      "input_contract": {
+        "mode": "task_context_and_typed_ports",
+        "port_ids": [
+          "task_context"
+        ]
+      },
+      "output_contract": {
+        "mode": "structured_and_artifacts",
+        "machine_result_schema_ref": "schema.provider_update_discovery",
+        "artifact_specs": [
+          {
+            "kind": "structured_json",
+            "id": "provider_change_bundle"
+          }
+        ],
+        "human_summary_required": true
+      },
+      "execution": {
+        "spawn_mode": "isolated_lane",
+        "timeout_ms": 120000,
+        "retry_policy": {
+          "max_attempts": 1
+        },
+        "execution_backend": "app_server",
+        "collaboration_mode": "default",
+        "subagent_policy": null
+      },
+      "safety": {
+        "risk_class": "moderate",
+        "allow_provider_calls": false,
+        "allow_code_changes": false,
+        "allow_install": false,
+        "requires_human_approval": false
+      },
+      "ui": {
+        "position": {
+          "x": 80,
+          "y": 180
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    },
+    {
+      "node_id": "node_smoke",
+      "kind": "validator",
+      "label": "Smoke Matrix",
+      "role": "validator",
+      "card_ref": "agent_card_smoke_validator",
+      "routing": {
+        "selection_mode": "explicit",
+        "provider_id": "qwen",
+        "model_id": "qwen3-coder-plus",
+        "capability_claims": {
+          "input_port_types": [
+            "text",
+            "structured_json"
+          ],
+          "output_port_types": [
+            "structured_json",
+            "agent_report"
+          ]
+        }
+      },
+      "prompt": {
+        "template_mode": "inline",
+        "template": "Run the compatibility smoke matrix and classify blocked cases explicitly."
+      },
+      "tools": {
+        "approval_mode": "ask",
+        "allowed_tool_classes": [
+          "read_file",
+          "shell"
+        ]
+      },
+      "ports": {
+        "inputs": [
+          {
+            "port_id": "task_context",
+            "label": "Task Context",
+            "port_type": "text",
+            "shape": "single",
+            "required": true
+          },
+          {
+            "port_id": "provider_bundle",
+            "label": "Provider Bundle",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.provider_update_discovery"
+          }
+        ],
+        "outputs": [
+          {
+            "port_id": "machine_result",
+            "label": "Machine Result",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.provider_smoke_matrix"
+          },
+          {
+            "port_id": "smoke_matrix",
+            "label": "Smoke Matrix",
+            "port_type": "agent_report",
+            "shape": "single",
+            "required": false,
+            "artifact_kind": "validation_report"
+          }
+        ]
+      },
+      "input_contract": {
+        "mode": "task_context_and_typed_ports",
+        "port_ids": [
+          "task_context",
+          "provider_bundle"
+        ]
+      },
+      "output_contract": {
+        "mode": "structured_and_artifacts",
+        "machine_result_schema_ref": "schema.provider_smoke_matrix",
+        "artifact_specs": [
+          {
+            "kind": "validation_report",
+            "id": "smoke_matrix"
+          }
+        ],
+        "human_summary_required": true
+      },
+      "execution": {
+        "spawn_mode": "isolated_lane",
+        "timeout_ms": 120000,
+        "retry_policy": {
+          "max_attempts": 1
+        },
+        "execution_backend": "app_server",
+        "collaboration_mode": "default",
+        "subagent_policy": null
+      },
+      "safety": {
+        "risk_class": "moderate",
+        "allow_provider_calls": false,
+        "allow_code_changes": false,
+        "allow_install": false,
+        "requires_human_approval": false
+      },
+      "ui": {
+        "position": {
+          "x": 350,
+          "y": 180
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    },
+    {
+      "node_id": "node_gate",
+      "kind": "gate",
+      "label": "Manual Promotion Gate",
+      "role": "gate",
+      "card_ref": "agent_card_manual_gate",
+      "routing": {
+        "selection_mode": "none"
+      },
+      "prompt": {
+        "template_mode": "inline",
+        "template": "Present the smoke evidence bundle for a bounded human promotion decision."
+      },
+      "tools": {
+        "approval_mode": "ask",
+        "allowed_tool_classes": []
+      },
+      "ports": {
+        "inputs": [
+          {
+            "port_id": "task_context",
+            "label": "Task Context",
+            "port_type": "text",
+            "shape": "single",
+            "required": true
+          },
+          {
+            "port_id": "smoke_matrix",
+            "label": "Smoke Matrix",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.provider_smoke_matrix"
+          }
+        ],
+        "outputs": [
+          {
+            "port_id": "machine_result",
+            "label": "Machine Result",
+            "port_type": "structured_json",
+            "shape": "single",
+            "required": true,
+            "schema_ref": "schema.provider_gate_decision"
+          },
+          {
+            "port_id": "promotion_decision",
+            "label": "Promotion Decision",
+            "port_type": "approval_record",
+            "shape": "single",
+            "required": false,
+            "artifact_kind": "approval_record"
+          }
+        ]
+      },
+      "input_contract": {
+        "mode": "typed_ports",
+        "port_ids": [
+          "smoke_matrix"
+        ]
+      },
+      "output_contract": {
+        "mode": "structured_and_artifacts",
+        "machine_result_schema_ref": "schema.provider_gate_decision",
+        "artifact_specs": [
+          {
+            "kind": "approval_record",
+            "id": "promotion_decision"
+          }
+        ],
+        "human_summary_required": true
+      },
+      "execution": {
+        "spawn_mode": "manual_only",
+        "timeout_ms": 0,
+        "retry_policy": {
+          "max_attempts": 1
+        },
+        "execution_backend": "human_review",
+        "collaboration_mode": "default",
+        "subagent_policy": null
+      },
+      "safety": {
+        "risk_class": "high",
+        "allow_provider_calls": false,
+        "allow_code_changes": false,
+        "allow_install": false,
+        "requires_human_approval": true,
+        "approval_kind": "provider_call_gate"
+      },
+      "ui": {
+        "position": {
+          "x": 640,
+          "y": 180
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "edge_discover_smoke",
+      "from_node_id": "node_discover",
+      "to_node_id": "node_smoke",
+      "edge_type": "artifact_handoff",
+      "handoff_contract": {
+        "message_template": "Validate the provider update bundle with the smoke matrix.",
+        "message_part_modes": [
+          "machine_result",
+          "human_summary"
+        ],
+        "required_output_schema_refs": [
+          "schema.provider_update_discovery"
+        ],
+        "port_bindings": [
+          {
+            "from_port_id": "machine_result",
+            "to_port_id": "provider_bundle"
+          }
+        ]
+      },
+      "context_policy": {
+        "policy_id": "policy_edge_discover_smoke",
+        "history_mode": "latest_summary_only",
+        "artifact_mode": "required_output_only",
+        "exclude_private_memory": true,
+        "include_machine_results": true,
+        "include_human_summaries": true,
+        "summary_strategy": "human_and_machine"
+      },
+      "ui": {
+        "position": {
+          "x": 215,
+          "y": 180
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    },
+    {
+      "edge_id": "edge_smoke_gate",
+      "from_node_id": "node_smoke",
+      "to_node_id": "node_gate",
+      "edge_type": "approval_dependency",
+      "handoff_contract": {
+        "message_template": "Review the smoke matrix and blocked cases before promotion.",
+        "message_part_modes": [
+          "machine_result",
+          "human_summary"
+        ],
+        "required_output_schema_refs": [
+          "schema.provider_smoke_matrix"
+        ],
+        "port_bindings": [
+          {
+            "from_port_id": "machine_result",
+            "to_port_id": "smoke_matrix"
+          }
+        ]
+      },
+      "context_policy": {
+        "policy_id": "policy_edge_smoke_gate",
+        "history_mode": "latest_summary_only",
+        "artifact_mode": "required_output_only",
+        "exclude_private_memory": true,
+        "include_machine_results": true,
+        "include_human_summaries": true,
+        "summary_strategy": "human_and_machine"
+      },
+      "ui": {
+        "position": {
+          "x": 495,
+          "y": 180
+        },
+        "layout_mode": "canvas"
+      },
+      "status": "ready"
+    }
+  ],
+  "schema_registry": {
+    "schema.provider_update_discovery": {
+      "type": "object",
+      "required": [
+        "provider_changes",
+        "candidate_models"
+      ]
+    },
+    "schema.provider_smoke_matrix": {
+      "type": "object",
+      "required": [
+        "matrix",
+        "blocked_cases"
+      ]
+    },
+    "schema.provider_gate_decision": {
+      "type": "object",
+      "required": [
+        "decision",
+        "notes"
+      ]
+    }
+  },
+  "migration": {
+    "source_kind": "native_authoring",
+    "compiled_task_graph_version": "astrabridge-task-graph-v1",
+    "compatibility": {
+      "lowering_mode": "lossy_legacy_task_graph",
+      "preserves_unknown_fields": false,
+      "notes": [
+        "Canonical graphs remain the source of truth for GUI, code, dry-run, and runtime work.",
+        "Lowering into legacy task graphs is a compatibility shim while the generic scheduler is still under construction."
+      ]
+    }
+  },
+  "state_version": 1
+}
