@@ -123,7 +123,7 @@ The following ownership boundaries are now explicit:
 | Agent Envelope, delivery events, and artifact references | `astrabridge_sidecar.protocol` | Task-graph input/output envelopes and UI summaries |
 | MCP configuration and preset policy | `mcp_config_service.py` | Existing MCP server adapters |
 | MCP protocol core/broker | `astrabridge_sidecar.protocol` migration target | Current named MCP servers and direct capability paths, explicitly temporary |
-| Durable run state and scheduler events | `astrabridge_sidecar.protocol` migration target | Task JSON, manifests, and UI projections |
+| Durable run state and scheduler events | `astrabridge_sidecar.durable_run_store.DurableRunEventStore` | Workspace-local `.astrabridge/durable_runs.sqlite3` is the source of truth; task JSON, manifests, diagnostics, and UI refs are redacted compatibility projections |
 | Provider runtime client lanes and lifecycle leases | `astrabridge_sidecar.runtime_client_pool.RuntimeClientPool` | `RuntimeService._client` compatibility projection; each lane owns its app-server process, private environment, and Codex home |
 | Graph authoring/runtime NodeType registry | `astrabridge_sidecar.protocol` migration target | Existing role palette and graph components |
 

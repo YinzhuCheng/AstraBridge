@@ -195,20 +195,20 @@ Then execute the revised highest-leverage work unit in the same turn when feasib
 ## Current Progress
 
 - Current status: In progress
-- Completed steps: Step 0, Create Durable Execution Plan; Step 1, Reconcile Plan And Contract Ownership; Step 2, Isolate Provider Runtime Client Lanes; Step 3, Establish Canonical Protocol Schemas And Code Generation
-- Current step: Step 4, Add The Workspace-Local Durable Run And Event Store
-- Next step: Step 4, Add The Workspace-Local Durable Run And Event Store
+- Completed steps: Step 0, Create Durable Execution Plan; Step 1, Reconcile Plan And Contract Ownership; Step 2, Isolate Provider Runtime Client Lanes; Step 3, Establish Canonical Protocol Schemas And Code Generation; Step 4, Add The Workspace-Local Durable Run And Event Store
+- Current step: Step 5, Move Live Graph Execution To An Asynchronous Durable Scheduler
+- Next step: Step 5, Move Live Graph Execution To An Asynchronous Durable Scheduler
 - Last updated: 2026-07-16
 
 ## Current Work Unit
 
-- ID: STAB-04
-- Goal: Establish the workspace-local durable run/event source of truth while retaining current JSON/manifests as projections.
-- Inputs: `apps/astrabridge-sidecar/astrabridge_sidecar/task_service.py`; `apps/astrabridge-sidecar/astrabridge_sidecar/protocol/`; workspace-local `.astrabridge/` state; Step 3 generated protocol projections.
-- Expected output: versioned transactional run/event store with idempotent migration, compare-and-swap state transitions, ordered events, and projection rebuild hooks.
-- Acceptance check: empty/existing/repeated migration is deterministic; concurrent terminal writes yield one valid result; projections rebuild identically; no secrets are persisted or old evidence deleted.
+- ID: STAB-05
+- Goal: Move live graph execution behind an asynchronous scheduler whose durable store is the only state-advancing authority.
+- Inputs: `DurableRunEventStore`; `task_service.py` compatibility bridge; `runtime_service.py` graph execution path; Step 4 CAS/lease/outbox primitives.
+- Expected output: queued run receipt, background scheduler loop, dependency/parallel dispatch, attempt leases, and projection/event reads without HTTP-lifetime coupling.
+- Acceptance check: slow fake-provider creation returns within the bounded receipt budget; closing the caller does not stop the run; dependency ordering and `max_parallelism` hold; only the scheduler advances live state.
 - Status: queued
-- Next action: Inspect current task/run persistence and workspace state boundaries, then define the smallest store schema and migration seam for Step 4.
+- Next action: Trace the current synchronous live graph entry path and define the smallest scheduler receipt/worker seam without duplicating provider or UI execution.
 
 ## Execution Steps
 
@@ -319,7 +319,7 @@ Acceptance criteria:
 - Event plus projection updates cannot be observed half-committed.
 - No secret-bearing value is persisted, and legacy manifests/artifacts are not deleted or overwritten.
 
-Status: not started
+Status: completed
 
 ### 5. Move Live Graph Execution To An Asynchronous Durable Scheduler
 
@@ -765,3 +765,13 @@ Status: not started
 - Security and preservation: no provider credentials, raw secrets, cookies, or authorization headers were written to the schema, fixtures, generated outputs, or reports; preserved `.pnpm-store/`, `.tmp/`, and `tmp/` remain untracked and were not staged.
 - Blockers: None for Step 3.
 - Next step: Step 4, Add The Workspace-Local Durable Run And Event Store.
+
+### 2026-07-16 - Step 4
+
+- Completed: Added `astrabridge_sidecar.durable_run_store.DurableRunEventStore`, a workspace-local versioned SQLite/WAL source of truth under `.astrabridge/durable_runs.sqlite3` for runs, attempts, ordered events, leases, inbox/outbox, and external operations. Transactions use state-version CAS, immutable evidence keys, terminal monotonicity with an explicit dry-run-to-live compatibility promotion, and atomic event/projection updates.
+- Migration and projections: Added deterministic empty/existing/repeated legacy migration, redacted secret-safe payload storage, outside-workspace path markers, active-legacy `needs_review` classification, idempotent run/event/artifact merging, and deterministic projection rebuilds. Existing task JSON, manifests, diagnostics, `PRIVATE/**`, and raw evidence remain untouched compatibility exports.
+- Integration and ownership: `TaskService` lazily initializes/migrates the durable store and mirrors full/compact graph run writes; ownership docs and `scripts/contract_boundary_audit.py` now name and verify `DurableRunEventStore` as the durable state owner.
+- Validation: `test_durable_run_store.py` passed 8 tests (including concurrent CAS, rollback atomicity, idempotency, leases, migration, redaction, and projection determinism); focused task-graph persistence passed 5/5 with `ASTRABRIDGE_RUNTIME_ROOT` redirected to workspace `.tmp`; live graph worker and full `test_task_graph_api.py` passed (12/12); protocol/graph/compiler tests passed 21/21; contract audit passed 6/6; governance passed 0 errors/0 warnings; focused and app-hardening secret scans passed; stale-process helper found no clearly stale owned wrappers.
+- Environment note: task-graph tests require the existing writable runtime-root override on this machine because the default `D:\AstraBridgeRuntime` is access-denied; no product files or historical artifacts were cleaned.
+- Blockers: None for Step 4.
+- Next step: Step 5, Move Live Graph Execution To An Asynchronous Durable Scheduler.

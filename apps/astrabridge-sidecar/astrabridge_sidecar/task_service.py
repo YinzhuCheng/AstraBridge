@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from .coding_kernel import task_refs_from_coding_events
 from .common import WORKSPACE_STATE_DIRNAME, new_id, now_iso, read_json, write_json
+from .durable_run_store import DurableRunEventStore
 from .agent_orchestration_contract import (
     lift_task_graph_to_agent_orchestration_graph,
     lower_agent_orchestration_graph_to_task_graph,
@@ -181,6 +182,29 @@ class TaskService:
 
     def __init__(self, project_service) -> None:
         self._projects = project_service
+        self._durable_store: DurableRunEventStore | None = None
+        self._durable_store_workspace: Path | None = None
+
+    def durable_run_store(self) -> DurableRunEventStore:
+        """Return the workspace-local durable run store for this service.
+
+        The store is initialized lazily so ordinary task-list reads keep their
+        existing lightweight path.  A workspace switch closes the old logical
+        owner before opening the new store; SQLite connections themselves are
+        short-lived and never cross request lifetimes.
+        """
+
+        workspace = Path(self._projects.require_workspace_root()).expanduser().resolve()
+        if self._durable_store is not None and self._durable_store_workspace == workspace:
+            return self._durable_store
+        if self._durable_store is not None:
+            self._durable_store.close()
+        store = DurableRunEventStore(workspace)
+        store.initialize()
+        store.migrate_legacy_state()
+        self._durable_store = store
+        self._durable_store_workspace = workspace
+        return store
 
     def snapshot(self) -> dict[str, Any]:
         state = self._state()
@@ -1375,6 +1399,7 @@ class TaskService:
         validated_run = validate_task_graph_run(run, graph_definition=graph, workspace_root=self._projects.require_workspace_root())
         compact_ref = self._compact_graph_run_ref(validated_run)
         compact_ref = self._refresh_graph_run_export_report(compact_ref)
+        self.durable_run_store().sync_legacy_run(validated_run)
         existing = [
             dict(item)
             for item in list(task.get("graph_run_refs") or [])
@@ -1578,6 +1603,7 @@ class TaskService:
         task["graph_activity_summary"] = self._graph_activity_summary(task)
         task["updated_at"] = now_iso()
         self._save_task(task)
+        self.durable_run_store().sync_compact_run_ref(refreshed)
         return {"run_ref": refreshed, "task": self.task_view(task, compact_graph_runs=True)}
 
     def record_graph_worker(

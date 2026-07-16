@@ -53,6 +53,7 @@ PROTOCOL_PY_GENERATED_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "protocol" /
 PROTOCOL_TS_GENERATED_PATH = REPO_ROOT / "apps" / "astrabridge-desktop" / "src" / "astrabridge_protocol" / "generated" / "v1.ts"
 PROTOCOL_FIXTURE_PATH = REPO_ROOT / "apps" / "astrabridge-desktop" / "src" / "astrabridge_protocol" / "fixtures" / "protocol_v1.json"
 RUNTIME_CLIENT_POOL_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "runtime_client_pool.py"
+DURABLE_RUN_STORE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "durable_run_store.py"
 
 EXPECTED_PROVIDER_TRANSPORTS = {
     "qwen": "QwenResponsesTransport",
@@ -83,6 +84,7 @@ def _audit_stability_ownership() -> dict[str, Any]:
         "ownership_doc": OWNERSHIP_DOC_PATH,
         "protocol_package": PROTOCOL_PACKAGE_PATH,
         "runtime_client_pool": RUNTIME_CLIENT_POOL_PATH,
+        "durable_run_store": DURABLE_RUN_STORE_PATH,
     }
     missing = [name for name, path in required_paths.items() if not path.exists()]
     if missing:
@@ -98,6 +100,7 @@ def _audit_stability_ownership() -> dict[str, Any]:
         "Agent Envelope, delivery events, and artifact references",
         "MCP protocol core and broker boundary",
         "Durable graph run state, scheduler commands, and ordered events",
+        "DurableRunEventStore",
         "Canonical NodeType registry and compiled graph executable metadata",
         "ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md",
     )
@@ -121,6 +124,43 @@ def _audit_stability_ownership() -> dict[str, Any]:
         "owner": "docs/CODE_OWNERSHIP_AND_CONTRACTS.md + astrabridge_sidecar.protocol",
         "status": "pass" if not errors else "fail",
         "required_inputs": {name: str(path.relative_to(REPO_ROOT)) for name, path in required_paths.items()},
+        "errors": errors,
+    }
+
+
+def _audit_durable_run_store() -> dict[str, Any]:
+    """Verify the workspace-local durable run/event owner without opening a DB."""
+
+    errors: list[str] = []
+    if not DURABLE_RUN_STORE_PATH.exists():
+        errors.append("durable run store implementation is missing")
+        source = ""
+    else:
+        source = DURABLE_RUN_STORE_PATH.read_text(encoding="utf-8")
+    required_markers = (
+        "DURABLE_RUN_STORE_SCHEMA_VERSION",
+        "DURABLE_RUN_STORE_FILENAME",
+        "PRAGMA journal_mode=WAL",
+        "CREATE TABLE IF NOT EXISTS runs",
+        "CREATE TABLE IF NOT EXISTS run_events",
+        "CREATE TABLE IF NOT EXISTS node_attempts",
+        "CREATE TABLE IF NOT EXISTS leases",
+        "CREATE TABLE IF NOT EXISTS inbox",
+        "CREATE TABLE IF NOT EXISTS outbox",
+        "CREATE TABLE IF NOT EXISTS external_operations",
+        "StateVersionConflict",
+        "compare_and_swap_run",
+        "migrate_legacy_state",
+        "rebuild_run_projection",
+    )
+    for marker in required_markers:
+        if marker not in source:
+            errors.append(f"durable run store missing required marker: {marker}")
+    return {
+        "contract": "workspace_local_durable_run_and_event_store",
+        "owner": "astrabridge_sidecar.durable_run_store.DurableRunEventStore",
+        "status": "pass" if not errors else "fail",
+        "path": str(DURABLE_RUN_STORE_PATH.relative_to(REPO_ROOT)),
         "errors": errors,
     }
 
@@ -333,6 +373,7 @@ def _audit_orchestration_examples() -> dict[str, Any]:
 def audit_contract_boundaries() -> dict[str, Any]:
     checks = [
         _audit_stability_ownership(),
+        _audit_durable_run_store(),
         _audit_protocol_schema_generation(),
         _audit_provider_transport_registry(),
         _audit_task_graph_fixtures(),
