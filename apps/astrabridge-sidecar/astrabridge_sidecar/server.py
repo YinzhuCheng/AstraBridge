@@ -5,6 +5,7 @@ import json
 import os
 import re
 import socket
+import sys
 import threading
 import time
 import urllib.parse
@@ -17,17 +18,18 @@ from .agentic_update_service import AgenticUpdateService
 from .automations import AutomationService
 from .browser_workbench_service import BrowserWorkbenchService
 from .checkpoint_service import CheckpointService
-from .common import DEFAULT_PORT, public_error
-from .common import now_iso, read_json, write_json
+from .common import DEFAULT_PORT, PROJECT_SCHEMA_VERSION, now_iso, public_error, read_json, write_json
 from .capabilities import capability_artifact_snapshot, capability_smoke_snapshot
 from .capabilities.runtime import CapabilityRuntime
 from .codex_plugin_skill_project_presets import mutate_project_plugin_skill_presets
+from .durable_run_store import DURABLE_RUN_STORE_SCHEMA_VERSION
 from .dogfood_run_service import DogfoodRunService
 from .image_prompt_strategy import build_rewrite_instruction, prompt_guides_payload
 from .isolation_audit_service import IsolationAuditService
 from .modal_service import ModalService
 from .metadata_service import MetadataService
 from .mcp_config_service import McpConfigService
+from .mcp_broker_service import McpBrokerService
 from .llm_api_manager_service import LlmApiManagerService
 from .runtime_config_service import RuntimeConfigService
 from .official_login_guard import disabled_status
@@ -58,6 +60,7 @@ ALLOWED_ORIGINS = {
     "tauri://localhost",
 }
 SMOKE_TASK_PREFIX_PATTERN = re.compile(r"^Step\s+\d+\s+(?:source|target)\s+for\s+", re.IGNORECASE)
+SIDECAR_READY_SCHEMA_VERSION = "astrabridge-sidecar-ready-v1"
 
 
 def configured_allowed_origins() -> set[str]:
@@ -145,8 +148,22 @@ def normalize_task_conversation_payload(payload: dict[str, Any]) -> dict[str, An
 
 
 class AppContext:
-    def __init__(self, seed_root: Path) -> None:
+    def __init__(
+        self,
+        seed_root: Path,
+        *,
+        boot_id: str | None = None,
+        launch_record_path: Path | None = None,
+        build_version: str | None = None,
+    ) -> None:
         self.seed_root = seed_root.expanduser().resolve()
+        self.boot_id = str(boot_id or os.environ.get("ASTRABRIDGE_SIDECAR_BOOT_ID") or "").strip() or f"astrabridge-sidecar-{int(time.time() * 1000)}"
+        self.launch_record_path = launch_record_path.expanduser().resolve() if isinstance(launch_record_path, Path) else None
+        self.build_version = str(build_version or os.environ.get("ASTRABRIDGE_SIDECAR_BUILD_VERSION") or "dev").strip() or "dev"
+        self.listen_host = "127.0.0.1"
+        self.listen_port: int | None = None
+        self.ready_at: str | None = None
+        self.startup_restore: dict[str, Any] = {"status": "pending"}
         self.projects = ProjectService()
         self.profiles = ProfileService()
         self.secrets = SecretService()
@@ -173,12 +190,23 @@ class AppContext:
             router_config=self.router_config,
         )
         self.llm_manager = LlmApiManagerService(self.router_config, self.router)
+        self.capability_runtime = CapabilityRuntime(
+            router_config=self.router_config,
+            key_injector=self.llm_manager.inject_profile_key,
+        )
         self.modals = ModalService(self.projects.require_shell_state_root)
         self.tasks = TaskService(self.projects)
         self.title_suggestions = TitleSuggestionService(self.projects, self.tasks, self.router)
         self.assets = AssetRegistryService(self.projects, self.tasks)
         self.yunwu_image = YunwuImageService()
         self.web_tools = AstraBridgeWebService(self.projects)
+        self.mcp_broker = McpBrokerService(
+            project_service=self.projects,
+            capability_runtime=self.capability_runtime,
+            yunwu_image_service=self.yunwu_image,
+            mcp_config=self.mcp_config,
+        )
+        self.web_tools.set_mcp_broker(self.mcp_broker)
         self.browser_workbench = BrowserWorkbenchService(self.projects)
         self.dogfood = DogfoodRunService(self.projects)
         self.checkpoints = CheckpointService(self.projects)
@@ -213,6 +241,7 @@ class AppContext:
             router_service=self.router,
             router_config_service=self.router_config,
             key_injector=self.llm_manager.inject_profile_key,
+            mcp_broker_service=self.mcp_broker,
         )
         self.project_tools = ProjectToolsService(
             self.projects,
@@ -248,6 +277,7 @@ class AppContext:
     def _restore_startup_state(self) -> None:
         project = self.projects.current_project or {}
         if not project:
+            self.startup_restore = {"status": "skipped", "reason": "no_project"}
             return
         logical_active_thread = self.tasks.active_provider_thread(include_missing_fallback=True) or {}
         thread_id = str(project.get("current_thread_id") or logical_active_thread.get("thread_id") or "").strip()
@@ -258,8 +288,10 @@ class AppContext:
             )
         except Exception as exc:  # noqa: BLE001
             self.runtime.record_supervisor_event({"event": "startup_task_restore_failed", "error": str(exc)[:300]})
+            self.startup_restore = {"status": "task_restore_failed", "error": str(exc)[:300]}
         profile_id = self._startup_profile_id()
         if not profile_id:
+            self.startup_restore = {"status": "skipped", "reason": "no_profile"}
             return
         try:
             profile = self.resolve_runtime_profile(profile_id)
@@ -271,8 +303,13 @@ class AppContext:
                     "error": str(exc)[:300],
                 }
             )
+            self.startup_restore = {"status": "profile_restore_failed", "profile_id": profile_id, "error": str(exc)[:300]}
             return
-        self.runtime.restore_startup_runtime(profile, thread_id=thread_id or None)
+        result = self.runtime.restore_startup_runtime(profile, thread_id=thread_id or None)
+        if isinstance(result, dict):
+            self.startup_restore = {"status": "restored", **result}
+        else:
+            self.startup_restore = {"status": "restored"}
 
     def _startup_profile_id(self) -> str | None:
         active_provider_thread = self.tasks.active_provider_thread(include_missing_fallback=True) or {}
@@ -301,6 +338,93 @@ class AppContext:
         from .model_catalog import merge_profile_with_effective_model
 
         return merge_profile_with_effective_model(profile, self.router_config.models())
+
+    def bind_sidecar_listener(self, listen_host: str, listen_port: int) -> None:
+        self.listen_host = str(listen_host or "127.0.0.1")
+        self.listen_port = int(listen_port)
+        self.ready_at = now_iso()
+        self._write_launch_record(status="ready")
+
+    def sidecar_provenance(self) -> dict[str, Any]:
+        return build_sidecar_provenance(
+            listen_host=self.listen_host,
+            listen_port=self.listen_port,
+            seed_root=self.seed_root,
+        )
+
+    def ready_payload(self) -> dict[str, Any]:
+        provenance = self.sidecar_provenance()
+        return {
+            "schema_version": SIDECAR_READY_SCHEMA_VERSION,
+            "ok": True,
+            "service": "astrabridge-sidecar",
+            "boot_id": self.boot_id,
+            "build_version": self.build_version,
+            "runtime_version": sys.version.split()[0],
+            "durable_run_store_schema_version": DURABLE_RUN_STORE_SCHEMA_VERSION,
+            "project_schema_version": PROJECT_SCHEMA_VERSION,
+            "listen_host": self.listen_host,
+            "listen_port": self.listen_port,
+            "ready_at": self.ready_at,
+            "startup_restore": self.startup_restore,
+            "sidecar": {
+                "pid": provenance.get("pid"),
+                "listen_port": provenance.get("listen_port"),
+                "origin": provenance.get("origin"),
+                "launcher_mode": provenance.get("launcher_mode"),
+            },
+        }
+
+    def _write_launch_record(self, *, status: str, last_error: str | None = None) -> None:
+        if self.launch_record_path is None:
+            return
+        existing = read_json(self.launch_record_path, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        provenance = self.sidecar_provenance()
+        created_at = str(existing.get("created_at") or now_iso())
+        ready_at = str(existing.get("ready_at") or self.ready_at or "")
+        payload = {
+            "schema_version": str(existing.get("schema_version") or "astrabridge-desktop-sidecar-launch-v1"),
+            "status": status,
+            "boot_id": self.boot_id,
+            "pid": int(provenance.get("pid") or os.getpid()),
+            "listen_host": self.listen_host,
+            "listen_port": self.listen_port,
+            "requested_port": int(existing.get("requested_port") or self.listen_port or 0),
+            "build_version": self.build_version,
+            "runtime_version": sys.version.split()[0],
+            "durable_run_store_schema_version": DURABLE_RUN_STORE_SCHEMA_VERSION,
+            "project_schema_version": PROJECT_SCHEMA_VERSION,
+            "created_at": created_at,
+            "updated_at": now_iso(),
+            "ready_at": ready_at or None,
+            "exited_at": now_iso() if status == "stopped" else None,
+            "executable": str(provenance.get("executable") or sys.executable),
+            "seed_root": str(self.seed_root),
+            "source_root": provenance.get("source_root"),
+            "repo_root": provenance.get("repo_root"),
+            "current_source_match": provenance.get("current_source_match"),
+            "owner": dict(existing.get("owner") or {}),
+            "log_paths": dict(existing.get("log_paths") or {}),
+            "startup_restore": self.startup_restore,
+            "last_error": last_error,
+        }
+        write_json(self.launch_record_path, payload)
+
+    def shutdown(self) -> None:
+        try:
+            self.automations.stop()
+        except Exception:
+            pass
+        try:
+            self.router.stop()
+        except Exception:
+            pass
+
+
+class AstraBridgeSidecarHttpServer(ThreadingHTTPServer):
+    allow_reuse_address = True
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -479,6 +603,9 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
             query = urllib.parse.parse_qs(parsed.query)
+            if path == "/readyz":
+                self.send_json(self.context.ready_payload())
+                return
             if path in {"/health", "/api/health"}:
                 self.send_json(
                     {
@@ -565,6 +692,9 @@ class Handler(BaseHTTPRequestHandler):
                         else None,
                     )
                 )
+                return
+            if path == "/api/task-graphs/node-types":
+                self.send_json(self.context.tasks.node_type_registry_snapshot())
                 return
             if path == "/api/task-graphs/run/status":
                 run_id = self._optional_query_string(query, "run_id")
@@ -824,6 +954,22 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = urllib.parse.urlparse(self.path).path
             payload = self.read_json_body()
+            if path == "/host/shutdown":
+                boot_id = str(payload.get("boot_id") or "").strip()
+                if not boot_id or boot_id != self.context.boot_id:
+                    raise PermissionError("Missing or invalid sidecar boot_id for shutdown.")
+                self.send_json({"ok": True, "accepted": True, "boot_id": self.context.boot_id}, status=202)
+                def _shutdown_server() -> None:
+                    try:
+                        self.context._write_launch_record(status="stopped")
+                    except Exception:
+                        pass
+                    try:
+                        self.server.shutdown()
+                    except Exception:
+                        return
+                self._run_after_response(name="sidecar-shutdown", callback=_shutdown_server)
+                return
             if path.startswith("/api/") and path not in {"/api/projects/current", "/api/projects/recent"}:
                 if self.command == "POST":
                     self._require_admin_token()
@@ -1235,10 +1381,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(self.context.tasks.execute_fixture_graph(payload))
                 return
             if path == "/api/task-graphs/run/cancel":
-                self.send_json(self.context.tasks.cancel_graph_run(payload))
+                cancel_method = getattr(self.context.runtime, "cancel_task_graph_run", None)
+                if callable(cancel_method):
+                    self.send_json(cancel_method(payload))
+                else:
+                    self.send_json(self.context.tasks.cancel_graph_run(payload))
                 return
             if path == "/api/task-graphs/run/recover":
-                self.send_json(self.context.tasks.recover_graph_run(payload))
+                recover_method = getattr(self.context.runtime, "recover_task_graph_run", None)
+                if callable(recover_method):
+                    self.send_json(recover_method(payload))
+                else:
+                    self.send_json(self.context.tasks.recover_graph_run(payload))
                 return
             if path == "/api/task-graphs/approval/resolve":
                 self.send_json(self.context.tasks.resolve_graph_run_approval(payload))
@@ -1271,61 +1425,73 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(self.context.yunwu_image.test_connectivity(api_key=self._ephemeral_key(payload)))
                 return
             if path == "/api/router/image/yunwu/generate":
-                self.send_json(
-                    self.context.yunwu_image.generate(
-                        prompt=str(payload.get("prompt") or ""),
-                        model=str(payload.get("model") or "gpt-image-2"),
-                        size=str(payload.get("size") or "1024x1024"),
-                        n=int(payload.get("n") or 1),
-                        image_urls=[str(item) for item in (payload.get("image_urls") or [])],
-                        response_format=str(payload.get("response_format") or "url"),
-                        quality=str(payload.get("quality") or "auto"),
-                        image_format=str(payload.get("format") or payload.get("image_format") or "png"),
-                        background=self._optional_string(payload, "background"),
-                        prompt_category=str(payload.get("prompt_category") or ""),
-                        api_key=self._ephemeral_key(payload),
-                        timeout_sec=int(payload.get("timeout_sec") or 300),
-                        workspace_root=self.context.projects.require_workspace_root(),
-                        purpose=self._optional_string(payload, "purpose"),
-                    )
+                broker_result = self.context.mcp_broker.invoke_tool(
+                    "yunwu_image",
+                    "yunwu_image_generate",
+                    {
+                        "prompt": str(payload.get("prompt") or ""),
+                        "model": str(payload.get("model") or "gpt-image-2"),
+                        "size": str(payload.get("size") or "1024x1024"),
+                        "n": int(payload.get("n") or 1),
+                        "image_urls": [str(item) for item in (payload.get("image_urls") or [])],
+                        "response_format": str(payload.get("response_format") or "url"),
+                        "quality": str(payload.get("quality") or "auto"),
+                        "format": str(payload.get("format") or payload.get("image_format") or "png"),
+                        "background": self._optional_string(payload, "background"),
+                        "prompt_category": str(payload.get("prompt_category") or ""),
+                        "timeout_sec": int(payload.get("timeout_sec") or 300),
+                        "workspace_root": self.context.projects.require_workspace_root(),
+                        "purpose": self._optional_string(payload, "purpose"),
+                    },
+                    caller="http_api",
+                    internal_meta=self._broker_internal_meta(payload),
                 )
+                self.send_json({**dict(broker_result.get("result") or {}), "mcp": dict(broker_result.get("mcp") or {})})
                 return
             if path == "/api/router/image/yunwu/edit":
-                self.send_json(
-                    self.context.yunwu_image.edit(
-                        prompt=str(payload.get("prompt") or ""),
-                        image_paths=[str(item) for item in (payload.get("image_paths") or [])],
-                        mask_path=self._optional_string(payload, "mask_path"),
-                        model=str(payload.get("model") or "gpt-image-2"),
-                        size=str(payload.get("size") or "1024x1024"),
-                        n=int(payload.get("n") or 1),
-                        quality=str(payload.get("quality") or "auto"),
-                        background=str(payload.get("background") or "auto"),
-                        moderation=str(payload.get("moderation") or "auto"),
-                        prompt_category=str(payload.get("prompt_category") or ""),
-                        api_key=self._ephemeral_key(payload),
-                        timeout_sec=int(payload.get("timeout_sec") or 300),
-                        workspace_root=self.context.projects.require_workspace_root(),
-                        purpose=self._optional_string(payload, "purpose"),
-                    )
+                broker_result = self.context.mcp_broker.invoke_tool(
+                    "yunwu_image",
+                    "yunwu_image_edit",
+                    {
+                        "prompt": str(payload.get("prompt") or ""),
+                        "image_paths": [str(item) for item in (payload.get("image_paths") or [])],
+                        "mask_path": self._optional_string(payload, "mask_path"),
+                        "model": str(payload.get("model") or "gpt-image-2"),
+                        "size": str(payload.get("size") or "1024x1024"),
+                        "n": int(payload.get("n") or 1),
+                        "quality": str(payload.get("quality") or "auto"),
+                        "background": str(payload.get("background") or "auto"),
+                        "moderation": str(payload.get("moderation") or "auto"),
+                        "prompt_category": str(payload.get("prompt_category") or ""),
+                        "timeout_sec": int(payload.get("timeout_sec") or 300),
+                        "workspace_root": self.context.projects.require_workspace_root(),
+                        "purpose": self._optional_string(payload, "purpose"),
+                    },
+                    caller="http_api",
+                    internal_meta=self._broker_internal_meta(payload),
                 )
+                self.send_json({**dict(broker_result.get("result") or {}), "mcp": dict(broker_result.get("mcp") or {})})
                 return
             if path == "/api/router/image/yunwu/transparent-asset":
-                self.send_json(
-                    self.context.yunwu_image.transparent_asset(
-                        prompt=str(payload.get("prompt") or ""),
-                        model=str(payload.get("model") or "gpt-image-2"),
-                        size=str(payload.get("size") or "1024x1024"),
-                        n=int(payload.get("n") or 1),
-                        quality=str(payload.get("quality") or "high"),
-                        moderation=str(payload.get("moderation") or "auto"),
-                        prompt_category=str(payload.get("prompt_category") or "game_asset_japanese_anime"),
-                        api_key=self._ephemeral_key(payload),
-                        timeout_sec=int(payload.get("timeout_sec") or 300),
-                        workspace_root=self.context.projects.require_workspace_root(),
-                        purpose=self._optional_string(payload, "purpose"),
-                    )
+                broker_result = self.context.mcp_broker.invoke_tool(
+                    "yunwu_image",
+                    "yunwu_image_transparent_asset",
+                    {
+                        "prompt": str(payload.get("prompt") or ""),
+                        "model": str(payload.get("model") or "gpt-image-2"),
+                        "size": str(payload.get("size") or "1024x1024"),
+                        "n": int(payload.get("n") or 1),
+                        "quality": str(payload.get("quality") or "high"),
+                        "moderation": str(payload.get("moderation") or "auto"),
+                        "prompt_category": str(payload.get("prompt_category") or "game_asset_japanese_anime"),
+                        "timeout_sec": int(payload.get("timeout_sec") or 300),
+                        "workspace_root": self.context.projects.require_workspace_root(),
+                        "purpose": self._optional_string(payload, "purpose"),
+                    },
+                    caller="http_api",
+                    internal_meta=self._broker_internal_meta(payload),
                 )
+                self.send_json({**dict(broker_result.get("result") or {}), "mcp": dict(broker_result.get("mcp") or {})})
                 return
             if path == "/api/router/image/prompt-rewrite/instruction":
                 self.send_json(
@@ -1504,14 +1670,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(capability_payload, dict):
                     capability_payload = {}
                 capability_payload = self._payload_with_default_workspace_root(capability_payload)
-                self.send_json(
-                    {
-                        "result": CapabilityRuntime(
-                            router_config=self.context.router_config,
-                            key_injector=self.context.llm_manager.inject_profile_key,
-                        ).invoke(capability_id, capability_payload)
-                    }
+                broker_result = self.context.mcp_broker.invoke_capability(
+                    capability_id,
+                    capability_payload,
+                    caller="http_api",
                 )
+                self.send_json({"result": broker_result.get("result"), "mcp": dict(broker_result.get("mcp") or {})})
                 return
             if path == "/api/runtime/capability-smoke":
                 payload = self._payload_with_default_workspace_root(payload)
@@ -1918,6 +2082,12 @@ class Handler(BaseHTTPRequestHandler):
             normalized["workspace_root"] = workspace_root
         return normalized
 
+    def _broker_internal_meta(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        api_key = self._ephemeral_key(payload)
+        if not api_key:
+            return None
+        return {"internal_api_key": api_key}
+
     def _default_workspace_root(self) -> str:
         current_project_service = getattr(getattr(self, "context", None), "projects", None)
         project_payload = getattr(current_project_service, "current_project", None)
@@ -2091,14 +2261,38 @@ class Handler(BaseHTTPRequestHandler):
         print("astrabridge-sidecar: " + (format % args))
 
 
-def serve(port: int, seed_root: Path) -> None:
-    if _port_in_use(port):
+def serve(
+    port: int,
+    seed_root: Path,
+    *,
+    boot_id: str | None = None,
+    launch_record_path: Path | None = None,
+    build_version: str | None = None,
+) -> None:
+    if port and _port_in_use(port):
         raise RuntimeError(f"AstraBridge sidecar port is already in use: 127.0.0.1:{port}")
-    Handler.context = AppContext(seed_root)
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"AstraBridge sidecar listening at http://127.0.0.1:{port}")
+    server = AstraBridgeSidecarHttpServer(("127.0.0.1", port), Handler)
+    actual_port = int(server.server_address[1])
+    Handler.context = AppContext(
+        seed_root,
+        boot_id=boot_id,
+        launch_record_path=launch_record_path,
+        build_version=build_version,
+    )
+    Handler.context.bind_sidecar_listener("127.0.0.1", actual_port)
+    print(f"AstraBridge sidecar listening at http://127.0.0.1:{actual_port}")
     print(f"Seed root: {seed_root.resolve()}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        try:
+            Handler.context._write_launch_record(status="stopped")
+        except Exception:
+            pass
+        try:
+            Handler.context.shutdown()
+        finally:
+            server.server_close()
 
 
 def _port_in_use(port: int) -> bool:
@@ -2112,9 +2306,18 @@ def main() -> None:
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--seed-root", default=str(Path.cwd()))
+    parser.add_argument("--boot-id")
+    parser.add_argument("--launch-record")
+    parser.add_argument("--build-version")
     args = parser.parse_args()
     if args.serve:
-        serve(args.port, Path(args.seed_root))
+        serve(
+            args.port,
+            Path(args.seed_root),
+            boot_id=str(args.boot_id or "").strip() or None,
+            launch_record_path=Path(args.launch_record).expanduser() if str(args.launch_record or "").strip() else None,
+            build_version=str(args.build_version or "").strip() or None,
+        )
     else:
         parser.print_help()
 

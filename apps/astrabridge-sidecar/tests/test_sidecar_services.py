@@ -22,6 +22,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Callable
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -964,6 +965,75 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(payload["router"]["listen_port"], 8787)  # type: ignore[index]
         self.assertFalse(runtime_environment_called)
         self.assertFalse(router_status_called)
+
+    def test_handler_readyz_exposes_boot_version_and_store_schema(self) -> None:
+        handler = object.__new__(Handler)
+        handler.path = "/readyz"
+        handler.server = SimpleNamespace(server_address=("127.0.0.1", 8842))
+        handler.context = SimpleNamespace(
+            ready_payload=lambda: {
+                "schema_version": "astrabridge-sidecar-ready-v1",
+                "ok": True,
+                "service": "astrabridge-sidecar",
+                "boot_id": "boot-step15",
+                "build_version": "0.1.0-test",
+                "runtime_version": "3.11.9",
+                "durable_run_store_schema_version": "astrabridge-durable-run-store-v1",
+                "project_schema_version": "astrabridge-project-v1",
+                "listen_port": 8842,
+            }
+        )
+        captured: dict[str, object] = {}
+
+        def send_json(payload: object, status: int = 200) -> None:
+            captured["status"] = status
+            captured["payload"] = payload
+
+        handler.send_json = send_json  # type: ignore[method-assign]
+
+        Handler.do_GET(handler)
+
+        self.assertEqual(captured["status"], 200)
+        payload = captured["payload"]
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(payload["boot_id"], "boot-step15")  # type: ignore[index]
+        self.assertEqual(payload["build_version"], "0.1.0-test")  # type: ignore[index]
+        self.assertEqual(  # type: ignore[index]
+            payload["durable_run_store_schema_version"],
+            "astrabridge-durable-run-store-v1",
+        )
+
+    def test_handler_host_shutdown_requires_matching_boot_id_and_stops_server_after_response(self) -> None:
+        body = json.dumps({"boot_id": "boot-step15"}).encode("utf-8")
+        handler = object.__new__(Handler)
+        handler.command = "POST"
+        handler.path = "/host/shutdown"
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        shutdown_calls: list[str] = []
+        callbacks: list[Callable[[], None]] = []
+        handler.server = SimpleNamespace(shutdown=lambda: shutdown_calls.append("server.shutdown"))
+        handler.context = SimpleNamespace(
+            boot_id="boot-step15",
+            _write_launch_record=lambda status="ready": shutdown_calls.append(f"launch_record:{status}"),
+        )
+        captured: dict[str, object] = {}
+
+        def send_json(payload: object, status: int = 200) -> None:
+            captured["status"] = status
+            captured["payload"] = payload
+
+        handler.send_json = send_json  # type: ignore[method-assign]
+        handler._run_after_response = lambda *, name, callback: callbacks.append(callback)  # type: ignore[method-assign]
+
+        Handler.do_POST(handler)
+
+        self.assertEqual(captured["status"], 202)
+        self.assertEqual(captured["payload"], {"ok": True, "accepted": True, "boot_id": "boot-step15"})
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0]()
+        self.assertIn("server.shutdown", shutdown_calls)
+        self.assertIn("launch_record:stopped", shutdown_calls)
 
     def test_handler_projects_close_returns_before_background_restart(self) -> None:
         body = b"{}"
@@ -4301,24 +4371,38 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("astrabridge_browser_smoke", names)
 
     def test_runtime_dynamic_yunwu_tool_call_returns_app_server_content_items(self) -> None:
-        class FakeYunwuImage:
-            def transparent_asset(self, **kwargs: object) -> dict[str, object]:
+        class FakeBroker:
+            def __init__(self, workspace_root: Path) -> None:
+                self._workspace_root = workspace_root
+
+            def invoke_tool(self, server: str, tool: str, arguments: dict[str, object], **_: object) -> dict[str, object]:
+                workspace_root = self._workspace_root
                 return {
-                    "created": 123,
-                    "requested_n": kwargs.get("n"),
-                    "actual_n": 1,
-                    "count_mismatch": False,
-                    "asset_manifest_path": str(Path(str(kwargs["workspace_root"])) / ".astrabridge" / "assets" / "generated" / "asset_manifest.json"),
-                    "data": [
-                        {
-                            "b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
-                            "asset_id": "yunwu-test",
-                            "local_path": str(Path(str(kwargs["workspace_root"])) / ".astrabridge" / "assets" / "generated" / "yunwu-test.png"),
-                            "has_alpha": True,
-                            "transparent_pixel_ratio": 0.5,
-                            "transparency_status": "passed",
-                        }
-                    ],
+                    "result": {
+                        "created": 123,
+                        "requested_n": arguments.get("n"),
+                        "actual_n": 1,
+                        "count_mismatch": False,
+                        "asset_manifest_path": str(workspace_root / ".astrabridge" / "assets" / "generated" / "asset_manifest.json"),
+                        "data": [
+                            {
+                                "b64_json_present": True,
+                                "asset_id": "yunwu-test",
+                                "local_path": str(workspace_root / ".astrabridge" / "assets" / "generated" / "yunwu-test.png"),
+                                "has_alpha": True,
+                                "transparent_pixel_ratio": 0.5,
+                                "transparency_status": "passed",
+                            }
+                        ],
+                    },
+                    "mcp": {
+                        "server": server,
+                        "tool": tool,
+                        "request_id": "mcp-request-yunwu-1",
+                        "operation_id": "mcp-op-yunwu-1",
+                        "policy_decision": {"decision": "allow"},
+                        "audit_event": {"type": "mcp_broker_tool_call", "server": server, "tool": tool},
+                    },
                 }
 
         with tempfile.TemporaryDirectory() as temp:
@@ -4327,9 +4411,12 @@ class AstraBridgeServiceTests(unittest.TestCase):
             workspace.mkdir()
             projects = ProjectService(root / "recent.json")
             projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
-            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root))
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                mcp_broker_service=FakeBroker(workspace),
+            )
             runtime._mcp_config.enabled_servers = lambda: [{"name": "yunwu_image", "enabled": True}]  # type: ignore[method-assign]
-            runtime._yunwu_image = FakeYunwuImage()  # type: ignore[assignment]
 
             result = runtime._on_server_request(  # noqa: SLF001
                 "item/tool/call",
@@ -4353,24 +4440,32 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn('"server": "yunwu_image"', event_payload)
             self.assertIn("b64_json_present", event_payload)
             self.assertIn("tool_context", event_payload)
-            self.assertNotIn("iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB", event_payload)
+            self.assertIn("mcp-request-yunwu-1", event_payload)
 
     def test_runtime_dynamic_astrabridge_web_tool_call_returns_research_brief_content_primary(self) -> None:
         captured_arguments: dict[str, object] = {}
+        captured_tool = ""
 
-        class FakeWebTools:
-            def research_brief(self, arguments: dict[str, object]) -> dict[str, object]:
+        class FakeBroker:
+            def invoke_tool(self, server: str, tool: str, arguments: dict[str, object], **_: object) -> dict[str, object]:
+                nonlocal captured_tool
+                captured_tool = tool
                 captured_arguments.update(arguments)
                 return {
-                    "ok": True,
-                    "record_id": "research-1",
-                    "tool_event_verified": True,
-                    "path": "D:/workspace/.astrabridge/research/research-1.json",
                     "result": {
                         "tool": "astrabridge_web_research_brief",
                         "research_goal": arguments.get("research_goal"),
                         "sources": [{"url": "https://example.com/autotile", "title": "Autotile"}],
                         "citation_rule": "Use only URLs in sources.",
+                        "tool_event_verified": True,
+                    },
+                    "mcp": {
+                        "server": server,
+                        "tool": tool,
+                        "request_id": "mcp-request-web-1",
+                        "operation_id": "mcp-op-web-1",
+                        "policy_decision": {"decision": "allow"},
+                        "audit_event": {"type": "mcp_broker_tool_call", "server": server, "tool": tool},
                     },
                 }
 
@@ -4406,7 +4501,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 projects,
                 ModalService(projects.require_shell_state_root),
                 task_service=tasks,
-                web_tool_service=FakeWebTools(),
+                mcp_broker_service=FakeBroker(),
             )
             runtime._mcp_config.enabled_servers = lambda: [{"name": "astrabridge_web", "enabled": True}]  # type: ignore[method-assign]
 
@@ -4430,6 +4525,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("dynamic_tool_called", event_payload)
             self.assertIn('"server": "astrabridge_web"', event_payload)
             self.assertIn("https://example.com/autotile", event_payload)
+            self.assertEqual(captured_tool, "astrabridge_web_research_brief")
             context = dict(captured_arguments.get("tool_context") or {})
             self.assertEqual(context["tool_name"], "astrabridge_web_research_brief")
             self.assertEqual(context["task_goal"], "Build a three-floor magical tower game")
@@ -4438,21 +4534,30 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(context["selected_model"], "deepseek-v4-pro")
             self.assertIn("Do not include raw .astrabridge/runtime_events.jsonl.", context["forbidden_inputs"])
             self.assertIn("tool_context", event_payload)
+            self.assertIn("mcp-request-web-1", event_payload)
 
     def test_runtime_dynamic_astrabridge_web_search_alias_preserves_default_tool_context(self) -> None:
         captured_arguments: dict[str, object] = {}
+        captured_tool = ""
 
-        class FakeWebTools:
-            def search_batch(self, arguments: dict[str, object]) -> dict[str, object]:
+        class FakeBroker:
+            def invoke_tool(self, server: str, tool: str, arguments: dict[str, object], **_: object) -> dict[str, object]:
+                nonlocal captured_tool
+                captured_tool = tool
                 captured_arguments.update(arguments)
                 return {
-                    "ok": True,
-                    "record_id": "search-1",
-                    "tool_event_verified": True,
-                    "path": "D:/workspace/.astrabridge/research/search-1.json",
                     "result": {
-                        "tool": "astrabridge_web_search_batch",
+                        "tool": "astrabridge_web_search",
                         "merged_results": [{"url": "https://example.com/tilemap", "title": "Tilemap"}],
+                        "tool_event_verified": True,
+                    },
+                    "mcp": {
+                        "server": server,
+                        "tool": tool,
+                        "request_id": "mcp-request-web-search-1",
+                        "operation_id": "mcp-op-web-search-1",
+                        "policy_decision": {"decision": "allow"},
+                        "audit_event": {"type": "mcp_broker_tool_call", "server": server, "tool": tool},
                     },
                 }
 
@@ -4468,7 +4573,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 projects,
                 ModalService(projects.require_shell_state_root),
                 task_service=tasks,
-                web_tool_service=FakeWebTools(),
+                mcp_broker_service=FakeBroker(),
             )
             runtime._mcp_config.enabled_servers = lambda: [{"name": "astrabridge_web", "enabled": True}]  # type: ignore[method-assign]
 
@@ -4484,28 +4589,38 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             self.assertTrue(result["success"])
             context = dict(captured_arguments.get("tool_context") or {})
+            self.assertEqual(captured_tool, "astrabridge_web_search")
             self.assertEqual(context["tool_name"], "astrabridge_web_search")
             self.assertEqual(context["workspace_root"], str(workspace))
             self.assertEqual(context["selected_provider"], "deepseek")
-            self.assertEqual(captured_arguments["queries"], [{"query": "JRPG meadow map overlay collision", "max_results": 5}])
+            self.assertEqual(captured_arguments["query"], "JRPG meadow map overlay collision")
+            self.assertEqual(captured_arguments["max_results"], 5)
             self.assertIn("tool_context", result["contentItems"][0]["text"])
 
     def test_runtime_dynamic_astrabridge_web_tool_call_returns_research_brief_content(self) -> None:
         captured_arguments: dict[str, object] = {}
+        captured_tool = ""
 
-        class FakeWebTools:
-            def research_brief(self, arguments: dict[str, object]) -> dict[str, object]:
+        class FakeBroker:
+            def invoke_tool(self, server: str, tool: str, arguments: dict[str, object], **_: object) -> dict[str, object]:
+                nonlocal captured_tool
+                captured_tool = tool
                 captured_arguments.update(arguments)
                 return {
-                    "ok": True,
-                    "record_id": "research-2",
-                    "tool_event_verified": True,
-                    "path": "D:/workspace/.astrabridge/research/research-2.json",
                     "result": {
                         "tool": "astrabridge_web_research_brief",
                         "research_goal": arguments.get("research_goal"),
                         "sources": [{"url": "https://example.com/autotile", "title": "Autotile"}],
                         "citation_rule": "Use only URLs in sources.",
+                        "tool_event_verified": True,
+                    },
+                    "mcp": {
+                        "server": server,
+                        "tool": tool,
+                        "request_id": "mcp-request-web-2",
+                        "operation_id": "mcp-op-web-2",
+                        "policy_decision": {"decision": "allow"},
+                        "audit_event": {"type": "mcp_broker_tool_call", "server": server, "tool": tool},
                     },
                 }
 
@@ -4521,7 +4636,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 projects,
                 ModalService(projects.require_shell_state_root),
                 task_service=tasks,
-                web_tool_service=FakeWebTools(),
+                mcp_broker_service=FakeBroker(),
             )
             runtime._mcp_config.enabled_servers = lambda: [{"name": "astrabridge_web", "enabled": True}]  # type: ignore[method-assign]
 
@@ -4541,6 +4656,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertIn("astrabridge_web_research_brief", text)
             self.assertIn("https://example.com/autotile", text)
             self.assertIn("tool_event_verified", text)
+            self.assertEqual(captured_tool, "astrabridge_web_research_brief")
             context = dict(captured_arguments.get("tool_context") or {})
             self.assertEqual(context["tool_name"], "astrabridge_web_research_brief")
             self.assertEqual(context["selected_model"], "deepseek-v4-pro")
@@ -16046,6 +16162,137 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(status["thread_status"]["thread_id"], "thread-new")
         self.assertEqual(status["plan"]["source"], "task/plan")
         self.assertEqual(status["plan"]["steps"][0]["step"], "Reuse task plan")
+
+    def test_runtime_supervisor_status_includes_observability_summary_from_runtime_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp) / "workspace"
+            (workspace / ".astrabridge" / "desktop-sidecar" / "logs").mkdir(parents=True)
+            ((workspace / ".astrabridge" / "desktop-sidecar" / "logs") / "sidecar-host.jsonl").write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-07-17T12:00:06+09:00",
+                        "event": "sidecar_exit_observed",
+                        "instance_id": "desktop-1",
+                        "payload": {"boot_id": "sidecar-boot-1", "pid": 4567},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            class FakeProjects:
+                current_project = {
+                    "name": "Demo",
+                    "current_thread_id": "thread-worker",
+                    "default_profile_id": "qwen-default",
+                    "default_model": "qwen3.7-plus",
+                    "default_effort": "high",
+                    "ui_preferences": {},
+                }
+
+                def require_workspace_root(self) -> Path:
+                    return workspace
+
+            class FakeTasks:
+                def current_task(self) -> dict[str, object]:
+                    return {
+                        "active_provider_thread_id": "thread-worker",
+                        "graph_run_refs": [
+                            {
+                                "run_id": "graph-run-1",
+                                "trace_id": "trace-graph-run-1",
+                                "status": "completed",
+                                "timeline_events": [
+                                    {
+                                        "event_id": "graph-run-1-created",
+                                        "event_type": "run_created",
+                                        "created_at": "2026-07-17T12:00:00+09:00",
+                                        "summary": "Run admitted.",
+                                    },
+                                    {
+                                        "event_id": "graph-run-1-worker-started",
+                                        "event_type": "node_started",
+                                        "created_at": "2026-07-17T12:00:02+09:00",
+                                        "summary": "Worker started.",
+                                        "node_id": "worker",
+                                    },
+                                    {
+                                        "event_id": "graph-run-1-worker-complete",
+                                        "event_type": "node_completed",
+                                        "created_at": "2026-07-17T12:00:06+09:00",
+                                        "summary": "Worker completed.",
+                                        "node_id": "worker",
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+
+                def active_provider_thread(self, include_missing_fallback: bool = False) -> dict[str, object]:  # noqa: FBT001, FBT002
+                    return {"thread_id": "thread-worker"}
+
+                def durable_run_store(self) -> object:
+                    return SimpleNamespace(db_path=workspace / ".astrabridge" / "missing.sqlite3")
+
+            class FakeRuntime:
+                _tasks = FakeTasks()
+
+                def list_events(self, after: int = 0, limit: int | None = None) -> dict[str, object]:
+                    return {
+                        "cursor": 3,
+                        "events": [
+                            {
+                                "type": "notification",
+                                "method": "turn/started",
+                                "timestamp": "2026-07-17T12:00:01+09:00",
+                                "params": {"threadId": "thread-worker", "turnId": "turn-worker"},
+                            },
+                            {
+                                "type": "notification",
+                                "method": "item/agentMessage/delta",
+                                "timestamp": "2026-07-17T12:00:02+09:00",
+                                "params": {"threadId": "thread-worker", "turnId": "turn-worker", "delta": "hello"},
+                            },
+                            {
+                                "type": "dynamic_tool_called",
+                                "timestamp": "2026-07-17T12:00:05+09:00",
+                                "thread_id": "thread-worker",
+                                "turn_id": "turn-worker",
+                                "mcp_policy_decision": {"server_enabled": True},
+                                "mcp_audit_event": {
+                                    "protocol_version": "2025-11-25",
+                                    "trace_context": {
+                                        "trace_id": "trace-graph-run-1",
+                                        "run_id": "graph-run-1",
+                                        "node_id": "worker",
+                                        "attempt_count": 1,
+                                        "thread_id": "thread-worker",
+                                        "turn_id": "turn-worker",
+                                    },
+                                },
+                            },
+                        ],
+                    }
+
+                def record_supervisor_event(self, event):  # noqa: ANN001
+                    self.latest_event = event
+
+            class FakeModals:
+                def list_pending(self) -> dict[str, object]:
+                    return {"modals": []}
+
+            class FakeDogfood:
+                def snapshot(self) -> dict[str, object]:
+                    return {"run": {"enabled": False, "browser_smokes": [], "milestones": [], "usage": {}, "budgets": {}}}
+
+            supervisor = RuntimeSupervisorService(FakeProjects(), FakeRuntime(), FakeModals(), FakeDogfood())
+            status = supervisor.status(thread_id="thread-worker", profile={"provider_id": "qwen", "model": "qwen3.7-plus"})
+
+            self.assertEqual(status["observability"]["source"]["ui_source"], "runtime-supervisor")
+            self.assertEqual(status["observability"]["trace_lineage"]["trace_id"], "trace-graph-run-1")
+            metric_ids = [item["metric_id"] for item in status["observability"]["metrics"]]
+            self.assertIn("mcp_conformance_rate", metric_ids)
+            self.assertTrue(any(item["domain"] == "host" for item in status["observability"]["recent_diagnostics"]))
 
     def test_runtime_supervisor_does_not_auto_interrupt_pending_approval(self) -> None:
         class FakeProjects:

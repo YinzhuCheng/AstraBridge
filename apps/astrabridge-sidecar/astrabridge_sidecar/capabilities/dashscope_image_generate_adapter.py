@@ -8,6 +8,7 @@ from typing import Any, Callable
 import requests
 
 from ..common import new_id, now_iso, path_for_host, write_json
+from ..multimodal_result_envelope import enrich_capability_result
 
 
 DASHSCOPE_IMAGE_GENERATE_CAPABILITY_RESULT_SCHEMA = "astrabridge-image-generate-capability-result-v1"
@@ -81,7 +82,7 @@ class DashScopeImageGenerateAdapter:
         persisted = self.persist_artifacts(payload, request_body, create_body, poll_body, result)
         if persisted:
             result.update(persisted)
-        return result
+        return enrich_capability_result("image.generate", result, workspace_root=payload.get("workspace_root"))
 
     def build_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         operation = _clean_text(payload.get("operation") or "generate").lower() or "generate"

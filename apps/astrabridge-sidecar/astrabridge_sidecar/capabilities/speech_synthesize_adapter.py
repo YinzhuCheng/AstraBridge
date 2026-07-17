@@ -11,6 +11,7 @@ from typing import Any, Callable
 import requests
 
 from ..common import new_id, now_iso, path_for_host, write_json
+from ..multimodal_result_envelope import enrich_capability_result
 
 
 SPEECH_SYNTHESIZE_CAPABILITY_RESULT_SCHEMA = "astrabridge-speech-synthesize-capability-result-v1"
@@ -109,7 +110,7 @@ class AlibabaSpeechSynthesizeAdapter:
         persisted = self.persist_artifacts(payload, request_body, sse_lines, result, profile=profile)
         if persisted:
             result.update(persisted)
-        return result
+        return enrich_capability_result("speech.synthesize", result, workspace_root=payload.get("workspace_root"))
 
     def build_request(self, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         text = _clean_text(payload.get("text"))

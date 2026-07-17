@@ -2,7 +2,7 @@
 
 export const SCHEMA_VERSION = "astrabridge-protocol-v1" as const;
 export const SCHEMA_ID = "https://astrabridge.dev/schemas/protocol/v1.json" as const;
-export const SCHEMA_DIGEST = "d83e965b938528a997eecde3cff7b4b9a3e8f63447d9268bd1c222e08859d6b8" as const;
+export const SCHEMA_DIGEST = "94cc0c660970e584f9aa63963e9043195b6e44e9dd4ba9f67bc8ce45d4caca3e" as const;
 export const PROTOCOL_SCHEMA = {
   "$defs": {
     "AgentEnvelope": {
@@ -747,6 +747,10 @@ export const PROTOCOL_SCHEMA = {
             "approval_requested",
             "approval_resolved",
             "handoff_created",
+            "handoff_acknowledged",
+            "handoff_rejected",
+            "handoff_retry_scheduled",
+            "handoff_delivery_failed",
             "run_cancel_requested",
             "run_cancelled",
             "run_completed",
@@ -928,7 +932,7 @@ export interface RunEvent {
   task_id: Identifier;
   trace_id: Identifier;
   sequence: number;
-  event_type: "run_created" | "run_dry_run_started" | "run_dry_run_completed" | "node_queued" | "node_started" | "node_progress" | "node_completed" | "node_blocked" | "node_failed" | "node_cancelled" | "artifact_created" | "artifact_redacted" | "approval_requested" | "approval_resolved" | "handoff_created" | "run_cancel_requested" | "run_cancelled" | "run_completed" | "run_failed" | "run_rolled_back";
+  event_type: "run_created" | "run_dry_run_started" | "run_dry_run_completed" | "node_queued" | "node_started" | "node_progress" | "node_completed" | "node_blocked" | "node_failed" | "node_cancelled" | "artifact_created" | "artifact_redacted" | "approval_requested" | "approval_resolved" | "handoff_created" | "handoff_acknowledged" | "handoff_rejected" | "handoff_retry_scheduled" | "handoff_delivery_failed" | "run_cancel_requested" | "run_cancelled" | "run_completed" | "run_failed" | "run_rolled_back";
   created_at: Timestamp;
   payload: LooseObject;
   artifact_refs?: Array<ArtifactRef>;

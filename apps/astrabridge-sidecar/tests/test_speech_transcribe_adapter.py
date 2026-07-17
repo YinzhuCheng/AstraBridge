@@ -105,8 +105,17 @@ class SpeechTranscribeAdapterTests(unittest.TestCase):
             self.assertTrue(result["audio_only_content"])
             self.assertTrue(result["prompt_ignored"])
             self.assertEqual(len(result["artifact_refs"]), 4)
+            self.assertEqual(len(result["protocol_artifact_refs"]), 1)
+            self.assertEqual(len(result["diagnostic_refs"]), 3)
+            self.assertEqual(result["capability_output"]["status"], "ok")
+            self.assertEqual(result["content_parts"][0]["kind"], "text")
+            self.assertEqual(result["content_parts"][1]["kind"], "document")
 
             artifact_dir = Path(result["artifact_dir"])
+            self.assertEqual(
+                result["protocol_artifact_refs"][0]["artifact_uri"],
+                f"workspace://.astrabridge/capabilities/speech_transcribe/{artifact_dir.name}/transcript.txt",
+            )
             request_payload = json.loads((artifact_dir / "request.json").read_text(encoding="utf-8"))
             response_payload = json.loads((artifact_dir / "response.json").read_text(encoding="utf-8"))
             transcript_text = (artifact_dir / "transcript.txt").read_text(encoding="utf-8")

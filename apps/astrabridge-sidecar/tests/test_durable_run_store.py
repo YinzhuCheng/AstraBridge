@@ -50,6 +50,62 @@ def _run(run_id: str = "run-1", *, status: str = "queued") -> dict[str, object]:
     }
 
 
+def _agent_envelope(run_id: str = "run-1") -> dict[str, object]:
+    return {
+        "envelope_id": f"envelope-{run_id}",
+        "schema_version": "astrabridge-protocol-v1",
+        "message_id": f"message-{run_id}",
+        "task_id": "task-1",
+        "run_id": run_id,
+        "sender": {
+            "agent_id": "agent-source",
+            "provider_id": "qwen",
+            "model_id": "qwen3.7-plus",
+            "lane_id": "worker-node-source",
+        },
+        "recipient": {
+            "agent_id": "agent-target",
+            "provider_id": "deepseek",
+            "model_id": "deepseek-v4-pro",
+            "lane_id": "node-target",
+        },
+        "kind": "handoff",
+        "content": [
+            {
+                "part_id": f"part-{run_id}",
+                "kind": "json",
+                "mime_type": "application/json",
+                "data": {"result": "ok"},
+            }
+        ],
+        "created_at": "2026-01-01T00:01:00+00:00",
+        "delivery": {
+            "attempt": 1,
+            "idempotency_key": f"delivery-{run_id}",
+            "trace_id": f"trace-{run_id}",
+            "sequence": 0,
+        },
+        "security_policy": {
+            "exclude_private_memory": True,
+            "redaction_applied": True,
+        },
+        "metadata": {
+            "graph_id": "graph-1",
+            "context_id": f"context-{run_id}",
+            "source_node_id": "node-source",
+            "target_node_id": "node-target",
+            "edge_id": "edge-source-target",
+            "intent": "graph_node_handoff",
+            "correlation_id": f"corr-{run_id}",
+            "causation_id": f"cause-{run_id}",
+            "schema_refs": ["schema.result"],
+            "context_policy_snapshot": {"exclude_private_memory": True},
+            "budget": {"total_tokens": 10},
+            "provenance": {"source_output_envelope_path": "PRIVATE/output-envelope.json"},
+        },
+    }
+
+
 class DurableRunStoreTests(unittest.TestCase):
     def test_schema_is_workspace_local_wal_and_repeated_initialization_is_stable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -176,6 +232,48 @@ class DurableRunStoreTests(unittest.TestCase):
             self.assertEqual(store.enqueue_outbox("operation-1", "run-1", kind="dispatch")["status"], "pending")
             operation = store.record_external_operation("operation-1", "run-1", kind="provider_call", classification="read_only", status="completed")
             self.assertEqual(operation["status"], "completed")
+
+    def test_agent_envelope_persistence_is_immutable_and_delivery_events_project_into_delivery_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = DurableRunEventStore(temp)
+            store.create_run(_run())
+            envelope = _agent_envelope()
+            stored = store.record_agent_envelope(envelope)
+            self.assertEqual(store.record_agent_envelope(envelope), stored)
+            store.append_event(
+                {
+                    "event_id": "run-1-handoff-created",
+                    "run_id": "run-1",
+                    "task_id": "task-1",
+                    "trace_id": "trace-run-1",
+                    "event_type": "handoff_created",
+                    "created_at": "2026-01-01T00:01:01+00:00",
+                    "payload": {
+                        "envelope_id": "envelope-run-1",
+                        "delivery_idempotency_key": "delivery-run-1",
+                    },
+                }
+            )
+            projection = store.load_run("run-1")
+            self.assertEqual(len(projection["agent_envelopes"]), 1)
+            self.assertEqual(projection["agent_envelopes"][0]["envelope_id"], "envelope-run-1")
+            self.assertEqual(len(projection["delivery_ledger"]), 1)
+            self.assertEqual(projection["delivery_ledger"][0]["event_type"], "handoff_created")
+            self.assertEqual(projection["delivery_ledger"][0]["payload"]["envelope_id"], "envelope-run-1")
+            with self.assertRaises(ImmutableRecordConflict):
+                store.record_agent_envelope(
+                    {
+                        **envelope,
+                        "content": [
+                            {
+                                "part_id": "part-run-1",
+                                "kind": "json",
+                                "mime_type": "application/json",
+                                "data": {"result": "different"},
+                            }
+                        ],
+                    }
+                )
 
     def test_legacy_migration_preserves_source_redacts_secrets_and_marks_active_or_external_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

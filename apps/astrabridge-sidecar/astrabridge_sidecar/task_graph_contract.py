@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from .node_type_registry import task_graph_node_kind_ids
 from .security import DESKTOP_KEY_PATH_RE, SECRET_RE, SecurityError, resolve_under
 
 
@@ -20,7 +21,7 @@ GRAPH_TEMPLATE_IDS = (
     "multimodal_capability_adapter",
     "custom_blank_graph",
 )
-NODE_KINDS = ("supervisor", "worker", "synthesizer", "extractor", "validator", "reviewer", "gate", "artifact_source")
+NODE_KINDS = task_graph_node_kind_ids()
 NODE_DEFINITION_STATUSES = ("draft", "ready", "invalid", "disabled")
 EDGE_TYPES = ("context_handoff", "artifact_handoff", "control_dependency", "approval_dependency", "fanout_branch", "fanin_merge")
 EDGE_STATUSES = ("draft", "ready", "invalid", "disabled")
@@ -53,6 +54,7 @@ RUN_STATUSES = (
     "dry_run_passed",
     "running",
     "paused_for_review",
+    "needs_review",
     "partial",
     "cancelled",
     "failed",
@@ -68,6 +70,7 @@ NODE_RUN_STATUSES = (
     "running",
     "waiting_on_approval",
     "waiting_on_artifact",
+    "needs_review",
     "partial",
     "skipped",
     "blocked",
@@ -87,6 +90,7 @@ RUN_EVENT_TYPES = (
     "node_blocked",
     "node_failed",
     "node_cancelled",
+    "node_needs_review",
     "artifact_created",
     "artifact_redacted",
     "approval_requested",
@@ -96,6 +100,7 @@ RUN_EVENT_TYPES = (
     "run_cancelled",
     "run_completed",
     "run_failed",
+    "run_needs_review",
     "run_rolled_back",
 )
 APPROVAL_STATES = ("not_required", "pending", "approved", "rejected", "expired")

@@ -1,0 +1,474 @@
+{
+  "format": "langgraph_stategraph_manifest",
+  "version": "1.0",
+  "graph": {
+    "graph_id": "graph_langgraph_supported",
+    "task_id": "task_langgraph_examples",
+    "title": "LangGraph Supported Manifest",
+    "state_channels": {
+      "task_context": {
+        "value_type": "text",
+        "reducer": "replace"
+      },
+      "machine_result": {
+        "value_type": "structured_json",
+        "reducer": "replace"
+      },
+      "route": {
+        "value_type": "structured_json",
+        "reducer": "replace"
+      },
+      "approval_record": {
+        "value_type": "approval_record",
+        "reducer": "replace"
+      },
+      "subgraph_result": {
+        "value_type": "structured_json",
+        "reducer": "replace"
+      }
+    },
+    "compile": {
+      "checkpointer": {
+        "mode": "memory",
+        "thread_id_field": "thread_id",
+        "checkpoint_ns_field": "checkpoint_ns",
+        "checkpoint_id_field": "checkpoint_id"
+      },
+      "interrupt_before": [
+        "node_review_gate"
+      ],
+      "interrupt_after": [
+        "node_route"
+      ]
+    },
+    "nodes": [
+      {
+        "id": "node_request_input",
+        "type": "astrabridge/artifact_source",
+        "label": "Request Input",
+        "role": "custom",
+        "node_type_config": {
+          "artifact_kind": "text_report",
+          "artifact_uri": "workspace://PRIVATE/langgraph/inputs/request.md"
+        },
+        "ports": {
+          "inputs": [],
+          "outputs": [
+            {
+              "port_id": "artifact_output",
+              "label": "Task Context",
+              "port_type": "text",
+              "shape": "single",
+              "required": true,
+              "artifact_kind": "text_report"
+            }
+          ]
+        },
+        "input_contract": {
+          "mode": "task_context"
+        },
+        "output_contract": {
+          "mode": "artifact_only",
+          "artifact_specs": [
+            {
+              "kind": "text_report",
+              "id": "artifact_output"
+            }
+          ],
+          "human_summary_required": true
+        },
+        "execution": {
+          "spawn_mode": "inline_lane",
+          "timeout_ms": 120000,
+          "retry_policy": {
+            "max_attempts": 1
+          },
+          "execution_backend": "app_server",
+          "collaboration_mode": "default"
+        },
+        "safety": {
+          "risk_class": "low",
+          "allow_provider_calls": false,
+          "allow_code_changes": false,
+          "allow_install": false,
+          "requires_human_approval": false
+        },
+        "status": "ready",
+        "ui": {
+          "position": {
+            "x": 40,
+            "y": 160
+          },
+          "layout_mode": "canvas"
+        }
+      },
+      {
+        "id": "node_route",
+        "type": "astrabridge/router_condition",
+        "label": "Route Request",
+        "role": "custom",
+        "node_type_config": {
+          "condition": {
+            "mode": "state_field_literal",
+            "field": "route",
+            "branch_map": {
+              "review": "review",
+              "approve": "approve"
+            }
+          }
+        },
+        "ports": {
+          "inputs": [
+            {
+              "port_id": "input_payload",
+              "label": "Input Payload",
+              "port_type": "text",
+              "shape": "single",
+              "required": true
+            }
+          ],
+          "outputs": [
+            {
+              "port_id": "route_decision",
+              "label": "Route Decision",
+              "port_type": "structured_json",
+              "shape": "single",
+              "required": true,
+              "schema_ref": "schema.node_route.machine_result"
+            }
+          ]
+        },
+        "input_contract": {
+          "mode": "typed_ports",
+          "port_ids": [
+            "input_payload"
+          ]
+        },
+        "output_contract": {
+          "mode": "structured_and_artifacts",
+          "machine_result_schema_ref": "schema.node_route.machine_result",
+          "artifact_specs": [],
+          "human_summary_required": true
+        },
+        "execution": {
+          "spawn_mode": "inline_lane",
+          "timeout_ms": 120000,
+          "retry_policy": {
+            "max_attempts": 1
+          },
+          "execution_backend": "app_server",
+          "collaboration_mode": "default"
+        },
+        "safety": {
+          "risk_class": "low",
+          "allow_provider_calls": false,
+          "allow_code_changes": false,
+          "allow_install": false,
+          "requires_human_approval": false
+        },
+        "status": "ready",
+        "ui": {
+          "position": {
+            "x": 320,
+            "y": 160
+          },
+          "layout_mode": "canvas"
+        }
+      },
+      {
+        "id": "node_review_subgraph",
+        "type": "astrabridge/subgraph",
+        "label": "Review Subgraph",
+        "role": "custom",
+        "node_type_config": {
+          "graph_ref": "graph_review_subflow"
+        },
+        "subgraph": {
+          "graph_ref": "graph_review_subflow",
+          "integration_mode": "compiled_subgraph",
+          "checkpoint_scope": "inherit_parent"
+        },
+        "ports": {
+          "inputs": [
+            {
+              "port_id": "subgraph_input",
+              "label": "Subgraph Input",
+              "port_type": "structured_json",
+              "shape": "single",
+              "required": true
+            }
+          ],
+          "outputs": [
+            {
+              "port_id": "subgraph_result",
+              "label": "Subgraph Result",
+              "port_type": "structured_json",
+              "shape": "single",
+              "required": true,
+              "schema_ref": "schema.node_review_subgraph.machine_result"
+            }
+          ]
+        },
+        "input_contract": {
+          "mode": "typed_ports",
+          "port_ids": [
+            "subgraph_input"
+          ]
+        },
+        "output_contract": {
+          "mode": "structured_and_artifacts",
+          "machine_result_schema_ref": "schema.node_review_subgraph.machine_result",
+          "artifact_specs": [],
+          "human_summary_required": true
+        },
+        "execution": {
+          "spawn_mode": "subagent_worker",
+          "timeout_ms": 120000,
+          "retry_policy": {
+            "max_attempts": 1
+          },
+          "execution_backend": "app_server",
+          "collaboration_mode": "default",
+          "subagent_policy": {
+            "isolation_mode": "lane",
+            "max_turns": 8,
+            "allow_direct_teammate_messages": false,
+            "share_worktree": false,
+            "allow_nested_subagents": false
+          }
+        },
+        "safety": {
+          "risk_class": "low",
+          "allow_provider_calls": false,
+          "allow_code_changes": false,
+          "allow_install": false,
+          "requires_human_approval": false
+        },
+        "status": "ready",
+        "ui": {
+          "position": {
+            "x": 620,
+            "y": 60
+          },
+          "layout_mode": "canvas"
+        }
+      },
+      {
+        "id": "node_review_gate",
+        "type": "astrabridge/human_approval",
+        "label": "Approval Gate",
+        "role": "gate",
+        "node_type_config": {
+          "review_kind": "human_gate"
+        },
+        "ports": {
+          "inputs": [
+            {
+              "port_id": "approval_input",
+              "label": "Approval Input",
+              "port_type": "structured_json",
+              "shape": "single",
+              "required": true
+            }
+          ],
+          "outputs": [
+            {
+              "port_id": "approval_record",
+              "label": "Approval Record",
+              "port_type": "approval_record",
+              "shape": "single",
+              "required": true,
+              "artifact_kind": "approval_record"
+            }
+          ]
+        },
+        "input_contract": {
+          "mode": "typed_ports",
+          "port_ids": [
+            "approval_input"
+          ]
+        },
+        "output_contract": {
+          "mode": "artifact_only",
+          "artifact_specs": [
+            {
+              "kind": "approval_record",
+              "id": "approval_record"
+            }
+          ],
+          "human_summary_required": true
+        },
+        "execution": {
+          "spawn_mode": "manual_only",
+          "timeout_ms": 120000,
+          "retry_policy": {
+            "max_attempts": 1
+          },
+          "execution_backend": "human_review",
+          "collaboration_mode": "default"
+        },
+        "safety": {
+          "risk_class": "moderate",
+          "allow_provider_calls": false,
+          "allow_code_changes": false,
+          "allow_install": false,
+          "requires_human_approval": true,
+          "approval_kind": "human_gate"
+        },
+        "status": "ready",
+        "ui": {
+          "position": {
+            "x": 620,
+            "y": 260
+          },
+          "layout_mode": "canvas"
+        }
+      },
+      {
+        "id": "node_result_sink",
+        "type": "astrabridge/artifact_sink",
+        "label": "Result Sink",
+        "role": "custom",
+        "node_type_config": {
+          "target_kind": "validation_report"
+        },
+        "ports": {
+          "inputs": [
+            {
+              "port_id": "artifact_input",
+              "label": "Artifact Input",
+              "port_type": "structured_json",
+              "shape": "single",
+              "required": true
+            }
+          ],
+          "outputs": [
+            {
+              "port_id": "artifact_record",
+              "label": "Artifact Record",
+              "port_type": "structured_json",
+              "shape": "single",
+              "required": true,
+              "artifact_kind": "validation_report"
+            }
+          ]
+        },
+        "input_contract": {
+          "mode": "typed_ports",
+          "port_ids": [
+            "artifact_input"
+          ]
+        },
+        "output_contract": {
+          "mode": "artifact_only",
+          "artifact_specs": [
+            {
+              "kind": "validation_report",
+              "id": "artifact_record"
+            }
+          ],
+          "human_summary_required": true
+        },
+        "execution": {
+          "spawn_mode": "inline_lane",
+          "timeout_ms": 120000,
+          "retry_policy": {
+            "max_attempts": 1
+          },
+          "execution_backend": "app_server",
+          "collaboration_mode": "default"
+        },
+        "safety": {
+          "risk_class": "low",
+          "allow_provider_calls": false,
+          "allow_code_changes": false,
+          "allow_install": false,
+          "requires_human_approval": false
+        },
+        "status": "ready",
+        "ui": {
+          "position": {
+            "x": 960,
+            "y": 160
+          },
+          "layout_mode": "canvas"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_start_request",
+        "kind": "start",
+        "source": "__start__",
+        "target": "node_request_input"
+      },
+      {
+        "id": "edge_request_route",
+        "kind": "edge",
+        "source": "node_request_input",
+        "target": "node_route",
+        "source_port_id": "artifact_output",
+        "target_port_id": "input_payload"
+      },
+      {
+        "id": "edge_route_review",
+        "kind": "conditional",
+        "source": "node_route",
+        "target": "node_review_subgraph",
+        "branch": "review",
+        "source_port_id": "route_decision",
+        "target_port_id": "subgraph_input"
+      },
+      {
+        "id": "edge_route_approve",
+        "kind": "conditional",
+        "source": "node_route",
+        "target": "node_review_gate",
+        "branch": "approve",
+        "source_port_id": "route_decision",
+        "target_port_id": "approval_input"
+      },
+      {
+        "id": "edge_subgraph_sink",
+        "kind": "edge",
+        "source": "node_review_subgraph",
+        "target": "node_result_sink",
+        "source_port_id": "subgraph_result",
+        "target_port_id": "artifact_input"
+      },
+      {
+        "id": "edge_gate_end",
+        "kind": "conditional",
+        "source": "node_review_gate",
+        "target": "__end__",
+        "branch": "approved",
+        "source_port_id": "approval_record"
+      }
+    ],
+    "schema_registry": {
+      "schema.node_route.machine_result": {
+        "type": "object",
+        "properties": {
+          "route": {
+            "type": "string"
+          }
+        }
+      },
+      "schema.node_review_subgraph.machine_result": {
+        "type": "object",
+        "properties": {
+          "review_summary": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "graph_policy": {
+      "entry_node_ids": [
+        "node_request_input"
+      ],
+      "max_depth": 6
+    },
+    "state_version": 1
+  }
+}

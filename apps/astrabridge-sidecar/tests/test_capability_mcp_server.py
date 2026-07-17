@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from astrabridge_sidecar import astrabridge_capabilities_mcp_server as capabilities_mcp_server
-from astrabridge_sidecar import codex_mcp_probe_fixture_server as probe_fixture_mcp_server
 from astrabridge_sidecar.astrabridge_capabilities_mcp_server import _call_tool, _tools
 from astrabridge_sidecar.capabilities.runtime import CapabilityRuntime
+from astrabridge_sidecar.mcp_server_core import McpStdioFramingState, read_stdio_message, write_stdio_message
 from astrabridge_sidecar.mcp_config_service import astrabridge_capabilities_preset
 from astrabridge_sidecar.modal_service import ModalService
 from astrabridge_sidecar.profile_service import ProfileService
@@ -46,17 +47,16 @@ class CapabilityMcpServerTests(unittest.TestCase):
         self.assertIn("MOONSHOT_API_KEY", preset["env_vars"])
         self.assertIn("YUNWU_API_KEY", preset["env_vars"])
 
-    def test_stdio_servers_accept_raw_json_mcp_framing(self) -> None:
-        for server_module in (capabilities_mcp_server, probe_fixture_mcp_server):
-            with self.subTest(server=server_module.__name__):
-                raw_request = b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n'
-                message = server_module._read_message(io.BytesIO(raw_request))  # noqa: SLF001
-                self.assertEqual(message["method"], "tools/list")
+    def test_shared_stdio_core_accepts_raw_json_mcp_framing(self) -> None:
+        state = McpStdioFramingState()
+        raw_request = b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n'
+        message = read_stdio_message(io.BytesIO(raw_request), state=state)
+        self.assertEqual(message["method"], "tools/list")
 
-                output = io.BytesIO()
-                server_module._write_message(output, {"jsonrpc": "2.0", "id": 1, "result": {"tools": []}})  # noqa: SLF001
-                self.assertTrue(output.getvalue().startswith(b"{"))
-                self.assertTrue(output.getvalue().endswith(b"\n"))
+        output = io.BytesIO()
+        write_stdio_message(output, {"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}, state=state)
+        self.assertTrue(output.getvalue().startswith(b"{"))
+        self.assertTrue(output.getvalue().endswith(b"\n"))
 
     def test_capability_runtime_route_snapshot_and_mcp_routes_tool_are_available(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -80,30 +80,33 @@ class CapabilityMcpServerTests(unittest.TestCase):
             root = Path(temp_dir)
             workspace = root / "workspace"
             workspace.mkdir()
-            projects = ProjectService(root / "recent.json")
-            projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
-            profiles = ProfileService(store_path=root / "profiles.json")
-            router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
-            runtime = RuntimeService(
-                projects,
-                ModalService(projects.require_shell_state_root),
-                profile_service=profiles,
-                router_config_service=router_config,
-            )
-            runtime._mcp_config.enabled_servers = lambda: [{"name": "astrabridge_capabilities", "enabled": True}]  # type: ignore[method-assign]
+            runtime_root = root / ".runtime"
+            runtime_root.mkdir()
+            with patch.dict(os.environ, {"ASTRABRIDGE_RUNTIME_ROOT": str(runtime_root)}):
+                projects = ProjectService(root / "recent.json")
+                projects.create_project("Demo", root / "demo.abproj", workspace_root=workspace, entry_mode="existing")
+                profiles = ProfileService(store_path=root / "profiles.json")
+                router_config = RouterConfigService(profiles, store_path=root / "router_config.json")
+                runtime = RuntimeService(
+                    projects,
+                    ModalService(projects.require_shell_state_root),
+                    profile_service=profiles,
+                    router_config_service=router_config,
+                )
+                runtime._mcp_config.enabled_servers = lambda: [{"name": "astrabridge_capabilities", "enabled": True}]  # type: ignore[method-assign]
 
-            params = runtime._thread_start_params(  # noqa: SLF001
-                profile={"profile_id": "deepseek", "provider_id": "deepseek", "model": "deepseek-v4-pro"},
-                model="deepseek-v4-pro",
-                permission_mode="auto",
-            )
+                params = runtime._thread_start_params(  # noqa: SLF001
+                    profile={"profile_id": "deepseek", "provider_id": "deepseek", "model": "deepseek-v4-pro"},
+                    model="deepseek-v4-pro",
+                    permission_mode="auto",
+                )
 
-            names = {tool["name"] for tool in params["dynamicTools"]}
-            self.assertIn("astrabridge_capability_routes", names)
-            self.assertIn("astrabridge_capability_image_generate", names)
-            self.assertIn("astrabridge_capability_vision_analyze", names)
-            self.assertIn("astrabridge_capability_speech_transcribe", names)
-            self.assertIn("astrabridge_capability_speech_synthesize", names)
+                names = {tool["name"] for tool in params["dynamicTools"]}
+                self.assertIn("astrabridge_capability_routes", names)
+                self.assertIn("astrabridge_capability_image_generate", names)
+                self.assertIn("astrabridge_capability_vision_analyze", names)
+                self.assertIn("astrabridge_capability_speech_transcribe", names)
+                self.assertIn("astrabridge_capability_speech_synthesize", names)
 
 
 if __name__ == "__main__":

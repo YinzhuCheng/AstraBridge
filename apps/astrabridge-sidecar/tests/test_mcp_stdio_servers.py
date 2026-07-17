@@ -14,7 +14,7 @@ class McpStdioServerScriptTests(unittest.TestCase):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
-            "params": {"protocolVersion": "2024-11-05"},
+            "params": {"protocolVersion": "2025-11-25"},
         }
 
         proc = subprocess.Popen(
@@ -36,6 +36,7 @@ class McpStdioServerScriptTests(unittest.TestCase):
         response = json.loads(stdout.strip().splitlines()[0])
         self.assertEqual(response["id"], 1)
         self.assertEqual(response["result"]["serverInfo"]["name"], "astrabridge-web-tools")
+        self.assertEqual(response["result"]["protocolVersion"], "2025-11-25")
 
 
 if __name__ == "__main__":

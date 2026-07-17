@@ -194,21 +194,22 @@ Then execute the revised highest-leverage work unit in the same turn when feasib
 
 ## Current Progress
 
-- Current status: In progress
-- Completed steps: Step 0, Create Durable Execution Plan; Step 1, Reconcile Plan And Contract Ownership; Step 2, Isolate Provider Runtime Client Lanes; Step 3, Establish Canonical Protocol Schemas And Code Generation; Step 4, Add The Workspace-Local Durable Run And Event Store; Step 5, Move Live Graph Execution To An Asynchronous Durable Scheduler
-- Current step: Step 6, Add Leases, Checkpoints, Startup Reconciliation, And Effect Journaling
-- Next step: Step 6, Add Leases, Checkpoints, Startup Reconciliation, And Effect Journaling
+- Current status: Complete
+- Completed steps: Step 0, Create Durable Execution Plan; Step 1, Reconcile Plan And Contract Ownership; Step 2, Isolate Provider Runtime Client Lanes; Step 3, Establish Canonical Protocol Schemas And Code Generation; Step 4, Add The Workspace-Local Durable Run And Event Store; Step 5, Move Live Graph Execution To An Asynchronous Durable Scheduler; Step 6, Add Leases, Checkpoints, Startup Reconciliation, And Effect Journaling; Step 7, Implement Production Cancel, Retry, Resume, And Provider Failover Semantics; Step 8, Implement The Versioned Agent Envelope And Delivery Ledger; Step 9, Enforce Typed Port Bindings And Output Schemas In The Live Path; Step 10, Complete Cross-Provider Context Projection And Handoff Continuity; Step 11, Replace Duplicated MCP Protocol Code With One Shared Core; Step 12, Route Every Normal Capability Invocation Through The MCP Broker; Step 13, Add Structured Multimodal MCP Results And Safe Artifact References; Step 14, Enforce Per-Node MCP Tool And Resource Policy; Step 15, Add Desktop-Sidecar Host Supervision And Run Reattachment; Step 16, Add Cross-Layer Tracing, Reliability SLOs, And Redacted Diagnostics; Step 17, Build Deterministic Fault Injection And Conformance Release Gates; Step 18, Introduce The Canonical NodeType Registry And Compiler Interface; Step 19, Make The Graph GUI Registry-Driven And Separate Definition, Plan, And Run; Step 20, Add A Loss-Aware ComfyUI Workflow Adapter; Step 21, Add An Optional LangGraph Adapter Without Core Coupling; Step 22, Migrate, Roll Out, Dogfood, And Close The Reliability Gate
+- Current step: Plan complete
+- Next step: None. Optional future work only, including the user-deferred Git/GitHub CLI connection revisit after plan completion.
 - Last updated: 2026-07-17
+- Git/GitHub CLI connection: explicitly abandoned by user for the duration of this execution plan on 2026-07-17; do not retry or treat it as a blocker until every numbered step is complete. Preserve the independent Git remote credential path and all existing working-tree artifacts.
 
 ## Current Work Unit
 
-- ID: STAB-06
-- Goal: Add lease/checkpoint/effect-journal semantics on top of the durable scheduler before enabling crash recovery and retries.
-- Inputs: `DurableRunEventStore`; `DurableGraphScheduler`; `task_service.py` compatibility bridge; `runtime_service.py` graph execution path; Step 4 CAS/lease/outbox primitives.
-- Expected output: attempt dispatch intents, owner boot IDs, heartbeats/expiration, startup reconciliation, and idempotent provider/Agent Envelope/MCP effect records.
-- Acceptance check: duplicate submission and completion evidence remain idempotent; a crash before dispatch replays safely; known external handles reattach; ambiguous non-idempotent effects become `needs_review`.
-- Status: queued
-- Next action: Trace the current attempt/provider dispatch boundaries and bind scheduler jobs to durable leases and outbox intents without duplicating external effects.
+- ID: STAB-22
+- Goal: Migrate the new reliability spine through rollout and dogfood without losing graphs, runs, artifacts, or rollback visibility.
+- Inputs: the completed protocol/runtime/adapter boundaries from Steps 1-21, durable run state, stability gate infrastructure, migration/rollback constraints, and preserved validation evidence.
+- Expected output: a feature-flagged rollout/migration/rollback path with shadow comparison, dogfood evidence, deterministic release-gate coverage, and explicit terminal handling for legacy runs.
+- Acceptance check: repeated migration is idempotent, shadow comparison explains no state deltas, rollback preserves inspectability, and the full release gate closes with owned orphan listeners/processes at zero.
+- Status: completed
+- Next action: Plan complete. Preserve the passing rollout/release evidence, and treat any further work as optional follow-on breadth or the separately deferred Git/GitHub CLI reconnection task.
 
 ## Execution Steps
 
@@ -363,7 +364,7 @@ Acceptance criteria:
 - An ambiguous non-idempotent operation becomes `needs_review` and is never automatically repeated.
 - Deduplication and operation evidence survive Sidecar restart.
 
-Status: not started
+Status: completed
 
 ### 7. Implement Production Cancel, Retry, Resume, And Provider Failover Semantics
 
@@ -387,7 +388,7 @@ Acceptance criteria:
 - Provider failover preserves envelope/artifact lineage and records both the original and fallback attempt.
 - Restart recovery safely resumes eligible attempts and surfaces ineligible attempts for review.
 
-Status: not started
+Status: completed
 
 ### 8. Implement The Versioned Agent Envelope And Delivery Ledger
 
@@ -409,7 +410,7 @@ Acceptance criteria:
 - Events remain ordered and trace/correlation lineage is queryable end to end.
 - Persisted and UI forms are traceable to the same immutable message while remaining redacted.
 
-Status: not started
+Status: completed
 
 ### 9. Enforce Typed Port Bindings And Output Schemas In The Live Path
 
@@ -431,7 +432,7 @@ Acceptance criteria:
 - Both send-side and receive-side validation are covered by positive and negative fixtures.
 - Existing v1 graphs either migrate successfully or emit an explicit compatibility diagnostic without silent data loss.
 
-Status: not started
+Status: completed
 
 ### 10. Complete Cross-Provider Context Projection And Handoff Continuity
 
@@ -453,7 +454,7 @@ Acceptance criteria:
 - Tool-call/result pairs remain valid after projection.
 - The target can complete from the neutral payload when provider-specific transcript fields are removed.
 
-Status: not started
+Status: completed
 
 ### 11. Replace Duplicated MCP Protocol Code With One Shared Core
 
@@ -475,7 +476,7 @@ Acceptance criteria:
 - Loopback, stdio, and Streamable HTTP return semantically equivalent results for one deterministic tool.
 - Protocol logs remain redacted and bounded.
 
-Status: not started
+Status: completed
 
 ### 12. Route Every Normal Capability Invocation Through The MCP Broker
 
@@ -497,7 +498,7 @@ Acceptance criteria:
 - The standalone web lane remains independent while its tool invocation uses the shared MCP contract.
 - No subprocess is required for safe in-process loopback, but its semantics match external MCP calls.
 
-Status: not started
+Status: completed
 
 ### 13. Add Structured Multimodal MCP Results And Safe Artifact References
 
@@ -519,7 +520,7 @@ Acceptance criteria:
 - URI escape and untrusted provider-path tests fail safely.
 - Desktop typed rendering passes component tests and visual QA without exposing unsafe absolute paths.
 
-Status: not started
+Status: completed
 
 ### 14. Enforce Per-Node MCP Tool And Resource Policy
 
@@ -541,7 +542,7 @@ Acceptance criteria:
 - Audit events record policy revision, effective policy fingerprint, approval decision, and attempt context without secrets.
 - Run replay uses the snapshotted policy rather than silently adopting later preset changes.
 
-Status: not started
+Status: completed
 
 ### 15. Add Desktop-Sidecar Host Supervision And Run Reattachment
 
@@ -565,7 +566,7 @@ Acceptance criteria:
 - Two Desktop instances do not terminate each other's valid Sidecar.
 - Logs contain boot/exit lineage but no secrets.
 
-Status: not started
+Status: completed
 
 ### 16. Add Cross-Layer Tracing, Reliability SLOs, And Redacted Diagnostics
 
@@ -587,7 +588,7 @@ Acceptance criteria:
 - Secret/redaction tests pass for traces, logs, events, and reports.
 - UI diagnostics use the same event source rather than inventing independent state.
 
-Status: not started
+Status: completed
 
 ### 17. Build Deterministic Fault Injection And Conformance Release Gates
 
@@ -609,7 +610,7 @@ Acceptance criteria:
 - Host loops leave zero owned orphan processes/listeners.
 - All reports parse and pass the secret scan; failed evidence is preserved rather than cleaned.
 
-Status: not started
+Status: completed
 
 ### 18. Introduce The Canonical NodeType Registry And Compiler Interface
 
@@ -631,7 +632,7 @@ Acceptance criteria:
 - Unknown nodes round-trip as opaque/disabled with machine-readable diagnostics.
 - UI hints do not affect execution hashes; compiler behavior is covered by registry fingerprint tests.
 
-Status: not started
+Status: completed
 
 ### 19. Make The Graph GUI Registry-Driven And Separate Definition, Plan, And Run
 
@@ -654,7 +655,7 @@ Acceptance criteria:
 - A mixed `Agent -> MCP tool/multimodal -> Transform -> Approval -> Agent/Artifact sink` fixture passes dry-run and fixture-live execution.
 - Desktop build/tests and wide/narrow visual QA pass without regressing existing graphs.
 
-Status: not started
+Status: completed
 
 ### 20. Add A Loss-Aware ComfyUI Workflow Adapter
 
@@ -676,7 +677,7 @@ Acceptance criteria:
 - Imported artifacts remain workspace-scoped and pass URI safety validation.
 - The GUI can open, diagnose, edit, and re-export supported imported workflows.
 
-Status: not started
+Status: completed
 
 ### 21. Add An Optional LangGraph Adapter Without Core Coupling
 
@@ -698,7 +699,7 @@ Acceptance criteria:
 - External dependency/version changes are isolated to adapter conformance tests.
 - The adapter cannot bypass MCP policy, Agent Envelope validation, or the durable scheduler.
 
-Status: not started
+Status: completed
 
 ### 22. Migrate, Roll Out, Dogfood, And Close The Reliability Gate
 
@@ -722,7 +723,7 @@ Acceptance criteria:
 - Steps 1-21 are complete, all release gates pass, reports are preserved and redacted, and owned orphan processes/listeners are zero.
 - Current Progress is marked complete with no remaining required work and the final log names only optional future product breadth.
 
-Status: not started
+Status: completed
 
 ## Progress Log
 
@@ -776,7 +777,7 @@ Status: not started
 - Blockers: None for Step 4.
 - Next step: Step 5, Move Live Graph Execution To An Asynchronous Durable Scheduler.
 
-### 2026-07-17 - Step 5
+### 2026-07-16 - Step 5
 
 - Completed: Added `DurableGraphScheduler` with bounded daemon workers, redacted job metadata, idempotent submission, wait/status/shutdown controls, and a runtime callback seam. The normal `/api/task-graphs/run` route now admits a durable queued run and returns a receipt; `RuntimeService.execute_task_graph_run` remains an explicit synchronous compatibility adapter and honors scheduler-owned run IDs only.
 - Durable projection/API: queued manifests are persisted through `TaskService.record_graph_run`/`DurableRunEventStore` before dispatch; scheduler workers promote the durable projection to `running`; `graph_run_status` returns the durable run plus ordered events and scheduler metadata; Desktop API and App polling read the status projection rather than keeping request-local execution state.
@@ -785,3 +786,195 @@ Status: not started
 - Security and preservation: scheduler job/status payloads never expose callback payloads; callback errors are redacted; no secrets or provider credentials were staged; `.pnpm-store/`, `.tmp/`, and `tmp/` remain untracked and preserved; stale-process helper remained clean.
 - Blockers: None for Step 5. Full crash recovery, leases, checkpoints, and effect journaling remain intentionally owned by Step 6.
 - Next step: Step 6, Add Leases, Checkpoints, Startup Reconciliation, And Effect Journaling.
+
+### 2026-07-16 - Git connection deferral
+
+- Decision: Per user instruction, stop GitHub CLI login and Git connection troubleshooting until all numbered stability/protocol/Agent Runtime steps are complete.
+- Evidence: `gh auth status` remained unauthenticated after the device flow reached GitHub's additional email-verification page; no token, cookie, or authorization header was read or persisted. The waiting `gh` process was terminated after the user abandoned this work.
+- Route impact: This is an explicitly deferred external integration, not a blocker for Step 6 or the plan's runtime acceptance criteria. Do not create a retry step or revisit it during intermediate execution rounds.
+- Next step: Continue Step 6, Add Leases, Checkpoints, Startup Reconciliation, And Effect Journaling.
+
+### 2026-07-16 - Step 6
+
+- Completed: Extended the durable graph runtime with stable per-node `operation_id` journaling, durable outbox/external-operation records, lease-backed dispatch checkpoints, lease heartbeats/releases, and scheduler startup reconciliation that requeues eligible `queued`/`running` runs from the durable store instead of relying on HTTP lifetime.
+- Recovery semantics: duplicate run admission now reuses one deterministic run for the same idempotency key; crash-before-dispatch leaves a durable queued attempt plus pending outbox that safely replays after lease expiry; crash-after-handle persists the accepted remote thread/turn handle and reattaches without starting a second provider turn; ambiguous non-idempotent dispatch errors settle as `needs_review` instead of silently replaying.
+- Contract/state updates: added `needs_review` to live run/node statuses and event types; durable store now exposes lease/outbox/external-operation reads and outbox status updates; compact run-ref syncing normalizes `approval_state` back into full-run shape for the durable store; zero-attempt queued nodes no longer create immutable attempt rows prematurely.
+- Validation: `python -m unittest -v tests.test_graph_scheduler tests.test_durable_run_store` passed 16/16, covering idempotent admission, crash-before-dispatch replay, reattach via known external handle, ambiguous non-idempotent `needs_review`, scheduler queue timing, failure redaction, durable store CAS/idempotency, leases, inbox/outbox, and migration. Targeted `py_compile` checks over the modified sidecar/runtime/test files passed.
+- Process hygiene: end-of-round local process audit found no clearly AstraBridge-owned stale `python`/`node`/`cmd` wrappers remaining after the focused test run.
+- Blockers: None for Step 6.
+- Next step: Step 7, Implement Production Cancel, Retry, Resume, And Provider Failover Semantics.
+
+### 2026-07-16 - Step 7
+
+- Completed: promoted live task-graph cancellation, retry, recovery, and provider-failover behavior from fixture-only placeholders into the durable runtime. Live cancel/recover HTTP routes now prefer `RuntimeService`; cancelling a running live node sends a real interrupt against the tracked runtime lane/thread/turn and prevents later retry dispatches.
+- Runtime/state updates: live execution now carries declared retry policy through the real wait loop, respects zero-delay retry configuration, classifies retryable 429/5xx/transport failures before scheduling a new attempt, records fallback-model lineage per attempt, keeps terminal `cancelled` events explicit, and stops treating live compact run snapshots as immutable attempt inserts in the durable store. `graph_run_status()` overlays the latest live run ref so status, recovery, and cancellation read current node state instead of stale attempt rows.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py apps/astrabridge-sidecar/astrabridge_sidecar/task_service.py apps/astrabridge-sidecar/astrabridge_sidecar/durable_run_store.py apps/astrabridge-sidecar/astrabridge_sidecar/server.py apps/astrabridge-sidecar/tests/test_graph_scheduler.py apps/astrabridge-sidecar/tests/test_task_graph_api.py` passed. `python -m unittest -v apps/astrabridge-sidecar/tests/test_graph_scheduler.py` passed 11/11, covering live cancel interrupts, retryable 429/5xx/transport retries, invalid-output / permission-denied / invalid-request-shape no-retry behavior, crash replay, reattach, and ambiguous dispatch `needs_review`. A targeted live-route HTTP regression run with a temporary runtime root passed 2/2 for `test_http_api_exposes_live_task_graph_run_route` and `test_live_cancel_and_recover_routes_prefer_runtime_handlers`.
+- Process hygiene: end-of-round audit found no clearly AstraBridge-owned stale `python`/`node`/`cmd` wrappers attributable to this Step 7 validation round.
+- Blockers: None for Step 7.
+- Next step: Step 8, Implement The Versioned Agent Envelope And Delivery Ledger.
+
+### 2026-07-16 - Step 8
+
+- Completed: promoted cross-node task-graph handoffs into immutable protocol-validated agent envelopes persisted in the workspace-local durable store instead of leaving structured communication as prompt-only metadata. Source worker output now writes canonical per-edge `AgentEnvelope` artifacts with stable message, envelope, correlation, causation, and delivery idempotency identifiers, plus redacted provider-neutral content parts and artifact lineage.
+- Runtime/state updates: live scheduler admission now validates incoming agent envelopes before target provider dispatch, rejects malformed or mismatched envelopes without starting the target provider lane, deduplicates repeated delivery idempotency keys before downstream execution, and records `handoff_created`, `handoff_acknowledged`, `handoff_rejected`, `handoff_retry_scheduled`, and `handoff_delivery_failed` as ordered durable run events. The durable run store now persists immutable `agent_envelopes` and exposes a derived `delivery_ledger` projection through `graph_run_status()` so UI/status views can trace the same redacted message identity end to end.
+- Protocol updates: extended `protocol/schema/v1/protocol.json` delivery-ledger event coverage and regenerated the sidecar and desktop protocol projections with `python scripts/generate_protocol_types.py --write` so schema, Python validator, and TypeScript projection remain in sync.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/task_service.py apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py apps/astrabridge-sidecar/astrabridge_sidecar/durable_run_store.py apps/astrabridge-sidecar/tests/test_graph_scheduler.py apps/astrabridge-sidecar/tests/test_durable_run_store.py apps/astrabridge-sidecar/tests/test_protocol_schema.py` passed. `python -m unittest -v apps/astrabridge-sidecar/tests/test_durable_run_store.py apps/astrabridge-sidecar/tests/test_protocol_schema.py apps/astrabridge-sidecar/tests/test_graph_scheduler.py` passed 31/31, covering immutable envelope persistence, protocol projection freshness, structured-part delivery without a human summary, invalid-envelope pre-dispatch rejection, duplicate delivery idempotency dedupe, and the existing Step 7 live-runtime recovery/retry envelope interactions.
+- Process hygiene: end-of-round audit found no clearly AstraBridge-owned stale `python`/`node`/`cmd` wrappers attributable to this Step 8 validation round.
+- Blockers: None for Step 8.
+- Next step: Step 9, Enforce Typed Port Bindings And Output Schemas In The Live Path.
+
+### 2026-07-16 - Step 9
+
+- Completed: made typed handoff contracts operational in the live path instead of leaving them as prompt-only metadata. Live worker output now projects edge payloads from compiled `port_bindings`, persists validated typed input maps inside the immutable `AgentEnvelope`, and rejects missing/legacy raw-text-only typed projections with an explicit compatibility diagnostic instead of silently degrading.
+- Runtime/state updates: the sidecar now validates source output ports, projected payloads, target input ports, and node `machine_result` objects against the declared schemas before downstream provider dispatch or terminal success marking. Legacy task-graph migration now infers deterministic typed input ports per edge when the source graph lacks first-class ports, while preserving imported explicit orchestration bindings. Failed or blocked worker outputs no longer emit downstream handoffs, and compiled fixture runs auto-fill schema-required machine-result fields so fixture coverage stays aligned with the live contract.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/task_service.py apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py apps/astrabridge-sidecar/tests/test_graph_scheduler.py apps/astrabridge-sidecar/tests/test_task_graph_api.py` passed. `python -m unittest -v apps/astrabridge-sidecar/tests/test_graph_scheduler.py` passed 17/17, adding positive/negative Step 9 fixtures for fan-out/fan-in typed inputs, machine-result schema fail-closed behavior, and explicit typed-handoff compatibility rejection. With `ASTRABRIDGE_RUNTIME_ROOT` redirected to a workspace-local temp root, `python -m unittest -v apps/astrabridge-sidecar/tests/test_task_graph_api.py` passed 13/13. The combined Step 9 regression lane `python -m unittest -v apps/astrabridge-sidecar/tests/test_graph_scheduler.py apps/astrabridge-sidecar/tests/test_task_graph_api.py apps/astrabridge-sidecar/tests/test_durable_run_store.py apps/astrabridge-sidecar/tests/test_protocol_schema.py` passed 47/47.
+- Process hygiene: end-of-round read-only listener audit found no clearly AstraBridge-owned stale `python`/`node`/`cmd` wrappers attributable to this Step 9 validation round.
+- Blockers: None for Step 9.
+- Next step: Step 10, Complete Cross-Provider Context Projection And Handoff Continuity.
+
+### 2026-07-16 - Step 10
+
+- Completed: promoted cross-provider handoff continuity from prompt previews into an explicit neutral context bundle that is attached to downstream live dispatch. Each downstream node now receives a deterministic `neutral-context-attempt-<n>.json` bundle containing validated typed inputs, preserved artifact references, edge/schema provenance, and projected cross-provider history/tool state rather than only summary counts or preview text.
+- Runtime/state updates: the live scheduler now builds per-node neutral context bundles from immutable agent envelopes, runs `HistoryProjector` against the source worker thread when visible history exists, strips provider-private reasoning fields, records repaired tool-call/result pairing, and attaches the resulting neutral context plus declared artifact files to downstream provider turns while keeping `context_mode="no_context"` so provider-native transcript state remains isolated. Neutral projection truncation is deterministic and diagnosed through per-handoff limits, warnings, and bundle-level truncation metadata. Local handoff artifacts with workspace-relative paths now project into downstream attachments without requiring a prior protocol ArtifactRef conversion.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py apps/astrabridge-sidecar/tests/test_graph_scheduler.py` passed. `python -m unittest -v apps/astrabridge-sidecar/tests/test_graph_scheduler.py` passed 19/19, adding Step 10 fixtures for A -> B -> C neutral context continuity across `qwen -> kimi -> glm`, provider-private reasoning stripping, repaired tool-call/result projection, artifact carry-through, and deterministic projection truncation. With `ASTRABRIDGE_RUNTIME_ROOT` redirected to a workspace-local temp root, the broader validation lane `python -m unittest -v apps/astrabridge-sidecar/tests/test_graph_scheduler.py apps/astrabridge-sidecar/tests/test_task_graph_api.py apps/astrabridge-sidecar/tests/test_durable_run_store.py apps/astrabridge-sidecar/tests/test_protocol_schema.py` passed 49/49.
+- Process hygiene: end-of-round read-only listener audit found no clearly AstraBridge-owned stale `python`/`node`/`cmd` wrappers attributable to this Step 10 validation round.
+- Blockers: None for Step 10.
+- Next step: Step 11, Replace Duplicated MCP Protocol Code With One Shared Core.
+
+### 2026-07-16 - Step 11
+
+- Completed: replaced the duplicated MCP stdio reader/lifecycle code in the capability, web, Yunwu image, and probe-fixture servers with one shared `astrabridge_sidecar.mcp_server_core` owner. The shared core now owns version negotiation, JSON-RPC request handling, tools/resources listing, raw-stdio compatibility framing, bounded log redaction, timeout handling, cancellation, progress notifications, loopback calls, and Streamable HTTP session adapters.
+- Runtime/state updates: production stdio servers now instantiate `McpServerCore` and route their tool catalogs/execution through thin adapters instead of defining private `_read_first_nonempty_byte`, `_read_json_object`, and custom initialize/dispatch loops. The negotiated protocol surface now supports current `2025-11-25` plus legacy `2024-11-05` reads through explicit downgrade rules rather than echoing arbitrary requested versions. `docs/CODE_OWNERSHIP_AND_CONTRACTS.md` and `scripts/contract_boundary_audit.py` now name `mcp_server_core.py` as the canonical MCP lifecycle owner and fail if those production adapters regress into duplicate framing helpers.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/mcp_server_core.py apps/astrabridge-sidecar/astrabridge_sidecar/astrabridge_capabilities_mcp_server.py apps/astrabridge-sidecar/astrabridge_sidecar/astrabridge_web_mcp_server.py apps/astrabridge-sidecar/astrabridge_sidecar/yunwu_image_mcp_server.py apps/astrabridge-sidecar/astrabridge_sidecar/codex_mcp_probe_fixture_server.py` passed. `python -m unittest -v apps/astrabridge-sidecar/tests/test_mcp_server_core.py apps/astrabridge-sidecar/tests/test_capability_mcp_server.py apps/astrabridge-sidecar/tests/test_mcp_stdio_servers.py` passed 14/14, covering stdio raw/header framing, invalid JSON parse error, current/legacy/unsupported version negotiation, cancellation, timeout, progress, loopback parity, and Streamable HTTP session behavior. The broader MCP regression lane `python -m unittest -v apps/astrabridge-sidecar/tests/test_codex_app_server_probe.py apps/astrabridge-sidecar/tests/test_capability_mcp_server.py apps/astrabridge-sidecar/tests/test_mcp_server_core.py apps/astrabridge-sidecar/tests/test_mcp_stdio_servers.py` passed 18/18. `python scripts/contract_boundary_audit.py` passed 8/8 checks, including the new shared-core ownership audit.
+- Process hygiene: pre/post round read-only listener audits found no clearly AstraBridge-owned stale `python`/`node`/`cmd` wrappers attributable to this Step 11 implementation and validation round.
+- Blockers: None for Step 11. Git/GitHub CLI connection remains explicitly deferred by user and is not part of this step's acceptance path.
+- Next step: Step 12, Route Every Normal Capability Invocation Through The MCP Broker.
+
+### 2026-07-17 - Step 12
+
+- Completed: added `astrabridge_sidecar.mcp_broker_service.McpBrokerService` as the canonical internal broker seam for normal capability invocation and routed the live HTTP/runtime capability surfaces through it instead of calling capability/web/Yunwu implementations directly. `runtime_service.py` dynamic capability/web/Yunwu tools, `web_tool_service.py`, `server.py` normal Yunwu routes, and `/api/runtime/capability-invoke` now carry MCP request/operation/policy/audit metadata on the normal path.
+- Result-shape and compatibility updates: `mcp_server_core.py` now preserves tool-call `_meta` on `McpToolCallContext`; `yunwu_image_mcp_server.py` now keeps compatibility text summaries while returning raw structured results, honors broker-injected workspace roots/timeouts, and accepts loopback-only internal API-key metadata without exposing it as tool arguments or durable output. The Yunwu summary path now preserves `b64_json_present` markers instead of dropping them during dynamic-tool summarization.
+- Ownership and guardrails: `docs/CODE_OWNERSHIP_AND_CONTRACTS.md` now names `mcp_broker_service.McpBrokerService` as part of the canonical MCP boundary. `scripts/contract_boundary_audit.py` now requires the broker owner, verifies runtime/server/web broker usage, and raises the ownership audit to 9 checks. New `test_mcp_broker_service.py` adds broker metadata, HTTP route, web-lane persistence, and direct-bypass source guards so normal `RuntimeService`/`server.py` regressions fail deterministically.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/mcp_server_core.py apps/astrabridge-sidecar/astrabridge_sidecar/mcp_broker_service.py apps/astrabridge-sidecar/astrabridge_sidecar/yunwu_image_mcp_server.py apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py apps/astrabridge-sidecar/astrabridge_sidecar/server.py apps/astrabridge-sidecar/tests/test_mcp_broker_service.py` passed. `python -m unittest -v apps.astrabridge-sidecar.tests.test_mcp_broker_service` passed 6/6. `python -m unittest -v apps.astrabridge-sidecar.tests.test_contract_boundary_audit` passed 3/3. `python -m unittest -v apps.astrabridge-sidecar.tests.test_mcp_server_core apps.astrabridge-sidecar.tests.test_capability_mcp_server apps.astrabridge-sidecar.tests.test_mcp_stdio_servers` passed 14/14. Targeted runtime regressions `test_runtime_dynamic_yunwu_tool_call_returns_app_server_content_items`, `test_runtime_dynamic_astrabridge_web_tool_call_returns_research_brief_content_primary`, `test_runtime_dynamic_astrabridge_web_search_alias_preserves_default_tool_context`, and `test_runtime_dynamic_astrabridge_web_tool_call_returns_research_brief_content` passed 4/4. `test_yunwu_image_generation_payload_and_smoke_request` passed 1/1. `python scripts/contract_boundary_audit.py` passed 9/9 checks.
+- Process hygiene: pre/post round read-only listener audits found no clearly AstraBridge-owned stale listener or launcher that needed reaping during this Step 12 implementation/validation round.
+- Blockers: None for Step 12. Git/GitHub CLI connection remains explicitly deferred by user and is not part of this step's acceptance path.
+- Next step: Step 13, Add Structured Multimodal MCP Results And Safe Artifact References.
+
+### 2026-07-17 - Step 13
+
+- Completed: introduced `astrabridge_sidecar.multimodal_result_envelope` as the shared typed multimodal MCP-result bridge for capability, Yunwu image, and standalone web-lane results. Normal multimodal result paths now project protocol-safe artifact refs, diagnostic refs, content parts, inline-externalization policy, and typed summary envelopes instead of relying only on raw text/path payloads.
+- Runtime/result updates: `YunwuImageGenerateAdapter`, `DashScopeImageGenerateAdapter`, `vision_analyze_adapter.py`, `speech_transcribe_adapter.py`, `speech_synthesize_adapter.py`, `astrabridge_web_mcp_server.py`, `web_tool_service.py`, and `yunwu_image_mcp_server.py` now enrich normal results with workspace-safe `workspace://` artifact URIs, media type, digest, size, lineage, typed content parts, and MCP text summaries that avoid dumping large inline payloads or absolute artifact paths. Speech synthesis now externalizes `audio_bytes_base64` once durable audio artifacts exist and records an inline-policy marker instead of returning large inline audio blobs. Provider-path escape outside the workspace allowlist now fails closed for protocol artifact projection.
+- Desktop/result consumption: `capabilities/artifacts.py` now projects protocol-safe artifact metadata into capability artifact snapshots, and the Desktop `CapabilityRoutesPanel` now renders visible typed artifact metadata (`artifact_uri`, `mime_type`, `size`, `sha256`) while keeping media preview loading internal and avoiding visible absolute-path spill. The visual QA harness and preserved screenshot live under `apps/astrabridge-desktop/output/playwright/capability-panel-harness/`, with the verified screenshot at `capability-panel-qa-http-2026-07-17.png`.
+- Ownership and guardrails: `docs/CODE_OWNERSHIP_AND_CONTRACTS.md` now names `multimodal_result_envelope.py` as the canonical typed multimodal MCP-result and safe-artifact projection owner. `scripts/contract_boundary_audit.py` now requires that owner and verifies the capability/web/Yunwu adapters plus capability artifact snapshots remain wired to the shared typed-result bridge, raising the audit to 10 checks.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/multimodal_result_envelope.py apps/astrabridge-sidecar/astrabridge_sidecar/capabilities/image_generate_adapter.py apps/astrabridge-sidecar/astrabridge_sidecar/capabilities/dashscope_image_generate_adapter.py apps/astrabridge-sidecar/astrabridge_sidecar/capabilities/vision_analyze_adapter.py apps/astrabridge-sidecar/astrabridge_sidecar/capabilities/speech_transcribe_adapter.py apps/astrabridge-sidecar/astrabridge_sidecar/capabilities/speech_synthesize_adapter.py apps/astrabridge-sidecar/astrabridge_sidecar/capabilities/artifacts.py apps/astrabridge-sidecar/astrabridge_sidecar/capabilities/smoke.py apps/astrabridge-sidecar/astrabridge_sidecar/astrabridge_capabilities_mcp_server.py apps/astrabridge-sidecar/astrabridge_sidecar/astrabridge_web_mcp_server.py apps/astrabridge-sidecar/astrabridge_sidecar/web_tool_service.py apps/astrabridge-sidecar/astrabridge_sidecar/yunwu_image_mcp_server.py` passed. `python -m unittest -v apps.astrabridge-sidecar.tests.test_image_generate_adapter apps.astrabridge-sidecar.tests.test_vision_analyze_adapter apps.astrabridge-sidecar.tests.test_speech_transcribe_adapter apps.astrabridge-sidecar.tests.test_speech_synthesize_adapter apps.astrabridge-sidecar.tests.test_capability_artifacts apps.astrabridge-sidecar.tests.test_web_lane apps.astrabridge-sidecar.tests.test_capability_smoke apps.astrabridge-sidecar.tests.test_capability_mcp_server` passed 54/54. `python -m unittest -v apps.astrabridge-sidecar.tests.test_mcp_broker_service apps.astrabridge-sidecar.tests.test_contract_boundary_audit apps.astrabridge-sidecar.tests.test_mcp_server_core apps.astrabridge-sidecar.tests.test_mcp_stdio_servers` passed 18/18. Targeted runtime regressions in `test_sidecar_services.py` for Yunwu/web dynamic tool calls passed 4/4. Desktop `cmd /c npm test -- --run src/features/capabilities/CapabilityRoutesPanel.test.tsx` passed 13/13 and `cmd /c npm run build` passed. Visual QA harness build passed, and the preserved screenshot confirms visible typed artifact metadata without absolute-path text exposure. `python scripts/contract_boundary_audit.py` passed 10/10 checks.
+- Process hygiene: pre/post round read-only listener audits were run; the temporary local HTTP server used for visual QA was explicitly terminated via `taskkill /PID 13708 /T /F`, and the final listener audit showed no remaining Step 13 QA listener on port 43123.
+- Blockers: None for Step 13. Git/GitHub CLI connection remains explicitly deferred by user and is not part of this step's acceptance path.
+- Next step: Step 14, Enforce Per-Node MCP Tool And Resource Policy.
+
+### 2026-07-17 - Plan Note: Git/GitHub CLI Connection Deferred
+
+- Decision: the user explicitly directed the plan to stop all GitHub CLI / `gh` authentication and connection troubleshooting until every numbered step in this execution plan is complete.
+- Execution effect: do not spend Step 14+ rounds on `gh auth`, device login, token repair, or related GitHub CLI setup; do not treat GitHub CLI connection state as a blocker for any numbered step in this plan unless the user explicitly reopens that topic after plan completion.
+- Scope note: existing Git remote credential behavior remains an independent path and does not change the defer/abandon decision for GitHub CLI work.
+
+### 2026-07-17 - Step 14
+
+- Completed: introduced `astrabridge_sidecar.mcp_node_policy` as the canonical owner for per-node MCP least-privilege policy, including exact server/tool selectors, resource URI allowlists, approval mode, effect class, call budget, policy fingerprinting, and deny-before-side-effect authorization. Graph/node authoring, compiled-plan snapshots, live run manifests, worker runtime contracts, exposed dynamic-tool filtering, and broker dispatch now consume the same normalized policy owner instead of re-encoding coarse `supports_mcp` behavior ad hoc.
+- Runtime/policy updates: `agent_orchestration_contract.py` now validates graph/node MCP policy fields and preserves them across lift/lower bridges; `agent_orchestration_compiler.py` snapshots planned node `mcp_tool_policy` into compiled nodes; `task_service.py` persists node MCP policy snapshots into `run_policy_snapshot.node_mcp_tool_policies` and worker `runtime_contract.tool_policy.mcp_tool_policy`; `runtime_service.py` now filters `dynamicTools` at thread exposure time, carries snapshotted MCP policy plus run/node/attempt context through `start_turn`, records per-turn policy lineage, reuses approval/bootstrap state within the active turn, and uses snapshotted node MCP policy during replay/retry rather than silently widening to later enabled-server drift. `mcp_broker_service.py` now re-authorizes loopback dispatch against the node snapshot when graph-worker policy metadata is present and fails closed before tool execution on undeclared, denied, exhausted, or resource-escape calls.
+- Ownership and guardrails: `docs/CODE_OWNERSHIP_AND_CONTRACTS.md` now names `astrabridge_sidecar.mcp_node_policy` as the canonical owner for per-node MCP tool/resource policy. `scripts/contract_boundary_audit.py` now requires that owner and verifies contract/compiler/runtime/task/broker bridges remain wired to the shared policy owner, raising the ownership audit to 11 checks.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/mcp_node_policy.py apps/astrabridge-sidecar/astrabridge_sidecar/mcp_broker_service.py apps/astrabridge-sidecar/astrabridge_sidecar/agent_orchestration_contract.py apps/astrabridge-sidecar/astrabridge_sidecar/agent_orchestration_compiler.py apps/astrabridge-sidecar/astrabridge_sidecar/task_service.py apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py` passed. `python -m unittest -v apps.astrabridge-sidecar.tests.test_mcp_node_policy apps.astrabridge-sidecar.tests.test_mcp_broker_service apps.astrabridge-sidecar.tests.test_task_graph_worker_runtime` passed 52/52, covering allow/deny/ask, approval reuse, budget exhaustion, resource URI escape, broker pre-dispatch denial, graph-worker snapshot drift, and live graph runtime regressions. `python -m unittest -v apps.astrabridge-sidecar.tests.test_contract_boundary_audit apps.astrabridge-sidecar.tests.test_task_graph_api apps.astrabridge-sidecar.tests.test_graph_scheduler` passed 35/35. `python scripts/contract_boundary_audit.py` passed 11/11 checks, including the new `node_scoped_mcp_tool_and_resource_policy` audit.
+- Process hygiene: pre/post round read-only listener and process audits were run. No clearly AstraBridge-owned stale listener or launcher required reaping during Step 14 implementation and validation.
+- Blockers: None for Step 14. Git/GitHub CLI connection remains explicitly deferred by user and is not part of this step's acceptance path.
+- Next step: Step 15, Add Desktop-Sidecar Host Supervision And Run Reattachment.
+
+### 2026-07-17 - Plan Note: Git/GitHub CLI Connection Explicitly Abandoned Until Plan Completion
+
+- Decision: the user reaffirmed that all GitHub CLI / `gh` authentication, token, and connection work is abandoned for the duration of this execution plan and may be revisited only after every numbered step is complete.
+- Execution effect: do not retry `gh auth`, device login, token repair, token inspection, or related GitHub CLI diagnostics during Step 15+ rounds; do not spend execution time on GitHub CLI unless the user explicitly reopens it after plan completion.
+- Scope note: Git remote push credentials remain a separate path, but they do not authorize or require GitHub CLI work while this plan is still active.
+
+### 2026-07-17 - Step 15
+
+- Completed: replaced the fixed-port Desktop-sidecar launcher with `apps/astrabridge-desktop/src-tauri/src/sidecar_supervision.rs`, which now owns collision-safe launch/reattach, workspace-scoped launch records and lease files, `/readyz` boot/build/store validation, bounded restart/backoff/circuit-breaking, redacted stdout/stderr capture, host lineage logs, and ownership-verified graceful shutdown before any hard kill. `main.rs` now wires that owner into Tauri state, and Desktop `src/api.ts` now resolves the bound sidecar URL through the supervisor on each Tauri request so post-restart port rebinding does not strand the UI on a stale cached port.
+- Sidecar contract updates: `apps/astrabridge-sidecar/astrabridge_sidecar/server.py` now owns `/readyz` plus `/host/shutdown`, writes ready/stopped launch-record updates, reports boot/build/runtime/store schema metadata, preserves startup runtime restore results for reattachment diagnostics, and allows dynamic port `0` binding through a reusable-address HTTP server. This keeps Desktop supervision and Sidecar readiness/shutdown on one explicit contract instead of fixed-port guessing or kill-by-port behavior.
+- Ownership and guardrails: `docs/CODE_OWNERSHIP_AND_CONTRACTS.md` now names Desktop-sidecar host supervision plus Sidecar `/readyz`/shutdown as a canonical boundary. `scripts/contract_boundary_audit.py` now verifies that `sidecar_supervision.rs`, `main.rs`, `src/api.ts`, and `server.py` remain wired to that owner and raises the audit to 12 checks.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/server.py` passed. `cmd /c npm test -- --run src/api.test.ts` passed 11/11. `cmd /c npm run build` passed. `python -m unittest -v apps/astrabridge-sidecar/tests/test_sidecar_services.py` passed 384/384, including the new `/readyz` and `/host/shutdown` route tests. `cargo test -- --test-threads=1` in `apps/astrabridge-desktop/src-tauri` passed 7/7, covering restart-after-forced-exit, circuit breaker on repeated launch failure, unrelated candidate-port listener preservation, two-supervisor shared-sidecar coexistence, and 20 start/exit churn cycles without orphan sidecar processes. `python -m unittest -v apps.astrabridge-sidecar.tests.test_graph_scheduler.DurableGraphSchedulerTests.test_crash_before_provider_dispatch_replays_after_recovery apps.astrabridge-sidecar.tests.test_graph_scheduler.DurableGraphSchedulerTests.test_known_external_handle_reattaches_without_restarting_turn apps.astrabridge-sidecar.tests.test_graph_scheduler.DurableGraphSchedulerTests.test_ambiguous_non_idempotent_dispatch_becomes_needs_review` passed 3/3, and `python -m unittest -v apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_live_cancel_and_recover_routes_prefer_runtime_handlers` passed 1/1. Together these runtime recovery tests plus the new host restart tests satisfy the Step 15 acceptance path for recovery/reattach or explicit `needs_review` after forced Sidecar death.
+- Process hygiene: pre/post round read-only listener audits were run. During Rust supervision test iteration, clearly stale AstraBridge-owned test sidecar roots were manually reaped with `taskkill /PID <root> /T /F` for the stale parent PIDs `14224, 27068, 14504, 7264, 26728, 33736, 22712, 6976, 30068, 9816`; the final listener and process audits showed no remaining AstraBridge-owned stale sidecar listener or launcher.
+- Blockers: None for Step 15. Git/GitHub CLI connection remains explicitly abandoned by user and is not part of this step's acceptance path.
+- Next step: Step 16, Add Cross-Layer Tracing, Reliability SLOs, And Redacted Diagnostics.
+
+### 2026-07-17 - Step 16
+
+- Completed: added `apps/astrabridge-sidecar/astrabridge_sidecar/runtime_observability.py` as the canonical owner for cross-layer trace lineage, reliability metrics/SLOs, host-lineage ingestion, OpenTelemetry mapping metadata, and redacted diagnostic summaries. The runtime now enriches persisted/live events through that owner, hydrates Desktop-sidecar host lineage logs into the same runtime event stream, and projects one stable `observability` payload through `RuntimeSupervisorService.status()` instead of inventing a separate UI state source.
+- Runtime/bridge updates: `runtime_service.py` now records explicit `astrabridge_trace` context across graph/MCP execution, emits `duplicate_effect_suppressed` plus `terminal_projection_lag_ms` runtime events, and enriches all recorded/hydrated events through the observability owner. `mcp_broker_service.py` now preserves trace context on broker audit events. Desktop `src/types.ts` and `src/App.tsx` now consume the supervisor `observability` projection to show latest trace lineage, recent diagnostics, and reliability summaries from the same underlying event source.
+- Ownership and guardrails: `docs/CODE_OWNERSHIP_AND_CONTRACTS.md` now names cross-layer trace lineage, reliability metrics/SLOs, and redacted diagnostics as a canonical boundary owned by `astrabridge_sidecar.runtime_observability`. `scripts/contract_boundary_audit.py` now enforces that `runtime_observability.py` remains the only owner while `runtime_service.py`, `runtime_supervisor_service.py`, and Desktop stay bridge/projection layers.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/runtime_observability.py apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py apps/astrabridge-sidecar/astrabridge_sidecar/runtime_supervisor_service.py apps/astrabridge-sidecar/astrabridge_sidecar/mcp_broker_service.py` passed. With `PYTHONPATH=D:\\AstraBridge\\apps\\astrabridge-sidecar`, `python -m unittest -v apps.astrabridge-sidecar.tests.test_runtime_observability apps.astrabridge-sidecar.tests.test_sidecar_services.AstraBridgeServiceTests.test_runtime_supervisor_status_includes_observability_summary_from_runtime_events` passed 3/3. With the same `PYTHONPATH`, `python scripts/contract_boundary_audit.py` passed all 13/13 checks. `cmd /c npm run build` passed in `apps/astrabridge-desktop`. Earlier in the same execution round, `cmd /c npm test -- --run src/api.test.ts` passed 11/11 and `cargo test --no-run` passed in `apps/astrabridge-desktop/src-tauri`.
+- Process hygiene: start/end listener audits found no AstraBridge-owned listeners on the standard local development ports and no clearly stale AstraBridge-owned `python`/`node`/`cmd` launchers requiring termination during this step.
+- Blockers: None for Step 16. Git/GitHub CLI connection remains explicitly abandoned by user and is not part of this step's acceptance path.
+- Next step: Step 17, Build Deterministic Fault Injection And Conformance Release Gates.
+
+### 2026-07-17 - Step 17
+
+- Completed: added `apps/astrabridge-sidecar/astrabridge_sidecar/runtime_stability_gate.py` as the canonical owner for deterministic runtime fault-injection suite definitions, `PRIVATE/runtime-stability/<run-id>/` artifact layout, preserved fixture evidence capture, secret-scan policy, and fast-vs-release gate mode semantics. Added the CLI wrapper `scripts/run_runtime_stability_gate.py` and wired `scripts/run_local_gate.py --full` to call the shared fast mode instead of defining a second suite list.
+- Ownership and guardrails: `docs/CODE_OWNERSHIP_AND_CONTRACTS.md` now names deterministic fault injection and the runtime stability release gate as a canonical boundary owned by `astrabridge_sidecar.runtime_stability_gate`. `scripts/contract_boundary_audit.py` now enforces that the shared gate owner, wrapper script, and local fast-gate projection stay aligned and raises the audit to 14 checks.
+- Runtime-stability gate implementation: the shared gate now groups canonical Python and Rust suites for scheduler recovery/idempotency, terminal projection reconciliation, MCP timeout/cancel/policy fail-close behavior, disk-write and client-disconnect recovery, bounded provider redaction/contract coverage, forced-exit restart, crash-loop circuit breaker behavior, unrelated-listener preservation, shared-sidecar coexistence, and 20-cycle orphan-free host restart churn. The gate preserves raw command logs, before/after process inventories, fixture store/timeline artifacts, and validation reports under `PRIVATE/runtime-stability/<run-id>/`, then applies a focused artifact secret scan without deleting failed evidence.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/runtime_stability_gate.py scripts/run_runtime_stability_gate.py scripts/run_local_gate.py scripts/contract_boundary_audit.py` passed. With `PYTHONPATH=D:\\AstraBridge\\apps\\astrabridge-sidecar`, `python -m unittest -v apps.astrabridge-sidecar.tests.test_runtime_stability_gate` passed 4/4. With the same `PYTHONPATH`, `python scripts/contract_boundary_audit.py` passed all 14/14 checks. `python scripts/run_runtime_stability_gate.py --mode fast --run-id step17-fast-validation` passed and preserved fast-mode evidence under `PRIVATE/runtime-stability/step17-fast-validation/`. `python scripts/run_runtime_stability_gate.py --mode release --run-id step17-release-validation` passed and preserved release evidence under `PRIVATE/runtime-stability/step17-release-validation/`, including: `scheduler_recovery_and_idempotency` 20/20 consecutive passes; `terminal_projection_and_stream_recovery` 20/20; `mcp_timeout_cancel_and_policy_fail_closed` 20/20; `client_disconnect_and_disk_write_recovery` 20/20; `desktop_forced_exit_restart` 20/20; `desktop_circuit_breaker_recovery` 20/20; `desktop_twenty_restart_cycles_no_orphans` one run with `internal_passes_per_run=20` and `max_consecutive_passes=20`; provider/redaction matrix pass; fixture evidence pass; and runtime-stability secret scan pass with 0 findings over 330 scanned text artifacts.
+- Process hygiene: the gate captured before/after process inventories in its preserved artifacts, and the round-closing read-only listener audit again found no AstraBridge-owned listeners on the standard local development ports and no clearly stale AstraBridge-owned `python`/`node`/`cmd` launchers requiring termination.
+- Blockers: None for Step 17. Git/GitHub CLI connection remains explicitly abandoned by user and is not part of this step's acceptance path.
+- Next step: Step 18, Introduce The Canonical NodeType Registry And Compiler Interface.
+
+### 2026-07-17 - Step 18
+
+- Completed: added `apps/astrabridge-sidecar/astrabridge_sidecar/node_type_registry.py` as the canonical owner for `NodeTypeSpec`, legacy kind alias resolution, registry fingerprints, task-graph/orchestration projection defaults, and the backend node-type registry snapshot. The registry now publishes initial `agent_model`, `mcp_tool`, `mcp_resource`, `transform`, `router_condition`, `loop`, `subgraph`, `human_approval`, `artifact_source`, and `artifact_sink` types, while preserving an internal `opaque_disabled` placeholder for unknown imported node types.
+- Contract/compiler updates: `task_graph_contract.py` now derives allowed node kinds from the shared registry instead of a private tuple. `agent_orchestration_contract.py` now resolves node kinds through the registry, treats existing supervisor/planner/worker/coder/reviewer/researcher/custom/gate kinds as compatible aliases/configurations instead of a second hard-coded contract, projects registry metadata onto validated canonical nodes, and lowers unknown imported node types into disabled compatibility placeholders with machine-readable diagnostics rather than silently dropping them. `agent_orchestration_compiler.py` now emits resolved node type ids, compiler executor ids, and a registry fingerprint into compiled plans instead of inferring execution metadata from local role tables alone.
+- Bridge/API updates: `task_service.py` now exposes `node_type_registry_snapshot()` and preserves unknown imported node kinds/diagnostics across orchestration import and task-graph synchronization. `server.py` now serves `/api/task-graphs/node-types`, and Desktop `src/types.ts` plus `src/api.ts` now expose typed registry snapshot payloads for Step 19 consumers without yet making the GUI palette registry-driven.
+- Ownership and guardrails: `docs/CODE_OWNERSHIP_AND_CONTRACTS.md` now names `astrabridge_sidecar.node_type_registry` plus compiler projection as the canonical NodeType boundary. `scripts/contract_boundary_audit.py` now verifies the shared registry owner, contract/compiler consumers, task-graph allowlist derivation, task-service snapshot, server registry route, and Desktop API projection, raising the audit to 15 checks.
+- Validation: with `PYTHONPYCACHEPREFIX=D:\\AstraBridge\\PRIVATE\\tmp\\pycache-step18`, `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/node_type_registry.py apps/astrabridge-sidecar/astrabridge_sidecar/agent_orchestration_contract.py apps/astrabridge-sidecar/astrabridge_sidecar/agent_orchestration_compiler.py apps/astrabridge-sidecar/astrabridge_sidecar/task_graph_contract.py apps/astrabridge-sidecar/astrabridge_sidecar/task_service.py apps/astrabridge-sidecar/astrabridge_sidecar/server.py scripts/contract_boundary_audit.py scripts/run_local_gate.py scripts/run_runtime_stability_gate.py` passed. With `PYTHONPATH=D:\\AstraBridge\\apps\\astrabridge-sidecar`, `python -m unittest -v apps.astrabridge-sidecar.tests.test_node_type_registry apps.astrabridge-sidecar.tests.test_agent_orchestration_contract apps.astrabridge-sidecar.tests.test_agent_orchestration_compiler` passed 20/20, covering registry snapshot content, duplicate-registration failure, UI-hint-insensitive registry fingerprints, fixture node-type registration + compiler resolution, imported unknown node preservation/disable diagnostics, HTTP registry route, legacy lift/lower identity preservation, and compiler fingerprint/executor projection. With the same `PYTHONPATH`, `python scripts/contract_boundary_audit.py` passed all 15/15 checks. Desktop `cmd /c npm run build` passed, and `cmd /c npm test -- --run src/api.test.ts` passed 11/11.
+- Process hygiene: start/end read-only listener audits found no AstraBridge-owned listeners on the standard local development ports and no clearly stale AstraBridge-owned `python`/`node`/`cmd` launchers requiring termination during this step.
+- Blockers: None for Step 18. Git/GitHub CLI connection remains explicitly abandoned by user and is not part of this step's acceptance path.
+- Next step: Step 19, Make The Graph GUI Registry-Driven And Separate Definition, Plan, And Run.
+
+### 2026-07-17 - Step 19
+
+- Completed: the Desktop graph editor now consumes the Step 18 node-type registry instead of hard-coded palette metadata as its primary node-authoring source. `apps/astrabridge-desktop/src/features/runtime/taskGraphNodeRegistryUi.ts` projects registry snapshot data into palette sections, human-readable labels, tones, and icon ids; `App.tsx` now queries `/api/task-graphs/node-types` and passes the snapshot into `TaskGraphWorkspace`; and `TaskGraphWorkspace.tsx` now renders registry-driven palette entries, registry-aware node badges, and a schema-backed node-type config section while preserving Definition edits separately from run overlays.
+- Schema/form updates: added `TaskGraphSchemaForm.tsx` plus focused component coverage for scalar, enum, list, reference, and structured-JSON fallback controls. Node saves now preserve merged `ui_hints`, `node_type_config`, `node_type_id`, and registry fingerprints rather than collapsing back to the old palette-only contract. `node_type_registry.py` now exposes explicit agent palette variants so legacy agent roles remain human-readable aliases on top of the canonical `agent_model` node type.
+- Runtime/contract updates: `agent_orchestration_contract.py` now preserves legacy task-graph `graph_policy.max_depth` when lifting back into canonical orchestration graphs instead of hard-defaulting to depth 2. `task_service.py` now persists approval-resolution state back into the full fixture run manifest, so post-approval recovery uses the same canonical node/run truth as compact run refs. This was required to validate a mixed registry graph that includes a downstream sink after an approval gate.
+- Validation: Desktop `cmd /c npm run build` passed. Frontend targeted tests passed with `node .\\node_modules\\vitest\\vitest.mjs run src/features/runtime/TaskGraphSchemaForm.test.tsx --reporter=verbose` (2/2) and `node .\\node_modules\\vitest\\vitest.mjs run src/features/runtime/TaskGraphWorkspace.test.tsx --reporter=verbose` (84/84). Backend targeted validation passed with `python -m unittest -v apps.astrabridge-sidecar.tests.test_task_graph_worker_runtime.TaskGraphWorkerRuntimeTests.test_provider_gate_fixture_requires_approval_and_persists_resolution apps.astrabridge-sidecar.tests.test_task_graph_worker_runtime.TaskGraphWorkerRuntimeTests.test_mixed_registry_graph_passes_dry_run_and_fixture_execution_after_approval apps.astrabridge-sidecar.tests.test_node_type_registry` (9/9), `python -m unittest -v apps.astrabridge-sidecar.tests.test_agent_orchestration_contract` (5/5), `python scripts/contract_boundary_audit.py` (15/15 pass), and focused `py_compile` checks for the touched sidecar contract/task-service files.
+- Mixed-fixture evidence: the new `test_mixed_registry_graph_passes_dry_run_and_fixture_execution_after_approval` proves a registry-native `agent_model -> mcp_tool -> transform -> human_approval -> artifact_sink` path can dry-run cleanly, pause for approval at the gate, and then finish the sink through the existing fixture recovery/resume semantics after the approval manifest is updated. This closes the Step 19 requirement that registry-era mixed graphs remain executable rather than UI-only.
+- UI QA note: this round preserved narrow UI QA through the targeted workspace/component Vitest render coverage that exercises palette, inspector, node badges, typed ports, run docks, and registry-backed node-type config surfaces under both empty and populated graph states. No additional local browser-only screenshot sweep was needed to clear the changed surfaces in this step.
+- Process hygiene: end-of-round listener/process audits found no AstraBridge-owned local listeners on the standard development ports and no clearly stale AstraBridge-owned `python`/`node`/`cmd` launchers attributable to this step.
+- Blockers: None for Step 19. Git/GitHub CLI connection remains explicitly abandoned by user and is not part of this step's acceptance path.
+- Next step: Step 20, Add A Loss-Aware ComfyUI Workflow Adapter.
+
+### 2026-07-17 - Step 20
+
+- Completed: added `apps/astrabridge-sidecar/astrabridge_sidecar/comfyui_workflow_adapter.py` as the canonical loss-aware ComfyUI workflow bridge for the supported save-workflow subset. The adapter now declares its own manifest/version surface, detects ComfyUI workflow JSON by content, maps supported AstraBridge node types/typed ports/config into canonical orchestration graphs, exports the supported subset back to ComfyUI JSON, preserves disconnected unsupported nodes as opaque extension data when safe, and blocks unsafe or connected unsupported constructs with machine-readable loss reports.
+- Import/export bridge updates: `task_service.py` now auto-detects ComfyUI workflow JSON during graph import, applies adapter-provided `task_graph_overlays` into `ui_hints.node_type_config`, infers `comfyui_workflow` as the default export format for imported graphs, preserves GUI edits back into ComfyUI node metadata/widgets on re-export, and uses a ComfyUI-specific synchronization fallback when the persisted task-graph projection cannot fully reconstruct typed edge/schema metadata on its own. Desktop `src/types.ts`, `src/api.ts`, and `src/App.tsx` now expose/source the adapter metadata (`source_format`, `export_format`, `loss_report`, `adapter_manifest`), default import/export prompts to task graph/workflow wording, default ComfyUI-origin graphs back to ComfyUI export paths, and surface machine-readable loss diagnostics through the existing import/export error lane.
+- Fixture and ownership updates: added representative workflow fixtures under `examples/comfyui-workflow/` for supported linear, supported branched multimodal, unsupported connected, and unsupported disconnected-preserved cases. `docs/CODE_OWNERSHIP_AND_CONTRACTS.md` now names `astrabridge_sidecar.comfyui_workflow_adapter` as the canonical owner for the ComfyUI subset map, extension namespace, loss reports, and workspace-safe artifact URI validation. `scripts/contract_boundary_audit.py` now audits that owner plus the `task_service.py`/Desktop bridges, raising the governance suite to 16 checks.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/comfyui_workflow_adapter.py apps/astrabridge-sidecar/astrabridge_sidecar/task_service.py apps/astrabridge-sidecar/tests/test_comfyui_workflow_adapter.py apps/astrabridge-sidecar/tests/test_task_graph_api.py` passed. With `PYTHONPATH=D:\\AstraBridge\\apps\\astrabridge-sidecar`, `python -m unittest -v apps.astrabridge-sidecar.tests.test_comfyui_workflow_adapter apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_comfyui_import_export_reimport_round_trip_preserves_semantics_and_defaults_to_comfyui_format apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_comfyui_import_reexports_updated_node_type_config_from_task_graph_ui_hints apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_http_task_graph_import_export_supports_comfyui_workflow_json` passed 7/7, covering supported linear/branched round-trip semantics, disconnected opaque preservation warnings, connected unsupported-node blocking, unsafe artifact URI rejection, UI edit re-export fidelity, and HTTP import/export default-format inference. `python scripts/contract_boundary_audit.py` passed all 16/16 checks. Desktop `cmd /c npm run build` passed after the App/API/type changes.
+- Process hygiene: start/end read-only listener/process audits found no AstraBridge-owned local listeners on the standard development ports and no clearly stale AstraBridge-owned `python`/`node`/`cmd` launchers attributable to this step.
+- Blockers: None for Step 20. Git/GitHub CLI connection remains explicitly abandoned by user and is not part of this step's acceptance path.
+- Next step: Step 21, Add An Optional LangGraph Adapter Without Core Coupling.
+
+### 2026-07-17 - Step 21
+
+- Completed: added `apps/astrabridge-sidecar/astrabridge_sidecar/langgraph_stategraph_adapter.py` as the canonical optional LangGraph StateGraph interop owner. The adapter now defines a supported `langgraph_stategraph_manifest` subset with versioned adapter/format manifests, supported node/edge/checkpointer rules, optional dependency detection, machine-readable loss reports, and generated Python integration code that targets `StateGraph`, static `interrupt_before`/`interrupt_after`, conditional edges, `START`/`END`, and memory/inherited checkpointer seams without pulling LangGraph or LangChain into the core runtime.
+- Import/export bridge updates: `task_service.py` now auto-detects LangGraph StateGraph manifests during graph import, applies adapter-provided `task_graph_overlays` into `ui_hints.node_type_config`, defaults LangGraph-origin graphs back to `langgraph_stategraph_manifest` on export, returns generated LangGraph Python integration code in export responses, and extends the interop synchronization fallback so imported LangGraph graphs preserve their typed ports/conditional-edge metadata instead of being degraded by the lossy task-graph lift/lower bridge. Desktop `src/App.tsx` now recognizes LangGraph-origin graphs for default export-path selection and user-facing import/export diagnostics.
+- Fixture and ownership updates: added representative LangGraph fixtures under `examples/langgraph-stategraph/`, including `conditional_subgraph_interrupt_supported.json` for supported conditional routing + subgraph + static interrupt + checkpointer coverage and `unsupported_dynamic_interrupt.json` for explicit dynamic-interrupt blocking. `docs/CODE_OWNERSHIP_AND_CONTRACTS.md` now names `astrabridge_sidecar.langgraph_stategraph_adapter` as the canonical owner for the supported manifest subset, compile-config mapping, thread/checkpoint lineage projection, and generated-code contract. `scripts/contract_boundary_audit.py` now audits that owner plus the `task_service.py`/Desktop bridges, raising the governance suite to 17 checks.
+- Validation: `python -m py_compile apps/astrabridge-sidecar/astrabridge_sidecar/langgraph_stategraph_adapter.py apps/astrabridge-sidecar/astrabridge_sidecar/task_service.py apps/astrabridge-sidecar/tests/test_langgraph_stategraph_adapter.py apps/astrabridge-sidecar/tests/test_task_graph_api.py` passed. With `PYTHONPATH=D:\\AstraBridge\\apps\\astrabridge-sidecar`, `python -m unittest -v apps.astrabridge-sidecar.tests.test_langgraph_stategraph_adapter apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_langgraph_import_export_reimport_round_trip_preserves_semantics_and_defaults_to_langgraph_format apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_langgraph_import_reexports_updated_node_type_config_from_task_graph_ui_hints apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_http_task_graph_import_export_supports_langgraph_manifest_json` passed 6/6. The broader native graph/core suite `python -m unittest -v apps.astrabridge-sidecar.tests.test_agent_orchestration_contract apps.astrabridge-sidecar.tests.test_agent_orchestration_compiler apps.astrabridge-sidecar.tests.test_node_type_registry apps.astrabridge-sidecar.tests.test_task_graph_api` passed 39/39 while the current environment confirmed `langgraph` and `langchain` are both absent. `python -m unittest -v apps.astrabridge-sidecar.tests.test_langgraph_stategraph_adapter apps.astrabridge-sidecar.tests.test_comfyui_workflow_adapter apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_langgraph_import_export_reimport_round_trip_preserves_semantics_and_defaults_to_langgraph_format apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_langgraph_import_reexports_updated_node_type_config_from_task_graph_ui_hints apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_http_task_graph_import_export_supports_langgraph_manifest_json apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_comfyui_import_export_reimport_round_trip_preserves_semantics_and_defaults_to_comfyui_format apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_comfyui_import_reexports_updated_node_type_config_from_task_graph_ui_hints apps.astrabridge-sidecar.tests.test_task_graph_api.TaskGraphApiTests.test_http_task_graph_import_export_supports_comfyui_workflow_json` passed 13/13, proving the new interop fallback did not regress Step 20. `python scripts/contract_boundary_audit.py` passed all 17/17 checks. Desktop `cmd /c npm run build` passed after the App export-path changes.
+- External-contract evidence: Step 21 mapping terminology was aligned against current official LangGraph documentation for Graph API, subgraphs, persistence/checkpointers, and interrupts: [Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api), [Subgraphs](https://docs.langchain.com/oss/python/langgraph/subgraphs), [Persistence](https://docs.langchain.com/oss/python/langgraph/persistence), and [Interrupts / Human-in-the-loop](https://docs.langchain.com/oss/python/langgraph/interrupts).
+- Process hygiene: end-of-round read-only listener/process audit again found no AstraBridge-owned local listeners on the standard development ports; the only `:3000` activity was outbound established traffic to a remote host, not a local AstraBridge listener, and no clearly stale AstraBridge-owned `python`/`node`/`cmd` launchers attributable to this step required termination.
+- Blockers: None for Step 21. Git/GitHub CLI connection remains explicitly abandoned by user and is not part of this step's acceptance path.
+- Next step: Step 22, Migrate, Roll Out, Dogfood, And Close The Reliability Gate.
+
+### 2026-07-17 - Step 22
+
+- Completed: added `apps/astrabridge-sidecar/astrabridge_sidecar/runtime_rollout_gate.py` as the canonical final rollout owner, `scripts/run_runtime_rollout_gate.py` as its CLI wrapper, `docs/RUNTIME_ROLLOUT_AND_MAINTENANCE_RUNBOOK.md` as the rollout/maintenance boundary, and `apps/astrabridge-sidecar/tests/test_runtime_rollout_gate.py` as the targeted rollout regression suite. The rollout owner now captures the final feature-flag manifest, compatibility window, single-execution shadow comparison, repeated migration evidence, rollback readback, nested release-gate evidence, Desktop build/capture evidence, and rollout secret scan under `PRIVATE/runtime-rollout/<run-id>/`.
+- Stability fixes required to close the gate: fixed `_capture_desktop_visual_qa()` so a successful `returncode=0` capture is not misclassified as failure; fixed live cancel CAS races in `runtime_service.cancel_task_graph_run()` by reloading/retrying on `StateVersionConflict` and short-circuiting when a concurrent update already pushed the durable run into a terminal state; and shortened the nested release-gate / fixture-evidence artifact roots in `runtime_rollout_gate.py` and `runtime_stability_gate.py` so Windows path depth no longer breaks the final release-gate fixture capture. These close-out fixes preserved the earlier Step 22 cancellation truth fix in `task_service.cancel_graph_run()` plus the compact-to-durable artifact sync in `durable_run_store.py`, which were required for shadow-comparison parity.
+- Governance updates: `docs/CODE_OWNERSHIP_AND_CONTRACTS.md` now names `astrabridge_sidecar.runtime_rollout_gate` as the only owner for the final rollout feature-flag manifest, compatibility window, shadow-comparison rule, bounded dogfood migration copy, rollback-readback proof, and release-closure evidence bundle. `scripts/contract_boundary_audit.py` now audits that owner, its wrapper, and the rollout runbook, raising the governance suite to 18 checks.
+- Validation: focused compilation passed for `runtime_rollout_gate.py`, `runtime_stability_gate.py`, `runtime_service.py`, `durable_run_store.py`, `task_service.py`, `scripts/run_runtime_rollout_gate.py`, and the touched scheduler tests. With `PYTHONPATH=D:\\AstraBridge\\apps\\astrabridge-sidecar`, `python -m unittest discover -s apps/astrabridge-sidecar/tests -p 'test_runtime_rollout_gate.py' -v` passed 3/3; `python -m unittest discover -s apps/astrabridge-sidecar/tests -p 'test_runtime_stability_gate.py' -v` passed 4/4; `python -m unittest -v tests.test_graph_scheduler.DurableGraphSchedulerTests.test_live_cancel_interrupts_running_turn_and_marks_run_cancelled` passed; the five-test scheduler recovery/idempotency suite passed 5/5; the duplicate-delivery scheduler test passed in repeated single-test runs; and `python scripts/contract_boundary_audit.py` passed all 18/18 checks.
+- Final rollout evidence: `python scripts/run_runtime_rollout_gate.py --run-id step22-final-rollout-r3` passed with all rollout checks green and preserved the final close-out bundle under `PRIVATE/runtime-rollout/step22-final-rollout-r3/`. The rollout secret scan passed with 0 findings across 514 scanned text artifacts. The nested release gate at `PRIVATE/runtime-rollout/step22-final-rollout-r3/rg/r/` passed in release mode, including `scheduler_recovery_and_idempotency` 20/20 consecutive passes, `terminal_projection_and_stream_recovery` 20/20, `desktop_twenty_restart_cycles_no_orphans` with `internal_passes_per_run=20`, fixture evidence pass, and release-gate secret scan pass.
+- Migration / rollback evidence: the Step 22 rollout summary preserved shadow-comparison parity for completed, failed, retry-recovered, cancelled, and approval-pending cases with no mismatches; repeated migration remained idempotent for both the controlled fixture workspace and the bounded dogfood copy of the repository `.astrabridge/tasks.json`; the fixture migration intentionally classified active legacy runs as `needs_review` rather than resuming them; and rollback readback preserved the durable-store hash while rebuilding a projection from the copied snapshot.
+- Process hygiene: read-only listener audits before and after the closing rollout round found no AstraBridge-owned listeners on the standard development ports. The nested release gate also preserved before/after process inventories at `PRIVATE/runtime-rollout/step22-final-rollout-r3/rg/r/validations/process-inventory-before.json` and `.../process-inventory-after.json`, and the Desktop orphan-restart suite passed.
+- Blockers: None for Step 22. Git/GitHub CLI connection remains explicitly abandoned by user for the duration of this plan and was not retried or treated as a blocker.
+- Next step: Plan complete. Optional future work only: revisit the deferred Git/GitHub CLI connection task after this completed plan, and separately reconsider the deferred product-breadth plans referenced in the authority section.

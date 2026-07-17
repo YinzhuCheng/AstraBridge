@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import requests
 
 from ..common import new_id, now_iso, path_for_host, write_json
+from ..multimodal_result_envelope import enrich_capability_result
 from ..security import DESKTOP_KEY_PATH_RE, SECRET_QUERY_RE
 
 
@@ -197,7 +198,7 @@ class ChatVisionAnalyzeAdapter:
         persisted = self.persist_artifacts(payload, request_body, response_body, result)
         if persisted:
             result.update(persisted)
-        return result
+        return enrich_capability_result("vision.analyze", result, workspace_root=payload.get("workspace_root"))
 
     def build_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         prompt = _clean_text(payload.get("prompt"))

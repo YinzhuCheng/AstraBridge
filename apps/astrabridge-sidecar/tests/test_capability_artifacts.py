@@ -82,6 +82,16 @@ class CapabilityArtifactTests(unittest.TestCase):
             self.assertEqual(by_capability["speech.synthesize"]["preview"]["audio_path"], str(audio_path.resolve()))
             self.assertEqual(by_capability["image.generate"]["preview"]["image_path"], str(image_path.resolve()))
             self.assertTrue(by_capability["image.generate"]["artifact_refs"][0]["exists"])
+            self.assertEqual(
+                by_capability["vision.analyze"]["artifact_refs"][0]["artifact_uri"],
+                "workspace://.astrabridge/capabilities/vision_analyze/vision-run/text.txt",
+            )
+            self.assertGreater(by_capability["speech.synthesize"]["artifact_refs"][0]["size_bytes"], 0)
+            self.assertEqual(len(by_capability["image.generate"]["artifact_refs"][0]["digest_sha256"]), 64)
+            self.assertEqual(
+                by_capability["image.generate"]["artifact_refs"][0]["lineage"]["task_id"],
+                "capability.image.generate",
+            )
 
     def test_lists_generated_asset_manifest_even_when_registry_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -121,6 +131,7 @@ class CapabilityArtifactTests(unittest.TestCase):
             self.assertEqual(artifact["preview"]["image_path"], str(image_path.resolve()))
             self.assertEqual(artifact["relative_summary_path"], ".astrabridge\\assets\\generated\\asset_manifest.json")
             self.assertEqual(artifact["metadata"]["transparency_status"], "passed")
+            self.assertEqual(artifact["artifact_refs"][0]["artifact_uri"], "workspace://.astrabridge/assets/generated/yunwu-asset.png")
 
     def test_ignores_paths_outside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -166,9 +166,23 @@ class SpeechSynthesizeAdapterTests(unittest.TestCase):
             self.assertAlmostEqual(result["duration_sec"], 0.0005, places=6)
             self.assertEqual(result["usage"]["total_tokens"], 77)
             self.assertEqual(len(result["artifact_refs"]), 5)
+            self.assertEqual(len(result["protocol_artifact_refs"]), 2)
+            self.assertEqual(len(result["diagnostic_refs"]), 3)
+            self.assertEqual(result["capability_output"]["status"], "ok")
+            self.assertTrue(result["audio_bytes_base64_present"])
+            self.assertNotIn("audio_bytes_base64", result)
             self.assertEqual(result["tts_family"], "qwen_tts")
 
             artifact_dir = Path(result["artifact_dir"])
+            artifact_uris = {item["artifact_uri"] for item in result["protocol_artifact_refs"]}
+            self.assertIn(
+                f"workspace://.astrabridge/capabilities/speech_synthesize/{artifact_dir.name}/output.wav",
+                artifact_uris,
+            )
+            self.assertIn(
+                f"workspace://.astrabridge/capabilities/speech_synthesize/{artifact_dir.name}/transcript.txt",
+                artifact_uris,
+            )
             request_payload = json.loads((artifact_dir / "request.json").read_text(encoding="utf-8"))
             sse_text = (artifact_dir / "response.sse.txt").read_text(encoding="utf-8")
             transcript_text = (artifact_dir / "transcript.txt").read_text(encoding="utf-8")

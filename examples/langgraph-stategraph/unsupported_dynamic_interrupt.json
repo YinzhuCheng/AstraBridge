@@ -1,0 +1,72 @@
+{
+  "format": "langgraph_stategraph_manifest",
+  "version": "1.0",
+  "graph": {
+    "graph_id": "graph_langgraph_unsupported_dynamic_interrupt",
+    "task_id": "task_langgraph_examples",
+    "title": "LangGraph Unsupported Dynamic Interrupt",
+    "state_channels": {
+      "task_context": {
+        "value_type": "text",
+        "reducer": "replace"
+      }
+    },
+    "compile": {
+      "checkpointer": {
+        "mode": "memory",
+        "thread_id_field": "thread_id",
+        "checkpoint_ns_field": "checkpoint_ns",
+        "checkpoint_id_field": "checkpoint_id"
+      },
+      "dynamic_interrupts": [
+        {
+          "node_id": "node_route",
+          "reason": "inline interrupt body"
+        }
+      ]
+    },
+    "nodes": [
+      {
+        "id": "node_request_input",
+        "type": "astrabridge/artifact_source",
+        "label": "Request Input",
+        "role": "custom",
+        "node_type_config": {
+          "artifact_kind": "text_report",
+          "artifact_uri": "workspace://PRIVATE/langgraph/inputs/request.md"
+        }
+      },
+      {
+        "id": "node_route",
+        "type": "astrabridge/router_condition",
+        "label": "Route Request",
+        "role": "custom",
+        "node_type_config": {
+          "condition": {
+            "mode": "state_field_literal",
+            "field": "route",
+            "branch_map": {
+              "review": "review"
+            }
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_start_request",
+        "kind": "start",
+        "source": "__start__",
+        "target": "node_request_input"
+      },
+      {
+        "id": "edge_request_route",
+        "kind": "edge",
+        "source": "node_request_input",
+        "target": "node_route"
+      }
+    ],
+    "schema_registry": {},
+    "state_version": 1
+  }
+}

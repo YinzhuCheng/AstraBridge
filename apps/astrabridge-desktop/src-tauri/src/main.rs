@@ -1,17 +1,19 @@
+mod sidecar_supervision;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::Mutex;
 
+use sidecar_supervision::{
+    apply_common_sidecar_environment, SidecarLaunchConfig, SidecarSupervisor,
+};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::webview::{NewWindowResponse, WebviewWindowBuilder};
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl};
 use url::Url;
 
-const SIDECAR_PORT: &str = "8790";
 const BROWSER_LABEL_PREFIX: &str = "ab-browser-";
-
-struct SidecarProcess(Mutex<Option<Child>>);
 #[derive(Default)]
 struct BrowserRegistry(Mutex<HashMap<String, BrowserSession>>);
 
@@ -42,34 +44,6 @@ struct BrowserSession {
     supervision_error: Option<String>,
 }
 
-impl Drop for SidecarProcess {
-    fn drop(&mut self) {
-        if let Ok(mut child) = self.0.lock() {
-            if let Some(mut process) = child.take() {
-                #[cfg(windows)]
-                if !terminate_process_tree(process.id()) {
-                    let _ = process.kill();
-                }
-                #[cfg(not(windows))]
-                let _ = process.kill();
-                let _ = process.wait();
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-fn terminate_process_tree(pid: u32) -> bool {
-    Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
 fn repo_root_from_manifest() -> Option<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest.parent()?.parent()?.parent().map(PathBuf::from)
@@ -97,114 +71,54 @@ fn sidecar_locations(app: &tauri::App) -> Option<(PathBuf, PathBuf)> {
     ))
 }
 
-#[cfg(windows)]
-fn stop_existing_astrabridge_sidecars() {
-    let script = r#"$ErrorActionPreference = 'SilentlyContinue';
-function Test-AstraBridgeSidecar($item) {
-  if (-not $item) { return $false };
-  $name = [string]$item.Name;
-  $cmd = [string]$item.CommandLine;
-  $isSidecarProcess = $name -match '^(python|pythonw)(\.exe)?$|^astrabridge-sidecar(\.exe)?$|^sidecar_server(\.exe)?$';
-  $hasSidecarMarker = $cmd -match 'astrabridge[-_]sidecar|sidecar_server\.py';
-  return $isSidecarProcess -and $hasSidecarMarker -and $cmd -match '(?:^|\s)--serve(?:\s|$)';
-};
-$connection = Get-NetTCPConnection -LocalPort {port} -State Listen | Select-Object -First 1;
-if ($connection) {
-  $processes = @(Get-CimInstance Win32_Process);
-  $byPid = @{};
-  foreach ($item in $processes) { $byPid[[int]$item.ProcessId] = $item };
-  $root = $byPid[[int]$connection.OwningProcess];
-  if (Test-AstraBridgeSidecar $root) {
-    while ($true) {
-      $parent = $byPid[[int]$root.ParentProcessId];
-      if (-not (Test-AstraBridgeSidecar $parent)) { break };
-      $root = $parent;
-    };
-    Start-Process -FilePath "$env:WINDIR\System32\taskkill.exe" -ArgumentList @('/PID', [string]$root.ProcessId, '/T', '/F') -WindowStyle Hidden -Wait | Out-Null;
-  };
-}"#
-        .replace("{port}", SIDECAR_PORT);
-    let _ = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg(script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-#[cfg(not(windows))]
-fn stop_existing_astrabridge_sidecars() {}
-
-fn configure_sidecar_environment(command: &mut Command) {
-    // A desktop launch always owns its runtime selection. Inherited Codex homes
-    // could otherwise make every project share official or stale Codex state.
-    command.env_remove("CODEX_HOME");
-    command.env_remove("ASTRABRIDGE_CODEX_HOME");
+fn sidecar_environment_overrides() -> HashMap<String, String> {
+    let mut env = HashMap::new();
     #[cfg(windows)]
     if std::env::var_os("ASTRABRIDGE_RUNTIME_ROOT").is_none() && PathBuf::from(r"D:\").is_dir() {
-        command.env("ASTRABRIDGE_RUNTIME_ROOT", r"D:\AstraBridgeRuntime");
+        env.insert(
+            "ASTRABRIDGE_RUNTIME_ROOT".to_string(),
+            r"D:\AstraBridgeRuntime".to_string(),
+        );
     }
+    env
 }
 
-fn spawn_sidecar(app: &tauri::App) -> Option<Child> {
-    stop_existing_astrabridge_sidecars();
-    let (sidecar, seed_root) = sidecar_locations(app)?;
-    if !sidecar.exists() {
-        eprintln!("AstraBridge sidecar was not found: {}", sidecar.display());
-        return None;
+fn sidecar_state_root(app: &tauri::App, seed_root: &PathBuf) -> PathBuf {
+    let workspace_state_root = seed_root.join(".astrabridge").join("desktop-sidecar");
+    if seed_root.join(".git").exists() || seed_root.join(".astrabridge").exists() {
+        return workspace_state_root;
     }
-
-    let sidecar_is_exe = sidecar
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.eq_ignore_ascii_case("exe"))
-        .unwrap_or(false);
-
-    if sidecar_is_exe {
-        let mut command = Command::new(&sidecar);
-        configure_sidecar_environment(&mut command);
-        return command
-            .arg("--serve")
-            .arg("--port")
-            .arg(SIDECAR_PORT)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok();
+    if let Ok(app_data_dir) = app.path().app_data_dir() {
+        return app_data_dir.join("desktop-sidecar");
     }
+    workspace_state_root
+}
 
-    let mut candidates = Vec::new();
+fn sidecar_supervisor(app: &tauri::App) -> Result<SidecarSupervisor, String> {
+    let (sidecar_path, seed_root) = sidecar_locations(app)
+        .ok_or_else(|| "Could not resolve the AstraBridge sidecar launch path.".to_string())?;
+    if !sidecar_path.exists() {
+        return Err(format!(
+            "AstraBridge sidecar was not found: {}",
+            sidecar_path.display()
+        ));
+    }
+    let mut python_candidates = Vec::new();
     if let Ok(path) = std::env::var("ASTRABRIDGE_PYTHON") {
-        candidates.push(path);
+        python_candidates.push(path);
     }
-    candidates.push("python".to_string());
-    candidates.push("py".to_string());
-
-    for python in candidates {
-        let mut command = Command::new(&python);
-        configure_sidecar_environment(&mut command);
-        match command
-            .arg(&sidecar)
-            .arg("--serve")
-            .arg("--port")
-            .arg(SIDECAR_PORT)
-            .arg("--seed-root")
-            .arg(&seed_root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(child) => return Some(child),
-            Err(error) => eprintln!("Could not start sidecar with {python}: {error}"),
-        }
-    }
-    None
+    python_candidates.push("python".to_string());
+    python_candidates.push("py".to_string());
+    let config = SidecarLaunchConfig {
+        sidecar_path,
+        seed_root: seed_root.clone(),
+        state_root: sidecar_state_root(app, &seed_root),
+        build_version: env!("CARGO_PKG_VERSION").to_string(),
+        python_candidates,
+        extra_env: sidecar_environment_overrides(),
+        tuning: Default::default(),
+    };
+    SidecarSupervisor::new(config)
 }
 
 fn build_menu<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
@@ -676,8 +590,8 @@ async fn browser_tile_two_up(
 }
 
 #[tauri::command]
-fn sidecar_url() -> String {
-    format!("http://127.0.0.1:{SIDECAR_PORT}")
+fn sidecar_url(supervisor: State<'_, SidecarSupervisor>) -> Result<String, String> {
+    supervisor.sidecar_url()
 }
 
 #[cfg(test)]
@@ -687,7 +601,7 @@ mod tests {
     #[test]
     fn desktop_sidecar_does_not_inherit_codex_home_overrides() {
         let mut command = Command::new("sidecar-placeholder");
-        configure_sidecar_environment(&mut command);
+        apply_common_sidecar_environment(&mut command, &sidecar_environment_overrides());
         let environments: HashMap<_, _> = command.get_envs().collect();
 
         assert_eq!(
@@ -706,7 +620,9 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .menu(build_menu)
         .setup(|app| {
-            app.manage(SidecarProcess(Mutex::new(spawn_sidecar(app))));
+            let supervisor = sidecar_supervisor(app)?;
+            let _ = supervisor.sidecar_url();
+            app.manage(supervisor);
             app.manage(BrowserRegistry::default());
             Ok(())
         })

@@ -189,9 +189,67 @@ class ImageGenerateAdapterTests(unittest.TestCase):
             self.assertEqual(result["task_id"], "task-123")
             self.assertTrue(result["artifact_refs"][0]["local_path"].endswith("result-0.png"))
             self.assertTrue(Path(result["asset_manifest_path"]).is_file())
+            self.assertTrue(
+                str(result["protocol_artifact_refs"][0]["artifact_uri"]).startswith(
+                    "workspace://.astrabridge/capabilities/image_generate/"
+                )
+            )
+            self.assertTrue(str(result["protocol_artifact_refs"][0]["artifact_uri"]).endswith("/assets/result-0.png"))
+            self.assertGreater(result["protocol_artifact_refs"][0]["size_bytes"], 0)
+            self.assertEqual(len(result["protocol_artifact_refs"][0]["digest_sha256"]), 64)
+            self.assertEqual(result["capability_output"]["status"], "ok")
             self.assertEqual(post_calls[0]["json"]["parameters"]["size"], "1024*1024")
             self.assertEqual(post_calls[0]["json"]["parameters"]["n"], 1)
             self.assertEqual(get_calls[0]["url"].split("/")[-2:], ["tasks", "task-123"])
+
+    def test_capability_generate_rejects_protocol_artifact_escape_outside_workspace(self) -> None:
+        class _EscapeYunwuService(_FakeYunwuService):
+            def __init__(self, external_image_path: Path, external_manifest_path: Path) -> None:
+                super().__init__()
+                self._external_image_path = external_image_path
+                self._external_manifest_path = external_manifest_path
+
+            def generate(self, **kwargs: object) -> dict[str, object]:
+                self.calls.append(("generate", dict(kwargs)))
+                return {
+                    "created": 111,
+                    "requested_n": 1,
+                    "actual_n": 1,
+                    "count_mismatch": False,
+                    "asset_manifest_path": str(self._external_manifest_path),
+                    "persisted_assets": [
+                        {
+                            "asset_id": "escaped-asset",
+                            "provider": "yunwu",
+                            "tool": "yunwu_image_generate",
+                            "model": "gpt-image-2",
+                            "local_path": str(self._external_image_path),
+                            "source_url": "",
+                            "result_index": 0,
+                            "actual_width": 1024,
+                            "actual_height": 1024,
+                            "actual_format": "png",
+                            "validation_warnings": [],
+                        }
+                    ],
+                    "data": [{"revised_prompt": "provider prompt"}],
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            workspace.mkdir()
+            external_root = Path(temp_dir) / "outside"
+            external_root.mkdir()
+            external_image = external_root / "escaped.png"
+            external_manifest = external_root / "asset_manifest.json"
+            external_image.write_bytes(b"\x89PNG\r\n\x1a\n")
+            external_manifest.write_text("{}", encoding="utf-8")
+            adapter = YunwuImageGenerateAdapter(_EscapeYunwuService(external_image, external_manifest))  # type: ignore[arg-type]
+
+            result = adapter.generate({"prompt": "draw a red key", "workspace_root": str(workspace)})
+
+        self.assertEqual(result["protocol_artifact_refs"], [])
+        self.assertEqual(result["diagnostic_refs"], [])
 
     def test_dashscope_image_generate_rejects_unsupported_operation_and_model(self) -> None:
         adapter = DashScopeImageGenerateAdapter(post_fn=lambda **_kwargs: None, get_fn=lambda **_kwargs: None)  # type: ignore[arg-type]

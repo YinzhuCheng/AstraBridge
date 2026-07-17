@@ -4,7 +4,6 @@ import json
 import os
 import re
 import sys
-import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -12,62 +11,51 @@ from typing import Any, BinaryIO
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from astrabridge_sidecar.common import normalize_path_for_host
+    from astrabridge_sidecar.mcp_server_core import (
+        McpToolCallContext,
+        McpServerCore,
+        McpStdioFramingState,
+        read_stdio_message,
+        run_stdio_mcp_server,
+        write_stdio_message,
+    )
+    from astrabridge_sidecar.multimodal_result_envelope import enrich_yunwu_image_result, typed_result_text_summary
     from astrabridge_sidecar.yunwu_image_service import MAX_YUNWU_IMAGE_CONCURRENCY, YunwuImageService
 else:
     from .common import normalize_path_for_host
+    from .mcp_server_core import (
+        McpToolCallContext,
+        McpServerCore,
+        McpStdioFramingState,
+        read_stdio_message,
+        run_stdio_mcp_server,
+        write_stdio_message,
+    )
+    from .multimodal_result_envelope import enrich_yunwu_image_result, typed_result_text_summary
     from .yunwu_image_service import MAX_YUNWU_IMAGE_CONCURRENCY, YunwuImageService
 
 
 SERVER_NAME = "astrabridge-yunwu-image"
 SERVER_VERSION = "0.1.0"
-_OUTPUT_FRAMING = "header"
+_STREAM_STATE = McpStdioFramingState()
 def main() -> None:
     _debug("started", argv=sys.argv[:3])
     service = YunwuImageService()
-    while True:
-        message = _read_message(sys.stdin.buffer)
-        if message is None:
-            _debug("eof")
-            break
-        _debug("received", method=str(message.get("method") or ""), has_id=message.get("id") is not None)
-        response = _handle_message(service, message)
-        if response is not None:
-            _debug("responding", has_error="error" in response)
-            _write_message(sys.stdout.buffer, response)
+    run_stdio_mcp_server(_server_core(service), sys.stdin.buffer, sys.stdout.buffer, state=_STREAM_STATE, log_hook=_debug)
 
 
-def _handle_message(service: YunwuImageService, message: dict[str, Any]) -> dict[str, Any] | None:
-    request_id = message.get("id")
-    method = str(message.get("method") or "")
-    params = message.get("params") or {}
-    try:
-        if method == "initialize":
-            return _result(
-                request_id,
-                {
-                    "protocolVersion": str(params.get("protocolVersion") or "2024-11-05"),
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                    "instructions": "Use Yunwu image tools only when the user explicitly asks to generate or edit images. Never request or pass API keys as tool arguments; the server reads YUNWU_API_KEY from its environment.",
-                },
-            )
-        if method in {"notifications/initialized", "initialized"}:
-            return None
-        if method == "tools/list":
-            return _result(request_id, {"tools": _tools()})
-        if method == "resources/list":
-            return _result(request_id, {"resources": []})
-        if method == "resources/templates/list":
-            return _result(request_id, {"resourceTemplates": []})
-        if method == "tools/call":
-            return _result(request_id, _call_tool(service, params))
-        if request_id is None:
-            return None
-        return _error(request_id, -32601, f"Unsupported method: {method}")
-    except Exception as exc:  # noqa: BLE001
-        details = "".join(traceback.format_exception_only(type(exc), exc)).strip()
-        _debug("handler_error", method=method, error=details[:500])
-        return _error(request_id, -32000, details)
+def _server_core(service: YunwuImageService) -> McpServerCore:
+    return McpServerCore(
+        server_name=SERVER_NAME,
+        server_version=SERVER_VERSION,
+        instructions=(
+            "Use Yunwu image tools only when the user explicitly asks to generate or edit images. "
+            "Never request or pass API keys as tool arguments; the server reads YUNWU_API_KEY from its environment."
+        ),
+        tools_provider=_tools,
+        tool_handler=lambda name, arguments, context: _dispatch_tool(service, name, arguments, context),
+        log_hook=_debug,
+    )
 
 
 def _tools() -> list[dict[str, Any]]:
@@ -116,6 +104,7 @@ def _tools() -> list[dict[str, Any]]:
                         "description": "Optional HTTP(S) image URLs for gpt-image-2-all composition/edit-like generation.",
                     },
                     "response_format": {"type": "string", "enum": ["url", "b64_json"], "default": "url"},
+                    "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 900, "default": 300},
                     "purpose": {"type": "string", "description": "Short asset purpose, such as hero_sprite or monster_icon."},
                     "interface_note": {
                         "type": "string",
@@ -148,6 +137,7 @@ def _tools() -> list[dict[str, Any]]:
                     },
                     "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"], "default": "high"},
                     "moderation": {"type": "string", "enum": ["low", "auto"], "default": "auto"},
+                    "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 900, "default": 300},
                     "prompt_category": {"type": "string", "default": "game_asset_japanese_anime"},
                     "purpose": {"type": "string", "description": "Short asset purpose, such as heroine_walk_down_frame or yellow_door_sprite."},
                 },
@@ -190,6 +180,7 @@ def _tools() -> list[dict[str, Any]]:
                     "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"], "default": "high"},
                     "background": {"type": "string", "enum": ["opaque", "transparent", "auto"], "default": "transparent"},
                     "moderation": {"type": "string", "enum": ["low", "auto"], "default": "auto"},
+                    "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 900, "default": 300},
                     "prompt_category": {
                         "type": "string",
                         "description": "Prompt guide category. Use game_asset_japanese_anime or image_edit_recreation for most game asset edits.",
@@ -208,6 +199,18 @@ def _call_tool(service: YunwuImageService, params: dict[str, Any]) -> dict[str, 
     args = params.get("arguments") or {}
     if not isinstance(args, dict):
         raise ValueError("Tool arguments must be an object.")
+    return _dispatch_tool(service, name, args, None)
+
+
+def _dispatch_tool(
+    service: YunwuImageService,
+    name: str,
+    args: dict[str, Any],
+    context: McpToolCallContext | None,
+) -> dict[str, Any]:
+    workspace_root = _workspace_root_argument(args) or _workspace_root()
+    api_key = _context_api_key(context)
+    timeout_sec = int(args.get("timeout_sec") or 300)
     if name == "yunwu_image_generate":
         result = service.generate(
             prompt=str(args.get("prompt") or ""),
@@ -220,10 +223,14 @@ def _call_tool(service: YunwuImageService, params: dict[str, Any]) -> dict[str, 
             image_format=str(args.get("format") or args.get("output_format") or "png"),
             background=str(args.get("background") or "auto") or None,
             prompt_category=str(args.get("prompt_category") or ""),
-            workspace_root=_workspace_root(),
+            api_key=api_key,
+            timeout_sec=timeout_sec,
+            workspace_root=workspace_root,
             purpose=str(args.get("purpose") or "agent_generated_asset"),
         )
-        return _tool_text(_summarize_image_result(result))
+        result = enrich_yunwu_image_result(name, result, workspace_root=workspace_root, request_id=str(context.request_id) if context else None)
+        summary = _summarize_image_result(result)
+        return _tool_text(summary, structured_payload=result)
     if name == "yunwu_image_transparent_asset":
         result = service.transparent_asset(
             prompt=str(args.get("prompt") or ""),
@@ -233,10 +240,14 @@ def _call_tool(service: YunwuImageService, params: dict[str, Any]) -> dict[str, 
             quality=str(args.get("quality") or "high"),
             moderation=str(args.get("moderation") or "auto"),
             prompt_category=str(args.get("prompt_category") or "game_asset_japanese_anime"),
-            workspace_root=_workspace_root(),
+            api_key=api_key,
+            timeout_sec=timeout_sec,
+            workspace_root=workspace_root,
             purpose=str(args.get("purpose") or "agent_transparent_asset"),
         )
-        return _tool_text(_summarize_image_result(result))
+        result = enrich_yunwu_image_result(name, result, workspace_root=workspace_root, request_id=str(context.request_id) if context else None)
+        summary = _summarize_image_result(result)
+        return _tool_text(summary, structured_payload=result)
     if name == "yunwu_image_edit":
         result = service.edit(
             prompt=str(args.get("prompt") or ""),
@@ -249,10 +260,14 @@ def _call_tool(service: YunwuImageService, params: dict[str, Any]) -> dict[str, 
             background=str(args.get("background") or "transparent"),
             moderation=str(args.get("moderation") or "auto"),
             prompt_category=str(args.get("prompt_category") or ""),
-            workspace_root=_workspace_root(),
+            api_key=api_key,
+            timeout_sec=timeout_sec,
+            workspace_root=workspace_root,
             purpose=str(args.get("purpose") or "agent_edited_asset"),
         )
-        return _tool_text(_summarize_image_result(result))
+        result = enrich_yunwu_image_result(name, result, workspace_root=workspace_root, request_id=str(context.request_id) if context else None)
+        summary = _summarize_image_result(result)
+        return _tool_text(summary, structured_payload=result)
     raise ValueError(f"Unknown Yunwu image tool: {name}")
 
 
@@ -272,6 +287,22 @@ def _first_host_path_env(*names: str) -> str | None:
 
 def _normalize_host_path(path: str) -> str:
     return _normalize_path_for_os(path, os.name)
+
+
+def _workspace_root_argument(args: dict[str, Any]) -> str | None:
+    workspace_root = _normalize_host_path(str(args.get("workspace_root") or ""))
+    return workspace_root or None
+
+
+def _context_api_key(context: McpToolCallContext | None) -> str | None:
+    if context is None:
+        return None
+    meta = dict(context.meta or {})
+    for key in ("internal_api_key", "internalApiKey"):
+        value = str(meta.get(key) or "").strip()
+        if value:
+            return value
+    return None
 
 
 def _normalize_path_for_os(path: str, host_os_name: str) -> str:
@@ -294,7 +325,7 @@ def _summarize_image_result(result: dict[str, Any]) -> dict[str, Any]:
             entry["save_error"] = item["save_error"]
         if item.get("revised_prompt") is not None:
             entry["revised_prompt"] = item.get("revised_prompt")
-        if item.get("b64_json"):
+        if item.get("b64_json") or item.get("b64_json_present"):
             entry["b64_json_present"] = True
         for key in (
             "actual_width",
@@ -322,63 +353,16 @@ def _summarize_image_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _tool_text(payload: dict[str, Any]) -> dict[str, Any]:
-    urls = [str(item.get("url")) for item in payload.get("data", []) if isinstance(item, dict) and item.get("url")]
-    lines = ["Yunwu image tool result:", json.dumps(payload, ensure_ascii=False, indent=2)]
-    if urls:
-        lines.append("")
-        lines.extend(f"![generated image {index + 1}]({url})" for index, url in enumerate(urls))
-    local_paths = [str(item.get("local_path")) for item in payload.get("data", []) if isinstance(item, dict) and item.get("local_path")]
-    if local_paths:
-        lines.append("")
-        lines.append("Saved local assets:")
-        lines.extend(f"- {path}" for path in local_paths)
-    if payload.get("asset_manifest_path"):
-        lines.append(f"Asset manifest: {payload['asset_manifest_path']}")
-    return {"content": [{"type": "text", "text": "\n".join(lines)}]}
-
-
-def _result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "result": result}
-
-
-def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+def _tool_text(payload: dict[str, Any], structured_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    structured = structured_payload if structured_payload is not None else payload
+    return {
+        "structuredContent": structured,
+        "content": [{"type": "text", "text": typed_result_text_summary(structured, title="Yunwu image tool result:")}],
+    }
 
 
 def _read_message(stream: BinaryIO) -> dict[str, Any] | None:
-    global _OUTPUT_FRAMING
-    first = _read_first_nonempty_byte(stream)
-    if not first:
-        return None
-    _debug("first_byte", value=first.decode("ascii", errors="replace"))
-    if first in b" \t\r\n":
-        return None
-    if first == b"{":
-        _OUTPUT_FRAMING = "raw"
-        payload = _read_json_object(stream, first).decode("utf-8")
-        message = json.loads(payload)
-        if not message.get("method"):
-            _debug("methodless_message", keys=list(message.keys()), raw=payload[:500])
-        return message
-    _OUTPUT_FRAMING = "header"
-    headers: dict[str, str] = {}
-    line = first + stream.readline()
-    while line and line.strip():
-        text = line.decode("ascii", errors="replace")
-        if ":" in text:
-            key, value = text.split(":", 1)
-            headers[key.lower()] = value.strip()
-        line = stream.readline()
-    length = int(headers.get("content-length") or 0)
-    if length <= 0:
-        return None
-    body = stream.read(length)
-    payload = body.decode("utf-8")
-    message = json.loads(payload)
-    if not message.get("method"):
-        _debug("methodless_message", keys=list(message.keys()), raw=payload[:500])
-    return message
+    return read_stdio_message(stream, state=_STREAM_STATE, log_hook=_debug)
 
 
 def _debug(event: str, **fields: Any) -> None:
@@ -402,53 +386,8 @@ def _debug(event: str, **fields: Any) -> None:
         pass
 
 
-def _read_first_nonempty_byte(stream: BinaryIO) -> bytes:
-    while True:
-        chunk = stream.read(1)
-        if not chunk:
-            return b""
-        if chunk in b" \t\r\n":
-            continue
-        return chunk
-
-
-def _read_json_object(stream: BinaryIO, first: bytes) -> bytes:
-    buffer = bytearray(first)
-    depth = 1
-    in_string = False
-    escaped = False
-    while depth > 0:
-        chunk = stream.read(1)
-        if not chunk:
-            break
-        char = chunk[0]
-        buffer.extend(chunk)
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == 92:  # backslash
-                escaped = True
-            elif char == 34:  # quote
-                in_string = False
-            continue
-        if char == 34:
-            in_string = True
-        elif char == 123:  # {
-            depth += 1
-        elif char == 125:  # }
-            depth -= 1
-    return bytes(buffer)
-
-
 def _write_message(stream: BinaryIO, message: dict[str, Any]) -> None:
-    body = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    if _OUTPUT_FRAMING == "raw":
-        stream.write(body + b"\n")
-        stream.flush()
-        return
-    stream.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
-    stream.write(body)
-    stream.flush()
+    write_stdio_message(stream, message, state=_STREAM_STATE)
 
 
 if __name__ == "__main__":

@@ -247,6 +247,14 @@ function renderPanel(options: RenderPanelOptions = {}) {
                 relative_path: ".astrabridge/capabilities/vision_analyze/vision-run/text.txt",
                 exists: true,
                 mime_type: "text/plain",
+                artifact_uri: "workspace://.astrabridge/capabilities/vision_analyze/vision-run/text.txt",
+                size_bytes: 128,
+                digest_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                lineage: {
+                  task_id: "capability.vision.analyze",
+                  run_id: "vision-run",
+                  source_node_id: "capability.vision.analyze",
+                },
               },
             ],
             preview: { kind: "text", text: "AstraBridge vision artifact preview", audio_path: "", image_path: "" },
@@ -321,6 +329,8 @@ describe("CapabilityRoutesPanel", () => {
     expect(screen.getByText("kimi: credential missing")).toBeInTheDocument();
     expect(screen.getByText("AstraBridge vision artifact preview")).toBeInTheDocument();
     expect(screen.getByText("1 refs")).toBeInTheDocument();
+    expect(screen.getByText("workspace://.astrabridge/capabilities/vision_analyze/vision-run/text.txt · text/plain · 128 B · sha256:0123456789ab")).toBeInTheDocument();
+    expect(screen.queryByText("D:/AstraBridge/.astrabridge/capabilities/vision_analyze/vision-run/text.txt")).toBeNull();
     expect(screen.getByTestId("capability-route-status-vision.analyze")).toHaveTextContent("unverified");
     expect(screen.getByTestId("capability-candidate-status-vision.analyze-qwen-qwen3-vl-plus")).toHaveTextContent("unverified");
     expect(screen.getByText("resolved route")).toBeInTheDocument();
@@ -374,6 +384,9 @@ describe("CapabilityRoutesPanel", () => {
               relative_path: ".astrabridge/assets/generated/asset-1.png",
               exists: true,
               mime_type: "image/png",
+              artifact_uri: "workspace://.astrabridge/assets/generated/asset-1.png",
+              size_bytes: 4096,
+              digest_sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
             },
           ],
           preview: {
@@ -395,6 +408,8 @@ describe("CapabilityRoutesPanel", () => {
     expect(image).toHaveAttribute("src", "media://D:/AstraBridge/workspace/.astrabridge/assets/generated/asset-1.png");
     expect(preview?.querySelector("p")).toBeNull();
     expect(screen.getByText("asset-1")).toBeInTheDocument();
+    expect(screen.getByText("workspace://.astrabridge/assets/generated/asset-1.png · image/png · 4.0 KB · sha256:abcdef012345")).toBeInTheDocument();
+    expect(screen.queryByText("D:/AstraBridge/workspace/.astrabridge/assets/generated/asset-1.png")).toBeNull();
   });
 
   it("resets unsaved route changes", () => {

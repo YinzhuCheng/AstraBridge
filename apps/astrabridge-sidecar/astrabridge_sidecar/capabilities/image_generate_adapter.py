@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..multimodal_result_envelope import enrich_capability_result
 from ..yunwu_image_service import YunwuImageService
 
 
@@ -29,7 +30,8 @@ class YunwuImageGenerateAdapter:
             workspace_root=payload.get("workspace_root"),
             purpose=str(payload.get("purpose") or "capability_image_generate"),
         )
-        return self.normalize_result(result, operation="generate")
+        normalized = self.normalize_result(result, operation="generate")
+        return enrich_capability_result("image.generate", normalized, workspace_root=payload.get("workspace_root"))
 
     def edit_as_generation(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = self._service.edit(
@@ -49,7 +51,8 @@ class YunwuImageGenerateAdapter:
             workspace_root=payload.get("workspace_root"),
             purpose=str(payload.get("purpose") or "capability_image_edit"),
         )
-        return self.normalize_result(result, operation="edit")
+        normalized = self.normalize_result(result, operation="edit")
+        return enrich_capability_result("image.generate", normalized, workspace_root=payload.get("workspace_root"))
 
     def transparent_asset(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = self._service.transparent_asset(
@@ -66,7 +69,8 @@ class YunwuImageGenerateAdapter:
             workspace_root=payload.get("workspace_root"),
             purpose=str(payload.get("purpose") or "capability_transparent_asset"),
         )
-        return self.normalize_result(result, operation="transparent_asset")
+        normalized = self.normalize_result(result, operation="transparent_asset")
+        return enrich_capability_result("image.generate", normalized, workspace_root=payload.get("workspace_root"))
 
     def normalize_result(self, result: dict[str, Any], *, operation: str) -> dict[str, Any]:
         persisted_assets = [dict(item) for item in (result.get("persisted_assets") or []) if isinstance(item, dict)]

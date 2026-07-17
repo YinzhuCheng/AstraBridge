@@ -1,0 +1,212 @@
+{
+  "version": 1.0,
+  "state": {
+    "lastNodeId": 4,
+    "lastLinkId": 2
+  },
+  "last_node_id": 4,
+  "last_link_id": 2,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "astrabridge/agent",
+      "title": "Planner Agent",
+      "pos": [40, 120],
+      "size": [280, 180],
+      "inputs": [
+        {
+          "name": "Task context",
+          "type": "text",
+          "id": "task_context",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Task draft",
+          "type": "structured_json",
+          "id": "machine_result",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "properties": {
+        "astrabridge": {
+          "node_id": "node_planner",
+          "label": "Planner Agent",
+          "role": "supervisor",
+          "node_type_id": "agent_model",
+          "node_type_config": {
+            "routing": {
+              "selection_mode": "explicit",
+              "provider_id": "qwen",
+              "model_id": "qwen3.7-plus"
+            },
+            "prompt": {
+              "template_mode": "inline",
+              "template": "Plan the next bounded action."
+            },
+            "execution": {
+              "spawn_mode": "inline_lane",
+              "timeout_ms": 120000,
+              "retry_policy": {
+                "max_attempts": 1
+              },
+              "execution_backend": "app_server",
+              "collaboration_mode": "default"
+            },
+            "safety": {
+              "risk_class": "low",
+              "allow_provider_calls": true,
+              "allow_code_changes": false,
+              "allow_install": false,
+              "requires_human_approval": false
+            }
+          },
+          "routing": {
+            "selection_mode": "explicit",
+            "provider_id": "qwen",
+            "model_id": "qwen3.7-plus"
+          },
+          "prompt": {
+            "template_mode": "inline",
+            "template": "Plan the next bounded action."
+          },
+          "status": "ready"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "astrabridge/mcp_tool",
+      "title": "Inspect Policy",
+      "pos": [380, 120],
+      "size": [260, 160],
+      "inputs": [
+        {
+          "name": "Task draft",
+          "type": "structured_json",
+          "id": "task_context",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Tool result",
+          "type": "tool_result",
+          "id": "tool_result",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "properties": {
+        "astrabridge": {
+          "node_id": "node_tool",
+          "label": "Inspect Policy",
+          "role": "custom",
+          "node_type_id": "mcp_tool",
+          "node_type_config": {
+            "server": "filesystem",
+            "tool": "read_file"
+          },
+          "server": "filesystem",
+          "tool": "read_file",
+          "status": "ready"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "astrabridge/artifact_sink",
+      "title": "Archive Result",
+      "pos": [720, 120],
+      "size": [240, 150],
+      "inputs": [
+        {
+          "name": "Artifact input",
+          "type": "tool_result",
+          "id": "artifact_input",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Artifact record",
+          "type": "structured_json",
+          "id": "artifact_record",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "properties": {
+        "astrabridge": {
+          "node_id": "node_sink",
+          "label": "Archive Result",
+          "role": "custom",
+          "node_type_id": "artifact_sink",
+          "node_type_config": {
+            "target_kind": "validation_report"
+          },
+          "target_kind": "validation_report",
+          "status": "ready"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "vendor_magic/disconnected_probe",
+      "title": "Disconnected Unsupported",
+      "pos": [380, 360],
+      "size": [240, 160],
+      "outputs": [
+        {
+          "name": "Output",
+          "type": "structured_json",
+          "id": "machine_result",
+          "shape": "single",
+          "required": false
+        }
+      ]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "structured_json"],
+    [2, 2, 0, 3, 0, "tool_result"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "astrabridge": {
+      "graph_id": "graph_comfyui_unsupported_disconnected_preserved",
+      "task_id": "task_comfyui_examples",
+      "metadata": {
+        "title": "Unsupported Disconnected Workflow",
+        "template_id": "custom_blank_graph"
+      },
+      "graph_policy": {
+        "entry_node_ids": ["node_planner"],
+        "max_depth": 4
+      },
+      "schema_registry": {},
+      "migration": {
+        "source_kind": "comfyui_fixture"
+      },
+      "links": {
+        "1": {
+          "edge_id": "edge_planner_tool",
+          "source_port_id": "machine_result",
+          "target_port_id": "task_context"
+        },
+        "2": {
+          "edge_id": "edge_tool_sink",
+          "source_port_id": "tool_result",
+          "target_port_id": "artifact_input"
+        }
+      },
+      "state_version": 1
+    }
+  }
+}

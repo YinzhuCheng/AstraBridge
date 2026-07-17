@@ -395,6 +395,18 @@ class AgentOrchestrationContractTests(unittest.TestCase):
                 lowered = lower_agent_orchestration_graph_to_task_graph(lifted)
                 self.assertEqual(lowered["graph_id"], legacy["graph_id"])
                 self.assertEqual(lowered["template_id"], legacy["template_id"])
+                self.assertEqual(
+                    [node["node_id"] for node in lowered["nodes"]],
+                    [node["node_id"] for node in legacy["nodes"]],
+                )
+                self.assertEqual(
+                    [edge["edge_id"] for edge in lowered["edges"]],
+                    [edge["edge_id"] for edge in legacy["edges"]],
+                )
+                self.assertEqual(
+                    [node["graph_id"] for node in lowered["nodes"]],
+                    [node["graph_id"] for node in legacy["nodes"]],
+                )
 
 
 if __name__ == "__main__":

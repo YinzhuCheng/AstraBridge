@@ -522,6 +522,43 @@ export type TaskGraphTemplateSummary = {
   };
 };
 
+export type NodeTypeRegistryPortSpec = {
+  port_id: string;
+  port_type: string;
+  shape?: string;
+  required?: boolean;
+  schema_ref?: string;
+  artifact_kind?: string;
+  label?: string;
+};
+
+export type NodeTypeRegistryEntry = {
+  type_id: string;
+  version: number;
+  category: string;
+  title: string;
+  description?: string;
+  config_schema: Record<string, unknown>;
+  typed_ports: {
+    inputs: NodeTypeRegistryPortSpec[];
+    outputs: NodeTypeRegistryPortSpec[];
+  };
+  compiler_executor_id: string;
+  default_policy: Record<string, unknown>;
+  ui_hints: Record<string, unknown>;
+  migration: Record<string, unknown>;
+  registry_fingerprint: string;
+  internal_only?: boolean;
+};
+
+export type NodeTypeRegistrySnapshot = {
+  schema_version: string;
+  registry_fingerprint: string;
+  role_ids: string[];
+  kind_aliases: Record<string, string>;
+  node_types: NodeTypeRegistryEntry[];
+};
+
 export type TaskGraphDryRunStatus = "pass" | "warning" | "blocked" | string;
 
 export type TaskGraphDryRunNodeResult = {
@@ -591,6 +628,11 @@ export type AgentOrchestrationGraphExportResponse = {
   task: ProjectTask | null;
   orchestration_graph: AgentOrchestrationGraph;
   serialized_text: string;
+  source_format?: string | null;
+  export_format?: string | null;
+  source_version?: string | null;
+  adapter_manifest?: Record<string, unknown> | null;
+  loss_report?: Record<string, unknown> | null;
   export_path?: string | null;
 };
 
@@ -599,6 +641,10 @@ export type AgentOrchestrationGraphImportResponse = {
   graph: TaskGraphDefinition;
   task: ProjectTask | null;
   orchestration_graph: AgentOrchestrationGraph;
+  source_format?: string | null;
+  source_version?: string | null;
+  adapter_manifest?: Record<string, unknown> | null;
+  loss_report?: Record<string, unknown> | null;
   import_path?: string | null;
   snapshot?: TaskGraphSnapshotRef;
 };
@@ -2074,6 +2120,7 @@ export type CapabilitySmokeResponse = {
 
 export type CapabilityInvokeResponse = {
   result: Record<string, unknown>;
+  mcp?: Record<string, unknown>;
 };
 
 export type CapabilityArtifactSummary = {
@@ -2087,6 +2134,10 @@ export type CapabilityArtifactRef = {
   relative_path: string;
   exists: boolean;
   mime_type: string;
+  artifact_uri?: string;
+  size_bytes?: number;
+  digest_sha256?: string;
+  lineage?: Record<string, unknown>;
 };
 
 export type CapabilityArtifactEntry = {
@@ -2294,6 +2345,7 @@ export type WebToolResponse<T> = {
   tool_event_verified: boolean;
   tool_context: WebToolContext;
   path: string;
+  mcp?: Record<string, unknown>;
   result: T;
 };
 
@@ -2742,6 +2794,84 @@ export type RuntimeSupervisorState = {
     mcp?: { status: string; count?: number | null; last_updated_at?: string | null };
   };
   browser: DogfoodBrowserSmoke;
+  observability?: {
+    schema_version: string;
+    generated_at: string;
+    source: {
+      runtime_event_count: number;
+      host_event_count: number;
+      graph_event_count: number;
+      merged_event_count: number;
+      event_stream: string;
+      host_lineage: string;
+      ui_source: string;
+    };
+    trace_lineage?: {
+      trace_id?: string | null;
+      run_id?: string | null;
+      thread_id?: string | null;
+      latest_at?: string | null;
+      domain_sequence?: string[];
+      complete?: boolean;
+      steps?: Array<{
+        timestamp?: string | null;
+        source?: string | null;
+        domain?: string | null;
+        event_type?: string | null;
+        summary?: string | null;
+        node_id?: string | null;
+        operation_id?: string | null;
+        artifact_id?: string | null;
+      }>;
+    } | null;
+    metrics?: Array<{
+      metric_id: string;
+      label: string;
+      value?: number | null;
+      unit: string;
+      sample_size: number;
+      numerator?: number | null;
+      denominator?: number | null;
+      distribution?: {
+        count?: number | null;
+        p95?: number | null;
+        max?: number | null;
+      } | null;
+      status: "pass" | "warning" | "fail" | "unknown" | string;
+      otel_mapping?: {
+        instrument?: string;
+        kind?: string;
+        semantic_bridge?: string;
+        attributes?: string[];
+      } | null;
+    }>;
+    slos?: Array<{
+      metric_id: string;
+      status: string;
+      good_threshold: number;
+      warn_threshold: number;
+      unit: string;
+      release_gate: boolean;
+    }>;
+    domain_counts?: Array<{
+      domain: string;
+      count: number;
+      error_count: number;
+      warning_count: number;
+    }>;
+    recent_diagnostics?: Array<{
+      schema_version?: string;
+      domain: string;
+      severity: string;
+      event_type: string;
+      summary: string;
+      timestamp: string;
+      trace_id?: string | null;
+      run_id?: string | null;
+      node_id?: string | null;
+      operation_id?: string | null;
+    }>;
+  } | null;
   dogfood: {
     enabled: boolean;
     phase: string;

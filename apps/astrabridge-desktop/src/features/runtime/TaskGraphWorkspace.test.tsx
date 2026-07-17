@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TaskGraphWorkspace } from "./TaskGraphWorkspace";
 import type {
+  NodeTypeRegistrySnapshot,
   TaskGraphDefinition,
   TaskGraphDryRunResult,
   TaskGraphRunRef,
@@ -164,6 +165,210 @@ const templates: TaskGraphTemplateSummary[] = [
     },
   },
 ];
+
+const nodeTypeRegistry: NodeTypeRegistrySnapshot = {
+  schema_version: "astrabridge-node-type-registry-v1",
+  registry_fingerprint: "registry-test",
+  role_ids: [
+    "supervisor",
+    "worker",
+    "synthesizer",
+    "extractor",
+    "validator",
+    "reviewer",
+    "planner",
+    "coder",
+    "researcher",
+    "gate",
+    "custom",
+  ],
+  kind_aliases: {
+    supervisor: "agent_model",
+    worker: "agent_model",
+    synthesizer: "agent_model",
+    extractor: "agent_model",
+    validator: "agent_model",
+    reviewer: "agent_model",
+    planner: "agent_model",
+    coder: "agent_model",
+    researcher: "agent_model",
+    custom: "agent_model",
+    gate: "human_approval",
+  },
+  node_types: [
+    {
+      type_id: "agent_model",
+      version: 1,
+      category: "agent",
+      title: "Agent / Model",
+      description:
+        "Bounded provider-backed agent lane with explicit routing, prompt, and typed input/output ports.",
+      config_schema: {
+        type: "object",
+        properties: {
+          routing: { type: "object", title: "Routing" },
+          prompt: { type: "object", title: "Prompt" },
+          execution: { type: "object", title: "Execution" },
+          safety: { type: "object", title: "Safety" },
+        },
+      },
+      typed_ports: { inputs: [], outputs: [] },
+      compiler_executor_id: "agent_lane",
+      default_policy: {},
+      ui_hints: {
+        palette_role: "custom",
+        palette_sections: ["planning", "execution"],
+        icon: "bot",
+        tone: "neutral",
+        palette_variants: [
+          {
+            kind: "supervisor",
+            label: "Supervisor",
+            description:
+              "Plans the bounded workflow and coordinates downstream workers.",
+            palette_sections: ["planning"],
+            icon: "compass",
+            tone: "planner",
+          },
+          {
+            kind: "planner",
+            label: "Planner",
+            description:
+              "Breaks work into explicit steps and hands them to other agents.",
+            palette_sections: ["planning"],
+            icon: "file-text",
+            tone: "planner",
+          },
+          {
+            kind: "researcher",
+            label: "Researcher",
+            description:
+              "Collects evidence, docs, or comparisons before synthesis.",
+            palette_sections: ["planning"],
+            icon: "search",
+            tone: "extractor",
+          },
+          {
+            kind: "extractor",
+            label: "Extractor",
+            description:
+              "Pulls structured facts from files, docs, or provider metadata.",
+            palette_sections: ["planning"],
+            icon: "database",
+            tone: "extractor",
+          },
+          {
+            kind: "worker",
+            label: "Worker",
+            description:
+              "Executes the main task and returns the primary artifact.",
+            palette_sections: ["execution"],
+            icon: "wrench",
+            tone: "worker",
+          },
+          {
+            kind: "coder",
+            label: "Coder",
+            description:
+              "Applies code or document changes in a bounded implementation lane.",
+            palette_sections: ["execution"],
+            icon: "braces",
+            tone: "worker",
+          },
+          {
+            kind: "synthesizer",
+            label: "Synthesizer",
+            description:
+              "Merges branch outputs into one bounded answer or artifact set.",
+            palette_sections: ["execution"],
+            icon: "sparkles",
+            tone: "synthesizer",
+          },
+          {
+            kind: "reviewer",
+            label: "Reviewer",
+            description:
+              "Reads outputs critically and returns review feedback or approval.",
+            palette_sections: ["execution"],
+            icon: "eye",
+            tone: "reviewer",
+          },
+          {
+            kind: "validator",
+            label: "Validator",
+            description:
+              "Runs checks, tests, or smoke validation before promotion.",
+            palette_sections: ["execution"],
+            icon: "shield-check",
+            tone: "validator",
+          },
+          {
+            kind: "custom",
+            label: "Custom",
+            description:
+              "Starts as a neutral agent shell with the default fallback icon.",
+            palette_sections: ["control"],
+            icon: "bot",
+            tone: "neutral",
+          },
+        ],
+      },
+      migration: {},
+      registry_fingerprint: "agent-registry-test",
+    },
+    {
+      type_id: "human_approval",
+      version: 1,
+      category: "approval",
+      title: "Human Approval",
+      description:
+        "Pauses execution behind an explicit review and approval decision.",
+      config_schema: {
+        type: "object",
+        properties: {
+          review_kind: { type: "string", title: "Review kind" },
+        },
+      },
+      typed_ports: { inputs: [], outputs: [] },
+      compiler_executor_id: "human_approval",
+      default_policy: {},
+      ui_hints: {
+        palette_role: "gate",
+        palette_sections: ["control"],
+        icon: "lock",
+        tone: "gate",
+      },
+      migration: {},
+      registry_fingerprint: "gate-registry-test",
+    },
+    {
+      type_id: "mcp_tool",
+      version: 1,
+      category: "mcp",
+      title: "MCP Tool",
+      description:
+        "Executes one declared MCP tool/resource operation through the broker boundary.",
+      config_schema: {
+        type: "object",
+        properties: {
+          tool: { type: "string", title: "Tool" },
+          server: { type: "string", title: "Server" },
+        },
+      },
+      typed_ports: { inputs: [], outputs: [] },
+      compiler_executor_id: "mcp_tool",
+      default_policy: {},
+      ui_hints: {
+        palette_role: "custom",
+        palette_sections: ["control"],
+        icon: "wrench",
+        tone: "neutral",
+      },
+      migration: {},
+      registry_fingerprint: "mcp-registry-test",
+    },
+  ],
+};
 
 const graph: TaskGraphDefinition = {
   schema_version: "astrabridge-task-graph-v1",
@@ -628,6 +833,7 @@ function buildWorkspaceProps(
     selectedEdgeId: null,
     providerOptions: ["qwen", "kimi"],
     modelSuggestions: ["qwen3-coder-plus", "kimi-k2.6"],
+    nodeTypeRegistry,
     nodeSaveError: null,
     edgeSaveError: null,
     dryRunResult: null,
@@ -1271,6 +1477,63 @@ describe("TaskGraphWorkspace", () => {
     );
   });
 
+  it("saves registry-driven node type config back into ui_hints", () => {
+    const onSaveNode = vi.fn();
+    const mcpGraph: TaskGraphDefinition = {
+      ...graph,
+      nodes: graph.nodes.map((node) =>
+        node.node_id === "node_smoke"
+          ? {
+              ...node,
+              kind: "mcp_tool",
+              label: "Search Tool",
+              ui_hints: {
+                context_policy_preset: "task_digest",
+                node_type_config: {
+                  tool: "web.search",
+                  server: "astrabridge_web",
+                },
+              },
+            }
+          : node,
+      ),
+    };
+
+    renderWorkspace({
+      graph: mcpGraph,
+      selectedNodeId: "node_smoke",
+      onSaveNode,
+    });
+    expandInspector();
+
+    fireEvent.change(
+      screen.getByTestId("task-graph-inspector-node-type-config-field-tool"),
+      {
+        target: { value: "read_file" },
+      },
+    );
+    fireEvent.change(
+      screen.getByTestId("task-graph-inspector-node-type-config-field-server"),
+      {
+        target: { value: "workspace_files" },
+      },
+    );
+    fireEvent.click(screen.getByTestId("task-graph-inspector-save"));
+
+    expect(onSaveNode).toHaveBeenCalledWith(
+      "node_smoke",
+      expect.objectContaining({
+        ui_hints: expect.objectContaining({
+          node_type_config: {
+            tool: "read_file",
+            server: "workspace_files",
+          },
+          node_type_id: "mcp_tool",
+        }),
+      }),
+    );
+  });
+
   it("exposes collapsed rail entry points and reopens the requested pane", () => {
     renderWorkspace();
 
@@ -1422,7 +1685,7 @@ describe("TaskGraphWorkspace", () => {
     );
     expect(
       screen.getByTestId("task-graph-node-kind-node_custom"),
-    ).toHaveAttribute("title", "custom");
+    ).toHaveAttribute("title", "Custom");
   });
 
   it("saves prompt, schema, tool, and memory settings from the node inspector", () => {
@@ -1710,7 +1973,7 @@ describe("TaskGraphWorkspace", () => {
     );
     expect(
       screen.getByTestId("task-graph-node-kind-node_discover"),
-    ).toHaveAttribute("title", "extractor");
+    ).toHaveAttribute("title", "Extractor");
     expect(
       screen.getByTestId("task-graph-node-status-node_smoke"),
     ).toHaveTextContent("warning");
@@ -1741,10 +2004,10 @@ describe("TaskGraphWorkspace", () => {
       expect.objectContaining({
         provider_id: "kimi",
         model_id: "kimi-k2.6",
-        ui_hints: {
+        ui_hints: expect.objectContaining({
           context_policy_preset: "isolated_artifacts_only",
           memory_policy_preset: "default",
-        },
+        }),
       }),
     );
   });

@@ -1,0 +1,137 @@
+{
+  "version": 1.0,
+  "state": {
+    "lastNodeId": 2,
+    "lastLinkId": 1
+  },
+  "last_node_id": 2,
+  "last_link_id": 1,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "astrabridge/agent",
+      "title": "Supported Agent",
+      "pos": [40, 120],
+      "size": [280, 180],
+      "inputs": [
+        {
+          "name": "Task context",
+          "type": "text",
+          "id": "task_context",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Machine result",
+          "type": "structured_json",
+          "id": "machine_result",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "properties": {
+        "astrabridge": {
+          "node_id": "node_supported_agent",
+          "label": "Supported Agent",
+          "role": "worker",
+          "node_type_id": "agent_model",
+          "node_type_config": {
+            "routing": {
+              "selection_mode": "explicit",
+              "provider_id": "qwen",
+              "model_id": "qwen3.7-plus"
+            },
+            "prompt": {
+              "template_mode": "inline",
+              "template": "Produce a structured result."
+            },
+            "execution": {
+              "spawn_mode": "inline_lane",
+              "timeout_ms": 120000,
+              "retry_policy": {
+                "max_attempts": 1
+              },
+              "execution_backend": "app_server",
+              "collaboration_mode": "default"
+            },
+            "safety": {
+              "risk_class": "low",
+              "allow_provider_calls": true,
+              "allow_code_changes": false,
+              "allow_install": false,
+              "requires_human_approval": false
+            }
+          },
+          "routing": {
+            "selection_mode": "explicit",
+            "provider_id": "qwen",
+            "model_id": "qwen3.7-plus"
+          },
+          "prompt": {
+            "template_mode": "inline",
+            "template": "Produce a structured result."
+          },
+          "status": "ready"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "vendor_magic/unsupported_router",
+      "title": "Unsupported Router",
+      "pos": [380, 120],
+      "size": [240, 160],
+      "inputs": [
+        {
+          "name": "Input",
+          "type": "structured_json",
+          "id": "input_payload",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Output",
+          "type": "structured_json",
+          "id": "machine_result",
+          "shape": "single",
+          "required": true
+        }
+      ]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "structured_json"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "astrabridge": {
+      "graph_id": "graph_comfyui_unsupported_connected",
+      "task_id": "task_comfyui_examples",
+      "metadata": {
+        "title": "Unsupported Connected Workflow",
+        "template_id": "custom_blank_graph"
+      },
+      "graph_policy": {
+        "entry_node_ids": ["node_supported_agent"],
+        "max_depth": 3
+      },
+      "schema_registry": {},
+      "migration": {
+        "source_kind": "comfyui_fixture"
+      },
+      "links": {
+        "1": {
+          "edge_id": "edge_supported_to_unsupported",
+          "source_port_id": "machine_result",
+          "target_port_id": "input_payload"
+        }
+      },
+      "state_version": 1
+    }
+  }
+}

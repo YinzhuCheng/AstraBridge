@@ -46,6 +46,7 @@ import { Bot, Eye, Lock, Search, ShieldCheck, Wrench } from "lucide-react";
 
 import type {
   LocaleCode,
+  NodeTypeRegistrySnapshot,
   TaskGraphContextPolicy,
   TaskGraphDefinition,
   TaskGraphDryRunResult,
@@ -58,6 +59,11 @@ import type {
   TaskGraphTemplateSummary,
 } from "../../types";
 import { isTaskGraphRunRefStale } from "./taskGraphRunRefs";
+import { TaskGraphSchemaForm } from "./TaskGraphSchemaForm";
+import {
+  buildTaskGraphNodeRegistryUi,
+  taskGraphPaletteMeta,
+} from "./taskGraphNodeRegistryUi";
 
 type TaskGraphWorkspaceProps = {
   locale: LocaleCode;
@@ -67,6 +73,7 @@ type TaskGraphWorkspaceProps = {
   selectedEdgeId: string | null;
   providerOptions: string[];
   modelSuggestions: string[];
+  nodeTypeRegistry?: NodeTypeRegistrySnapshot | null;
   nodeSaveError: string | null;
   edgeSaveError: string | null;
   dryRunResult: TaskGraphDryRunResult | null;
@@ -182,6 +189,7 @@ type NodeDraft = {
   allow_install: boolean;
   requires_human_approval: boolean;
   approval_review_kind: string;
+  node_type_config: Record<string, unknown>;
 };
 
 type EdgeDraft = {
@@ -288,19 +296,6 @@ const MIN_STAGE_HEIGHT = 512;
 const MIN_CANVAS_SCALE = 0.55;
 const MAX_CANVAS_SCALE = 1.6;
 const DEFAULT_CANVAS_SCALE = 1;
-const PALETTE_NODE_KINDS = [
-  "supervisor",
-  "planner",
-  "worker",
-  "coder",
-  "reviewer",
-  "validator",
-  "researcher",
-  "extractor",
-  "synthesizer",
-  "gate",
-  "custom",
-] as const;
 const TASK_GRAPH_SIDEBAR_WIDTH_STORAGE_KEY =
   "astrabridge.task_graph.sidebar_width";
 const TASK_GRAPH_WORKSPACE_STATE_STORAGE_KEY_PREFIX =
@@ -396,6 +391,7 @@ export function TaskGraphWorkspace({
   selectedEdgeId,
   providerOptions: rawProviderOptions,
   modelSuggestions: rawModelSuggestions,
+  nodeTypeRegistry,
   nodeSaveError,
   edgeSaveError,
   dryRunResult,
@@ -984,6 +980,20 @@ export function TaskGraphWorkspace({
     graph?.nodes.find((node) => node.node_id === selectedNodeId) ??
     graph?.nodes[0] ??
     null;
+  const registryUi = useMemo(
+    () =>
+      buildTaskGraphNodeRegistryUi({
+        locale,
+        snapshot: nodeTypeRegistry,
+      }),
+    [locale, nodeTypeRegistry],
+  );
+  const selectedNodeTypeSpec = useMemo(
+    () => registryUi.typeSpecForNode(selectedNode),
+    [registryUi, selectedNode],
+  );
+  const selectedNodeTypeConfigSchema =
+    (asRecord(selectedNodeTypeSpec?.config_schema) ?? null);
   const selectedEdge =
     graph?.edges.find((edge) => edge.edge_id === selectedEdgeId) ?? null;
   const nodeMap = useMemo(
@@ -1011,6 +1021,7 @@ export function TaskGraphWorkspace({
   const [nodeDraftBaseline, setNodeDraftBaseline] = useState<NodeDraft | null>(
     null,
   );
+  const [nodeTypeConfigValid, setNodeTypeConfigValid] = useState(true);
   const [edgeDraft, setEdgeDraft] = useState<EdgeDraft | null>(null);
   const [edgeDraftBaseline, setEdgeDraftBaseline] = useState<EdgeDraft | null>(
     null,
@@ -1212,6 +1223,7 @@ export function TaskGraphWorkspace({
     const nextNodeDraft = selectedNode ? buildNodeDraft(selectedNode) : null;
     setNodeDraft(nextNodeDraft);
     setNodeDraftBaseline(nextNodeDraft);
+    setNodeTypeConfigValid(true);
   }, [selectedNode]);
 
   useEffect(() => {
@@ -1407,6 +1419,9 @@ export function TaskGraphWorkspace({
     node: selectedNode,
     graph,
   });
+  const effectiveNodeDraftError = !nodeTypeConfigValid
+    ? "Node type config contains invalid values."
+    : nodeDraftError;
   const nodeDraftWarning = selectedNode
     ? incompleteNodeWarning(copy.incompleteNodeWarning, selectedNode, nodeDraft)
     : "";
@@ -2227,7 +2242,7 @@ export function TaskGraphWorkspace({
   };
 
   const saveNode = () => {
-    if (!selectedNode || !nodeDraft || nodeDraftError) return;
+    if (!selectedNode || !nodeDraft || effectiveNodeDraftError) return;
     const parsedSchema = parseNodeSchemaText(
       nodeDraft.machine_result_schema_text,
     );
@@ -2264,8 +2279,16 @@ export function TaskGraphWorkspace({
       output_contract: nextOutputContract,
       ...(nextApprovalGate ? { approval_gate: nextApprovalGate } : {}),
       ui_hints: {
+        ...(asRecord(selectedNode.ui_hints) ?? {}),
         context_policy_preset: nodeDraft.context_policy_preset,
         memory_policy_preset: nodeDraft.memory_policy_preset,
+        node_type_config: nodeDraft.node_type_config,
+        node_type_id:
+          selectedNodeTypeSpec?.type_id ??
+          asRecord(selectedNode.ui_hints)?.node_type_id,
+        node_type_registry_fingerprint:
+          nodeTypeRegistry?.registry_fingerprint ??
+          asRecord(selectedNode.ui_hints)?.node_type_registry_fingerprint,
       },
     });
     const savedDraft: NodeDraft = {
@@ -3625,34 +3648,39 @@ export function TaskGraphWorkspace({
                             </div>
                             <div className="task-graph-template-preview-track">
                               {selectedTemplate.preview_graph.nodes.map(
-                                (node, index) => (
-                                  <div
-                                    key={`${selectedTemplate.template_id}:preview:${node.node_id}`}
-                                    className="task-graph-template-preview-node"
-                                  >
-                                    <span
-                                      className={`task-graph-palette-icon task-graph-node-role-badge-${nodeToneForKind(displayTemplateNodeKind(node.kind))}`}
-                                      aria-hidden="true"
+                                (node, index) => {
+                                  const visibleKind =
+                                    registryUi.kindForTemplate(node.kind);
+                                  const item = taskGraphPaletteMeta(
+                                    registryUi,
+                                    visibleKind,
+                                  );
+                                  return (
+                                    <div
+                                      key={`${selectedTemplate.template_id}:preview:${node.node_id}`}
+                                      className="task-graph-template-preview-node"
                                     >
-                                      {nodeKindIcon(
-                                        displayTemplateNodeKind(node.kind),
-                                        12,
-                                      )}
-                                    </span>
-                                    <span>{node.label}</span>
-                                    {index <
-                                    selectedTemplate.preview_graph.nodes
-                                      .length -
-                                      1 ? (
                                       <span
-                                        className="task-graph-template-preview-arrow"
+                                        className={`task-graph-palette-icon task-graph-node-role-badge-${nodeToneForKind(visibleKind)}`}
                                         aria-hidden="true"
                                       >
-                                        {"->"}
+                                        {nodeKindIcon(item.icon || visibleKind, 12)}
                                       </span>
-                                    ) : null}
-                                  </div>
-                                ),
+                                      <span>{node.label}</span>
+                                      {index <
+                                      selectedTemplate.preview_graph.nodes
+                                        .length -
+                                        1 ? (
+                                        <span
+                                          className="task-graph-template-preview-arrow"
+                                          aria-hidden="true"
+                                        >
+                                          {"->"}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                  );
+                                },
                               )}
                             </div>
                           </div>
@@ -3734,7 +3762,7 @@ export function TaskGraphWorkspace({
                 {activeSidebarPane === "nodes" ? (
                 <section className="task-graph-sidebar-section">
                   <div data-testid="task-graph-node-palette">
-                    {paletteSections(locale).map((section) => (
+                    {registryUi.paletteSections.map((section) => (
                       <section
                         key={section.id}
                         className="task-graph-palette-section"
@@ -3742,7 +3770,7 @@ export function TaskGraphWorkspace({
                       >
                         <div className="task-graph-node-palette-grid">
                           {section.kinds.map((kind) => {
-                            const item = paletteNodeMeta(kind);
+                            const item = taskGraphPaletteMeta(registryUi, kind);
                             return (
                               <button
                                 key={kind}
@@ -3779,7 +3807,7 @@ export function TaskGraphWorkspace({
                                   className={`task-graph-palette-icon task-graph-node-role-badge-${nodeToneForKind(kind)}`}
                                   aria-hidden="true"
                                 >
-                                  {nodeKindIcon(kind, 14)}
+                                  {nodeKindIcon(item.icon || kind, 14)}
                                 </span>
                                 <span
                                   id={`task-graph-palette-tooltip-${kind}`}
@@ -4597,8 +4625,12 @@ export function TaskGraphWorkspace({
                     const nodeStatusTone = nodeStatus
                       ? statusVisualTone(nodeStatus)
                       : null;
-                    const visibleKind = displayNodeKind(node);
-                    const nodeTone = nodeToneForKind(visibleKind);
+                    const visibleKind = registryUi.kindForNode(node);
+                    const visibleKindMeta = taskGraphPaletteMeta(
+                      registryUi,
+                      visibleKind,
+                    );
+                    const nodeTone = nodeToneForKind(visibleKindMeta.tone);
                     const nodePorts = nodePortSummary(node, graph);
                     const isEdgeSource =
                       edgeCreateSourceId === node.node_id && isCreatingEdge;
@@ -4634,13 +4666,13 @@ export function TaskGraphWorkspace({
                         }}
                         title={
                           nodeEdgeCompatibility
-                            ? `${node.label} / ${visibleKind} / ${nodeEdgeCompatibility.message}`
-                            : `${node.label} / ${visibleKind}`
+                            ? `${node.label} / ${visibleKindMeta.label} / ${nodeEdgeCompatibility.message}`
+                            : `${node.label} / ${visibleKindMeta.label}`
                         }
                         aria-label={
                           nodeEdgeCompatibility
-                            ? `${node.label} / ${visibleKind} / ${nodeEdgeCompatibility.message}`
-                            : `${node.label} / ${visibleKind}`
+                            ? `${node.label} / ${visibleKindMeta.label} / ${nodeEdgeCompatibility.message}`
+                            : `${node.label} / ${visibleKindMeta.label}`
                         }
                         onKeyDown={(event) => {
                           if (event.key !== "Enter" && event.key !== " ") return;
@@ -4675,10 +4707,13 @@ export function TaskGraphWorkspace({
                             <span
                               className={`task-graph-node-role-badge task-graph-node-role-badge-${nodeTone}`}
                               data-testid={`task-graph-node-kind-${node.node_id}`}
-                              aria-label={visibleKind}
-                              title={visibleKind}
+                              aria-label={visibleKindMeta.label}
+                              title={visibleKindMeta.label}
                             >
-                              {nodeKindIcon(visibleKind, 13)}
+                              {nodeKindIcon(
+                                visibleKindMeta.icon || visibleKind,
+                                13,
+                              )}
                             </span>
                             <strong>{node.label}</strong>
                           </span>
@@ -4917,32 +4952,37 @@ export function TaskGraphWorkspace({
                           </div>
                           <div className="task-graph-template-preview-track">
                             {selectedTemplate.preview_graph.nodes.map(
-                              (node, index) => (
-                                <div
-                                  key={`${selectedTemplate.template_id}:preview:${node.node_id}`}
-                                  className="task-graph-template-preview-node"
-                                >
-                                  <span
-                                    className={`task-graph-palette-icon task-graph-node-role-badge-${nodeToneForKind(displayTemplateNodeKind(node.kind))}`}
-                                    aria-hidden="true"
+                              (node, index) => {
+                                const visibleKind =
+                                  registryUi.kindForTemplate(node.kind);
+                                const item = taskGraphPaletteMeta(
+                                  registryUi,
+                                  visibleKind,
+                                );
+                                return (
+                                  <div
+                                    key={`${selectedTemplate.template_id}:preview:${node.node_id}`}
+                                    className="task-graph-template-preview-node"
                                   >
-                                    {nodeKindIcon(
-                                      displayTemplateNodeKind(node.kind),
-                                      12,
-                                    )}
-                                  </span>
-                                  <span>{node.label}</span>
-                                  {index <
-                                  selectedTemplate.preview_graph.nodes.length - 1 ? (
                                     <span
-                                      className="task-graph-template-preview-arrow"
+                                      className={`task-graph-palette-icon task-graph-node-role-badge-${nodeToneForKind(visibleKind)}`}
                                       aria-hidden="true"
                                     >
-                                      {"->"}
+                                      {nodeKindIcon(item.icon || visibleKind, 12)}
                                     </span>
-                                  ) : null}
-                                </div>
-                              ),
+                                    <span>{node.label}</span>
+                                    {index <
+                                    selectedTemplate.preview_graph.nodes.length - 1 ? (
+                                      <span
+                                        className="task-graph-template-preview-arrow"
+                                        aria-hidden="true"
+                                      >
+                                        {"->"}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                );
+                              },
                             )}
                           </div>
                         </div>
@@ -5152,7 +5192,14 @@ export function TaskGraphWorkspace({
                       <div className="task-graph-inspector-title">
                         <strong>{selectedNode.label}</strong>
                         <div className="task-graph-inspector-title-meta">
-                          <span>{displayNodeKind(selectedNode)}</span>
+                          <span>
+                            {
+                              taskGraphPaletteMeta(
+                                registryUi,
+                                registryUi.kindForNode(selectedNode),
+                              ).label
+                            }
+                          </span>
                           <small>{selectedNode.node_id}</small>
                         </div>
                       </div>
@@ -5226,6 +5273,48 @@ export function TaskGraphWorkspace({
                             </div>
                           </div>
                         </section>
+                      ) : null}
+
+                      {selectedNodeTypeSpec && selectedNodeTypeConfigSchema ? (
+                        <details
+                          className="task-graph-advanced-panel"
+                          data-testid="task-graph-inspector-node-type-config"
+                        >
+                          <summary className="task-graph-advanced-summary">
+                            <strong>{selectedNodeTypeSpec.title}</strong>
+                          </summary>
+                          <div className="task-graph-advanced-body">
+                            {selectedNodeTypeSpec.description ? (
+                              <p className="task-graph-muted">
+                                {selectedNodeTypeSpec.description}
+                              </p>
+                            ) : null}
+                            <TaskGraphSchemaForm
+                              schema={selectedNodeTypeConfigSchema}
+                              value={nodeDraft.node_type_config}
+                              onChange={(nextValue) =>
+                                setNodeDraft((current) =>
+                                  current
+                                    ? {
+                                        ...current,
+                                        node_type_config: nextValue,
+                                      }
+                                    : current,
+                                )
+                              }
+                              onValidityChange={setNodeTypeConfigValid}
+                              testIdPrefix="task-graph-inspector-node-type-config-field"
+                            />
+                            {!nodeTypeConfigValid ? (
+                              <small
+                                className="task-graph-danger"
+                                data-testid="task-graph-inspector-node-type-config-error"
+                              >
+                                Node type config contains invalid values.
+                              </small>
+                            ) : null}
+                          </div>
+                        </details>
                       ) : null}
 
                       <label className="task-graph-field">
@@ -5727,15 +5816,15 @@ export function TaskGraphWorkspace({
                       </details>
 
                       {selectedNodeRunPanel}
-                      {nodeDraftError ? (
+                      {effectiveNodeDraftError ? (
                         <p
                           className="task-graph-validation"
                           data-testid="task-graph-inspector-validation"
                         >
-                          {nodeDraftError}
+                          {effectiveNodeDraftError}
                         </p>
                       ) : null}
-                      {!nodeDraftError && nodeDraftWarning ? (
+                      {!effectiveNodeDraftError && nodeDraftWarning ? (
                         <p
                           className="task-graph-validation"
                           data-testid="task-graph-inspector-warning"
@@ -5743,7 +5832,7 @@ export function TaskGraphWorkspace({
                           {nodeDraftWarning}
                         </p>
                       ) : null}
-                      {!nodeDraftError && nodeSaveError ? (
+                      {!effectiveNodeDraftError && nodeSaveError ? (
                         <p
                           className="task-graph-validation"
                           data-testid="task-graph-inspector-save-error"
@@ -5757,11 +5846,12 @@ export function TaskGraphWorkspace({
                           type="button"
                           className="ghost-button"
                           data-testid="task-graph-inspector-reset"
-                          onClick={() =>
+                          onClick={() => {
                             setNodeDraft(
                               nodeDraftBaseline ?? buildNodeDraft(selectedNode),
-                            )
-                          }
+                            );
+                            setNodeTypeConfigValid(true);
+                          }}
                           disabled={!nodeDraftDirty || isSavingNode}
                         >
                           {copy.reset}
@@ -5773,7 +5863,7 @@ export function TaskGraphWorkspace({
                           onClick={saveNode}
                           disabled={
                             !nodeDraftDirty ||
-                            Boolean(nodeDraftError) ||
+                            Boolean(effectiveNodeDraftError) ||
                             isSavingNode
                           }
                           title={copy.nodeModeTitle}
@@ -6593,6 +6683,7 @@ function buildNodeDraft(node: TaskGraphNode): NodeDraft {
       typeof approvalGate.review_kind === "string"
         ? approvalGate.review_kind
         : "",
+    node_type_config: asRecord(uiHints.node_type_config) ?? {},
   };
 }
 
@@ -8152,25 +8243,53 @@ function nodeKindIcon(kind: string, size = 14) {
       .toLowerCase()
   ) {
     case "supervisor":
+    case "compass":
       return <Compass size={size} />;
     case "planner":
+    case "file-text":
       return <FileText size={size} />;
     case "worker":
+    case "mcp_tool":
+    case "wrench":
       return <Wrench size={size} />;
     case "coder":
+    case "braces":
       return <Braces size={size} />;
     case "synthesizer":
+    case "sparkles":
       return <Sparkles size={size} />;
     case "validator":
+    case "shield-check":
       return <ShieldCheck size={size} />;
     case "reviewer":
+    case "eye":
       return <Eye size={size} />;
     case "gate":
+    case "human_approval":
+    case "lock":
       return <Lock size={size} />;
     case "researcher":
+    case "search":
       return <Search size={size} />;
     case "extractor":
+    case "mcp_resource":
+    case "database":
       return <Database size={size} />;
+    case "transform":
+    case "loop":
+    case "repeat":
+      return <Repeat size={size} />;
+    case "router_condition":
+    case "git-branch":
+      return <GitBranch size={size} />;
+    case "subgraph":
+    case "boxes":
+      return <Boxes size={size} />;
+    case "artifact_source":
+      return <FileText size={size} />;
+    case "artifact_sink":
+    case "square-stack":
+      return <SquareStack size={size} />;
     default:
       return <Bot size={size} />;
   }

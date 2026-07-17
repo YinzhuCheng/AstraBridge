@@ -79,6 +79,12 @@ class WebLaneTests(unittest.TestCase):
             self.assertEqual(saved["schema_version"], "astrabridge-web-research-record-v1")
             self.assertEqual(saved["usage_signal"]["source"], "web_lane")
             self.assertEqual(saved["result"]["tool"], "astrabridge_web_search_batch")
+            self.assertEqual(
+                result["result"]["protocol_artifact_refs"][0]["artifact_uri"],
+                f"workspace://.astrabridge/research/{record_path.stem}.json",
+            )
+            self.assertEqual(result["result"]["typed_result"]["result_kind"], "web_search")
+            self.assertEqual(result["result"]["content_parts"][0]["kind"], "json")
 
     def test_openai_structured_outputs_research_uses_first_party_hints(self) -> None:
         goal = "Summarize current public documentation guidance for OpenAI Responses API structured outputs, citing official source pages only."

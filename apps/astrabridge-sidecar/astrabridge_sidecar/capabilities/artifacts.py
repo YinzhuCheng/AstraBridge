@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common import path_for_host, read_json
+from ..multimodal_result_envelope import protocol_artifact_snapshot
 
 
 CAPABILITY_ARTIFACTS_SCHEMA_VERSION = "astrabridge-capability-artifacts-v1"
@@ -59,19 +60,33 @@ def _summary_entries(workspace_root: Path, capability_dir: Path, capability_id: 
 
 def _entry_from_summary(workspace_root: Path, summary_path: Path, summary: dict[str, Any], capability_id: str) -> dict[str, Any] | None:
     artifact_refs = []
+    lineage = _artifact_lineage(capability_id, summary_path.parent.name)
     for key, value in summary.items():
         if not key.endswith("_path"):
             continue
         path = _safe_path(workspace_root, value)
         if path is None:
             continue
+        artifact_type = key[: -len("_path")]
+        protocol_ref = protocol_artifact_snapshot(
+            workspace_root=workspace_root,
+            artifact_path=path,
+            artifact_id=f"{summary_path.parent.name}-{artifact_type}",
+            lineage=lineage,
+            media_type=_mime_type(path),
+            artifact_kind=artifact_type,
+        )
         artifact_refs.append(
             {
-                "artifact_type": key[: -len("_path")],
+                "artifact_type": artifact_type,
                 "path": str(path),
                 "relative_path": _relative_path(workspace_root, path),
                 "exists": path.exists(),
                 "mime_type": _mime_type(path),
+                "artifact_uri": str(protocol_ref.get("artifact_uri") or "") if isinstance(protocol_ref, dict) else "",
+                "size_bytes": int(protocol_ref.get("size_bytes") or 0) if isinstance(protocol_ref, dict) else 0,
+                "digest_sha256": str(protocol_ref.get("digest_sha256") or "") if isinstance(protocol_ref, dict) else "",
+                "lineage": dict(protocol_ref.get("lineage") or {}) if isinstance(protocol_ref, dict) else {},
             }
         )
     preview_text = ""
@@ -123,6 +138,15 @@ def _image_asset_entries(workspace_root: Path) -> list[dict[str, Any]]:
         if key in seen:
             continue
         seen.add(key)
+        lineage = _artifact_lineage("image.generate", asset_id)
+        protocol_ref = protocol_artifact_snapshot(
+            workspace_root=workspace_root,
+            artifact_path=source,
+            artifact_id=asset_id,
+            lineage=lineage,
+            media_type=_mime_type(source),
+            artifact_kind="image",
+        )
         entries.append(
             {
                 "artifact_id": asset_id,
@@ -139,6 +163,10 @@ def _image_asset_entries(workspace_root: Path) -> list[dict[str, Any]]:
                         "relative_path": _relative_path(workspace_root, source),
                         "exists": source.exists(),
                         "mime_type": _mime_type(source),
+                        "artifact_uri": str(protocol_ref.get("artifact_uri") or "") if isinstance(protocol_ref, dict) else "",
+                        "size_bytes": int(protocol_ref.get("size_bytes") or 0) if isinstance(protocol_ref, dict) else 0,
+                        "digest_sha256": str(protocol_ref.get("digest_sha256") or "") if isinstance(protocol_ref, dict) else "",
+                        "lineage": dict(protocol_ref.get("lineage") or {}) if isinstance(protocol_ref, dict) else {},
                     }
                 ],
                 "preview": {
@@ -226,3 +254,11 @@ def _mime_type(path: Path) -> str:
     if suffix == ".txt":
         return "text/plain"
     return "application/octet-stream"
+
+
+def _artifact_lineage(capability_id: str, run_id: str) -> dict[str, Any]:
+    return {
+        "task_id": f"capability.{capability_id}",
+        "run_id": str(run_id or "artifact"),
+        "source_node_id": f"capability.{capability_id}",
+    }

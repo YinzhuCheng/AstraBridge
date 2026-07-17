@@ -24,12 +24,22 @@ DURABLE_RUN_STORE_SCHEMA_VERSION = "astrabridge-durable-run-store-v1"
 DURABLE_RUN_STORE_FILENAME = "durable_runs.sqlite3"
 DURABLE_RUN_MIGRATION_SCHEMA_VERSION = "astrabridge-durable-run-migration-v1"
 DURABLE_RUN_PROJECTION_SCHEMA_VERSION = "astrabridge-durable-run-projection-v1"
+DELIVERY_LEDGER_EVENT_TYPES = frozenset(
+    {
+        "handoff_created",
+        "handoff_acknowledged",
+        "handoff_rejected",
+        "handoff_retry_scheduled",
+        "handoff_delivery_failed",
+    }
+)
 
 TERMINAL_RUN_STATUSES = frozenset(
     {
         "completed",
         "failed",
         "cancelled",
+        "needs_review",
         "partial",
         "rolled_back",
         "dry_run_passed",
@@ -182,6 +192,21 @@ class DurableRunEventStore:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS agent_envelopes (
+                    envelope_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    graph_id TEXT NOT NULL,
+                    source_node_id TEXT NOT NULL,
+                    target_node_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    trace_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    UNIQUE (run_id, idempotency_key),
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS leases (
                     lease_id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL,
@@ -253,6 +278,7 @@ class DurableRunEventStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_run_events_run_sequence ON run_events(run_id, sequence);
                 CREATE INDEX IF NOT EXISTS idx_node_attempts_run_node ON node_attempts(run_id, node_id, attempt);
+                CREATE INDEX IF NOT EXISTS idx_agent_envelopes_run_target ON agent_envelopes(run_id, target_node_id, created_at, envelope_id);
                 CREATE INDEX IF NOT EXISTS idx_leases_active ON leases(run_id, node_id, status, expires_at);
                 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, updated_at);
                 """
@@ -366,6 +392,11 @@ class DurableRunEventStore:
             (run_id,),
         ).fetchall()
         run["artifact_refs"] = [_json_load(item["payload_json"], {}) for item in artifact_rows]
+        envelope_rows = conn.execute(
+            "SELECT payload_json FROM agent_envelopes WHERE run_id = ? ORDER BY created_at, envelope_id",
+            (run_id,),
+        ).fetchall()
+        run["agent_envelopes"] = [_json_load(item["payload_json"], {}) for item in envelope_rows]
         if include_events:
             event_rows = conn.execute(
                 "SELECT * FROM run_events WHERE run_id = ? ORDER BY sequence",
@@ -374,6 +405,11 @@ class DurableRunEventStore:
             run["event_refs"] = [self._event_payload(item) for item in event_rows]
         else:
             run["event_refs"] = []
+        run["delivery_ledger"] = [
+            dict(item)
+            for item in list(run.get("event_refs") or [])
+            if str(item.get("event_type") or "").strip() in DELIVERY_LEDGER_EVENT_TYPES
+        ]
         run.setdefault("entry_node_ids", [])
         run.setdefault("approval_state", {"status": "not_required"})
         run.setdefault("run_policy_snapshot", {})
@@ -477,6 +513,7 @@ class DurableRunEventStore:
                 )
             self._insert_attempts(conn, clean)
             self._insert_artifacts(conn, clean)
+            self._insert_agent_envelopes(conn, clean)
             self._insert_events(conn, clean)
             return self._projection_in_connection(conn, run_id) or clean
 
@@ -487,7 +524,9 @@ class DurableRunEventStore:
             node_id = str(item.get("node_id") or "").strip()
             if not node_id:
                 continue
-            attempt = max(1, int(item.get("attempt_count") or 1))
+            attempt = int(item.get("attempt_count") or 0)
+            if attempt <= 0:
+                continue
             status = str(item.get("status") or "queued").strip() or "queued"
             updated_at = str(item.get("updated_at") or run.get("updated_at") or now_iso()).strip()
             self._insert_attempt(conn, run_id=str(run["run_id"]), node_id=node_id, attempt=attempt, status=status, started_at=item.get("started_at"), updated_at=updated_at, payload=item)
@@ -595,6 +634,117 @@ class DurableRunEventStore:
                 raise ValueError(f"Unknown run_id: {run_id}")
             return self._insert_artifact(conn, run=self._row_run(row), artifact=artifact)
 
+    def _insert_agent_envelopes(self, conn: sqlite3.Connection, run: dict[str, Any]) -> None:
+        for item in list(run.get("agent_envelopes") or []):
+            if isinstance(item, dict) and str(item.get("envelope_id") or "").strip():
+                self._insert_agent_envelope(conn, envelope=item)
+
+    def _insert_agent_envelope(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        envelope: dict[str, Any],
+    ) -> dict[str, Any]:
+        clean = _redacted(envelope)
+        envelope_id = _identifier(clean.get("envelope_id"), "envelope_id")
+        run_id = _identifier(clean.get("run_id"), "run_id")
+        task_id = _identifier(clean.get("task_id"), "task_id")
+        message_id = _identifier(clean.get("message_id"), "message_id")
+        delivery = dict(clean.get("delivery") or {})
+        idempotency_key = _identifier(delivery.get("idempotency_key"), "delivery.idempotency_key")
+        trace_id = _identifier(delivery.get("trace_id"), "delivery.trace_id")
+        metadata = dict(clean.get("metadata") or {})
+        graph_id = _identifier(metadata.get("graph_id"), "metadata.graph_id")
+        source_node_id = _identifier(metadata.get("source_node_id"), "metadata.source_node_id")
+        target_node_id = _identifier(metadata.get("target_node_id"), "metadata.target_node_id")
+        created_at = str(clean.get("created_at") or now_iso()).strip() or now_iso()
+        existing = conn.execute(
+            "SELECT payload_json FROM agent_envelopes WHERE envelope_id = ?",
+            (envelope_id,),
+        ).fetchone()
+        if existing is not None:
+            old = _json_load(existing["payload_json"], {})
+            if _json_text(old) != _json_text(clean):
+                raise ImmutableRecordConflict(f"agent envelope is immutable: {envelope_id}")
+            return old
+        duplicate = conn.execute(
+            "SELECT payload_json FROM agent_envelopes WHERE run_id = ? AND idempotency_key = ?",
+            (run_id, idempotency_key),
+        ).fetchone()
+        if duplicate is not None:
+            old = _json_load(duplicate["payload_json"], {})
+            if _json_text(old) != _json_text(clean):
+                raise ImmutableRecordConflict(f"delivery idempotency key is immutable: {run_id}/{idempotency_key}")
+            return old
+        conn.execute(
+            """INSERT INTO agent_envelopes(
+                   envelope_id, run_id, task_id, graph_id, source_node_id, target_node_id,
+                   message_id, idempotency_key, trace_id, created_at, payload_json
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                envelope_id,
+                run_id,
+                task_id,
+                graph_id,
+                source_node_id,
+                target_node_id,
+                message_id,
+                idempotency_key,
+                trace_id,
+                created_at,
+                _json_text(clean),
+            ),
+        )
+        return clean
+
+    def record_agent_envelope(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        self._require_initialized()
+        clean_run_id = _identifier(envelope.get("run_id"), "run_id")
+        with self._transaction() as conn:
+            if conn.execute("SELECT 1 FROM runs WHERE run_id = ?", (clean_run_id,)).fetchone() is None:
+                raise ValueError(f"Unknown run_id: {clean_run_id}")
+            return self._insert_agent_envelope(conn, envelope=envelope)
+
+    def get_agent_envelope(self, envelope_id: str) -> dict[str, Any] | None:
+        self._require_initialized()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM agent_envelopes WHERE envelope_id = ?",
+                (_identifier(envelope_id, "envelope_id"),),
+            ).fetchone()
+            if row is None:
+                return None
+            return _json_load(row["payload_json"], {})
+
+    def list_agent_envelopes(
+        self,
+        *,
+        run_id: str | None = None,
+        source_node_id: str | None = None,
+        target_node_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self._require_initialized()
+        query = "SELECT payload_json FROM agent_envelopes"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if str(run_id or "").strip():
+            clauses.append("run_id = ?")
+            params.append(_identifier(run_id, "run_id"))
+        if str(source_node_id or "").strip():
+            clauses.append("source_node_id = ?")
+            params.append(_identifier(source_node_id, "source_node_id"))
+        if str(target_node_id or "").strip():
+            clauses.append("target_node_id = ?")
+            params.append(_identifier(target_node_id, "target_node_id"))
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at, envelope_id"
+        with self._connection() as conn:
+            return [
+                _json_load(row["payload_json"], {})
+                for row in conn.execute(query, tuple(params)).fetchall()
+            ]
+
     def _insert_events(self, conn: sqlite3.Connection, run: dict[str, Any]) -> None:
         next_sequence = 0
         for item in list(run.get("event_refs") or []):
@@ -633,7 +783,9 @@ class DurableRunEventStore:
             node_id = str(item.get("node_id") or "").strip()
             if not node_id:
                 continue
-            attempt = max(1, int(item.get("attempt_count") or 1))
+            attempt = int(item.get("attempt_count") or 0)
+            if attempt <= 0:
+                continue
             exists = conn.execute(
                 "SELECT 1 FROM node_attempts WHERE run_id=? AND node_id=? AND attempt=?",
                 (run_id, node_id, attempt),
@@ -657,6 +809,9 @@ class DurableRunEventStore:
                     # Compact legacy refs may enrich an existing artifact with
                     # UI-only labels or status.  Keep the first durable record.
                     continue
+        for item in list(run.get("agent_envelopes") or []):
+            if isinstance(item, dict) and str(item.get("envelope_id") or "").strip():
+                self._insert_agent_envelope(conn, envelope=item)
         for item in list(run.get("event_refs") or run.get("timeline_events") or []):
             if not isinstance(item, dict):
                 continue
@@ -836,45 +991,72 @@ class DurableRunEventStore:
         if not isinstance(run_ref, dict):
             raise TypeError("run_ref must be an object.")
         run_id = str(run_ref.get("run_id") or "").strip()
-        current = self.load_run(run_id) if run_id else None
-        if current is None:
+        if not run_id:
             return None
-        current_version = int(current.get("state_version") or 0)
-        patch = {
-            key: deepcopy(run_ref[key])
-            for key in (
-                "status",
-                "updated_at",
-                "entry_node_ids",
-                "node_status_counts",
-                "node_outcome_counts",
-                "artifact_count",
-                "event_count",
-                "approval_state",
-                "approval_details",
-                "latest_event_type",
-                "latest_event_at",
-                "metrics",
-                "budget",
-                "worker_count",
-                "worker_bindings",
-                "policy_snapshot",
-            )
-            if key in run_ref
-        }
-        patch["state_version"] = current_version
-        # Projection updates still receive a durable state transition so a
-        # scheduler never observes a partially-written ref.
-        return self.compare_and_swap_run(
-            run_id,
-            current_version,
-            status=str(run_ref.get("status") or current.get("status") or "queued"),
-            patch={key: value for key, value in patch.items() if key != "state_version"},
-            runtime_records={
+        last_conflict: StateVersionConflict | None = None
+        for _attempt in range(3):
+            current = self.load_run(run_id)
+            if current is None:
+                return None
+            current_version = int(current.get("state_version") or 0)
+            patch = {
+                key: deepcopy(run_ref[key])
+                for key in (
+                    "status",
+                    "updated_at",
+                    "entry_node_ids",
+                    "node_status_counts",
+                    "node_outcome_counts",
+                    "artifact_count",
+                    "event_count",
+                    "approval_state",
+                    "approval_details",
+                    "latest_event_type",
+                    "latest_event_at",
+                    "metrics",
+                    "budget",
+                    "worker_count",
+                    "worker_bindings",
+                    "policy_snapshot",
+                )
+                if key in run_ref
+            }
+            patch["state_version"] = current_version
+            runtime_records = {
                 **dict(run_ref),
+                # Compact live run refs carry the latest node snapshot, not an
+                # immutable attempt journal. Attempt rows must be created only
+                # through explicit durable attempt writes.
+                "node_run_states": [],
                 "event_refs": [dict(item) for item in list(run_ref.get("timeline_events") or []) if isinstance(item, dict)],
-            },
-        )
+                "artifact_refs": [
+                    *[dict(item) for item in list(run_ref.get("artifact_refs") or []) if isinstance(item, dict)],
+                    *[dict(item) for item in list(run_ref.get("diagnostic_refs") or []) if isinstance(item, dict)],
+                ],
+            }
+            raw_approval_state = runtime_records.get("approval_state")
+            if not isinstance(raw_approval_state, dict):
+                runtime_records["approval_state"] = {
+                    "status": str(raw_approval_state or "not_required").strip() or "not_required"
+                }
+            if "approval_state" in patch and not isinstance(patch["approval_state"], dict):
+                patch["approval_state"] = dict(runtime_records["approval_state"])
+            try:
+                # Projection updates still receive a durable state transition so a
+                # scheduler never observes a partially-written ref.
+                return self.compare_and_swap_run(
+                    run_id,
+                    current_version,
+                    status=str(run_ref.get("status") or current.get("status") or "queued"),
+                    patch={key: value for key, value in patch.items() if key != "state_version"},
+                    runtime_records=runtime_records,
+                )
+            except StateVersionConflict as exc:
+                last_conflict = exc
+                continue
+        if last_conflict is not None:
+            raise last_conflict
+        return None
 
     def acquire_lease(
         self,
@@ -911,12 +1093,42 @@ class DurableRunEventStore:
             )
             return self._lease_row(conn.execute("SELECT * FROM leases WHERE lease_id = ?", (clean_lease_id,)).fetchone())
 
+    def list_leases(
+        self,
+        *,
+        run_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self._require_initialized()
+        query = "SELECT * FROM leases"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if str(run_id or "").strip():
+            clauses.append("run_id = ?")
+            params.append(_identifier(run_id, "run_id"))
+        if str(status or "").strip():
+            clauses.append("status = ?")
+            params.append(str(status).strip())
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY acquired_at, lease_id"
+        with self._connection() as conn:
+            return [self._lease_row(row) for row in conn.execute(query, tuple(params)).fetchall()]
+
     @staticmethod
     def _lease_row(row: sqlite3.Row | None) -> dict[str, Any]:
         if row is None:
             return {}
         payload = _json_load(row["payload_json"], {})
-        payload.update({"lease_id": row["lease_id"], "status": row["status"], "heartbeat_at": row["heartbeat_at"], "expires_at": row["expires_at"]})
+        payload.update(
+            {
+                "lease_id": row["lease_id"],
+                "status": row["status"],
+                "acquired_at": row["acquired_at"],
+                "heartbeat_at": row["heartbeat_at"],
+                "expires_at": row["expires_at"],
+            }
+        )
         return payload
 
     def heartbeat_lease(self, lease_id: str, *, owner_boot_id: str, ttl_seconds: int = 60) -> dict[str, Any]:
@@ -964,8 +1176,55 @@ class DurableRunEventStore:
                 "INSERT OR IGNORE INTO outbox(operation_id,run_id,node_id,kind,status,created_at,updated_at,payload_json) VALUES(?,?,?,?,?,?,?,?)",
                 (op, rid, str(node_id or "") or None, str(kind or "dispatch"), "pending", now, now, _json_text(clean_payload)),
             )
-            row = conn.execute("SELECT * FROM outbox WHERE operation_id=?", (op,)).fetchone()
-            return {"operation_id": row["operation_id"], "run_id": row["run_id"], "node_id": row["node_id"], "kind": row["kind"], "status": row["status"], "payload": _json_load(row["payload_json"], {})}
+            return self._outbox_row(conn.execute("SELECT * FROM outbox WHERE operation_id=?", (op,)).fetchone())
+
+    @staticmethod
+    def _outbox_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {
+            "operation_id": row["operation_id"],
+            "run_id": row["run_id"],
+            "node_id": row["node_id"],
+            "kind": row["kind"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "payload": _json_load(row["payload_json"], {}),
+        }
+
+    def get_outbox_operation(self, operation_id: str) -> dict[str, Any] | None:
+        self._require_initialized()
+        with self._connection() as conn:
+            return self._outbox_row(
+                conn.execute(
+                    "SELECT * FROM outbox WHERE operation_id = ?",
+                    (_identifier(operation_id, "operation_id"),),
+                ).fetchone()
+            )
+
+    def update_outbox_status(
+        self,
+        operation_id: str,
+        *,
+        status: str,
+        payload: Any | None = None,
+    ) -> dict[str, Any] | None:
+        self._require_initialized()
+        clean_operation_id = _identifier(operation_id, "operation_id")
+        clean_status = str(status or "").strip() or "pending"
+        with self._transaction() as conn:
+            row = conn.execute("SELECT * FROM outbox WHERE operation_id = ?", (clean_operation_id,)).fetchone()
+            if row is None:
+                return None
+            next_payload = _json_load(row["payload_json"], {})
+            if payload is not None:
+                next_payload = _redacted(payload)
+            conn.execute(
+                "UPDATE outbox SET status = ?, updated_at = ?, payload_json = ? WHERE operation_id = ?",
+                (clean_status, now_iso(), _json_text(next_payload), clean_operation_id),
+            )
+            return self._outbox_row(conn.execute("SELECT * FROM outbox WHERE operation_id = ?", (clean_operation_id,)).fetchone())
 
     def record_external_operation(
         self,
@@ -997,8 +1256,33 @@ class DurableRunEventStore:
                     _json_text(_redacted(payload or {})),
                 ),
             )
-            row = conn.execute("SELECT * FROM external_operations WHERE operation_id=?", (operation_id,)).fetchone()
-            return {"operation_id": row["operation_id"], "run_id": row["run_id"], "kind": row["kind"], "classification": row["classification"], "status": row["status"], "external_handle": row["external_handle"], "payload": _json_load(row["payload_json"], {})}
+            return self._external_operation_row(conn.execute("SELECT * FROM external_operations WHERE operation_id=?", (operation_id,)).fetchone())
+
+    @staticmethod
+    def _external_operation_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {
+            "operation_id": row["operation_id"],
+            "run_id": row["run_id"],
+            "kind": row["kind"],
+            "classification": row["classification"],
+            "status": row["status"],
+            "external_handle": row["external_handle"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "payload": _json_load(row["payload_json"], {}),
+        }
+
+    def get_external_operation(self, operation_id: str) -> dict[str, Any] | None:
+        self._require_initialized()
+        with self._connection() as conn:
+            return self._external_operation_row(
+                conn.execute(
+                    "SELECT * FROM external_operations WHERE operation_id = ?",
+                    (_identifier(operation_id, "operation_id"),),
+                ).fetchone()
+            )
 
     def rebuild_run_projection(self, run_id: str, *, output_path: str | Path | None = None) -> dict[str, Any] | None:
         run = self.load_run(run_id)

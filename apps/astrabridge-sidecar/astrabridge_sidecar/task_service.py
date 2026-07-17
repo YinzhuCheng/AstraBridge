@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -8,12 +9,15 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
 
+from jsonschema import Draft202012Validator
+
 from .coding_kernel import task_refs_from_coding_events
 from .common import WORKSPACE_STATE_DIRNAME, new_id, now_iso, read_json, write_json
 from .durable_run_store import DurableRunEventStore
 from .agent_orchestration_contract import (
     lift_task_graph_to_agent_orchestration_graph,
     lower_agent_orchestration_graph_to_task_graph,
+    validate_agent_orchestration_graph,
 )
 from .agent_orchestration_checks import (
     build_known_model_capabilities,
@@ -22,12 +26,30 @@ from .agent_orchestration_checks import (
 )
 from .agent_orchestration_compiler import compile_agent_orchestration_graph
 from .agent_orchestration_file_format import (
-    load_agent_orchestration_graph_file,
     parse_agent_orchestration_graph_text,
     serialize_agent_orchestration_graph,
     write_agent_orchestration_graph_file,
 )
+from .comfyui_workflow_adapter import (
+    COMFYUI_WORKFLOW_SOURCE_FORMAT,
+    export_comfyui_workflow,
+    import_comfyui_workflow,
+    looks_like_comfyui_workflow,
+)
+from .langgraph_stategraph_adapter import (
+    LANGGRAPH_STATEGRAPH_SOURCE_FORMAT,
+    export_langgraph_stategraph_manifest,
+    import_langgraph_stategraph_manifest,
+    looks_like_langgraph_stategraph_manifest,
+)
 from .model_catalog.catalog import preferred_provider_model_record, provider_model_records
+from .node_type_registry import OPAQUE_DISABLED_NODE_TYPE_ID, node_type_registry_snapshot
+from .protocol.compatibility import adapt_legacy_artifact_path
+from .protocol.generated.v1 import (
+    ProtocolValidationError,
+    SCHEMA_VERSION as PROTOCOL_SCHEMA_VERSION,
+    validate_protocol_payload,
+)
 from .providers.runtime_transition import summarize_transition
 from .security import DESKTOP_KEY_PATH_RE, SECRET_RE, SecurityError, redact_sensitive, resolve_under
 from .task_graph_contract import (
@@ -46,6 +68,7 @@ DEFAULT_HANDOFF_POLICY = "multi_provider_handoff"
 GRAPH_DEFINITION_LIMIT = 20
 GRAPH_RUN_REF_LIMIT = 40
 GRAPH_SNAPSHOT_REF_LIMIT = 80
+AGENT_ORCHESTRATION_GRAPH_SOURCE_FORMAT = "agent_orchestration_graph"
 GRAPH_TEMPLATE_SUMMARIES = {
     "supervisor_worker_synthesizer": "Supervisor plans, one worker executes, one synthesizer returns the bounded result.",
     "fanout_fanin_research": "One planner fans out bounded research branches and one synthesizer merges their artifacts.",
@@ -169,6 +192,10 @@ def _sanitize_graph_machine_result(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_graph_machine_result(item) for item in value]
     return value
+
+
+class GraphContractValidationError(ValueError):
+    """Raised when live task-graph contracts fail closed."""
 
 
 class TaskService:
@@ -1720,6 +1747,7 @@ class TaskService:
         source_node = node_map.get(node_id)
         if not source_node:
             raise ValueError(f"Unknown graph worker node_id: {node_id}")
+        orchestration_graph = self._orchestration_graph_for_task_graph(graph)
 
         graph_run_refs = [dict(item) for item in list(task.get("graph_run_refs") or []) if isinstance(item, dict)]
         run_ref = next((item for item in graph_run_refs if str(item.get("run_id") or "").strip() == run_id), None)
@@ -1735,6 +1763,41 @@ class TaskService:
             ),
             None,
         )
+        if binding is None:
+            self.record_graph_worker(
+                {
+                    "graph_id": graph_id,
+                    "run_id": run_id,
+                    "node_id": node_id,
+                    "worker_thread_id": worker_thread_id,
+                    "parent_thread_id": payload.get("parent_thread_id"),
+                    "spawn_mode": payload.get("spawn_mode"),
+                    "worker_origin": payload.get("worker_origin"),
+                    "agent_role": payload.get("agent_role"),
+                    "agent_nickname": payload.get("agent_nickname"),
+                    "status": "ready",
+                    "execution_backend": payload.get("execution_backend"),
+                    "runtime_contract": payload.get("runtime_contract"),
+                    "created_at": payload.get("created_at") or now_iso(),
+                    "updated_at": payload.get("updated_at") or now_iso(),
+                },
+                graph_definition=graph,
+            )
+            task = self.current_task() or task
+            graph_run_refs = [dict(item) for item in list(task.get("graph_run_refs") or []) if isinstance(item, dict)]
+            run_ref = next((item for item in graph_run_refs if str(item.get("run_id") or "").strip() == run_id), None)
+            if run_ref is None:
+                raise ValueError("Unknown run_id for graph worker output.")
+            worker_bindings = [dict(item) for item in list(run_ref.get("worker_bindings") or []) if isinstance(item, dict)]
+            binding = next(
+                (
+                    dict(item)
+                    for item in worker_bindings
+                    if str(item.get("worker_thread_id") or "").strip() == worker_thread_id
+                    and str(item.get("node_id") or "").strip() == node_id
+                ),
+                None,
+            )
         if binding is None:
             raise ValueError("Unknown worker binding for graph worker output.")
 
@@ -1800,12 +1863,25 @@ class TaskService:
         retry_count = _optional_int(payload.get("retry_count"))
         if retry_count is None and attempt_count is not None:
             retry_count = max(0, attempt_count - 1)
+        durable_run = self.durable_run_store().load_run(run_id, include_events=False)
+        trace_id = str(
+            dict(durable_run or {}).get("trace_id")
+            or run_ref.get("trace_id")
+            or f"trace-{run_id}"
+        ).strip() or f"trace-{run_id}"
+        context_id = str(
+            dict(durable_run or {}).get("context_id")
+            or run_ref.get("context_id")
+            or f"context-{run_id}"
+        ).strip() or f"context-{run_id}"
 
         output_bundle = {
             "schema_version": "astrabridge-task-graph-worker-output-v1",
             "graph_id": graph_id,
             "run_id": run_id,
             "task_id": str(task.get("task_id") or ""),
+            "trace_id": trace_id,
+            "context_id": context_id,
             "node_id": node_id,
             "worker_thread_id": worker_thread_id,
             "human_summary": human_summary,
@@ -1819,6 +1895,12 @@ class TaskService:
                 "human_summary_required": bool(output_contract.get("human_summary_required")),
                 "artifact_outputs": list(output_contract.get("artifact_outputs") or []),
             },
+            "provider_id": provider_id or None,
+            "model": model or None,
+            "status": str(payload.get("status") or "completed").strip() or "completed",
+            "attempt_count": attempt_count or 1,
+            "retry_count": retry_count or 0,
+            "budget": deepcopy(dict(policy_snapshot.get("budget") or {})),
             "created_at": created_at,
         }
         write_json(output_json_path, output_bundle)
@@ -1853,19 +1935,21 @@ class TaskService:
         )
         write_json(output_envelope_json_path, output_envelope)
 
-        downstream_handoffs = self._build_graph_worker_handoffs(
-            graph=graph,
-            node_id=node_id,
-            run_id=run_id,
-            output_bundle=output_bundle,
-            output_envelope=output_envelope,
-            bundle_paths={
-                "output_json": output_json_path.relative_to(workspace_root).as_posix(),
-                "summary_md": summary_md_path.relative_to(workspace_root).as_posix(),
-                "output_envelope_json": output_envelope_json_path.relative_to(workspace_root).as_posix(),
-            },
-            generated_artifact_refs=generated_output_artifact_refs,
-        )
+        downstream_handoffs: list[dict[str, Any]] = []
+        if str(output_bundle.get("status") or "").strip() == "completed":
+            downstream_handoffs = self._build_graph_worker_handoffs(
+                graph=orchestration_graph,
+                node_id=node_id,
+                run_id=run_id,
+                output_bundle=output_bundle,
+                output_envelope=output_envelope,
+                bundle_paths={
+                    "output_json": output_json_path.relative_to(workspace_root).as_posix(),
+                    "summary_md": summary_md_path.relative_to(workspace_root).as_posix(),
+                    "output_envelope_json": output_envelope_json_path.relative_to(workspace_root).as_posix(),
+                },
+                generated_artifact_refs=generated_output_artifact_refs,
+            )
         write_json(
             handoff_json_path,
             {
@@ -1879,6 +1963,11 @@ class TaskService:
                 "created_at": created_at,
             },
         )
+        handoff_envelope_artifact_refs = [
+            dict(dict(item.get("agent_envelope") or {}).get("artifact_ref") or {})
+            for item in downstream_handoffs
+            if isinstance(dict(item.get("agent_envelope") or {}).get("artifact_ref"), dict)
+        ]
 
         new_artifact_refs = [
             *generated_output_artifact_refs,
@@ -1894,6 +1983,7 @@ class TaskService:
                 "path": handoff_json_path.relative_to(workspace_root).as_posix(),
                 "status": "ready",
             },
+            *handoff_envelope_artifact_refs,
         ]
         compact_output = {
             "human_summary": _compact_text(human_summary, limit=240),
@@ -2008,6 +2098,9 @@ class TaskService:
                 }
             )
         return {"schema_version": "astrabridge-task-graph-template-list-v1", "templates": templates}
+
+    def node_type_registry_snapshot(self) -> dict[str, Any]:
+        return node_type_registry_snapshot()
 
     @staticmethod
     def _resolve_template_recommended_model_ids(
@@ -2127,19 +2220,76 @@ class TaskService:
             raise ValueError("Graph not found.")
         validated_graph = validate_graph_definition(graph)
         orchestration_graph = self._orchestration_graph_for_task_graph(validated_graph)
-        serialized = serialize_agent_orchestration_graph(orchestration_graph)
+        requested_format = str(payload.get("format") or "").strip()
+        source_format = self._graph_interop_source_format(validated_graph)
+        export_format = requested_format or source_format
+        if export_format not in {
+            AGENT_ORCHESTRATION_GRAPH_SOURCE_FORMAT,
+            COMFYUI_WORKFLOW_SOURCE_FORMAT,
+            LANGGRAPH_STATEGRAPH_SOURCE_FORMAT,
+        }:
+            raise ValueError(
+                "Unsupported graph export format. Expected one of: "
+                f"{AGENT_ORCHESTRATION_GRAPH_SOURCE_FORMAT}, {COMFYUI_WORKFLOW_SOURCE_FORMAT}, "
+                f"{LANGGRAPH_STATEGRAPH_SOURCE_FORMAT}."
+            )
+        adapter_manifest: dict[str, Any] | None = None
+        loss_report: dict[str, Any] | None = None
+        source_version: str | None = None
+        serialized = ""
+        generated_python: str | None = None
         export_path_text = str(payload.get("export_path") or "").strip()
+        generated_python_path_text = str(payload.get("generated_python_path") or "").strip()
         workspace_root = self._projects.require_workspace_root()
         written_relative_path: str | None = None
-        if export_path_text:
-            written = write_agent_orchestration_graph_file(resolve_under(workspace_root, export_path_text), orchestration_graph)
-            written_relative_path = written.relative_to(workspace_root).as_posix()
+        if export_format == COMFYUI_WORKFLOW_SOURCE_FORMAT:
+            exported = export_comfyui_workflow(orchestration_graph, task_graph=validated_graph)
+            serialized = str(exported.get("serialized_text") or "")
+            adapter_manifest = deepcopy(exported.get("adapter_manifest") or None)
+            loss_report = deepcopy(exported.get("loss_report") or None)
+            source_version = str(exported.get("source_version") or "").strip() or None
+            if export_path_text:
+                target_path = resolve_under(workspace_root, export_path_text)
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_text(serialized, encoding="utf-8")
+                written_relative_path = target_path.relative_to(workspace_root).as_posix()
+        elif export_format == LANGGRAPH_STATEGRAPH_SOURCE_FORMAT:
+            exported = export_langgraph_stategraph_manifest(
+                orchestration_graph,
+                task_graph=validated_graph,
+                emit_generated_python=bool(payload.get("emit_generated_python", True)),
+            )
+            serialized = str(exported.get("serialized_text") or "")
+            generated_python = str(exported.get("generated_python") or "").strip() or None
+            adapter_manifest = deepcopy(exported.get("adapter_manifest") or None)
+            loss_report = deepcopy(exported.get("loss_report") or None)
+            source_version = str(exported.get("source_version") or "").strip() or None
+            if export_path_text:
+                target_path = resolve_under(workspace_root, export_path_text)
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_text(serialized, encoding="utf-8")
+                written_relative_path = target_path.relative_to(workspace_root).as_posix()
+            if generated_python and generated_python_path_text:
+                python_target_path = resolve_under(workspace_root, generated_python_path_text)
+                python_target_path.parent.mkdir(parents=True, exist_ok=True)
+                python_target_path.write_text(generated_python, encoding="utf-8")
+        else:
+            serialized = serialize_agent_orchestration_graph(orchestration_graph)
+            if export_path_text:
+                written = write_agent_orchestration_graph_file(resolve_under(workspace_root, export_path_text), orchestration_graph)
+                written_relative_path = written.relative_to(workspace_root).as_posix()
         return {
             "schema_version": "astrabridge-agent-orchestration-export-v1",
             "graph": validated_graph,
             "task": self.task_view(task, compact_graph_runs=True),
             "orchestration_graph": orchestration_graph,
             "serialized_text": serialized,
+            "source_format": source_format,
+            "export_format": export_format,
+            "source_version": source_version,
+            "adapter_manifest": adapter_manifest,
+            "loss_report": loss_report,
+            "generated_python": generated_python,
             "export_path": written_relative_path,
         }
 
@@ -2222,10 +2372,57 @@ class TaskService:
         if not graph_text and not graph_path:
             raise ValueError("graph_text or graph_path is required.")
         workspace_root = self._projects.require_workspace_root()
+        raw_import_text = graph_text
+        import_path_text: str | None = None
         if graph_path:
-            orchestration_graph = load_agent_orchestration_graph_file(resolve_under(workspace_root, graph_path))
+            resolved_path = resolve_under(workspace_root, graph_path)
+            raw_import_text = resolved_path.read_text(encoding="utf-8")
+            import_path_text = resolved_path.relative_to(workspace_root).as_posix()
+        source_name = import_path_text or "task-graph-import"
+        source_format = AGENT_ORCHESTRATION_GRAPH_SOURCE_FORMAT
+        source_version: str | None = None
+        adapter_manifest: dict[str, Any] | None = None
+        loss_report: dict[str, Any] | None = None
+        task_graph_overlays: dict[str, dict[str, Any]] = {}
+        parsed_json: Any = None
+        try:
+            parsed_json = json.loads(raw_import_text)
+        except json.JSONDecodeError:
+            parsed_json = None
+        if looks_like_comfyui_workflow(parsed_json):
+            imported_payload = import_comfyui_workflow(
+                parsed_json,
+                task_id=str(task.get("task_id") or ""),
+                title=str(payload.get("title") or "").strip() or None,
+            )
+            orchestration_graph = deepcopy(dict(imported_payload.get("orchestration_graph") or {}))
+            source_format = COMFYUI_WORKFLOW_SOURCE_FORMAT
+            source_version = str(imported_payload.get("source_version") or "").strip() or None
+            adapter_manifest = deepcopy(imported_payload.get("adapter_manifest") or None)
+            loss_report = deepcopy(imported_payload.get("loss_report") or None)
+            task_graph_overlays = {
+                str(node_id).strip(): deepcopy(dict(overlay))
+                for node_id, overlay in dict(imported_payload.get("task_graph_overlays") or {}).items()
+                if str(node_id).strip() and isinstance(overlay, dict)
+            }
+        elif looks_like_langgraph_stategraph_manifest(parsed_json):
+            imported_payload = import_langgraph_stategraph_manifest(
+                parsed_json,
+                task_id=str(task.get("task_id") or ""),
+                title=str(payload.get("title") or "").strip() or None,
+            )
+            orchestration_graph = deepcopy(dict(imported_payload.get("orchestration_graph") or {}))
+            source_format = LANGGRAPH_STATEGRAPH_SOURCE_FORMAT
+            source_version = str(imported_payload.get("source_version") or "").strip() or None
+            adapter_manifest = deepcopy(imported_payload.get("adapter_manifest") or None)
+            loss_report = deepcopy(imported_payload.get("loss_report") or None)
+            task_graph_overlays = {
+                str(node_id).strip(): deepcopy(dict(overlay))
+                for node_id, overlay in dict(imported_payload.get("task_graph_overlays") or {}).items()
+                if str(node_id).strip() and isinstance(overlay, dict)
+            }
         else:
-            orchestration_graph = parse_agent_orchestration_graph_text(graph_text, source_name="task-graph-import")
+            orchestration_graph = parse_agent_orchestration_graph_text(raw_import_text, source_name=source_name)
         compile_agent_orchestration_graph(
             orchestration_graph,
             known_model_capabilities=self._known_model_capabilities_for_graph(
@@ -2255,6 +2452,7 @@ class TaskService:
         task_graph["task_id"] = str(task.get("task_id") or "")
         task_graph["updated_at"] = now_iso()
         task_graph["state_version"] = int(task_graph.get("state_version") or 0) + 1
+        self._apply_task_graph_overlays(task_graph, task_graph_overlays)
         task_graph["orchestration_graph"] = self._sync_orchestration_graph_with_task_graph(imported, task_graph=task_graph)
         validated = self.upsert_graph_definition(task_graph)
         comparison_report = (
@@ -2278,9 +2476,54 @@ class TaskService:
             "graph": validated,
             "task": self.task_view(self.current_task()),
             "orchestration_graph": dict(validated.get("orchestration_graph") or {}),
-            "import_path": Path(graph_path).as_posix() if graph_path else None,
+            "source_format": source_format,
+            "source_version": source_version,
+            "adapter_manifest": adapter_manifest,
+            "loss_report": loss_report,
+            "import_path": import_path_text,
             "snapshot": snapshot,
         }
+
+    def _graph_interop_source_format(self, task_graph: dict[str, Any] | None) -> str:
+        graph = dict(task_graph or {})
+        orchestration_graph = dict(graph.get("orchestration_graph") or {})
+        migration = dict(orchestration_graph.get("migration") or {})
+        adapter = dict(migration.get("adapter") or {})
+        source_format = str(adapter.get("source_format") or "").strip()
+        if source_format:
+            return source_format
+        metadata = dict(orchestration_graph.get("metadata") or {})
+        manifest = dict(metadata.get("adapter_manifest") or {})
+        manifest_source_format = str(manifest.get("source_format") or "").strip()
+        if manifest_source_format:
+            return manifest_source_format
+        return AGENT_ORCHESTRATION_GRAPH_SOURCE_FORMAT
+
+    def _apply_task_graph_overlays(
+        self,
+        task_graph: dict[str, Any],
+        node_overlays: dict[str, dict[str, Any]] | None,
+    ) -> None:
+        if not isinstance(task_graph, dict) or not isinstance(node_overlays, dict) or not node_overlays:
+            return
+        for node in list(task_graph.get("nodes") or []):
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get("node_id") or "").strip()
+            overlay = dict(node_overlays.get(node_id) or {})
+            if not node_id or not overlay:
+                continue
+            ui_hints = dict(node.get("ui_hints") or {})
+            overlay_node_type_config = dict(overlay.get("node_type_config") or {})
+            existing_node_type_config = dict(ui_hints.get("node_type_config") or {})
+            node["ui_hints"] = {
+                **ui_hints,
+                **{key: deepcopy(value) for key, value in overlay.items() if key != "node_type_config"},
+                "node_type_config": {
+                    **existing_node_type_config,
+                    **overlay_node_type_config,
+                },
+            }
 
     def update_graph_node(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self.current_task()
@@ -2832,6 +3075,7 @@ class TaskService:
                 "warning_count": len(warnings),
                 "max_parallelism": int(dict(compiled_plan.get("topology") or {}).get("max_parallelism") or 1),
                 "budget": budget_snapshot,
+                "node_mcp_tool_policies": self._compiled_node_mcp_tool_policies(compiled_plan),
             },
             "created_at": created_at,
             "updated_at": created_at,
@@ -3284,6 +3528,7 @@ class TaskService:
                 "compatibility_shim": False,
                 "parallel_group_ids": [str(dict(group).get("group_id") or "").strip() for group in parallel_groups if str(dict(group).get("group_id") or "").strip()],
                 "budget": budget_snapshot,
+                "node_mcp_tool_policies": self._compiled_node_mcp_tool_policies(compiled_plan),
                 "recovery": (
                     {
                         "recovery_id": str(recovery_context.get("recovery_id") or "").strip(),
@@ -3495,6 +3740,13 @@ class TaskService:
         }
         if consumed_worker_artifacts:
             machine_result["consumed_worker_artifacts"] = consumed_worker_artifacts
+        machine_result = self._compiled_fixture_machine_result_with_schema_defaults(
+            graph_node=graph_node,
+            machine_result=machine_result,
+            behavior=behavior,
+            successful_dependencies=successful_dependencies,
+            blocked_dependencies=blocked_dependencies,
+        )
 
         next_action_hints = (
             ["Deliver the declared artifact bundle to downstream nodes according to edge policy."]
@@ -3511,6 +3763,82 @@ class TaskService:
             "machine_result": machine_result,
             "next_action_hints": next_action_hints,
         }
+
+    def _compiled_fixture_machine_result_with_schema_defaults(
+        self,
+        *,
+        graph_node: dict[str, Any],
+        machine_result: dict[str, Any],
+        behavior: str,
+        successful_dependencies: list[dict[str, Any]],
+        blocked_dependencies: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        schema = dict(dict(graph_node.get("output_contract") or {}).get("machine_result_schema") or {})
+        required_fields = [
+            str(item).strip()
+            for item in list(schema.get("required") or [])
+            if str(item or "").strip()
+        ]
+        if not required_fields:
+            return machine_result
+        completed = behavior == "completed"
+        defaults: dict[str, Any] = {
+            "goal": "Fixture goal",
+            "next_nodes": [],
+            "plan": ["Inspect task input", "Delegate execution", "Synthesize result"],
+            "next_workers": [],
+            "questions": ["Fixture question 1"],
+            "branches": [],
+            "findings": ["Fixture finding"] if completed else [],
+            "sources": ["https://example.com/fixture-source"] if completed else [],
+            "synthesis": "Fixture synthesis completed." if completed else "Fixture synthesis is partial.",
+            "gaps": [] if completed else ["One or more dependencies did not complete successfully."],
+            "summary": "Fixture summary completed." if completed else "Fixture summary is partial.",
+            "decision": "deliver_summary" if completed else behavior,
+            "matrix": ["fixture-provider"],
+            "blocked_cases": [] if behavior not in {"blocked", "failed"} else ["Fixture blocked case"],
+            "provider_changes": ["fixture-provider-change"],
+            "candidate_models": ["fixture-model"],
+            "files": ["apps/example.ts"],
+            "approach": "Fixture bounded approach.",
+            "changed_files": ["apps/example.ts"],
+            "failures": [],
+            "analysis": "Fixture analysis.",
+            "confidence": "fixture",
+            "report": "Fixture report completed.",
+            "recommendations": ["Review the fixture output bundle."],
+            "sections": ["Overview"],
+            "entities": ["Fixture entity"],
+            "status": str(machine_result.get("status") or behavior),
+            "result": "Fixture completed the requested bounded execution path." if completed else f"Fixture ended as {behavior}.",
+            "notes": "Fixture review note.",
+            "open_questions": [] if completed else ["Dependency gap remains."],
+            "consumed_worker_artifacts": [
+                str(dict(item.get("machine_result") or {}).get("artifact_bundle_path") or "")
+                for item in successful_dependencies
+                if str(dict(item.get("machine_result") or {}).get("artifact_bundle_path") or "").strip()
+            ],
+        }
+        if not defaults["consumed_worker_artifacts"]:
+            defaults["consumed_worker_artifacts"] = [
+                f"fixture://{str(dict(item.get('machine_result') or {}).get('node_id') or 'upstream')}"
+                for item in successful_dependencies
+            ]
+        if blocked_dependencies and not completed and "blocked_cases" in required_fields:
+            defaults["blocked_cases"] = [
+                str(dict(item.get("machine_result") or {}).get("node_id") or "blocked_dependency")
+                for item in blocked_dependencies
+            ]
+        enriched = dict(machine_result)
+        for field in required_fields:
+            current = enriched.get(field)
+            if current not in (None, "", [], {}):
+                continue
+            if field in defaults:
+                enriched[field] = deepcopy(defaults[field])
+                continue
+            enriched[field] = [] if field.endswith("s") else f"fixture-{field}"
+        return enriched
 
     @staticmethod
     def _compiled_fixture_summary(
@@ -3632,6 +3960,16 @@ class TaskService:
             return "paused_for_review"
         statuses = [str(item.get("status") or "").strip() for item in node_states.values()]
         outcomes = [str(item.get("outcome") or "").strip() for item in node_states.values()]
+        if "needs_review" in statuses or "needs_review" in outcomes:
+            return "needs_review"
+        if "failed" in statuses:
+            if any(item == "passed" for item in outcomes):
+                return "partial"
+            return "failed"
+        if "cancelled" in statuses or "cancelled" in outcomes:
+            if any(item in {"failed", "blocked"} for item in outcomes):
+                return "failed"
+            return "cancelled"
         if "partial" in statuses or "partial" in outcomes:
             return "partial"
         if all(item == "passed" for item in outcomes if item):
@@ -4016,6 +4354,97 @@ class TaskService:
         run_ref = self._refresh_compact_graph_run_observability(run_ref)
         run_ref = self._refresh_graph_run_export_report(run_ref)
 
+        full_run = self._load_full_graph_run(run_ref)
+        if isinstance(full_run, dict):
+            full_run["status"] = "cancelled"
+            full_run["updated_at"] = created_at
+            full_run["event_refs"] = [
+                *[dict(item) for item in list(full_run.get("event_refs") or []) if isinstance(item, dict)],
+                {
+                    "event_id": f"{run_id}-cancel-requested",
+                    "run_id": run_id,
+                    "task_id": str(run_ref.get("task_id") or ""),
+                    "trace_id": str(full_run.get("trace_id") or run_ref.get("trace_id") or f"trace-{run_id}"),
+                    "event_type": "run_cancel_requested",
+                    "created_at": created_at,
+                    "summary": "Run cancellation was requested from the task graph workspace.",
+                },
+                {
+                    "event_id": f"{run_id}-cancelled",
+                    "run_id": run_id,
+                    "task_id": str(run_ref.get("task_id") or ""),
+                    "trace_id": str(full_run.get("trace_id") or run_ref.get("trace_id") or f"trace-{run_id}"),
+                    "event_type": "run_cancelled",
+                    "created_at": created_at,
+                    "summary": "Fixture run was cancelled and preserved a diagnostic report.",
+                },
+            ]
+            source_node_id = str(list(full_run.get("entry_node_ids") or [""])[0] or "")
+            merged_artifact_refs = [
+                dict(item)
+                for item in list(full_run.get("artifact_refs") or [])
+                if isinstance(item, dict)
+            ]
+            for extra_artifact in (
+                {
+                    "artifact_id": f"{run_id}-cancel-summary-json",
+                    "artifact_kind": "diagnostic_bundle",
+                    "task_id": str(run_ref.get("task_id") or ""),
+                    "run_id": run_id,
+                    "source_node_id": source_node_id,
+                    "path": summary_json_path.relative_to(workspace_root).as_posix(),
+                    "media_type": "application/json",
+                    "status": "ready",
+                    "created_at": created_at,
+                },
+                {
+                    "artifact_id": f"{run_id}-cancel-report-md",
+                    "artifact_kind": "validation_report",
+                    "task_id": str(run_ref.get("task_id") or ""),
+                    "run_id": run_id,
+                    "source_node_id": source_node_id,
+                    "path": report_md_path.relative_to(workspace_root).as_posix(),
+                    "media_type": "text/markdown",
+                    "status": "ready",
+                    "created_at": created_at,
+                },
+            ):
+                merged_artifact_refs = [
+                    item
+                    for item in merged_artifact_refs
+                    if str(item.get("artifact_id") or "").strip() != str(extra_artifact.get("artifact_id") or "").strip()
+                    and str(item.get("path") or "").strip() != str(extra_artifact.get("path") or "").strip()
+                ]
+                merged_artifact_refs.append(extra_artifact)
+            full_run["artifact_refs"] = merged_artifact_refs
+            node_run_states = []
+            for item in list(full_run.get("node_run_states") or []):
+                if not isinstance(item, dict):
+                    continue
+                current = dict(item)
+                if str(current.get("status") or "").strip() in {
+                    "queued",
+                    "ready",
+                    "running",
+                    "waiting_on_dependencies",
+                    "waiting_on_artifact",
+                    "waiting_on_approval",
+                }:
+                    current["status"] = "cancelled"
+                    current["outcome"] = "cancelled"
+                    current["updated_at"] = created_at
+                node_run_states.append(current)
+            full_run["node_run_states"] = node_run_states
+            if str(dict(full_run.get("approval_state") or {}).get("status") or "").strip() == "pending":
+                full_run["approval_state"] = {
+                    **dict(full_run.get("approval_state") or {}),
+                    "status": "expired",
+                    "resolved_at": created_at,
+                    "resolution_summary": "Run was cancelled before the pending approval was resolved.",
+                    "notes": notes,
+                }
+            self._persist_full_graph_run(run_ref, full_run)
+
         task["graph_run_refs"] = [
             run_ref if str(item.get("run_id") or "").strip() == run_id else item
             for item in graph_run_refs
@@ -4023,6 +4452,7 @@ class TaskService:
         task["graph_activity_summary"] = self._graph_activity_summary(task)
         task["updated_at"] = now_iso()
         self._save_task(task)
+        self.durable_run_store().sync_compact_run_ref(run_ref)
         return {
             "cancellation": {
                 "run_id": run_id,
@@ -4338,7 +4768,7 @@ class TaskService:
         )
         run_ref["status"] = "completed" if decision == "approve" else "failed"
         run_ref["approval_state"] = "approved" if decision == "approve" else "rejected"
-        run_ref["approval_details"] = self._compact_graph_run_approval_state(
+        resolved_approval_details = self._compact_graph_run_approval_state(
             {
                 **approval_details,
                 "status": "approved" if decision == "approve" else "rejected",
@@ -4348,10 +4778,76 @@ class TaskService:
                 "resolution_summary": human_summary,
             }
         )
+        run_ref["approval_details"] = resolved_approval_details
         run_ref["latest_event_type"] = "run_completed" if decision == "approve" else "run_failed"
         run_ref["latest_event_at"] = created_at
         run_ref["event_count"] = int(run_ref.get("event_count") or 0) + 2
         run_ref["updated_at"] = created_at
+
+        full_run = self._load_full_graph_run(run_ref)
+        if isinstance(full_run, dict):
+            full_run["status"] = run_ref["status"]
+            full_run["approval_state"] = {
+                **approval_details,
+                "status": "approved" if decision == "approve" else "rejected",
+                "decision": decision,
+                "notes": notes,
+                "resolved_at": created_at,
+                "resolution_summary": human_summary,
+            }
+            full_run["updated_at"] = created_at
+            node_run_states = []
+            for item in list(full_run.get("node_run_states") or []):
+                if not isinstance(item, dict):
+                    continue
+                current = dict(item)
+                if str(current.get("node_id") or "").strip() == node_id:
+                    current["status"] = resolved_status
+                    current["outcome"] = resolved_outcome
+                    current["updated_at"] = created_at
+                    current["warnings"] = [] if decision == "approve" else [human_summary]
+                node_run_states.append(current)
+            full_run["node_run_states"] = node_run_states
+            event_refs = [dict(item) for item in list(full_run.get("event_refs") or []) if isinstance(item, dict)]
+            event_refs.append(
+                {
+                    "event_id": f"{run_id}-{node_id}-approval-resolved",
+                    "run_id": run_id,
+                    "task_id": str(run_ref.get("task_id") or ""),
+                    "trace_id": str(full_run.get("trace_id") or run_ref.get("trace_id") or f"trace-{run_id}"),
+                    "event_type": "approval_resolved",
+                    "created_at": created_at,
+                    "summary": human_summary,
+                    "node_id": node_id,
+                    "status": "approved" if decision == "approve" else "rejected",
+                }
+            )
+            if decision == "approve":
+                event_refs.append(
+                    {
+                        "event_id": f"{run_id}-completed-after-approval",
+                        "run_id": run_id,
+                        "task_id": str(run_ref.get("task_id") or ""),
+                        "trace_id": str(full_run.get("trace_id") or run_ref.get("trace_id") or f"trace-{run_id}"),
+                        "event_type": "run_completed",
+                        "created_at": created_at,
+                        "summary": f"{str(graph.get('title') or graph_id)} completed after approval resolution.",
+                    }
+                )
+            else:
+                event_refs.append(
+                    {
+                        "event_id": f"{run_id}-failed-after-approval",
+                        "run_id": run_id,
+                        "task_id": str(run_ref.get("task_id") or ""),
+                        "trace_id": str(full_run.get("trace_id") or run_ref.get("trace_id") or f"trace-{run_id}"),
+                        "event_type": "run_failed",
+                        "created_at": created_at,
+                        "summary": f"{str(graph.get('title') or graph_id)} remained blocked after approval rejection.",
+                    }
+                )
+            full_run["event_refs"] = event_refs
+            self._persist_full_graph_run(run_ref, full_run)
 
         task["graph_run_refs"] = [
             run_ref if str(item.get("run_id") or "").strip() == run_id else item
@@ -4501,6 +4997,7 @@ class TaskService:
                     "node_research_a": branch_a_behavior,
                     "node_research_b": branch_b_behavior,
                 },
+                "node_mcp_tool_policies": self._compiled_node_mcp_tool_policies(compiled_plan),
             },
             "created_at": created_at,
             "updated_at": created_at,
@@ -4812,6 +5309,7 @@ class TaskService:
                 "execution_mode": "cancellable",
                 "max_parallelism": int(dict(compiled_plan.get("topology") or {}).get("max_parallelism") or 1),
                 "budget": budget_snapshot,
+                "node_mcp_tool_policies": self._compiled_node_mcp_tool_policies(compiled_plan),
             },
             "created_at": created_at,
             "updated_at": created_at,
@@ -5001,6 +5499,7 @@ class TaskService:
                 "requires_human_review": True,
                 "max_parallelism": int(dict(compiled_plan.get("topology") or {}).get("max_parallelism") or 1),
                 "budget": budget_snapshot,
+                "node_mcp_tool_policies": self._compiled_node_mcp_tool_policies(compiled_plan),
             },
             "created_at": created_at,
             "updated_at": created_at,
@@ -5655,7 +6154,12 @@ class TaskService:
                     worker_bindings.append(binding)
         events = [dict(item) for item in list(run.get("event_refs") or []) if isinstance(item, dict)]
         latest_event = events[-1] if events else None
-        approval_state = dict(run.get("approval_state") or {})
+        raw_approval_state = run.get("approval_state")
+        approval_state = (
+            dict(raw_approval_state)
+            if isinstance(raw_approval_state, dict)
+            else {"status": str(raw_approval_state or "not_required").strip() or "not_required"}
+        )
         compact = {
             "run_id": run.get("run_id"),
             "graph_id": run.get("graph_id"),
@@ -6074,6 +6578,19 @@ class TaskService:
             "nodes": node_budgets,
             "static_blockers": static_blockers,
         }
+
+    @staticmethod
+    def _compiled_node_mcp_tool_policies(compiled_plan: dict[str, Any]) -> dict[str, Any]:
+        policies: dict[str, Any] = {}
+        for item in list(compiled_plan.get("nodes") or []):
+            if not isinstance(item, dict):
+                continue
+            node_id = str(item.get("node_id") or "").strip()
+            tool_policy = dict(item.get("tool_policy") or {})
+            mcp_tool_policy = dict(tool_policy.get("mcp_tool_policy") or {})
+            if node_id and mcp_tool_policy:
+                policies[node_id] = deepcopy(mcp_tool_policy)
+        return policies
 
     def _compact_graph_run_timeline_events(self, value: Any) -> list[dict[str, Any]]:
         events = [dict(item) for item in list(value or []) if isinstance(item, dict)]
@@ -6604,13 +7121,14 @@ class TaskService:
         node_id: str,
         parent_thread_id: str,
         created_at: str,
-        updated_at: str,
+        updated_at: str | None = None,
         behavior: str,
         summary: str,
         machine_result: dict[str, Any],
         next_action_hints: list[str],
         status: str | None = None,
     ) -> dict[str, Any]:
+        effective_updated_at = str(updated_at or created_at or now_iso()).strip() or now_iso()
         worker_thread_id = f"fixture-{node_id}-{run_id}"
         node = next(
             (
@@ -6635,7 +7153,7 @@ class TaskService:
                 "agent_nickname": nickname,
                 "status": status or self._fixture_behavior_to_node_status(behavior),
                 "created_at": created_at,
-                "updated_at": updated_at,
+                "updated_at": effective_updated_at,
             },
             graph_definition=graph,
         )
@@ -6651,7 +7169,7 @@ class TaskService:
                 "next_action_hints": next_action_hints,
                 "status": status or self._fixture_behavior_to_node_status(behavior),
                 "created_at": created_at,
-                "updated_at": updated_at,
+                "updated_at": effective_updated_at,
             },
             graph_definition=graph,
         )
@@ -6708,6 +7226,547 @@ class TaskService:
         ]
         return [dict(binding), *remainder]
 
+    @staticmethod
+    def _graph_worker_stable_identifier(prefix: str, *parts: Any) -> str:
+        seed = "::".join(str(part or "").strip() for part in parts if str(part or "").strip())
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+        return f"{prefix}-{digest}"
+
+    def _graph_worker_protocol_artifact_ref(
+        self,
+        artifact: dict[str, Any],
+        *,
+        task_id: str,
+        run_id: str,
+        source_node_id: str,
+    ) -> dict[str, Any]:
+        canonical = adapt_legacy_artifact_path(
+            artifact,
+            task_id=task_id,
+            run_id=run_id,
+            source_node_id=source_node_id,
+        )
+        canonical["metadata"] = {
+            **dict(canonical.get("metadata") or {}),
+            "relative_path": str(artifact.get("path") or "").replace("\\", "/").strip() or None,
+            "artifact_kind": str(artifact.get("artifact_kind") or "").strip() or None,
+        }
+        return validate_protocol_payload("ArtifactRef", canonical)
+
+    @staticmethod
+    def _graph_node_port_map(
+        node: dict[str, Any],
+        *,
+        direction: str,
+    ) -> dict[str, dict[str, Any]]:
+        ports = dict(node.get("ports") or {})
+        return {
+            str(item.get("port_id") or "").strip(): dict(item)
+            for item in list(ports.get(direction) or [])
+            if isinstance(item, dict) and str(item.get("port_id") or "").strip()
+        }
+
+    @staticmethod
+    def _graph_json_schema_errors(schema: dict[str, Any], value: Any) -> list[str]:
+        validator = Draft202012Validator(schema)
+        errors = sorted(
+            validator.iter_errors(value),
+            key=lambda item: (
+                tuple(str(part) for part in item.path),
+                tuple(str(part) for part in item.schema_path),
+            ),
+        )
+        formatted: list[str] = []
+        for item in errors[:8]:
+            instance_path = "/" + "/".join(str(part) for part in item.path) if list(item.path) else "$"
+            formatted.append(f"{instance_path}: {item.message}")
+        return formatted
+
+    def _graph_validate_port_value(
+        self,
+        *,
+        port: dict[str, Any],
+        value: Any,
+        schema_registry: dict[str, Any],
+        edge_id: str,
+        node_id: str,
+        port_id: str,
+        direction: str,
+    ) -> None:
+        port_type = str(port.get("port_type") or "").strip()
+        shape = str(port.get("shape") or "single").strip() or "single"
+        if shape != "single":
+            raise GraphContractValidationError(
+                f"edge {edge_id} {direction} port {node_id}.{port_id} uses unsupported shape {shape}; live typed delivery currently requires shape=single."
+            )
+        if port_type == "text":
+            if not isinstance(value, str) or not value.strip():
+                raise GraphContractValidationError(
+                    f"edge {edge_id} {direction} port {node_id}.{port_id} expects a non-empty text value."
+                )
+        elif port_type == "structured_json":
+            if not isinstance(value, (dict, list)):
+                raise GraphContractValidationError(
+                    f"edge {edge_id} {direction} port {node_id}.{port_id} expects structured JSON data."
+                )
+        else:
+            if not isinstance(value, dict):
+                raise GraphContractValidationError(
+                    f"edge {edge_id} {direction} port {node_id}.{port_id} expects a protocol ArtifactRef payload."
+                )
+            try:
+                validate_protocol_payload("ArtifactRef", value)
+            except ProtocolValidationError as exc:
+                raise GraphContractValidationError(
+                    f"edge {edge_id} {direction} port {node_id}.{port_id} received an invalid ArtifactRef payload: {exc}"
+                ) from exc
+        schema_ref = str(port.get("schema_ref") or "").strip()
+        if not schema_ref:
+            return
+        schema = schema_registry.get(schema_ref)
+        if not isinstance(schema, dict) or not schema:
+            raise GraphContractValidationError(
+                f"edge {edge_id} {direction} port {node_id}.{port_id} references missing schema {schema_ref}."
+            )
+        errors = self._graph_json_schema_errors(schema, value)
+        if errors:
+            raise GraphContractValidationError(
+                f"edge {edge_id} {direction} port {node_id}.{port_id} violated {schema_ref}: {errors[0]}"
+            )
+
+    def _build_graph_worker_typed_handoff_projection(
+        self,
+        *,
+        graph: dict[str, Any],
+        edge: dict[str, Any],
+        source_node: dict[str, Any],
+        target_node: dict[str, Any],
+        output_bundle: dict[str, Any],
+        artifact_refs: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        edge_id = str(edge.get("edge_id") or "").strip() or "edge"
+        handoff_contract = dict(edge.get("handoff_contract") or {})
+        schema_registry = dict(graph.get("schema_registry") or {})
+        port_bindings = [
+            {
+                "from_port_id": str(item.get("from_port_id") or "").strip(),
+                "to_port_id": str(item.get("to_port_id") or "").strip(),
+            }
+            for item in list(handoff_contract.get("port_bindings") or [])
+            if isinstance(item, dict)
+            and str(item.get("from_port_id") or "").strip()
+            and str(item.get("to_port_id") or "").strip()
+        ]
+        if not port_bindings:
+            return {
+                "status": "compatibility_required",
+                "mode": "legacy_raw_text_blocked",
+                "diagnostic": (
+                    f"edge {edge_id} is missing typed port_bindings; refresh the migrated graph before live delivery."
+                ),
+                "bindings": [],
+                "inputs": {},
+                "required_output_schema_refs": [
+                    str(item).strip()
+                    for item in list(handoff_contract.get("required_output_schema_refs") or [])
+                    if str(item or "").strip()
+                ],
+            }
+        source_ports = self._graph_node_port_map(source_node, direction="outputs")
+        target_ports = self._graph_node_port_map(target_node, direction="inputs")
+        if not source_ports or not target_ports:
+            return {
+                "status": "compatibility_required",
+                "mode": "legacy_raw_text_blocked",
+                "diagnostic": (
+                    f"edge {edge_id} is missing typed source or target ports; refresh the migrated graph before live delivery."
+                ),
+                "bindings": [],
+                "inputs": {},
+                "required_output_schema_refs": [
+                    str(item).strip()
+                    for item in list(handoff_contract.get("required_output_schema_refs") or [])
+                    if str(item or "").strip()
+                ],
+            }
+        human_summary = str(output_bundle.get("human_summary") or "").strip()
+        machine_result = redact_sensitive(output_bundle.get("machine_result") or {})
+        source_values: dict[str, Any] = {
+            str(item.get("artifact_id") or "").strip(): deepcopy(item)
+            for item in artifact_refs
+            if isinstance(item, dict) and str(item.get("artifact_id") or "").strip()
+        }
+        if human_summary:
+            source_values["human_summary"] = human_summary
+        if isinstance(machine_result, dict) and machine_result:
+            source_values["machine_result"] = deepcopy(machine_result)
+
+        projected_inputs: dict[str, Any] = {}
+        binding_records: list[dict[str, Any]] = []
+        declared_schema_refs = {
+            str(item).strip()
+            for item in list(handoff_contract.get("required_output_schema_refs") or [])
+            if str(item or "").strip()
+        }
+        for binding in port_bindings:
+            from_port_id = binding["from_port_id"]
+            to_port_id = binding["to_port_id"]
+            source_port = dict(source_ports.get(from_port_id) or {})
+            target_port = dict(target_ports.get(to_port_id) or {})
+            if not source_port:
+                raise GraphContractValidationError(
+                    f"edge {edge_id} references unknown source output port {from_port_id}."
+                )
+            if not target_port:
+                raise GraphContractValidationError(
+                    f"edge {edge_id} references unknown target input port {to_port_id}."
+                )
+            source_shape = str(source_port.get("shape") or "single").strip() or "single"
+            target_shape = str(target_port.get("shape") or "single").strip() or "single"
+            if source_shape != target_shape:
+                raise GraphContractValidationError(
+                    f"edge {edge_id} has incompatible port shapes for {from_port_id}->{to_port_id}: {source_shape} != {target_shape}."
+                )
+            source_type = str(source_port.get("port_type") or "").strip()
+            target_type = str(target_port.get("port_type") or "").strip()
+            if source_type and target_type and source_type != target_type:
+                raise GraphContractValidationError(
+                    f"edge {edge_id} has incompatible live port types for {from_port_id}->{to_port_id}: {source_type} != {target_type}."
+                )
+            if from_port_id not in source_values:
+                raise GraphContractValidationError(
+                    f"edge {edge_id} expected source output port {from_port_id}, but the node did not produce a value for it."
+                )
+            source_schema_ref = str(source_port.get("schema_ref") or "").strip()
+            if source_schema_ref and declared_schema_refs and source_schema_ref not in declared_schema_refs:
+                raise GraphContractValidationError(
+                    f"edge {edge_id} is missing required_output_schema_refs coverage for source schema {source_schema_ref}."
+                )
+            value = deepcopy(source_values[from_port_id])
+            self._graph_validate_port_value(
+                port=source_port,
+                value=value,
+                schema_registry=schema_registry,
+                edge_id=edge_id,
+                node_id=str(source_node.get("node_id") or "").strip() or "source",
+                port_id=from_port_id,
+                direction="source",
+            )
+            self._graph_validate_port_value(
+                port=target_port,
+                value=value,
+                schema_registry=schema_registry,
+                edge_id=edge_id,
+                node_id=str(target_node.get("node_id") or "").strip() or "target",
+                port_id=to_port_id,
+                direction="target",
+            )
+            if to_port_id in projected_inputs:
+                raise GraphContractValidationError(
+                    f"edge {edge_id} attempted to assign multiple values to target input port {to_port_id}."
+                )
+            projected_inputs[to_port_id] = deepcopy(value)
+            binding_records.append(
+                {
+                    "from_port_id": from_port_id,
+                    "to_port_id": to_port_id,
+                    "source_port_type": source_type,
+                    "target_port_type": target_type,
+                    "source_schema_ref": source_schema_ref or None,
+                    "target_schema_ref": str(target_port.get("schema_ref") or "").strip() or None,
+                    "value": deepcopy(value),
+                }
+            )
+        return {
+            "status": "validated",
+            "mode": "typed_ports",
+            "diagnostic": None,
+            "bindings": binding_records,
+            "inputs": projected_inputs,
+            "required_output_schema_refs": sorted(declared_schema_refs),
+        }
+
+    def _validate_graph_handoff_typed_projection(
+        self,
+        *,
+        graph: dict[str, Any],
+        envelope: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = dict(envelope.get("metadata") or {})
+        edge_id = str(metadata.get("edge_id") or "").strip()
+        source_node_id = str(metadata.get("source_node_id") or "").strip()
+        target_node_id = str(metadata.get("target_node_id") or "").strip()
+        if not edge_id or not source_node_id or not target_node_id:
+            raise ValueError("agent envelope typed handoff metadata is missing edge/source/target identifiers.")
+        edge = next(
+            (
+                dict(item)
+                for item in list(graph.get("edges") or [])
+                if isinstance(item, dict) and str(item.get("edge_id") or "").strip() == edge_id
+            ),
+            {},
+        )
+        if not edge:
+            raise ValueError(f"agent envelope references unknown edge_id {edge_id}.")
+        node_map = {
+            str(item.get("node_id") or "").strip(): dict(item)
+            for item in list(graph.get("nodes") or [])
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+        }
+        source_node = dict(node_map.get(source_node_id) or {})
+        target_node = dict(node_map.get(target_node_id) or {})
+        if not source_node or not target_node:
+            raise ValueError("agent envelope typed handoff references unknown source or target node.")
+        typed_handoff = dict(metadata.get("typed_handoff") or {})
+        if not typed_handoff:
+            raise ValueError(
+                "agent envelope is missing typed_handoff projection; legacy raw-text fallback is blocked until the graph migration is refreshed."
+            )
+        if str(typed_handoff.get("status") or "").strip() != "validated":
+            diagnostic = str(typed_handoff.get("diagnostic") or "").strip() or "typed handoff projection requires migration"
+            raise ValueError(
+                f"agent envelope typed handoff is not live-runnable: {diagnostic}"
+            )
+        expected_bindings = [
+            {
+                "from_port_id": str(item.get("from_port_id") or "").strip(),
+                "to_port_id": str(item.get("to_port_id") or "").strip(),
+            }
+            for item in list(dict(edge.get("handoff_contract") or {}).get("port_bindings") or [])
+            if isinstance(item, dict)
+            and str(item.get("from_port_id") or "").strip()
+            and str(item.get("to_port_id") or "").strip()
+        ]
+        binding_records = [
+            dict(item)
+            for item in list(typed_handoff.get("bindings") or [])
+            if isinstance(item, dict)
+        ]
+        if len(binding_records) != len(expected_bindings):
+            raise ValueError(
+                f"agent envelope typed handoff binding count does not match edge {edge_id}."
+            )
+        inputs = dict(typed_handoff.get("inputs") or {})
+        source_ports = self._graph_node_port_map(source_node, direction="outputs")
+        target_ports = self._graph_node_port_map(target_node, direction="inputs")
+        schema_registry = dict(graph.get("schema_registry") or {})
+        expected_target_ids = {item["to_port_id"] for item in expected_bindings}
+        unexpected_input_ids = sorted(set(inputs).difference(expected_target_ids))
+        if unexpected_input_ids:
+            raise ValueError(
+                f"agent envelope typed handoff contains unexpected target inputs: {', '.join(unexpected_input_ids)}"
+            )
+        for index, expected in enumerate(expected_bindings):
+            binding = dict(binding_records[index])
+            from_port_id = str(binding.get("from_port_id") or "").strip()
+            to_port_id = str(binding.get("to_port_id") or "").strip()
+            if from_port_id != expected["from_port_id"] or to_port_id != expected["to_port_id"]:
+                raise ValueError(
+                    f"agent envelope typed handoff binding order/content does not match edge {edge_id}."
+                )
+            if to_port_id not in inputs:
+                raise ValueError(
+                    f"agent envelope typed handoff is missing input payload for {to_port_id}."
+                )
+            value = binding.get("value")
+            if inputs[to_port_id] != value:
+                raise ValueError(
+                    f"agent envelope typed handoff payload for {to_port_id} does not match its binding value."
+                )
+            source_port = dict(source_ports.get(from_port_id) or {})
+            target_port = dict(target_ports.get(to_port_id) or {})
+            if not source_port or not target_port:
+                raise ValueError(
+                    f"agent envelope typed handoff references unknown source/target port {from_port_id}->{to_port_id}."
+                )
+            self._graph_validate_port_value(
+                port=source_port,
+                value=value,
+                schema_registry=schema_registry,
+                edge_id=edge_id,
+                node_id=source_node_id,
+                port_id=from_port_id,
+                direction="source",
+            )
+            self._graph_validate_port_value(
+                port=target_port,
+                value=value,
+                schema_registry=schema_registry,
+                edge_id=edge_id,
+                node_id=target_node_id,
+                port_id=to_port_id,
+                direction="target",
+            )
+        return typed_handoff
+
+    def validate_graph_node_machine_result_contract(
+        self,
+        graph_definition: dict[str, Any],
+        *,
+        node_id: str,
+        machine_result: Any,
+    ) -> dict[str, Any] | None:
+        node = next(
+            (
+                dict(item)
+                for item in list(graph_definition.get("nodes") or [])
+                if isinstance(item, dict) and str(item.get("node_id") or "").strip() == node_id
+            ),
+            {},
+        )
+        if not node:
+            raise ValueError(f"Unknown node_id for output validation: {node_id}")
+        output_contract = dict(node.get("output_contract") or {})
+        if bool(output_contract.get("artifact_only")):
+            return None
+        schema = output_contract.get("machine_result_schema")
+        if not isinstance(schema, dict) or not schema:
+            return {
+                "schema_ref": None,
+                "errors": ["output_contract.machine_result_schema is missing."],
+            }
+        if not isinstance(machine_result, dict) or not machine_result:
+            return {
+                "schema_ref": f"schema.{node_id}.machine_result",
+                "errors": ["machine_result must be a non-empty object."],
+            }
+        errors = self._graph_json_schema_errors(schema, machine_result)
+        if not errors:
+            return None
+        return {
+            "schema_ref": f"schema.{node_id}.machine_result",
+            "errors": errors,
+        }
+
+    def _graph_worker_content_parts(
+        self,
+        *,
+        output_bundle: dict[str, Any],
+        message_parts: list[dict[str, Any]],
+        artifact_refs: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        parts: list[dict[str, Any]] = []
+        artifact_by_id = {
+            str(item.get("artifact_id") or "").strip(): dict(item)
+            for item in artifact_refs
+            if isinstance(item, dict) and str(item.get("artifact_id") or "").strip()
+        }
+        for index, item in enumerate(message_parts, start=1):
+            if not isinstance(item, dict):
+                continue
+            part_type = str(item.get("part_type") or "").strip()
+            if not part_type:
+                continue
+            if part_type == "human_summary":
+                human_summary = str(output_bundle.get("human_summary") or "").strip()
+                if not human_summary:
+                    continue
+                parts.append(
+                    validate_protocol_payload(
+                        "ContentPart",
+                        {
+                            "part_id": self._graph_worker_stable_identifier(
+                                "part",
+                                output_bundle.get("run_id"),
+                                output_bundle.get("node_id"),
+                                output_bundle.get("attempt_count"),
+                                "human_summary",
+                                index,
+                            ),
+                            "kind": "text",
+                            "mime_type": "text/markdown",
+                            "text": human_summary,
+                            "metadata": {
+                                "part_type": "human_summary",
+                                "relative_path": str(item.get("path") or "").strip() or None,
+                                "preview": str(item.get("preview") or "").strip() or None,
+                            },
+                        },
+                    )
+                )
+                continue
+            if part_type == "machine_result":
+                machine_result = redact_sensitive(output_bundle.get("machine_result") or {})
+                if not isinstance(machine_result, dict) or not machine_result:
+                    continue
+                parts.append(
+                    validate_protocol_payload(
+                        "ContentPart",
+                        {
+                            "part_id": self._graph_worker_stable_identifier(
+                                "part",
+                                output_bundle.get("run_id"),
+                                output_bundle.get("node_id"),
+                                output_bundle.get("attempt_count"),
+                                "machine_result",
+                                index,
+                            ),
+                            "kind": "json",
+                            "mime_type": "application/json",
+                            "data": machine_result,
+                            "metadata": {
+                                "part_type": "machine_result",
+                                "relative_path": str(item.get("path") or "").strip() or None,
+                                "preview": str(item.get("preview") or "").strip() or None,
+                            },
+                        },
+                    )
+                )
+                continue
+            if part_type == "artifact_ref":
+                artifact_id = str(item.get("artifact_id") or "").strip()
+                artifact = artifact_by_id.get(artifact_id)
+                if artifact is None:
+                    continue
+                parts.append(
+                    validate_protocol_payload(
+                        "ContentPart",
+                        {
+                            "part_id": self._graph_worker_stable_identifier(
+                                "part",
+                                output_bundle.get("run_id"),
+                                output_bundle.get("node_id"),
+                                output_bundle.get("attempt_count"),
+                                artifact_id,
+                                index,
+                            ),
+                            "kind": "artifact",
+                            "mime_type": str(artifact.get("media_type") or "application/octet-stream"),
+                            "artifact": artifact,
+                            "metadata": {
+                                "part_type": "artifact_ref",
+                                "artifact_kind": str(item.get("artifact_kind") or dict(artifact.get("metadata") or {}).get("artifact_kind") or "").strip() or None,
+                                "relative_path": str(item.get("path") or "").strip() or str(dict(artifact.get("metadata") or {}).get("relative_path") or "").strip() or None,
+                            },
+                        },
+                    )
+                )
+                continue
+            if part_type == "resource_ref":
+                resource_ref = str(item.get("path") or "").strip()
+                if not resource_ref:
+                    continue
+                parts.append(
+                    validate_protocol_payload(
+                        "ContentPart",
+                        {
+                            "part_id": self._graph_worker_stable_identifier(
+                                "part",
+                                output_bundle.get("run_id"),
+                                output_bundle.get("node_id"),
+                                output_bundle.get("attempt_count"),
+                                "resource_ref",
+                                index,
+                            ),
+                            "kind": "text",
+                            "mime_type": "text/uri-list",
+                            "text": resource_ref,
+                            "metadata": {"part_type": "resource_ref"},
+                        },
+                    )
+                )
+        return parts
+
     def _build_graph_worker_handoffs(
         self,
         *,
@@ -6720,6 +7779,12 @@ class TaskService:
         generated_artifact_refs: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         handoffs: list[dict[str, Any]] = []
+        node_map = {
+            str(item.get("node_id") or "").strip(): dict(item)
+            for item in list(graph.get("nodes") or [])
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+        }
+        source_node = dict(node_map.get(node_id) or {})
         for edge in list(graph.get("edges") or []):
             if not isinstance(edge, dict):
                 continue
@@ -6738,11 +7803,51 @@ class TaskService:
                 Path(bundle_paths["output_json"]).parent / f"input-envelope-{str(edge.get('edge_id') or '').strip() or 'edge'}.json"
             ).as_posix()
             write_json(self._projects.require_workspace_root() / input_envelope_path, input_envelope)
+            target_node_id = str(edge.get("to_node_id") or "").strip()
+            target_node = dict(node_map.get(target_node_id) or {})
+            agent_envelope_path = (
+                Path(bundle_paths["output_json"]).parent / f"agent-envelope-{str(edge.get('edge_id') or '').strip() or 'edge'}.json"
+            ).as_posix()
+            agent_envelope = self._build_graph_worker_agent_envelope(
+                graph=graph,
+                edge=edge,
+                source_node=source_node,
+                target_node=target_node,
+                output_bundle=output_bundle,
+                input_envelope=input_envelope,
+                bundle_paths={
+                    **bundle_paths,
+                    "input_envelope_json": input_envelope_path,
+                },
+            )
+            write_json(self._projects.require_workspace_root() / agent_envelope_path, agent_envelope)
+            self.durable_run_store().record_agent_envelope(agent_envelope)
+            envelope_artifact_ref = {
+                "artifact_id": f"{str(output_bundle.get('worker_thread_id') or '').strip()}-{str(edge.get('edge_id') or '').strip() or 'edge'}-agent-envelope-json",
+                "artifact_kind": "structured_json",
+                "path": agent_envelope_path,
+                "status": "ready",
+            }
             handoffs.append(
                 {
                     "edge_id": str(edge.get("edge_id") or "").strip(),
-                    "to_node_id": str(edge.get("to_node_id") or "").strip(),
+                    "to_node_id": target_node_id,
                     "edge_type": str(edge.get("edge_type") or "").strip(),
+                    "agent_envelope": {
+                        "envelope_id": str(agent_envelope.get("envelope_id") or "").strip(),
+                        "message_id": str(agent_envelope.get("message_id") or "").strip(),
+                        "agent_envelope_path": agent_envelope_path,
+                        "artifact_ref": envelope_artifact_ref,
+                        "delivery": deepcopy(dict(agent_envelope.get("delivery") or {})),
+                        "sender": deepcopy(dict(agent_envelope.get("sender") or {})),
+                        "recipient": deepcopy(dict(agent_envelope.get("recipient") or {})),
+                        "metadata": deepcopy(dict(agent_envelope.get("metadata") or {})),
+                        "content_part_kinds": [
+                            str(part.get("kind") or "").strip()
+                            for part in list(agent_envelope.get("content") or [])
+                            if isinstance(part, dict) and str(part.get("kind") or "").strip()
+                        ],
+                    },
                     "context_policy": {
                         "history_mode": str(context_policy.get("history_mode") or "").strip(),
                         "artifact_mode": str(context_policy.get("artifact_mode") or "").strip(),
@@ -6762,7 +7867,9 @@ class TaskService:
                         "machine_result_path": bundle_paths["output_json"],
                         "output_envelope_path": bundle_paths["output_envelope_json"],
                         "input_envelope_path": input_envelope_path,
+                        "agent_envelope_path": agent_envelope_path,
                         "message_part_types": list(input_envelope.get("message_part_types") or []),
+                        "delivery": deepcopy(dict(agent_envelope.get("delivery") or {})),
                         "artifact_refs": deepcopy(list(input_envelope.get("artifact_refs") or [])),
                         "resource_refs": deepcopy(list(input_envelope.get("resource_refs") or [])),
                         "exclude_private_memory": bool(input_envelope.get("exclude_private_memory")),
@@ -6960,6 +8067,188 @@ class TaskService:
             "exclude_private_memory": bool(context_policy.get("exclude_private_memory")),
         }
 
+    def _build_graph_worker_agent_envelope(
+        self,
+        *,
+        graph: dict[str, Any],
+        edge: dict[str, Any],
+        source_node: dict[str, Any],
+        target_node: dict[str, Any],
+        output_bundle: dict[str, Any],
+        input_envelope: dict[str, Any],
+        bundle_paths: dict[str, str],
+    ) -> dict[str, Any]:
+        task_id = str(output_bundle.get("task_id") or "").strip()
+        run_id = str(output_bundle.get("run_id") or "").strip()
+        graph_id = str(graph.get("graph_id") or output_bundle.get("graph_id") or "").strip()
+        source_node_id = str(source_node.get("node_id") or output_bundle.get("node_id") or "").strip()
+        target_node_id = str(target_node.get("node_id") or edge.get("to_node_id") or "").strip()
+        edge_id = str(edge.get("edge_id") or "").strip()
+        attempt_count = max(1, int(output_bundle.get("attempt_count") or 1))
+        correlation_id = self._graph_worker_stable_identifier("corr", run_id, source_node_id, attempt_count)
+        causation_id = self._graph_worker_stable_identifier("cause", run_id, source_node_id, attempt_count, "output")
+        envelope_id = self._graph_worker_stable_identifier("envelope", run_id, edge_id, source_node_id, target_node_id, attempt_count)
+        message_id = self._graph_worker_stable_identifier("message", run_id, edge_id, source_node_id, target_node_id, attempt_count)
+        delivery_idempotency_key = self._graph_worker_stable_identifier("delivery", run_id, edge_id, source_node_id, target_node_id, attempt_count)
+        artifact_refs = [
+            self._graph_worker_protocol_artifact_ref(
+                item,
+                task_id=task_id,
+                run_id=run_id,
+                source_node_id=source_node_id,
+            )
+            for item in list(input_envelope.get("artifact_refs") or [])
+            if isinstance(item, dict)
+        ]
+        typed_handoff = self._build_graph_worker_typed_handoff_projection(
+            graph=graph,
+            edge=edge,
+            source_node=source_node,
+            target_node=target_node,
+            output_bundle=output_bundle,
+            artifact_refs=artifact_refs,
+        )
+        content = self._graph_worker_content_parts(
+            output_bundle=output_bundle,
+            message_parts=[dict(item) for item in list(input_envelope.get("message_parts") or []) if isinstance(item, dict)],
+            artifact_refs=artifact_refs,
+        )
+        if not content:
+            raise ValueError(f"Graph handoff {edge_id or target_node_id} did not produce any structured content parts.")
+        context_policy = dict(input_envelope.get("context_policy") or {})
+        handoff_contract = dict(input_envelope.get("handoff_contract") or {})
+        sender = {
+            "agent_id": self._graph_worker_stable_identifier("agent", graph_id, source_node_id),
+            "provider_id": str(output_bundle.get("provider_id") or source_node.get("provider_id") or "unknown").strip() or "unknown",
+        }
+        sender_model_id = str(output_bundle.get("model") or source_node.get("model_id") or "").strip()
+        if sender_model_id:
+            sender["model_id"] = sender_model_id
+        sender_lane_id = str(output_bundle.get("worker_thread_id") or "").strip()
+        if sender_lane_id:
+            sender["lane_id"] = sender_lane_id
+        recipient = {
+            "agent_id": self._graph_worker_stable_identifier("agent", graph_id, target_node_id),
+            "provider_id": str(target_node.get("provider_id") or "unknown").strip() or "unknown",
+        }
+        recipient_model_id = str(target_node.get("model_id") or "").strip()
+        if recipient_model_id:
+            recipient["model_id"] = recipient_model_id
+        if target_node_id:
+            recipient["lane_id"] = target_node_id
+        envelope = {
+            "envelope_id": envelope_id,
+            "schema_version": PROTOCOL_SCHEMA_VERSION,
+            "message_id": message_id,
+            "task_id": task_id,
+            "run_id": run_id,
+            "sender": sender,
+            "recipient": recipient,
+            "kind": "handoff",
+            "content": content,
+            "created_at": str(output_bundle.get("created_at") or now_iso()),
+            "delivery": {
+                "attempt": attempt_count,
+                "idempotency_key": delivery_idempotency_key,
+                "trace_id": str(output_bundle.get("trace_id") or f"trace-{run_id}"),
+                "sequence": 0,
+            },
+            "security_policy": {
+                "exclude_private_memory": bool(input_envelope.get("exclude_private_memory")),
+                "redaction_applied": True,
+            },
+            "metadata": {
+                "graph_id": graph_id,
+                "context_id": str(output_bundle.get("context_id") or f"context-{run_id}"),
+                "source_node_id": source_node_id,
+                "target_node_id": target_node_id,
+                "edge_id": edge_id,
+                "intent": "graph_node_handoff",
+                "correlation_id": correlation_id,
+                "causation_id": causation_id,
+                "deadline_at": None,
+                "ttl_seconds": 0,
+                "schema_refs": [str(item).strip() for item in list(handoff_contract.get("required_output_schema_refs") or []) if str(item or "").strip()],
+                "context_policy_snapshot": context_policy,
+                "budget": deepcopy(dict(output_bundle.get("budget") or {})),
+                "typed_handoff": typed_handoff,
+                "provenance": {
+                    "source_output_envelope_path": bundle_paths["output_envelope_json"],
+                    "legacy_input_envelope_path": bundle_paths.get("input_envelope_json"),
+                    "source_worker_thread_id": str(output_bundle.get("worker_thread_id") or "").strip() or None,
+                    "source_status": str(output_bundle.get("status") or "").strip() or None,
+                    "retry_count": int(output_bundle.get("retry_count") or 0),
+                },
+                "message_part_types": [str(part.get("kind") or "").strip() for part in content if str(part.get("kind") or "").strip()],
+            },
+        }
+        return validate_protocol_payload("AgentEnvelope", envelope)
+
+    def _load_graph_handoff_agent_envelope(
+        self,
+        handoff: dict[str, Any],
+        *,
+        expected_target_node_id: str,
+        graph_definition: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        downstream_input = dict(handoff.get("downstream_input") or {})
+        relative_path = str(downstream_input.get("agent_envelope_path") or "").strip()
+        if not relative_path:
+            raise ValueError("downstream handoff is missing agent_envelope_path.")
+        envelope_path = resolve_under(self._projects.require_workspace_root(), relative_path)
+        if envelope_path is None or not envelope_path.exists():
+            raise ValueError(f"agent envelope path is missing: {relative_path}")
+        loaded = json.loads(envelope_path.read_text(encoding="utf-8"))
+        envelope = validate_protocol_payload("AgentEnvelope", loaded)
+        metadata = dict(envelope.get("metadata") or {})
+        security_policy = dict(envelope.get("security_policy") or {})
+        recipient = dict(envelope.get("recipient") or {})
+        delivery = dict(envelope.get("delivery") or {})
+        required_metadata = (
+            "graph_id",
+            "context_id",
+            "source_node_id",
+            "target_node_id",
+            "edge_id",
+            "intent",
+            "correlation_id",
+            "causation_id",
+            "schema_refs",
+            "context_policy_snapshot",
+            "budget",
+            "provenance",
+        )
+        missing = [field for field in required_metadata if field not in metadata]
+        if missing:
+            raise ValueError(f"agent envelope is missing required metadata fields: {', '.join(missing)}")
+        if str(metadata.get("target_node_id") or "").strip() != expected_target_node_id:
+            raise ValueError("agent envelope target node does not match the requested node.")
+        if str(recipient.get("agent_id") or "").strip() != self._graph_worker_stable_identifier("agent", metadata.get("graph_id"), expected_target_node_id):
+            raise ValueError("agent envelope recipient agent_id does not match the target node.")
+        if str(metadata.get("intent") or "").strip() != "graph_node_handoff":
+            raise ValueError("agent envelope intent must be graph_node_handoff.")
+        if not bool(security_policy.get("exclude_private_memory")):
+            raise ValueError("agent envelope must exclude private memory.")
+        if int(delivery.get("attempt") or 0) <= 0:
+            raise ValueError("agent envelope delivery attempt must be positive.")
+        if not isinstance(envelope.get("content"), list) or not list(envelope.get("content") or []):
+            raise ValueError("agent envelope content must contain at least one structured part.")
+        if isinstance(graph_definition, dict):
+            orchestration_graph = (
+                graph_definition
+                if graph_definition.get("schema_registry") is not None
+                else self._orchestration_graph_for_task_graph(graph_definition)
+            )
+            typed_handoff = self._validate_graph_handoff_typed_projection(
+                graph=orchestration_graph,
+                envelope=envelope,
+            )
+            envelope["metadata"] = {
+                **metadata,
+                "typed_handoff": typed_handoff,
+            }
+        return envelope
+
     def _graph_worker_summary_markdown(self, output_bundle: dict[str, Any]) -> str:
         human_summary = str(output_bundle.get("human_summary") or "").strip()
         hints = [str(item).strip() for item in list(output_bundle.get("next_action_hints") or []) if str(item or "").strip()]
@@ -7050,6 +8339,30 @@ class TaskService:
         except Exception:
             return None
         return dict(loaded) if isinstance(loaded, dict) else None
+
+    def _persist_full_graph_run(self, run_ref: dict[str, Any], run: dict[str, Any]) -> bool:
+        artifact_refs = [dict(item) for item in list(run_ref.get("artifact_refs") or []) if isinstance(item, dict)]
+        manifest_ref = next(
+            (
+                item
+                for item in artifact_refs
+                if str(item.get("artifact_kind") or "").strip() == "structured_json"
+                and str(item.get("artifact_id") or "").strip().endswith("-run-manifest-json")
+            ),
+            None,
+        )
+        if manifest_ref is None:
+            return False
+        relative_path = str(manifest_ref.get("path") or "").strip()
+        if not relative_path:
+            return False
+        workspace_root = self._projects.require_workspace_root()
+        manifest_path = resolve_under(workspace_root, relative_path)
+        if manifest_path is None:
+            return False
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(manifest_path, run)
+        return True
 
     @staticmethod
     def _graph_recovery_closure(*, initial_targets: list[str], downstream_by_node: dict[str, list[str]]) -> set[str]:
@@ -7169,6 +8482,7 @@ class TaskService:
                     if str(entry or "").strip()
                 ][:16],
                 "supports_mcp": bool(dict(runtime_contract.get("tool_policy") or {}).get("supports_mcp")),
+                "mcp_tool_policy": deepcopy(dict(dict(runtime_contract.get("tool_policy") or {}).get("mcp_tool_policy") or {})),
             },
             "subagent_policy": {
                 "isolation_mode": str(dict(runtime_contract.get("subagent_policy") or {}).get("isolation_mode") or "").strip(),
@@ -7189,6 +8503,30 @@ class TaskService:
                     "edge_id": str(item.get("edge_id") or "").strip(),
                     "to_node_id": str(item.get("to_node_id") or "").strip(),
                     "edge_type": str(item.get("edge_type") or "").strip(),
+                    "agent_envelope": {
+                        "envelope_id": str(dict(item.get("agent_envelope") or {}).get("envelope_id") or "").strip() or None,
+                        "message_id": str(dict(item.get("agent_envelope") or {}).get("message_id") or "").strip() or None,
+                        "agent_envelope_path": str(dict(item.get("agent_envelope") or {}).get("agent_envelope_path") or "").strip() or None,
+                        "delivery": deepcopy(dict(dict(item.get("agent_envelope") or {}).get("delivery") or {})),
+                        "sender": deepcopy(dict(dict(item.get("agent_envelope") or {}).get("sender") or {})),
+                        "recipient": deepcopy(dict(dict(item.get("agent_envelope") or {}).get("recipient") or {})),
+                        "metadata": deepcopy(dict(dict(item.get("agent_envelope") or {}).get("metadata") or {})),
+                        "content_part_kinds": [
+                            str(entry).strip()
+                            for entry in list(dict(item.get("agent_envelope") or {}).get("content_part_kinds") or [])
+                            if str(entry or "").strip()
+                        ],
+                        "artifact_ref": (
+                            {
+                                "artifact_id": str(dict(dict(item.get("agent_envelope") or {}).get("artifact_ref") or {}).get("artifact_id") or "").strip(),
+                                "artifact_kind": str(dict(dict(item.get("agent_envelope") or {}).get("artifact_ref") or {}).get("artifact_kind") or "").strip(),
+                                "path": str(dict(dict(item.get("agent_envelope") or {}).get("artifact_ref") or {}).get("path") or "").strip(),
+                                "status": str(dict(dict(item.get("agent_envelope") or {}).get("artifact_ref") or {}).get("status") or "").strip() or "ready",
+                            }
+                            if isinstance(dict(item.get("agent_envelope") or {}).get("artifact_ref"), dict)
+                            else None
+                        ),
+                    },
                     "context_policy": {
                         "history_mode": str(context_policy.get("history_mode") or "").strip(),
                         "artifact_mode": str(context_policy.get("artifact_mode") or "").strip(),
@@ -7208,7 +8546,9 @@ class TaskService:
                         "machine_result_path": str(downstream_input.get("machine_result_path") or "").strip() or None,
                         "output_envelope_path": str(downstream_input.get("output_envelope_path") or "").strip() or None,
                         "input_envelope_path": str(downstream_input.get("input_envelope_path") or "").strip() or None,
+                        "agent_envelope_path": str(downstream_input.get("agent_envelope_path") or "").strip() or None,
                         "message_part_types": [str(entry).strip() for entry in list(downstream_input.get("message_part_types") or []) if str(entry or "").strip()],
+                        "delivery": deepcopy(dict(downstream_input.get("delivery") or {})),
                         "artifact_refs": [
                             {
                                 "artifact_id": str(entry.get("artifact_id") or "").strip(),
@@ -7428,8 +8768,19 @@ class TaskService:
 
     def _sync_orchestration_graph_with_task_graph(self, orchestration_graph: dict[str, Any], *, task_graph: dict[str, Any]) -> dict[str, Any]:
         executable_graph = self._reachable_task_graph_projection(task_graph)
-        canonical_lifted = lift_task_graph_to_agent_orchestration_graph(executable_graph)
         existing_graph = deepcopy(orchestration_graph) if isinstance(orchestration_graph, dict) else {}
+        interop_source_format = self._graph_interop_source_format({"orchestration_graph": existing_graph})
+        try:
+            canonical_lifted = lift_task_graph_to_agent_orchestration_graph(executable_graph)
+        except Exception:
+            if (
+                existing_graph
+                and interop_source_format
+                in {COMFYUI_WORKFLOW_SOURCE_FORMAT, LANGGRAPH_STATEGRAPH_SOURCE_FORMAT}
+            ):
+                canonical_lifted = validate_agent_orchestration_graph(existing_graph)
+            else:
+                raise
         synced = {**deepcopy(canonical_lifted), **existing_graph}
         synced["graph_id"] = task_graph["graph_id"]
         synced["task_id"] = task_graph["task_id"]
@@ -7471,7 +8822,22 @@ class TaskService:
             task_node = node_map.get(str(node.get("node_id") or "").strip())
             if not task_node:
                 continue
-            node["kind"] = task_node.get("kind")
+            task_ui_hints = dict(task_node.get("ui_hints") or {})
+            if (
+                str(task_node.get("kind") or "").strip() == OPAQUE_DISABLED_NODE_TYPE_ID
+                and str(task_ui_hints.get("original_node_type_kind") or "").strip()
+            ):
+                node["kind"] = str(task_ui_hints.get("original_node_type_kind") or "").strip()
+                diagnostics = [
+                    deepcopy(item)
+                    for item in list(task_ui_hints.get("node_type_diagnostics") or [])
+                    if isinstance(item, dict)
+                ]
+                if diagnostics:
+                    node["node_type_diagnostics"] = diagnostics
+                    node["status"] = "disabled"
+            else:
+                node["kind"] = task_node.get("kind")
             node["label"] = task_node.get("label")
             node["card_ref"] = task_node.get("agent_card_ref")
             routing = dict(node.get("routing") or {})
@@ -7553,14 +8919,25 @@ class TaskService:
                 output_contract["machine_result_schema_ref"] = schema_ref
                 node_schema_refs[str(task_node["node_id"])] = schema_ref
             node["output_contract"] = output_contract
-            node["ports"] = self._sync_orchestration_node_ports(
-                node=dict(node),
-                output_contract=output_contract,
-            )
+            if (
+                interop_source_format in {COMFYUI_WORKFLOW_SOURCE_FORMAT, LANGGRAPH_STATEGRAPH_SOURCE_FORMAT}
+                and isinstance(dict(existing_nodes.get(str(node.get("node_id") or "").strip()) or {}).get("ports"), dict)
+            ):
+                node["ports"] = deepcopy(dict(existing_nodes.get(str(node.get("node_id") or "").strip()) or {}).get("ports") or {})
+            else:
+                node["ports"] = self._sync_orchestration_node_ports(
+                    node=dict(node),
+                    output_contract=output_contract,
+                )
             ui = dict(node.get("ui") or {})
             ui["position"] = deepcopy(task_node.get("position") or ui.get("position") or {"x": 0, "y": 0})
             node["ui"] = ui
-            node["status"] = task_node.get("status")
+            if "node_type_id" in task_ui_hints and task_ui_hints.get("node_type_id") is not None:
+                node["resolved_node_type_id"] = str(task_ui_hints.get("node_type_id") or "")
+            if "node_type_registry_fingerprint" in task_ui_hints and task_ui_hints.get("node_type_registry_fingerprint") is not None:
+                node["node_type_registry_fingerprint"] = str(task_ui_hints.get("node_type_registry_fingerprint") or "")
+            if not list(node.get("node_type_diagnostics") or []):
+                node["status"] = task_node.get("status")
         synced["schema_registry"] = schema_registry
 
         task_node_positions = {
@@ -7578,6 +8955,48 @@ class TaskService:
             for item in list(existing_graph.get("edges") or [])
             if isinstance(item, dict) and str(item.get("edge_id") or "").strip()
         }
+        synced_node_map = {
+            str(item.get("node_id") or "").strip(): item
+            for item in list(synced.get("nodes") or [])
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+        }
+        for task_edge in edge_map.values():
+            edge_id = str(task_edge.get("edge_id") or "").strip()
+            from_node_id = str(task_edge.get("from_node_id") or "").strip()
+            to_node_id = str(task_edge.get("to_node_id") or "").strip()
+            source_schema_ref = str(node_schema_refs.get(from_node_id) or "").strip()
+            task_handoff_contract = task_edge.get("handoff_contract") if isinstance(task_edge.get("handoff_contract"), dict) else {}
+            existing_edge = dict(existing_edges.get(edge_id) or {})
+            existing_bindings = [
+                dict(item)
+                for item in list(dict(existing_edge.get("handoff_contract") or {}).get("port_bindings") or [])
+                if isinstance(item, dict)
+            ]
+            existing_has_explicit_typed_binding = bool(existing_bindings) and not all(
+                str(item.get("from_port_id") or "").strip() == "machine_result"
+                and str(item.get("to_port_id") or "").strip() == "task_context"
+                for item in existing_bindings
+            )
+            if (
+                not edge_id
+                or not from_node_id
+                or not to_node_id
+                or not source_schema_ref
+                or list(task_handoff_contract.get("port_bindings") or [])
+                or existing_has_explicit_typed_binding
+            ):
+                continue
+            target_node = synced_node_map.get(to_node_id)
+            if not isinstance(target_node, dict):
+                continue
+            source_task_node = node_map.get(from_node_id) or {}
+            self._ensure_inferred_handoff_input_port(
+                target_node,
+                edge_id=edge_id,
+                source_node_id=from_node_id,
+                source_node_label=str(source_task_node.get("label") or from_node_id).strip() or from_node_id,
+                schema_ref=source_schema_ref,
+            )
         synced["edges"] = [
             {
                 **deepcopy(item),
@@ -7607,6 +9026,7 @@ class TaskService:
                 handoff_contract["required_output_schema_refs"] = [source_schema_ref]
             handoff_contract["port_bindings"] = self._default_handoff_port_bindings(
                 synced,
+                edge_id=str(edge.get("edge_id") or ""),
                 from_node_id=str(edge["from_node_id"] or ""),
                 to_node_id=str(edge["to_node_id"] or ""),
                 existing=list(handoff_contract.get("port_bindings") or []),
@@ -7650,6 +9070,7 @@ class TaskService:
                         ],
                         "port_bindings": self._default_handoff_port_bindings(
                             synced,
+                            edge_id=edge_id,
                             from_node_id=from_node_id,
                             to_node_id=to_node_id,
                             existing=list(task_handoff_contract.get("port_bindings") or []),
@@ -7715,7 +9136,9 @@ class TaskService:
         ports = dict(node.get("ports") or {})
         inputs = [deepcopy(item) for item in list(ports.get("inputs") or []) if isinstance(item, dict)]
         outputs = [deepcopy(item) for item in list(ports.get("outputs") or []) if isinstance(item, dict)]
-        if not inputs:
+        input_contract = dict(node.get("input_contract") or {})
+        input_mode = str(input_contract.get("mode") or "").strip()
+        if not inputs and input_mode != "task_context":
             inputs = [{"port_id": "task_context", "label": "Task Context", "port_type": "text", "shape": "single", "required": True}]
 
         machine_schema_ref = str(output_contract.get("machine_result_schema_ref") or "").strip()
@@ -7759,7 +9182,7 @@ class TaskService:
             normalized_outputs = outputs or [{"port_id": "human_summary", "label": "Human Summary", "port_type": "text", "shape": "single", "required": True}]
         return {"inputs": inputs, "outputs": normalized_outputs}
 
-    def _default_handoff_port_bindings(self, orchestration_graph: dict[str, Any], *, from_node_id: str, to_node_id: str, existing: list[Any]) -> list[dict[str, str]]:
+    def _default_handoff_port_bindings(self, orchestration_graph: dict[str, Any], *, edge_id: str = "", from_node_id: str, to_node_id: str, existing: list[Any]) -> list[dict[str, str]]:
         normalized_existing: list[dict[str, str]] = []
         for item in existing:
             if not isinstance(item, dict):
@@ -7768,8 +9191,6 @@ class TaskService:
             to_port_id = str(item.get("to_port_id") or "").strip()
             if from_port_id and to_port_id:
                 normalized_existing.append({"from_port_id": from_port_id, "to_port_id": to_port_id})
-        if normalized_existing:
-            return normalized_existing
         node_map = {
             str(item.get("node_id") or "").strip(): dict(item)
             for item in list(orchestration_graph.get("nodes") or [])
@@ -7785,33 +9206,108 @@ class TaskService:
             for item in list(dict(node_map.get(to_node_id) or {}).get("ports", {}).get("inputs") or [])
             if isinstance(item, dict) and str(item.get("port_id") or "").strip()
         }
+        if normalized_existing:
+            legacy_task_context_only = all(
+                item["from_port_id"] == "machine_result" and item["to_port_id"] == "task_context"
+                for item in normalized_existing
+            )
+            if not legacy_task_context_only:
+                return normalized_existing
+            if "machine_result" not in source_outputs:
+                return normalized_existing
+            typed_targets = [
+                port_id
+                for port_id, port in target_inputs.items()
+                if port_id != "task_context"
+                and str(port.get("port_type") or "").strip() == str(dict(source_outputs.get("machine_result") or {}).get("port_type") or "").strip()
+            ]
+            if not typed_targets:
+                return normalized_existing
         bindings: list[dict[str, str]] = []
         if "machine_result" in source_outputs:
-            preferred_targets = [port_id for port_id in target_inputs if port_id != "task_context"] or (["task_context"] if "task_context" in target_inputs else [])
+            inferred_target_id = f"{str(edge_id or '').strip()}_input" if str(edge_id or "").strip() else ""
+            preferred_targets = []
+            if inferred_target_id and inferred_target_id in target_inputs:
+                preferred_targets.append(inferred_target_id)
+            preferred_targets.extend(
+                port_id
+                for port_id in target_inputs
+                if port_id != "task_context" and port_id != inferred_target_id
+            )
+            if not preferred_targets and "task_context" in target_inputs:
+                preferred_targets = ["task_context"]
             if preferred_targets:
                 bindings.append({"from_port_id": "machine_result", "to_port_id": preferred_targets[0]})
+        bound_targets = {
+            str(item.get("to_port_id") or "").strip()
+            for item in bindings
+            if str(item.get("to_port_id") or "").strip()
+        }
         for port_id in source_outputs:
             if port_id == "machine_result":
                 continue
             if port_id in target_inputs:
+                if port_id in bound_targets:
+                    continue
                 bindings.append({"from_port_id": port_id, "to_port_id": port_id})
+                bound_targets.add(port_id)
                 continue
             source_type = str(source_outputs[port_id].get("port_type") or "").strip()
             target_match = next(
                 (
                     target_id
                     for target_id, target in target_inputs.items()
-                    if target_id != "task_context" and str(target.get("port_type") or "").strip() == source_type
+                    if target_id != "task_context"
+                    and target_id not in bound_targets
+                    and str(target.get("port_type") or "").strip() == source_type
                 ),
                 "",
             )
             if target_match:
                 bindings.append({"from_port_id": port_id, "to_port_id": target_match})
+                bound_targets.add(target_match)
         if not bindings and source_outputs and target_inputs:
             first_source = next(iter(source_outputs))
             first_target = next(iter(target_inputs))
             bindings.append({"from_port_id": first_source, "to_port_id": first_target})
         return bindings
+
+    def _ensure_inferred_handoff_input_port(
+        self,
+        node: dict[str, Any],
+        *,
+        edge_id: str,
+        source_node_id: str,
+        source_node_label: str,
+        schema_ref: str,
+    ) -> None:
+        inferred_port_id = f"{edge_id}_input"
+        ports = dict(node.get("ports") or {})
+        inputs = [deepcopy(item) for item in list(ports.get("inputs") or []) if isinstance(item, dict)]
+        if not any(str(item.get("port_id") or "").strip() == inferred_port_id for item in inputs):
+            inputs.append(
+                {
+                    "port_id": inferred_port_id,
+                    "label": f"Input From {source_node_label or source_node_id}",
+                    "port_type": "structured_json",
+                    "shape": "single",
+                    "required": True,
+                    "schema_ref": schema_ref,
+                }
+            )
+        ports["inputs"] = inputs
+        node["ports"] = ports
+        input_contract = dict(node.get("input_contract") or {})
+        existing_port_ids = [
+            str(item).strip()
+            for item in list(input_contract.get("port_ids") or [])
+            if str(item or "").strip()
+        ]
+        if inferred_port_id not in existing_port_ids:
+            existing_port_ids.append(inferred_port_id)
+        input_contract["mode"] = "task_context_and_typed_ports"
+        input_contract["port_ids"] = existing_port_ids
+        node["input_contract"] = input_contract
 
     @staticmethod
     def _artifact_spec_id_for_kind(existing_specs: list[dict[str, Any]], artifact_kind: str) -> str:

@@ -1,6 +1,6 @@
 {
   "schema_version": "astrabridge-document-registry-v1",
-  "last_verified": "2026-07-16",
+  "last_verified": "2026-07-17",
   "current_execution_plan": "PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md",
   "conditional_execution_plans": [
     {
@@ -44,6 +44,7 @@
     {"path":"docs/REAL_SCENARIO_DOGFOOD_EVIDENCE.md","status":"reference","owner":"dogfood","scope":"Evidence contract for real-scenario capability dogfood.","last_verified":"2026-07-10","replacement":null,"archive_policy":"keep_in_place"},
     {"path":"docs/RELEASE_CHECKLIST.md","status":"active","owner":"release","scope":"Current release gates and security/validation checklist.","last_verified":"2026-07-10","replacement":null,"archive_policy":"keep_in_place"},
     {"path":"docs/REPO_GOVERNANCE.md","status":"active","owner":"repository-governance","scope":"Repository hygiene, document taxonomy, and local gate policy.","last_verified":"2026-07-10","replacement":null,"archive_policy":"keep_in_place"},
+    {"path":"docs/RUNTIME_ROLLOUT_AND_MAINTENANCE_RUNBOOK.md","status":"reference","owner":"stability-protocol","scope":"Current final rollout, migration, rollback-readback, and runtime maintenance runbook.","last_verified":"2026-07-17","replacement":null,"archive_policy":"keep_in_place"},
     {"path":"docs/SECURITY_AND_ISOLATION.md","status":"active","owner":"security","scope":"Current secret, isolation, plugin, runtime, and external-write boundaries.","last_verified":"2026-07-10","replacement":null,"archive_policy":"keep_in_place"},
     {"path":"docs/TASK_GRAPH_MAINTAINER_RUNBOOK.md","status":"reference","owner":"agent-orchestration","scope":"Current task-graph operation, maintenance, and validation runbook.","last_verified":"2026-07-10","replacement":null,"archive_policy":"keep_in_place"},
     {"path":"docs/VERIFICATION_MATRIX.md","status":"active","owner":"release","scope":"Quick, focused, full, and release validation matrix.","last_verified":"2026-07-10","replacement":null,"archive_policy":"keep_in_place"},

@@ -51,6 +51,7 @@ import type {
   MetadataReportResponse,
   MetadataSourcesResponse,
   NativeKernelDemoResponse,
+  NodeTypeRegistrySnapshot,
   McpConfigResponse,
   McpServerConfig,
   McpStatusResponse,
@@ -113,7 +114,6 @@ import type {
 import { requestWebFetch, requestWebResearchBrief, requestWebSearchBatch } from "./features/web/webToolClient";
 import { visibleTaskTitle, visibleThreadTitle } from "./features/navigation/displayTitle";
 
-let sidecarBaseUrlPromise: Promise<string> | null = null;
 type AdminSessionTokenCacheEntry = {
   promise: Promise<string>;
   startedAt: number;
@@ -238,10 +238,7 @@ async function sidecarBaseUrl() {
   // reuse another desktop-side session.
   const fromQuery = querySidecarBaseUrl();
   if (fromQuery) return fromQuery;
-  if (!sidecarBaseUrlPromise) {
-    sidecarBaseUrlPromise = invoke<string>("sidecar_url");
-  }
-  return sidecarBaseUrlPromise;
+  return invoke<string>("sidecar_url");
 }
 
 function normalizeProviderThreadName<T extends { name?: string | null }>(thread: T): T {
@@ -516,7 +513,6 @@ function shouldRefreshAdminSession(response: Response, data: Record<string, unkn
 }
 
 export function resetApiModuleStateForTests() {
-  sidecarBaseUrlPromise = null;
   adminTokenPromises.clear();
 }
 
@@ -1277,6 +1273,7 @@ export const api = {
   projectTerminalHistory: () => request<ProjectTerminalHistory>("/api/project/terminal/history?limit=30"),
   projectTasks: async () => normalizeProjectTasksResponse(await request<ProjectTasksResponse>("/api/project/tasks")),
   taskGraphTemplates: () => request<{ schema_version: string; templates: TaskGraphTemplateSummary[] }>("/api/task-graphs/templates"),
+  taskGraphNodeTypes: () => request<NodeTypeRegistrySnapshot>("/api/task-graphs/node-types"),
   taskGraph: (graphId?: string | null) => {
     const params = new URLSearchParams();
     if (graphId) params.set("graph_id", graphId);
@@ -1368,7 +1365,7 @@ export const api = {
     }>(`/api/task-graphs/run/status?run_id=${encodeURIComponent(runId)}`),
   importTaskGraphFile: (payload: { graph_path?: string | null; graph_text?: string | null }) =>
     jsonRequest<AgentOrchestrationGraphImportResponse>("/api/task-graphs/import", payload),
-  exportTaskGraphFile: (payload: { graph_id: string; export_path?: string | null }) =>
+  exportTaskGraphFile: (payload: { graph_id: string; export_path?: string | null; format?: string | null }) =>
     jsonRequest<AgentOrchestrationGraphExportResponse>("/api/task-graphs/export", payload),
   createTaskGraphSnapshot: (payload: {
     graph_id: string;

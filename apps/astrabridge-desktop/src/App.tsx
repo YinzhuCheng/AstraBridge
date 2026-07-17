@@ -359,6 +359,88 @@ function taskGraphSelectionStorageKey(projectId: string, taskId: string) {
   return `${TASK_GRAPH_SELECTION_PREFIX}${projectId}:${taskId}`;
 }
 
+const TASK_GRAPH_COMFYUI_SOURCE_FORMAT = "comfyui_workflow";
+const TASK_GRAPH_LANGGRAPH_SOURCE_FORMAT = "langgraph_stategraph_manifest";
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function resolveTaskGraphImportExportSourceFormat(graph: TaskGraphDefinition | null | undefined) {
+  const orchestrationGraph = recordOrNull(graph?.orchestration_graph);
+  const migration = recordOrNull(orchestrationGraph?.migration);
+  const adapter = recordOrNull(migration?.adapter);
+  const adapterSourceFormat = String(adapter?.source_format ?? "").trim();
+  if (adapterSourceFormat) {
+    return adapterSourceFormat;
+  }
+  const metadata = recordOrNull(orchestrationGraph?.metadata);
+  const adapterManifest = recordOrNull(metadata?.adapter_manifest);
+  const manifestSourceFormat = String(adapterManifest?.source_format ?? "").trim();
+  return manifestSourceFormat || null;
+}
+
+function defaultTaskGraphImportPath() {
+  return "examples/comfyui-workflow/linear_supported.json";
+}
+
+function defaultTaskGraphExportPath(graphId: string, sourceFormat: string | null | undefined) {
+  if (String(sourceFormat ?? "").trim() === TASK_GRAPH_COMFYUI_SOURCE_FORMAT) {
+    return `PRIVATE/comfyui-workflow/${graphId}.json`;
+  }
+  if (String(sourceFormat ?? "").trim() === TASK_GRAPH_LANGGRAPH_SOURCE_FORMAT) {
+    return `PRIVATE/langgraph-stategraph/${graphId}.json`;
+  }
+  return `PRIVATE/agent-orchestration/productization/step7/20260707/${graphId}.json`;
+}
+
+function formatTaskGraphImportExportError(
+  error: unknown,
+  action: "import" | "export",
+) {
+  const fallback =
+    error instanceof Error
+      ? error.message
+      : action === "import"
+        ? "Failed to import the graph file."
+        : "Failed to export the graph file.";
+  if (!(error instanceof ApiRequestError)) {
+    return fallback;
+  }
+  const payload = recordOrNull(error.data);
+  const lossReport = recordOrNull(payload?.loss_report);
+  if (!lossReport) {
+    return fallback;
+  }
+  const summary = recordOrNull(lossReport.summary);
+  const issues = Array.isArray(lossReport.issues)
+    ? lossReport.issues
+        .map((item) => recordOrNull(item)?.message)
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .slice(0, 3)
+    : [];
+  const blockedCount = Number(summary?.blocked_count ?? 0);
+  const warningCount = Number(summary?.warning_count ?? 0);
+  const sourceFormat = String(payload?.source_format ?? lossReport.source_format ?? "").trim();
+  const formatLabel =
+    sourceFormat === TASK_GRAPH_COMFYUI_SOURCE_FORMAT
+      ? "ComfyUI workflow"
+      : sourceFormat === TASK_GRAPH_LANGGRAPH_SOURCE_FORMAT
+        ? "LangGraph StateGraph manifest"
+      : sourceFormat
+        ? `${sourceFormat} workflow`
+        : "workflow";
+  const countSummary = [blockedCount ? `${blockedCount} blocked` : null, warningCount ? `${warningCount} warning` : null]
+    .filter((item): item is string => Boolean(item))
+    .join(", ");
+  return [fallback, countSummary ? `${formatLabel} loss report: ${countSummary}.` : `${formatLabel} loss report available.`, ...issues]
+    .filter((item) => Boolean(String(item ?? "").trim()))
+    .join(" ");
+}
+
 function looksGenericProjectTitle(project: Pick<SidebarProjectNode, "name" | "project_id">) {
   const title = String(project.name || "").trim();
   return GENERIC_PROJECT_TITLES.has(title.toLowerCase()) || Boolean(title && title === String(project.project_id || "").trim());
@@ -1192,6 +1274,19 @@ function buildStatusEvidenceItems({
   goal: DisplayGoal | null;
 }): StatusEvidenceItem[] {
   const items: StatusEvidenceItem[] = [];
+  const observability = supervisor?.observability ?? null;
+  const latestTrace = observability?.trace_lineage ?? null;
+  const recentRuntimeDiagnostic = observability?.recent_diagnostics?.[0] ?? null;
+  const observabilityMetric = (metricId: string) =>
+    observability?.metrics?.find((item) => item.metric_id === metricId) ?? null;
+  const formatObservabilityMetricValue = (metricId: string) => {
+    const metric = observabilityMetric(metricId);
+    const value = metric?.value;
+    if (value == null || Number.isNaN(value)) return "";
+    if (metric?.unit === "ratio") return `${Math.round(value * 100)}%`;
+    if (metric?.unit === "ms") return `${Math.round(value)} ms`;
+    return `${Math.round(value)}`;
+  };
   if (supervisor?.token?.context_window) {
     items.push({
       id: "context",
@@ -1222,6 +1317,34 @@ function buildStatusEvidenceItems({
       label: locale === "zh-CN" ? "最近诊断" : "Latest diagnostic",
       value: latestDiagnostic.summary,
       detail: latestDiagnostic.kind,
+    });
+  }
+  if (latestTrace?.trace_id) {
+    items.push({
+      id: "trace-lineage",
+      label: locale === "zh-CN" ? "最新 Trace" : "Latest trace",
+      value: latestTrace.trace_id,
+      detail: latestTrace.run_id || latestTrace.domain_sequence?.join(" → ") || "",
+    });
+  }
+  if (recentRuntimeDiagnostic) {
+    items.push({
+      id: "runtime-diagnostic",
+      label: locale === "zh-CN" ? "运行诊断" : "Runtime diagnostic",
+      value: recentRuntimeDiagnostic.summary,
+      detail: `${recentRuntimeDiagnostic.domain} · ${recentRuntimeDiagnostic.severity}`,
+    });
+  }
+  const handoffMetric = formatObservabilityMetricValue("handoff_success_rate");
+  const nodeLatencyMetric = formatObservabilityMetricValue("node_latency_p95_ms");
+  if (handoffMetric || nodeLatencyMetric) {
+    items.push({
+      id: "runtime-reliability",
+      label: locale === "zh-CN" ? "可靠性" : "Reliability",
+      value: [handoffMetric ? `handoff ${handoffMetric}` : "", nodeLatencyMetric ? `p95 ${nodeLatencyMetric}` : ""].filter(Boolean).join(" · "),
+      detail: formatObservabilityMetricValue("mcp_conformance_rate")
+        ? `mcp ${formatObservabilityMetricValue("mcp_conformance_rate")}`
+        : "",
     });
   }
   if (!items.length && (workflowFacts.failedCommandCount > 0 || workflowFacts.recoveredCommandCount > 0)) {
@@ -6179,6 +6302,12 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
     enabled: mainView === "chat",
     staleTime: 30000,
   });
+  const taskGraphNodeTypes = useQuery({
+    queryKey: ["task-graph-node-types"],
+    queryFn: api.taskGraphNodeTypes,
+    enabled: mainView === "chat",
+    staleTime: 30000,
+  });
   const taskGraph = useQuery({
     queryKey: ["task-graph", project.project_id, taskGraphHydrationTaskId, activeTaskGraphId],
     queryFn: () => api.taskGraph(activeTaskGraphId),
@@ -6743,7 +6872,7 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
     },
     onError: (error) => {
-      setTaskGraphImportExportError(error instanceof Error ? error.message : "Failed to import the graph file.");
+      setTaskGraphImportExportError(formatTaskGraphImportExportError(error, "import"));
     },
   });
   const exportTaskGraphFile = useMutation({
@@ -6764,7 +6893,7 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
     },
     onError: (error) => {
-      setTaskGraphImportExportError(error instanceof Error ? error.message : "Failed to export the graph file.");
+      setTaskGraphImportExportError(formatTaskGraphImportExportError(error, "export"));
     },
   });
   const createTaskGraphSnapshot = useMutation({
@@ -7552,12 +7681,14 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
     }
   };
   const importTaskGraphThroughWorkspace = async () => {
+    const defaultImportPath = defaultTaskGraphImportPath();
     const graphPath = await promptForText({
-      title: "Import orchestration graph",
-      label: "Graph file path",
-      defaultValue: "examples/agent-orchestration/code_fix_review.json",
-      placeholder: "examples/agent-orchestration/code_fix_review.json",
-      description: "Use a workspace-relative JSON graph file. The imported graph will become the current task graph in this task.",
+      title: "Import task graph / workflow",
+      label: "JSON file path",
+      defaultValue: defaultImportPath,
+      placeholder: defaultImportPath,
+      description:
+        "Use a workspace-relative JSON file. Supports AstraBridge orchestration JSON and the supported ComfyUI workflow subset. The imported graph becomes the current task graph in this task.",
       submitLabel: "Import",
     });
     if (graphPath === null) return;
@@ -7571,17 +7702,24 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
     });
     const graphId = ensured?.graphId ?? null;
     if (!graphId) return;
+    const sourceFormat = resolveTaskGraphImportExportSourceFormat(ensured?.graph ?? currentTaskGraph);
+    const defaultExportPath = defaultTaskGraphExportPath(graphId, sourceFormat);
     const exportPath = await promptForText({
-      title: "Export orchestration graph",
+      title: "Export task graph / workflow",
       label: "Export file path",
-      defaultValue: `PRIVATE/agent-orchestration/productization/step7/20260707/${graphId}.json`,
-      placeholder: `PRIVATE/agent-orchestration/productization/step7/20260707/${graphId}.json`,
-      description: "Use a workspace-relative JSON path. The export preview summary will stay visible in the workspace after the file is written.",
+      defaultValue: defaultExportPath,
+      placeholder: defaultExportPath,
+      description:
+        sourceFormat === TASK_GRAPH_COMFYUI_SOURCE_FORMAT
+          ? "Use a workspace-relative JSON path. This graph originated from a ComfyUI workflow, so export defaults back to the supported ComfyUI workflow subset."
+          : sourceFormat === TASK_GRAPH_LANGGRAPH_SOURCE_FORMAT
+            ? "Use a workspace-relative JSON path. This graph originated from a LangGraph StateGraph manifest, so export defaults back to the supported LangGraph manifest subset."
+          : "Use a workspace-relative JSON path. The export preview summary will stay visible in the workspace after the file is written.",
       submitLabel: "Export",
     });
     if (exportPath === null) return;
     setTaskGraphImportExportError(null);
-    exportTaskGraphFile.mutate({ graph_id: graphId, export_path: exportPath.trim() });
+    exportTaskGraphFile.mutate({ graph_id: graphId, export_path: exportPath.trim(), format: sourceFormat ?? undefined });
   };
   const createTaskGraphSnapshotFromWorkspace = async () => {
     setTaskGraphSnapshotError(null);
@@ -10566,6 +10704,7 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
             selectedEdgeId={selectedTaskGraphEdgeId}
             providerOptions={taskGraphProviderOptions}
             modelSuggestions={taskGraphModelSuggestions}
+            nodeTypeRegistry={taskGraphNodeTypes.data ?? null}
             nodeSaveError={taskGraphNodeSaveError}
             edgeSaveError={taskGraphEdgeSaveError}
             dryRunResult={taskGraphDryRunResult}

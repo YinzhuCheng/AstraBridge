@@ -41,6 +41,7 @@ from .codex_skill_enablement import (
 )
 from .codex_skill_probe import probe_skill_discovery
 from .dogfood_run_service import MAX_BROWSER_SMOKE_ACTIONS
+from .durable_run_store import LeaseBusy, StateVersionConflict
 from .graph_scheduler import DurableGraphScheduler
 from .astrabridge_capabilities_mcp_server import _tools as astrabridge_capability_dynamic_tools
 from .astrabridge_web_mcp_server import _tools as astrabridge_web_dynamic_tools
@@ -53,16 +54,23 @@ from .model_catalog import (
     ASTRABRIDGE_MODEL_CATALOG_FILENAME,
     preferred_provider_model_record,
 )
+from .mcp_broker_service import McpBrokerService
 from .profile_service import ProfileService
 from .providers import HistoryProjector, NeutralMessage, ReasoningArtifact, classify_runtime_failure
 from .providers.transports import transport_class_for_profile
 from .providers.transports.base import transport_signature_for_class
+from .mcp_node_policy import (
+    McpToolPolicyDenied,
+    allowed_mcp_dynamic_tool_names,
+    resolve_node_mcp_tool_policy,
+)
 from .router_service import ROUTER_ENV_KEY, ROUTER_PORT
 from .runtime_config_service import RuntimeConfigService, codex_model_id, codex_reasoning_effort
 from .runtime_client_pool import RuntimeClientPool
+from .runtime_observability import enrich_runtime_event, load_host_lineage_events
 from .security import SecurityError, redact_sensitive, resolve_under, scan_text_for_secrets
 from .secret_service import SecretService
-from .task_service import _display_thread_name
+from .task_service import GraphContractValidationError, _display_thread_name
 from .task_graph_contract import validate_graph_definition
 from .tool_context_service import ToolContextService, sanitize_tool_context
 from .usage_signal import normalize_usage_signal, usage_not_available
@@ -91,6 +99,11 @@ THREAD_CREATE_RUNTIME_LOCK_TIMEOUT_SECONDS = 12.0
 THREAD_CREATE_OPERATION_TTL_SECONDS = 60.0 * 60.0
 THREAD_CREATE_OPERATION_LIMIT = 128
 TURN_START_TIMEOUT_SECONDS = 45.0
+GRAPH_LIVE_LEASE_TTL_SECONDS = 60
+GRAPH_LIVE_LEASE_HEARTBEAT_SECONDS = 15
+GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_HISTORY_MESSAGES = 12
+GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_REPLAYABLE_ARTIFACTS = 4
+GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_JSON_BYTES = 32768
 APP_SERVER_IMAGE_VERIFY_TIMEOUT_SECONDS = 60.0
 APP_SERVER_IMAGE_VERIFY_MAX_ATTEMPTS = 2
 TURN_RUNTIME_PIN_SECONDS = 300.0
@@ -121,6 +134,18 @@ def _is_astrabridge_web_tool(tool: str) -> bool:
     return str(tool or "").strip().startswith("astrabridge_web_")
 
 
+class _GraphDurablePause(RuntimeError):
+    """Preserve durable graph state without finalizing a failure."""
+
+
+class _GraphDispatchCrashBeforeExternalCall(_GraphDurablePause):
+    """Test-only hook that simulates a process crash before provider dispatch."""
+
+
+class _GraphDispatchCrashAfterHandleAccepted(_GraphDurablePause):
+    """Test-only hook that simulates a crash after a remote handle is known."""
+
+
 class RuntimeService:
     def __init__(
         self,
@@ -139,6 +164,7 @@ class RuntimeService:
         router_service: Any | None = None,
         router_config_service: Any | None = None,
         key_injector: Any | None = None,
+        mcp_broker_service: Any | None = None,
     ) -> None:
         self._projects = project_service
         self._modals = modal_service
@@ -171,8 +197,6 @@ class RuntimeService:
         self._events: list[dict[str, Any]] = []
         self._hydrated_event_log_path: Path | None = None
         self._context_guard_continue_once: set[str] = set()
-        self._yunwu_image = YunwuImageService()
-        self._capability_runtime = CapabilityRuntime(router_config=self._router_config) if self._router_config is not None else None
         self._lock = threading.RLock()
         self._thread_cache_lock = threading.RLock()
         self._runtime_operation_lock = threading.RLock()
@@ -196,6 +220,159 @@ class RuntimeService:
             self._run_graph_scheduler_job,
             max_workers=4,
         )
+        self._yunwu_image = YunwuImageService()
+        self._capability_runtime = (
+            CapabilityRuntime(router_config=self._router_config, key_injector=self._key_injector)
+            if self._router_config is not None
+            else None
+        )
+        self._mcp_broker = mcp_broker_service or McpBrokerService(
+            project_service=self._projects,
+            capability_runtime=self._capability_runtime,
+            yunwu_image_service=self._yunwu_image,
+            mcp_config=self._mcp_config,
+        )
+        set_broker = getattr(self._web_tools, "set_mcp_broker", None)
+        if callable(set_broker):
+            set_broker(self._mcp_broker)
+        self._reconcile_durable_graph_scheduler_runs()
+
+    @staticmethod
+    def _graph_live_operation_id(*, run_id: str, node_id: str, attempt: int, kind: str) -> str:
+        seed = f"{str(kind or 'provider_turn_start').strip()}:{str(run_id or '').strip()}:{str(node_id or '').strip()}:{max(1, int(attempt))}"
+        return f"graph-op-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:24]}"
+
+    @staticmethod
+    def _graph_live_completion_inbox_key(
+        *,
+        run_id: str,
+        node_id: str,
+        attempt: int,
+        execution_thread_id: str,
+        turn_id: str,
+    ) -> str:
+        seed = ":".join(
+            (
+                str(run_id or "").strip(),
+                str(node_id or "").strip(),
+                str(max(1, int(attempt))),
+                str(execution_thread_id or "").strip(),
+                str(turn_id or "").strip(),
+            )
+        )
+        return f"graph-inbox-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:24]}"
+
+    @staticmethod
+    def _graph_live_parse_external_handle(value: str | None) -> tuple[str, str]:
+        clean = str(value or "").strip()
+        if not clean or ":" not in clean:
+            return "", ""
+        thread_id, turn_id = clean.rsplit(":", 1)
+        return thread_id.strip(), turn_id.strip()
+
+    @staticmethod
+    def _graph_live_resume_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        resume_payload = {
+            "graph_id": payload.get("graph_id"),
+            "budget": deepcopy(dict(payload.get("budget") or {})) if isinstance(payload.get("budget"), dict) else {},
+        }
+        parent_thread_id = str(payload.get("parent_thread_id") or "").strip()
+        if parent_thread_id:
+            resume_payload["parent_thread_id"] = parent_thread_id
+        if "_scheduler_lease_ttl_seconds" in payload:
+            resume_payload["_scheduler_lease_ttl_seconds"] = deepcopy(payload["_scheduler_lease_ttl_seconds"])
+        return resume_payload
+
+    @staticmethod
+    def _graph_live_test_hook_enabled(value: Any, *, node_id: str) -> bool:
+        if value is True:
+            return True
+        if isinstance(value, str):
+            return node_id in {item.strip() for item in value.split(",") if item.strip()}
+        if isinstance(value, (list, tuple, set)):
+            return node_id in {str(item).strip() for item in value if str(item).strip()}
+        return False
+
+    @staticmethod
+    def _graph_live_lease_ttl_seconds(payload: dict[str, Any]) -> int:
+        raw_value = payload.get("_scheduler_lease_ttl_seconds")
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            value = GRAPH_LIVE_LEASE_TTL_SECONDS
+        return value if value > 0 else GRAPH_LIVE_LEASE_TTL_SECONDS
+
+    def _start_graph_live_lease_heartbeat(
+        self,
+        *,
+        store: Any,
+        lease_id: str,
+        owner_boot_id: str,
+        ttl_seconds: int,
+    ) -> tuple[threading.Event, threading.Thread]:
+        stop_event = threading.Event()
+        interval = max(1.0, min(float(max(1, ttl_seconds)) / 2.0, float(GRAPH_LIVE_LEASE_HEARTBEAT_SECONDS)))
+
+        def worker() -> None:
+            while not stop_event.wait(interval):
+                try:
+                    store.heartbeat_lease(
+                        lease_id,
+                        owner_boot_id=owner_boot_id,
+                        ttl_seconds=ttl_seconds,
+                    )
+                except Exception:
+                    return
+
+        thread = threading.Thread(
+            target=worker,
+            name=f"astrabridge-graph-lease-heartbeat-{lease_id}",
+            daemon=True,
+        )
+        thread.start()
+        return stop_event, thread
+
+    def _reconcile_durable_graph_scheduler_runs(self) -> None:
+        if self._tasks is None:
+            return
+        try:
+            store = self._tasks.durable_run_store()
+            now = now_iso()
+            for run in store.list_runs(limit=200):
+                run_id = str(run.get("run_id") or "").strip()
+                status = str(run.get("status") or "").strip()
+                if not run_id or status not in {"queued", "running"}:
+                    continue
+                policy_snapshot = dict(run.get("run_policy_snapshot") or {})
+                if str(policy_snapshot.get("scheduler") or "").strip() != "durable_graph_scheduler_v1":
+                    continue
+                if self._graph_scheduler.get(run_id) is not None:
+                    continue
+                if status == "running":
+                    active_leases = [
+                        lease
+                        for lease in store.list_leases(run_id=run_id, status="active")
+                        if str(lease.get("owner_boot_id") or "").strip() != self._graph_scheduler.owner_id
+                        and str(lease.get("expires_at") or "").strip() > now
+                    ]
+                    if active_leases:
+                        continue
+                resume_payload = dict(policy_snapshot.get("resume_payload") or {})
+                if not str(resume_payload.get("graph_id") or "").strip():
+                    continue
+                self._graph_scheduler.submit(
+                    run_id,
+                    resume_payload,
+                    max_parallelism=max(1, int(policy_snapshot.get("max_parallelism") or 1)),
+                )
+        except Exception as exc:
+            self._record_event(
+                {
+                    "type": "durable_graph_scheduler_reconcile_failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:300],
+                }
+            )
 
     def resolve_capability_route(self, capability_id: str) -> dict[str, Any]:
         configured_models = self._router_config.models() if self._router_config is not None else None
@@ -1526,6 +1703,7 @@ class RuntimeService:
         effort: str | None = None,
         permission_mode: str = "auto",
         artifact_refs: list[dict[str, Any]] | None = None,
+        mcp_tool_policy_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if self._tasks is None:
             raise ValueError("Task service is required for graph worker execution.")
@@ -1549,6 +1727,7 @@ class RuntimeService:
         )
         if not node:
             raise ValueError(f"Unknown graph worker node_id: {clean_node_id}")
+        graph_policy = dict(graph.get("graph_policy") or {})
         execution_policy = dict(node.get("execution_policy") or {})
         subagent_policy = dict(execution_policy.get("subagent_policy") or node.get("subagent_policy") or {})
         tools = dict(node.get("tools") or {})
@@ -1572,8 +1751,15 @@ class RuntimeService:
             node_id=clean_node_id,
             spawn_mode=spawn_mode,
         )
-        tool_policy = self._graph_worker_tool_policy(tools)
+        tool_policy = self._graph_worker_tool_policy(
+            tools,
+            node=node,
+            graph_policy=graph_policy,
+            node_id=clean_node_id,
+            mcp_tool_policy_snapshot=mcp_tool_policy_snapshot,
+        )
         turn_execution_policy = self._graph_worker_turn_execution_policy(tool_policy)
+        allowed_mcp_tool_names, allow_browser_smoke = self._graph_worker_dynamic_tool_filter(tool_policy)
         effective_permission_mode = "ask" if turn_execution_policy == NO_TOOLS_EXECUTION_POLICY else requested_permission_mode
         runtime_contract = self._graph_worker_runtime_contract(
             profile=profile,
@@ -1596,6 +1782,8 @@ class RuntimeService:
             model=effective_model,
             permission_mode=effective_permission_mode,
             include_dynamic_tools=turn_execution_policy != NO_TOOLS_EXECUTION_POLICY,
+            allowed_mcp_tool_names=allowed_mcp_tool_names,
+            allow_browser_smoke=allow_browser_smoke,
         )
         if spawn_mode == "subagent_worker" and clean_parent_thread_id:
             params["source"] = {
@@ -1798,12 +1986,18 @@ class RuntimeService:
     def queue_task_graph_run(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Persist a run receipt and dispatch it independently of HTTP lifetime."""
 
+        self._reconcile_durable_graph_scheduler_runs()
         submission = self._validate_graph_live_run_submission(payload)
         graph = dict(submission["graph"])
         compiled_plan = dict(submission["compiled_plan"])
         compiled_nodes = dict(submission["compiled_nodes"])
         run_budget = dict(submission["run_budget"])
-        run_id = new_id("graph-run-live")
+        idempotency_key = str(payload.get("idempotency_key") or "").strip() or None
+        run_id = (
+            f"graph-run-live-{hashlib.sha256(idempotency_key.encode('utf-8')).hexdigest()[:24]}"
+            if idempotency_key
+            else new_id("graph-run-live")
+        )
         created_at = now_iso()
         parallel_groups = [
             dict(group)
@@ -1860,6 +2054,10 @@ class RuntimeService:
             compiled_plan=compiled_plan,
             run_budget=run_budget,
         )
+        node_mcp_tool_policies = self._graph_node_mcp_tool_policy_snapshots(
+            graph=graph,
+            compiled_plan=compiled_plan,
+        )
         queued_manifest = {
             "schema_version": "astrabridge-task-graph-run-v1",
             "run_id": run_id,
@@ -1889,12 +2087,32 @@ class RuntimeService:
                     if str(group.get("group_id") or "").strip()
                 ],
                 "budget": budget_snapshot,
+                "node_mcp_tool_policies": node_mcp_tool_policies,
+                "resume_payload": self._graph_live_resume_payload(
+                    {
+                        "graph_id": graph["graph_id"],
+                        "budget": run_budget,
+                        "parent_thread_id": submission["parent_thread_id"],
+                        "_scheduler_lease_ttl_seconds": payload.get("_scheduler_lease_ttl_seconds"),
+                        "_crash_before_provider_dispatch": payload.get("_crash_before_provider_dispatch"),
+                        "_crash_after_provider_handle": payload.get("_crash_after_provider_handle"),
+                    }
+                ),
             },
             "created_at": created_at,
             "updated_at": created_at,
             "state_version": 1,
         }
         live_run_ref = self._tasks.record_graph_run(queued_manifest, graph_definition=graph)
+        if idempotency_key:
+            durable_receipt = self._tasks.durable_run_store().load_run(run_id, include_events=True)
+            if isinstance(durable_receipt, dict):
+                live_run_ref = dict(
+                    self._tasks.persist_graph_run_ref(
+                        self._tasks._compact_graph_run_ref(durable_receipt)
+                    ).get("run_ref")
+                    or live_run_ref
+                )
         worker_payload = dict(payload)
         worker_payload["_scheduler_run_id"] = run_id
         try:
@@ -1927,6 +2145,8 @@ class RuntimeService:
         worker_payload["_scheduler_run_id"] = str(run_id or "").strip()
         try:
             return self.execute_task_graph_run(worker_payload)
+        except _GraphDurablePause:
+            raise
         except Exception as exc:  # noqa: BLE001
             self._mark_graph_scheduler_failure(str(run_id or "").strip(), exc)
             raise
@@ -1934,6 +2154,8 @@ class RuntimeService:
     def _mark_graph_scheduler_failure(self, run_id: str, exc: Exception) -> None:
         clean_run_id = str(run_id or "").strip()
         if not clean_run_id or self._tasks is None:
+            return
+        if isinstance(exc, _GraphDurablePause):
             return
         error_text = str(redact_sensitive(str(exc) or type(exc).__name__))[:500]
         try:
@@ -1984,9 +2206,11 @@ class RuntimeService:
             pass
 
     def graph_scheduler_status(self) -> dict[str, Any]:
+        self._reconcile_durable_graph_scheduler_runs()
         return self._graph_scheduler.status()
 
     def graph_run_status(self, run_id: str) -> dict[str, Any]:
+        self._reconcile_durable_graph_scheduler_runs()
         clean_run_id = str(run_id or "").strip()
         if not clean_run_id:
             raise ValueError("run_id is required.")
@@ -1995,6 +2219,17 @@ class RuntimeService:
         durable_run = self._tasks.durable_run_store().load_run(clean_run_id, include_events=True)
         if durable_run is None:
             raise ValueError("Task graph run not found.")
+        run_ref = self._tasks.graph_run_ref(clean_run_id)
+        if isinstance(run_ref, dict):
+            live_status = str(run_ref.get("status") or "").strip()
+            live_node_states = [dict(item) for item in list(run_ref.get("node_run_states") or []) if isinstance(item, dict)]
+            live_events = [dict(item) for item in list(run_ref.get("event_refs") or []) if isinstance(item, dict)]
+            if live_status:
+                durable_run["status"] = live_status
+            if live_node_states:
+                durable_run["node_run_states"] = live_node_states
+            if live_events:
+                durable_run["event_refs"] = live_events
         graph_id = str(durable_run.get("graph_id") or "").strip()
         graph = self._tasks.graph_definition(graph_id) if graph_id else None
         scheduler_job = self._graph_scheduler.get(clean_run_id)
@@ -2004,7 +2239,7 @@ class RuntimeService:
             "live_run": {
                 "run_id": clean_run_id,
                 "run_status": str(durable_run.get("status") or ""),
-                "run_ref": self._tasks.graph_run_ref(clean_run_id),
+                "run_ref": run_ref,
                 "event_cursor": len(list(durable_run.get("event_refs") or [])),
             },
             "events": [
@@ -2016,6 +2251,267 @@ class RuntimeService:
             "scheduler": self._graph_scheduler.status(),
             "graph": graph,
             "task": self._tasks.task_view(self._tasks.current_task(), compact_graph_runs=True),
+        }
+
+    def cancel_task_graph_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._tasks is None:
+            raise ValueError("Task service is required for task-graph cancellation.")
+        if not isinstance(payload, dict):
+            raise TypeError("Task-graph cancel payload must be a dict.")
+        run_id = str(payload.get("run_id") or "").strip()
+        if not run_id:
+            raise ValueError("run_id is required.")
+        store = self._tasks.durable_run_store()
+        durable_run = store.load_run(run_id, include_events=True)
+        if durable_run is None:
+            raise ValueError("Task graph run not found.")
+        run_policy = dict(durable_run.get("run_policy_snapshot") or {})
+        if str(run_policy.get("mode") or "").strip() != "live_run":
+            return self._tasks.cancel_graph_run(payload)
+
+        def _terminal_cancellation_response(status: str) -> dict[str, Any]:
+            current_status_payload = self.graph_run_status(run_id)
+            return {
+                "cancellation": {
+                    "run_id": run_id,
+                    "status": status,
+                    "requested_at": None,
+                    "interrupt_results": [],
+                },
+                "run_ref": current_status_payload["live_run"]["run_ref"],
+                "graph": current_status_payload["graph"],
+                "task": current_status_payload["task"],
+            }
+
+        run_ref = self._tasks.graph_run_ref(run_id)
+        current_status = str((run_ref or {}).get("status") or durable_run.get("status") or "").strip()
+        if current_status in {"completed", "failed", "cancelled", "needs_review"}:
+            return _terminal_cancellation_response(current_status)
+
+        notes = str(redact_sensitive(payload.get("notes") or "")).strip()[:600]
+        requested_at = now_iso()
+        grace_timeout_ms = max(250, int(payload.get("grace_timeout_ms") or 5000))
+        cancellation = {
+            "status": "requested",
+            "requested_at": requested_at,
+            "notes": notes or None,
+            "grace_timeout_ms": grace_timeout_ms,
+        }
+        updated = durable_run
+        last_conflict: StateVersionConflict | None = None
+        for _ in range(4):
+            try:
+                updated = store.compare_and_swap_run(
+                    run_id,
+                    int(durable_run.get("state_version") or 0),
+                    status=current_status,
+                    patch={
+                        "cancellation": cancellation,
+                        "updated_at": requested_at,
+                    },
+                    event={
+                        "event_id": f"{run_id}-cancel-requested",
+                        "run_id": run_id,
+                        "task_id": str(durable_run.get("task_id") or ""),
+                        "trace_id": str(durable_run.get("trace_id") or f"trace-{run_id}"),
+                        "event_type": "run_cancel_requested",
+                        "created_at": requested_at,
+                        "summary": "Live task-graph run cancellation was requested.",
+                    },
+                )
+                last_conflict = None
+                break
+            except StateVersionConflict as exc:
+                last_conflict = exc
+                durable_run = store.load_run(run_id, include_events=True)
+                if durable_run is None:
+                    raise ValueError("Task graph run disappeared during cancellation.") from exc
+                run_ref = self._tasks.graph_run_ref(run_id)
+                current_status = str((run_ref or {}).get("status") or durable_run.get("status") or "").strip()
+                if current_status in {"completed", "failed", "cancelled", "needs_review"}:
+                    return _terminal_cancellation_response(current_status)
+        if last_conflict is not None:
+            raise last_conflict
+        latest_run_ref = self._tasks.graph_run_ref(run_id)
+        latest_node_states = {
+            str(item.get("node_id") or "").strip(): dict(item)
+            for item in list((latest_run_ref or {}).get("node_run_states") or [])
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+        }
+        if not latest_node_states:
+            latest_node_states = {
+                str(item.get("node_id") or "").strip(): dict(item)
+                for item in list(updated.get("node_run_states") or [])
+                if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+            }
+        graph = self._tasks.graph_definition(str(updated.get("graph_id") or "").strip()) or {}
+        graph_nodes = {
+            str(item.get("node_id") or "").strip(): dict(item)
+            for item in list(graph.get("nodes") or [])
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+        }
+
+        interrupt_results: list[dict[str, Any]] = []
+        for node_id, state in latest_node_states.items():
+            if str(state.get("status") or "").strip() != "running":
+                continue
+            execution_thread_id = str(state.get("execution_thread_id") or state.get("worker_thread_id") or "").strip()
+            turn_id = str(state.get("turn_id") or "").strip()
+            if not execution_thread_id or not turn_id:
+                continue
+            provider_id = str(state.get("provider_id") or graph_nodes.get(node_id, {}).get("provider_id") or "").strip()
+            try:
+                profile = self._profiles.resolve_runtime_profile(provider_id)
+                interrupt_result = self.interrupt_turn(profile, execution_thread_id, turn_id)
+            except Exception as exc:  # noqa: BLE001
+                interrupt_results.append(
+                    {
+                        "node_id": node_id,
+                        "thread_id": execution_thread_id,
+                        "turn_id": turn_id,
+                        "ok": False,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:300],
+                    }
+                )
+            else:
+                interrupt_results.append(
+                    {
+                        "node_id": node_id,
+                        "thread_id": execution_thread_id,
+                        "turn_id": turn_id,
+                        "ok": True,
+                        "interrupt": dict(interrupt_result.get("interrupt") or {}),
+                    }
+                )
+
+        compact_ref = dict(self._tasks.graph_run_ref(run_id) or {})
+        timeline_events = [dict(item) for item in list(compact_ref.get("timeline_events") or []) if isinstance(item, dict)]
+        if not any(str(item.get("event_id") or "") == f"{run_id}-cancel-requested" for item in timeline_events):
+            timeline_events.append(
+                {
+                    "event_id": f"{run_id}-cancel-requested",
+                    "event_type": "run_cancel_requested",
+                    "created_at": requested_at,
+                    "summary": "Live task-graph run cancellation was requested.",
+                    "status": "cancelled",
+                }
+            )
+        compact_ref["timeline_events"] = timeline_events[-24:]
+        compact_ref["latest_event_type"] = "run_cancel_requested"
+        compact_ref["latest_event_at"] = requested_at
+        compact_ref["updated_at"] = requested_at
+
+        active_running = any(str(item.get("status") or "").strip() == "running" for item in latest_node_states.values())
+        if not active_running and current_status == "queued":
+            cancelled_at = now_iso()
+            last_cancel_conflict: StateVersionConflict | None = None
+            for _ in range(4):
+                try:
+                    updated = store.compare_and_swap_run(
+                        run_id,
+                        int(updated.get("state_version") or 0),
+                        status="cancelled",
+                        patch={
+                            "cancellation": {**cancellation, "status": "completed", "resolved_at": cancelled_at},
+                            "updated_at": cancelled_at,
+                        },
+                        event={
+                            "event_id": f"{run_id}-cancelled",
+                            "run_id": run_id,
+                            "task_id": str(updated.get("task_id") or ""),
+                            "trace_id": str(updated.get("trace_id") or f"trace-{run_id}"),
+                            "event_type": "run_cancelled",
+                            "created_at": cancelled_at,
+                            "summary": "Live task-graph run was cancelled before provider dispatch.",
+                        },
+                    )
+                    last_cancel_conflict = None
+                    break
+                except StateVersionConflict as exc:
+                    last_cancel_conflict = exc
+                    refreshed = store.load_run(run_id, include_events=True)
+                    if not isinstance(refreshed, dict):
+                        raise ValueError("Task graph run disappeared during queued cancellation.") from exc
+                    if str(refreshed.get("status") or "").strip() in {"completed", "failed", "cancelled", "needs_review"}:
+                        updated = refreshed
+                        last_cancel_conflict = None
+                        break
+                    updated = refreshed
+            if last_cancel_conflict is not None:
+                raise last_cancel_conflict
+            compact_ref["status"] = "cancelled"
+            compact_ref["latest_event_type"] = "run_cancelled"
+            compact_ref["latest_event_at"] = cancelled_at
+            compact_ref["updated_at"] = cancelled_at
+            node_status_counts = dict(compact_ref.get("node_status_counts") or {})
+            queued_count = 0
+            for key in ("queued", "waiting_on_dependencies", "ready", "waiting_on_artifact", "waiting_on_approval"):
+                queued_count += int(node_status_counts.pop(key, 0) or 0)
+            if queued_count:
+                node_status_counts["cancelled"] = int(node_status_counts.get("cancelled") or 0) + queued_count
+            compact_ref["node_status_counts"] = node_status_counts
+            compact_ref["timeline_events"] = [
+                *compact_ref["timeline_events"],
+                {
+                    "event_id": f"{run_id}-cancelled",
+                    "event_type": "run_cancelled",
+                    "created_at": cancelled_at,
+                    "summary": "Live task-graph run was cancelled before provider dispatch.",
+                    "status": "cancelled",
+                },
+            ][-24:]
+
+        persisted = self._tasks.persist_graph_run_ref(compact_ref)
+        return {
+            "cancellation": {
+                "run_id": run_id,
+                "status": str(dict(persisted.get("run_ref") or {}).get("status") or current_status),
+                "requested_at": requested_at,
+                "interrupt_results": interrupt_results,
+            },
+            "run_ref": dict(persisted.get("run_ref") or compact_ref),
+            "graph": graph,
+            "task": persisted.get("task") or self._tasks.task_view(self._tasks.current_task(), compact_graph_runs=True),
+        }
+
+    def recover_task_graph_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._tasks is None:
+            raise ValueError("Task service is required for task-graph recovery.")
+        if not isinstance(payload, dict):
+            raise TypeError("Task-graph recovery payload must be a dict.")
+        run_id = str(payload.get("run_id") or "").strip()
+        strategy = str(payload.get("strategy") or "").strip().lower()
+        if not run_id:
+            raise ValueError("run_id is required.")
+        if not strategy:
+            raise ValueError("strategy is required.")
+        store = self._tasks.durable_run_store()
+        durable_run = store.load_run(run_id, include_events=True)
+        if durable_run is None:
+            raise ValueError("Task graph run not found.")
+        run_policy = dict(durable_run.get("run_policy_snapshot") or {})
+        if str(run_policy.get("mode") or "").strip() != "live_run":
+            return self._tasks.recover_graph_run(payload)
+
+        self._reconcile_durable_graph_scheduler_runs()
+        current_status = str(durable_run.get("status") or "").strip()
+        safe_to_resume = current_status in {"queued", "running"} and not self._graph_live_cancellation_requested(durable_run)
+        status_payload = self.graph_run_status(run_id)
+        return {
+            "recovery": {
+                "run_id": run_id,
+                "strategy": strategy,
+                "safe_to_resume": safe_to_resume,
+                "status": "requeued" if safe_to_resume else "needs_review",
+                "reason": None if safe_to_resume else "Live terminal recovery still requires manual review or a new run admission.",
+            },
+            "live_run": status_payload["live_run"],
+            "run": status_payload["run"],
+            "events": status_payload["events"],
+            "graph": status_payload["graph"],
+            "task": status_payload["task"],
+            "scheduler": status_payload["scheduler"],
         }
 
     def execute_task_graph_run(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2097,6 +2593,32 @@ class RuntimeService:
             scheduler_run_id = ""
         run_id = scheduler_run_id or new_id("graph-run-live")
         created_at = now_iso()
+        durable_store = self._tasks.durable_run_store()
+        existing_durable_run = (
+            durable_store.load_run(run_id, include_events=True)
+            if scheduler_run_id
+            else None
+        )
+        if isinstance(existing_durable_run, dict):
+            created_at = str(existing_durable_run.get("created_at") or created_at).strip() or created_at
+            if str(existing_durable_run.get("status") or "").strip() in {"completed", "failed", "cancelled", "needs_review"}:
+                compact = dict(
+                    self._tasks.persist_graph_run_ref(
+                        self._tasks._compact_graph_run_ref(existing_durable_run)
+                    ).get("run_ref")
+                    or self._tasks._compact_graph_run_ref(existing_durable_run)
+                )
+                return {
+                    "schema_version": "astrabridge-task-graph-live-run-v1",
+                    "live_run": {
+                        "run_id": run_id,
+                        "run_status": str(existing_durable_run.get("status") or ""),
+                        "run_ref": compact,
+                        "artifact_paths": {},
+                    },
+                    "graph": graph,
+                    "task": self._tasks.task_view(self._tasks.current_task(), compact_graph_runs=True),
+                }
         workspace_root = Path(self._projects.require_workspace_root())
         artifact_root = workspace_root / "PRIVATE" / "task-graph" / "live-run" / run_id
         artifact_root.mkdir(parents=True, exist_ok=True)
@@ -2110,6 +2632,10 @@ class RuntimeService:
             graph=graph,
             compiled_plan=compiled_plan,
             run_budget=run_budget,
+        )
+        node_mcp_tool_policies = self._graph_node_mcp_tool_policy_snapshots(
+            graph=graph,
+            compiled_plan=compiled_plan,
         )
         parallel_groups = [dict(group) for group in list(compiled_plan.get("parallel_groups") or []) if isinstance(group, dict)]
         node_states: dict[str, dict[str, Any]] = {}
@@ -2202,11 +2728,81 @@ class RuntimeService:
                     if str(group.get("group_id") or "").strip()
                 ],
                 "budget": budget_snapshot,
+                "node_mcp_tool_policies": node_mcp_tool_policies,
             },
             "created_at": created_at,
             "updated_at": created_at,
             "state_version": 1,
         }
+        if isinstance(existing_durable_run, dict):
+            persisted_states = {
+                str(item.get("node_id") or "").strip(): dict(item)
+                for item in list(existing_durable_run.get("node_run_states") or [])
+                if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+            }
+            if persisted_states:
+                node_states = persisted_states
+            persisted_events = [
+                dict(item)
+                for item in list(existing_durable_run.get("event_refs") or [])
+                if isinstance(item, dict)
+            ]
+            if persisted_events:
+                event_refs = persisted_events
+            persisted_artifacts = [
+                dict(item)
+                for item in list(existing_durable_run.get("artifact_refs") or [])
+                if isinstance(item, dict)
+            ]
+            if persisted_artifacts:
+                default_source_node_id = str(
+                    (compiled_plan.get("entry_node_ids") or [next(iter(compiled_nodes), "")])[0] or ""
+                )
+                normalized_artifacts: list[dict[str, Any]] = []
+                for item in persisted_artifacts:
+                    normalized = dict(item)
+                    path_text = str(normalized.get("path") or "").strip()
+                    if not str(normalized.get("artifact_id") or "").strip() or not path_text:
+                        continue
+                    normalized["artifact_kind"] = str(normalized.get("artifact_kind") or "run_summary").strip() or "run_summary"
+                    normalized["task_id"] = str(normalized.get("task_id") or graph["task_id"]).strip() or graph["task_id"]
+                    normalized["run_id"] = str(normalized.get("run_id") or run_id).strip() or run_id
+                    normalized["source_node_id"] = str(normalized.get("source_node_id") or default_source_node_id).strip() or default_source_node_id
+                    normalized["media_type"] = str(normalized.get("media_type") or ("application/json" if path_text.endswith(".json") else "text/plain")).strip() or "application/octet-stream"
+                    normalized["status"] = str(normalized.get("status") or "ready").strip() or "ready"
+                    normalized["created_at"] = str(normalized.get("created_at") or created_at).strip() or created_at
+                    normalized_artifacts.append(normalized)
+                merged_artifacts: list[dict[str, Any]] = []
+                seen_artifact_keys: set[str] = set()
+                for artifact in [*run_artifact_refs, *normalized_artifacts]:
+                    if not isinstance(artifact, dict):
+                        continue
+                    artifact_id = str(artifact.get("artifact_id") or "").strip()
+                    path_text = str(artifact.get("path") or "").strip()
+                    key = f"{artifact_id}|{path_text}"
+                    if not artifact_id or not path_text or key in seen_artifact_keys:
+                        continue
+                    seen_artifact_keys.add(key)
+                    merged_artifacts.append(dict(artifact))
+                run_artifact_refs = merged_artifacts[:48]
+            run_manifest = {
+                **run_manifest,
+                **dict(existing_durable_run),
+                "node_run_states": [deepcopy(item) for item in node_states.values()],
+                "artifact_refs": deepcopy(run_artifact_refs),
+                "event_refs": deepcopy(event_refs),
+                "run_policy_snapshot": dict(
+                    {
+                        **dict(run_manifest.get("run_policy_snapshot") or {}),
+                        **dict(existing_durable_run.get("run_policy_snapshot") or {}),
+                        "node_mcp_tool_policies": dict(
+                            dict(existing_durable_run.get("run_policy_snapshot") or {}).get("node_mcp_tool_policies")
+                            or dict(run_manifest.get("run_policy_snapshot") or {}).get("node_mcp_tool_policies")
+                            or {}
+                        ),
+                    }
+                ),
+            }
         write_json(run_manifest_path, run_manifest)
         live_run_ref = self._tasks.record_graph_run(run_manifest, graph_definition=graph)
         if scheduler_run_id:
@@ -2235,12 +2831,16 @@ class RuntimeService:
         try:
             for group_index, group in enumerate(parallel_groups):
                 group_id = str(group.get("group_id") or "").strip() or f"group_{group_index}"
+                current_durable_run = durable_store.load_run(run_id, include_events=False)
+                cancellation_requested = self._graph_live_cancellation_requested(current_durable_run)
                 group_candidates: list[dict[str, Any]] = []
                 for node_id in [
                     str(item).strip()
                     for item in list(group.get("node_ids") or [])
                     if str(item or "").strip() and str(item).strip() in compiled_nodes
                 ]:
+                    if cancellation_requested:
+                        continue
                     compiled_node = dict(compiled_nodes.get(node_id) or {})
                     graph_node = dict(node_map.get(node_id) or {})
                     dependency_node_ids = [
@@ -2253,14 +2853,130 @@ class RuntimeService:
                         continue
                     if any(str(item.get("status") or "").strip() != "completed" for item in dependency_states):
                         continue
+                    current_state = dict(node_states.get(node_id) or {})
+                    current_status = str(current_state.get("status") or "").strip()
+                    if current_status in {"completed", "failed", "cancelled", "needs_review", "blocked"}:
+                        continue
+                    raw_incoming_handoffs = incoming_handoffs.get(node_id) or []
+                    try:
+                        prepared_incoming_handoffs = self._graph_live_prepare_incoming_handoffs(
+                            graph=graph,
+                            node_id=node_id,
+                            incoming_handoffs=raw_incoming_handoffs,
+                        )
+                    except Exception as exc:
+                        failed_at = now_iso()
+                        node_states[node_id].update(
+                            {
+                                "status": "failed",
+                                "outcome": "failed",
+                                "attempt_count": max(0, int(current_state.get("attempt_count") or 0)),
+                                "updated_at": failed_at,
+                                "summary": f"{self._tasks._graph_node_label(graph, node_id)} rejected an invalid structured handoff before provider dispatch.",
+                            }
+                        )
+                        for index, item in enumerate(raw_incoming_handoffs, start=1):
+                            handoff = dict(dict(item).get("handoff") or {})
+                            agent_envelope = dict(handoff.get("agent_envelope") or {})
+                            downstream_input = dict(handoff.get("downstream_input") or {})
+                            envelope_id = str(agent_envelope.get("envelope_id") or "").strip() or f"invalid-{node_id}-{index}"
+                            self._graph_live_append_unique_event(
+                                event_refs,
+                                {
+                                    "event_id": f"{run_id}-{envelope_id}-rejected",
+                                    "run_id": run_id,
+                                    "task_id": graph["task_id"],
+                                    "trace_id": f"trace-{run_id}",
+                                    "event_type": "handoff_rejected",
+                                    "created_at": failed_at,
+                                    "summary": f"Structured handoff for {self._tasks._graph_node_label(graph, node_id)} was rejected before provider dispatch.",
+                                    "node_id": node_id,
+                                    "payload": {
+                                        "envelope_id": envelope_id or None,
+                                        "agent_envelope_path": str(downstream_input.get("agent_envelope_path") or "").strip() or None,
+                                        "target_node_id": node_id,
+                                        "error": str(exc)[:400],
+                                    },
+                                },
+                            )
+                        self._graph_live_append_unique_event(
+                            event_refs,
+                            {
+                                "event_id": f"{run_id}-{node_id}-handoff-rejected",
+                                "run_id": run_id,
+                                "task_id": graph["task_id"],
+                                "trace_id": f"trace-{run_id}",
+                                "event_type": "node_failed",
+                                "created_at": failed_at,
+                                "summary": f"{self._tasks._graph_node_label(graph, node_id)} rejected an invalid structured handoff before provider dispatch.",
+                                "node_id": node_id,
+                                "parallel_group_id": group_id,
+                            },
+                        )
+                        continue
+                    for item in prepared_incoming_handoffs:
+                        envelope = dict(item.get("agent_envelope") or {})
+                        metadata = dict(envelope.get("metadata") or {})
+                        delivery = dict(envelope.get("delivery") or {})
+                        envelope_id = str(envelope.get("envelope_id") or "").strip()
+                        self._graph_live_append_unique_event(
+                            event_refs,
+                            {
+                                "event_id": f"{run_id}-{envelope_id}-ack",
+                                "run_id": run_id,
+                                "task_id": graph["task_id"],
+                                "trace_id": f"trace-{run_id}",
+                                "event_type": "handoff_acknowledged",
+                                "created_at": now_iso(),
+                                "summary": f"Structured handoff for {self._tasks._graph_node_label(graph, node_id)} was admitted for delivery.",
+                                "node_id": node_id,
+                                "payload": {
+                                    "envelope_id": envelope_id,
+                                    "message_id": str(envelope.get("message_id") or "").strip() or None,
+                                    "delivery_idempotency_key": str(delivery.get("idempotency_key") or "").strip() or None,
+                                    "correlation_id": str(metadata.get("correlation_id") or "").strip() or None,
+                                    "causation_id": str(metadata.get("causation_id") or "").strip() or None,
+                                    "source_node_id": str(metadata.get("source_node_id") or "").strip() or None,
+                                    "target_node_id": str(metadata.get("target_node_id") or "").strip() or None,
+                                },
+                            },
+                        )
                     prepared = dict(prepared_nodes[node_id])
                     prepared["compiled_node"] = compiled_node
                     prepared["dependency_node_ids"] = dependency_node_ids
+                    prepared["existing_node_state"] = current_state
+                    prepared["attempt_count"] = max(1, int(current_state.get("attempt_count") or 1))
+                    prepared["incoming_handoffs"] = prepared_incoming_handoffs
+                    neutral_context = self._graph_live_prepare_neutral_context_bundle(
+                        graph=graph,
+                        node=graph_node,
+                        run_id=run_id,
+                        incoming_handoffs=prepared_incoming_handoffs,
+                        artifact_root=artifact_root,
+                        attempt_count=int(prepared["attempt_count"] or 1),
+                        target_provider_id=str(prepared["profile"].get("provider_id") or graph_node.get("provider_id") or "").strip(),
+                    )
+                    prepared["attachments"] = [
+                        deepcopy(item)
+                        for item in list(dict(neutral_context or {}).get("attachments") or [])
+                        if isinstance(item, dict)
+                    ]
+                    prepared["neutral_context"] = dict(dict(neutral_context or {}).get("summary") or {})
+                    if isinstance(neutral_context, dict):
+                        run_artifact_refs = self._tasks._merge_graph_worker_artifact_refs(
+                            run_artifact_refs,
+                            [
+                                dict(item)
+                                for item in list(neutral_context.get("artifact_refs") or [])
+                                if isinstance(item, dict)
+                            ],
+                        )
                     prepared["prompt_text"] = self._graph_live_run_prompt(
                         task=task,
                         graph=graph,
                         node=graph_node,
-                        incoming_handoffs=incoming_handoffs.get(node_id) or [],
+                        incoming_handoffs=prepared_incoming_handoffs,
+                        neutral_context=dict(prepared.get("neutral_context") or {}),
                     )
                     group_candidates.append(prepared)
 
@@ -2271,62 +2987,289 @@ class RuntimeService:
                     node_id = str(prepared["node_id"])
                     graph_node = dict(prepared["graph_node"])
                     profile = dict(prepared["profile"])
-                    worker_result = self.start_graph_worker(
-                        profile,
-                        graph_id=graph_id,
-                        run_id=run_id,
-                        node_id=node_id,
-                        parent_thread_id=parent_thread_id,
-                        model=str(graph_node.get("model_id") or "").strip() or None,
-                        effort=str(graph_node.get("reasoning_effort") or "").strip() or None,
-                        permission_mode=str(graph_node.get("permission_mode") or "auto").strip() or "auto",
-                    )
-                    worker = dict(worker_result.get("worker") or {})
+                    existing_state = dict(prepared.get("existing_node_state") or {})
+                    if str(existing_state.get("status") or "").strip() == "running" and (
+                        str(existing_state.get("worker_thread_id") or "").strip()
+                        or str(existing_state.get("execution_thread_id") or "").strip()
+                    ):
+                        worker = {
+                            "thread_id": str(existing_state.get("worker_thread_id") or existing_state.get("execution_thread_id") or "").strip(),
+                            "parent_thread_id": str(existing_state.get("parent_thread_id") or "").strip() or None,
+                            "spawn_mode": str(existing_state.get("spawn_mode") or "").strip() or None,
+                            "worker_origin": str(existing_state.get("worker_origin") or "").strip() or "provider_lane",
+                            "agent_role": str(existing_state.get("agent_role") or "").strip() or None,
+                            "agent_nickname": str(existing_state.get("agent_nickname") or "").strip() or None,
+                            "settings": {
+                                "execution_backend": str(existing_state.get("execution_backend") or "app_server"),
+                            },
+                        }
+                    else:
+                        worker_result = self.start_graph_worker(
+                            profile,
+                            graph_id=graph_id,
+                            run_id=run_id,
+                            node_id=node_id,
+                            parent_thread_id=parent_thread_id,
+                            model=str(graph_node.get("model_id") or "").strip() or None,
+                            effort=str(graph_node.get("reasoning_effort") or "").strip() or None,
+                            permission_mode=str(graph_node.get("permission_mode") or "auto").strip() or "auto",
+                        )
+                        worker = dict(worker_result.get("worker") or {})
                     runnable_nodes.append({**prepared, "worker": worker})
 
                 for execution in runnable_nodes:
+                    current_durable_run = durable_store.load_run(run_id, include_events=False)
+                    cancellation_requested = self._graph_live_cancellation_requested(current_durable_run)
+                    if cancellation_requested:
+                        break
                     node_id = str(execution["node_id"])
                     graph_node = dict(execution["graph_node"])
                     profile = dict(execution["profile"])
                     worker = dict(execution["worker"])
+                    existing_state = dict(execution.get("existing_node_state") or {})
                     dependency_node_ids = list(execution.get("dependency_node_ids") or [])
                     compiled_node = dict(execution.get("compiled_node") or {})
+                    retry_policy = dict(execution.get("retry_policy") or self._graph_live_retry_policy(compiled_node=compiled_node, graph_node=graph_node))
                     started_at = now_iso()
                     active_node_id = node_id
-                    tool_policy = self._graph_worker_tool_policy(dict(graph_node.get("tools") or {}))
-                    turn_execution_policy = self._graph_worker_turn_execution_policy(tool_policy)
-                    turn_result = self.start_turn(
-                        profile,
-                        thread_id=str(worker.get("thread_id") or ""),
-                        text=str(execution.get("prompt_text") or ""),
-                        attachments=None,
-                        model=str(graph_node.get("model_id") or "").strip() or None,
-                        effort=str(graph_node.get("reasoning_effort") or "").strip() or None,
-                        permission_mode=str(graph_node.get("permission_mode") or "auto").strip() or "auto",
-                        collaboration_mode=self._normalize_graph_worker_collaboration_mode(graph_node),
-                        context_mode="no_context",
-                        execution_policy=turn_execution_policy,
-                        token_budget=int(execution.get("token_budget") or 0) or None,
-                        token_budget_objective=(
-                            f"{str(graph.get('title') or graph_id).strip()} / "
-                            f"{self._tasks._graph_node_label(graph, node_id)}"
-                        ),
+                    attempt_count = max(1, int(execution.get("attempt_count") or 1))
+                    attempt_provider_id = str(existing_state.get("provider_id") or profile.get("provider_id") or graph_node.get("provider_id") or "").strip()
+                    attempt_model = str(existing_state.get("model_id") or graph_node.get("model_id") or profile.get("model") or "").strip()
+                    lease_ttl_seconds = self._graph_live_lease_ttl_seconds(payload)
+                    attempt_started_at = str(existing_state.get("started_at") or started_at)
+                    attempt_updated_at = str(existing_state.get("updated_at") or attempt_started_at)
+                    operation_id = self._graph_live_operation_id(
+                        run_id=run_id,
+                        node_id=node_id,
+                        attempt=attempt_count,
+                        kind="provider_turn_start",
                     )
+                    lease = durable_store.acquire_lease(
+                        run_id,
+                        node_id,
+                        attempt_count,
+                        owner_boot_id=self._graph_scheduler.owner_id,
+                        ttl_seconds=lease_ttl_seconds,
+                    )
+                    durable_store.record_node_attempt(
+                        run_id,
+                        node_id,
+                        attempt_count,
+                        status="queued",
+                        started_at=attempt_started_at,
+                        updated_at=attempt_updated_at,
+                        payload={
+                            "node_id": node_id,
+                            "run_id": run_id,
+                            "attempt_count": attempt_count,
+                            "status": "queued",
+                            "outcome": "pending",
+                            "started_at": attempt_started_at,
+                            "updated_at": attempt_updated_at,
+                            "worker_origin": None,
+                            "provider_id": attempt_provider_id or None,
+                            "model_id": attempt_model or None,
+                            "retry_policy": retry_policy,
+                            "lease_id": str(lease.get("lease_id") or "").strip() or None,
+                            "attempt_operation_id": operation_id,
+                        },
+                    )
+                    durable_store.enqueue_outbox(
+                        operation_id,
+                        run_id,
+                        kind="provider_turn_start",
+                        node_id=node_id,
+                        payload={
+                            "node_id": node_id,
+                            "attempt_count": attempt_count,
+                            "classification": "non_idempotent_write",
+                        },
+                    )
+                    existing_external_operation = durable_store.get_external_operation(operation_id)
+                    node_mcp_tool_policy_snapshot = deepcopy(
+                        dict(
+                            dict(dict(run_manifest.get("run_policy_snapshot") or {}).get("node_mcp_tool_policies") or {}).get(node_id)
+                            or dict(dict(compiled_node.get("tool_policy") or {}).get("mcp_tool_policy") or {})
+                        )
+                    )
+                    tool_policy = self._graph_worker_tool_policy(
+                        dict(graph_node.get("tools") or {}),
+                        node=graph_node,
+                        graph_policy=dict(graph.get("graph_policy") or {}),
+                        node_id=node_id,
+                        mcp_tool_policy_snapshot=node_mcp_tool_policy_snapshot,
+                    )
+                    turn_execution_policy = self._graph_worker_turn_execution_policy(tool_policy)
                     worker_thread_id = str(worker.get("thread_id") or "").strip()
-                    execution_thread_id = str(turn_result.get("thread_id") or worker_thread_id).strip()
-                    turn_id = str(dict(turn_result.get("turn") or {}).get("id") or "").strip()
+                    execution_thread_id = ""
+                    turn_id = ""
+                    if isinstance(existing_external_operation, dict) and str(existing_external_operation.get("status") or "").strip() == "needs_review":
+                        node_states[node_id].update(
+                            {
+                                "status": "needs_review",
+                                "outcome": "needs_review",
+                                "attempt_count": attempt_count,
+                                "updated_at": started_at,
+                                "attempt_operation_id": operation_id,
+                                "lease_id": str(lease.get("lease_id") or "").strip() or None,
+                            }
+                        )
+                        if not any(str(item.get("event_id") or "") == f"{run_id}-{node_id}-needs-review" for item in event_refs):
+                            event_refs.append(
+                                {
+                                    "event_id": f"{run_id}-{node_id}-needs-review",
+                                    "run_id": run_id,
+                                    "task_id": graph["task_id"],
+                                    "trace_id": f"trace-{run_id}",
+                                    "event_type": "node_needs_review",
+                                    "created_at": started_at,
+                                    "summary": f"{self._tasks._graph_node_label(graph, node_id)} requires manual review before any replay.",
+                                    "node_id": node_id,
+                                    "parallel_group_id": group_id,
+                                }
+                            )
+                        durable_store.release_lease(str(lease.get("lease_id") or ""), owner_boot_id=self._graph_scheduler.owner_id)
+                        continue
+                    if isinstance(existing_external_operation, dict) and str(existing_external_operation.get("status") or "").strip() in {"accepted", "completed"}:
+                        execution_thread_id, turn_id = self._graph_live_parse_external_handle(existing_external_operation.get("external_handle"))
+                    elif self._graph_live_test_hook_enabled(payload.get("_crash_before_provider_dispatch"), node_id=node_id):
+                        raise _GraphDispatchCrashBeforeExternalCall(f"graph node {node_id} crashed before provider dispatch")
+                    else:
+                        try:
+                            turn_result = self.start_turn(
+                                profile,
+                                thread_id=str(worker.get("thread_id") or ""),
+                                text=str(execution.get("prompt_text") or ""),
+                                attachments=[deepcopy(item) for item in list(execution.get("attachments") or []) if isinstance(item, dict)],
+                                model=attempt_model or None,
+                                effort=str(graph_node.get("reasoning_effort") or "").strip() or None,
+                                permission_mode=str(graph_node.get("permission_mode") or "auto").strip() or "auto",
+                                collaboration_mode=self._normalize_graph_worker_collaboration_mode(graph_node),
+                                context_mode="no_context",
+                                execution_policy=turn_execution_policy,
+                                token_budget=int(execution.get("token_budget") or 0) or None,
+                                token_budget_objective=(
+                                    f"{str(graph.get('title') or graph_id).strip()} / "
+                                    f"{self._tasks._graph_node_label(graph, node_id)}"
+                                ),
+                                mcp_tool_policy_snapshot=node_mcp_tool_policy_snapshot,
+                                mcp_tool_policy_context={
+                                    "graph_id": graph_id,
+                                    "run_id": run_id,
+                                    "node_id": node_id,
+                                    "attempt_count": attempt_count,
+                                    "worker_thread_id": worker_thread_id or None,
+                                },
+                            )
+                        except Exception as exc:
+                            durable_store.record_external_operation(
+                                operation_id,
+                                run_id,
+                                kind="provider_turn_start",
+                                classification="non_idempotent_write",
+                                status="needs_review",
+                                payload={
+                                    "node_id": node_id,
+                                    "attempt_count": attempt_count,
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+                            durable_store.update_outbox_status(
+                                operation_id,
+                                status="needs_review",
+                                payload={
+                                    "node_id": node_id,
+                                    "attempt_count": attempt_count,
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+                            node_states[node_id].update(
+                                {
+                                    "status": "needs_review",
+                                    "outcome": "needs_review",
+                                    "attempt_count": attempt_count,
+                                    "updated_at": started_at,
+                                    "provider_id": attempt_provider_id or None,
+                                    "model_id": attempt_model or None,
+                                    "attempt_operation_id": operation_id,
+                                    "lease_id": str(lease.get("lease_id") or "").strip() or None,
+                                }
+                            )
+                            if not any(str(item.get("event_id") or "") == f"{run_id}-{node_id}-needs-review" for item in event_refs):
+                                event_refs.append(
+                                    {
+                                        "event_id": f"{run_id}-{node_id}-needs-review",
+                                        "run_id": run_id,
+                                        "task_id": graph["task_id"],
+                                        "trace_id": f"trace-{run_id}",
+                                        "event_type": "node_needs_review",
+                                        "created_at": started_at,
+                                        "summary": f"{self._tasks._graph_node_label(graph, node_id)} requires review after an ambiguous provider dispatch error.",
+                                        "node_id": node_id,
+                                        "parallel_group_id": group_id,
+                                    }
+                                )
+                            durable_store.release_lease(str(lease.get("lease_id") or ""), owner_boot_id=self._graph_scheduler.owner_id)
+                            live_run_ref = self._graph_live_run_snapshot(
+                                run_ref=live_run_ref,
+                                node_states=node_states,
+                                event_refs=event_refs,
+                                artifact_refs=run_artifact_refs,
+                                policy_snapshot=run_manifest["run_policy_snapshot"],
+                                status="running",
+                            )
+                            self._write_graph_live_run_manifest_snapshot(
+                                run_manifest_path=run_manifest_path,
+                                run_manifest=run_manifest,
+                                node_states=node_states,
+                                artifact_refs=run_artifact_refs,
+                                event_refs=event_refs,
+                                status="running",
+                                updated_at=str(live_run_ref.get("updated_at") or ""),
+                            )
+                            continue
+                        execution_thread_id = str(turn_result.get("thread_id") or worker_thread_id).strip()
+                        turn_id = str(dict(turn_result.get("turn") or {}).get("id") or "").strip()
                     if not execution_thread_id:
                         raise RuntimeError("Task-graph turn start did not return an execution thread id.")
                     if not turn_id:
                         raise RuntimeError("Task-graph turn start did not return a turn id.")
+                    durable_store.record_external_operation(
+                        operation_id,
+                        run_id,
+                        kind="provider_turn_start",
+                        classification="non_idempotent_write",
+                        status="accepted",
+                        external_handle=f"{execution_thread_id}:{turn_id}",
+                        payload={
+                            "node_id": node_id,
+                            "attempt_count": attempt_count,
+                            "worker_thread_id": worker_thread_id or None,
+                            "execution_thread_id": execution_thread_id,
+                            "turn_id": turn_id,
+                        },
+                    )
+                    durable_store.update_outbox_status(
+                        operation_id,
+                        status="accepted",
+                        payload={
+                            "node_id": node_id,
+                            "attempt_count": attempt_count,
+                            "worker_thread_id": worker_thread_id or None,
+                            "execution_thread_id": execution_thread_id,
+                            "turn_id": turn_id,
+                        },
+                    )
                     node_states[node_id].update(
                         {
                             "status": "running",
                             "outcome": "pending",
-                            "attempt_count": 1,
-                            "started_at": started_at,
+                            "attempt_count": attempt_count,
+                            "started_at": str(existing_state.get("started_at") or started_at),
                             "updated_at": started_at,
                             "worker_origin": str(worker.get("worker_origin") or "").strip() or "provider_lane",
+                            "provider_id": attempt_provider_id or None,
+                            "model_id": attempt_model or None,
                             "worker_thread_id": worker_thread_id or None,
                             "execution_thread_id": execution_thread_id,
                             "turn_id": turn_id,
@@ -2337,6 +3280,9 @@ class RuntimeService:
                             "execution_backend": str(dict(worker.get("settings") or {}).get("execution_backend") or "app_server"),
                             "token_budget": int(execution.get("token_budget") or 0) or None,
                             "turn_execution_policy": turn_execution_policy,
+                            "attempt_operation_id": operation_id,
+                            "lease_id": str(lease.get("lease_id") or "").strip() or None,
+                            "retry_policy": retry_policy,
                         }
                     )
                     if dependency_node_ids:
@@ -2344,38 +3290,40 @@ class RuntimeService:
                             str(dict(node_states.get(dep_id) or {}).get("outcome") or "").strip() or "unknown"
                             for dep_id in dependency_node_ids
                         ]
+                        if not any(str(item.get("event_id") or "") == f"{run_id}-{node_id}-join-ready" for item in event_refs):
+                            event_refs.append(
+                                {
+                                    "event_id": f"{run_id}-{node_id}-join-ready",
+                                    "run_id": run_id,
+                                    "task_id": graph["task_id"],
+                                    "trace_id": f"trace-{run_id}",
+                                    "event_type": "node_progress",
+                                    "created_at": started_at,
+                                    "summary": (
+                                        f"{self._tasks._graph_node_label(graph, node_id)} satisfied join "
+                                        f"`{str(compiled_node.get('join_mode') or 'all_required')}` after dependencies "
+                                        f"{', '.join(dependency_node_ids)} resolved as {', '.join(dependency_outcomes)}."
+                                    ),
+                                    "node_id": node_id,
+                                    "parallel_group_id": group_id,
+                                }
+                            )
+                    if not any(str(item.get("event_id") or "") == f"{run_id}-{node_id}-started" for item in event_refs):
                         event_refs.append(
                             {
-                                "event_id": f"{run_id}-{node_id}-join-ready",
+                                "event_id": f"{run_id}-{node_id}-started",
                                 "run_id": run_id,
                                 "task_id": graph["task_id"],
                                 "trace_id": f"trace-{run_id}",
-                                "event_type": "node_progress",
+                                "event_type": "node_started",
                                 "created_at": started_at,
-                                "summary": (
-                                    f"{self._tasks._graph_node_label(graph, node_id)} satisfied join "
-                                    f"`{str(compiled_node.get('join_mode') or 'all_required')}` after dependencies "
-                                    f"{', '.join(dependency_node_ids)} resolved as {', '.join(dependency_outcomes)}."
-                                ),
+                                "summary": f"{self._tasks._graph_node_label(graph, node_id)} live execution started.",
                                 "node_id": node_id,
                                 "parallel_group_id": group_id,
+                                "worker_thread_id": worker_thread_id or None,
+                                "execution_thread_id": execution_thread_id,
                             }
                         )
-                    event_refs.append(
-                        {
-                            "event_id": f"{run_id}-{node_id}-started",
-                            "run_id": run_id,
-                            "task_id": graph["task_id"],
-                            "trace_id": f"trace-{run_id}",
-                            "event_type": "node_started",
-                            "created_at": started_at,
-                            "summary": f"{self._tasks._graph_node_label(graph, node_id)} live execution started.",
-                            "node_id": node_id,
-                            "parallel_group_id": group_id,
-                            "worker_thread_id": worker_thread_id or None,
-                            "execution_thread_id": execution_thread_id,
-                        }
-                    )
                     self._record_event(
                         {
                             "type": "graph_worker_turn_thread_resolved",
@@ -2389,147 +3337,735 @@ class RuntimeService:
                             "token_budget": int(execution.get("token_budget") or 0) or None,
                         }
                     )
+                    live_run_ref = self._graph_live_run_snapshot(
+                        run_ref=live_run_ref,
+                        node_states=node_states,
+                        event_refs=event_refs,
+                        artifact_refs=run_artifact_refs,
+                        policy_snapshot=run_manifest["run_policy_snapshot"],
+                        status="running",
+                    )
+                    self._write_graph_live_run_manifest_snapshot(
+                        run_manifest_path=run_manifest_path,
+                        run_manifest=run_manifest,
+                        node_states=node_states,
+                        artifact_refs=run_artifact_refs,
+                        event_refs=event_refs,
+                        status="running",
+                        updated_at=str(live_run_ref.get("updated_at") or ""),
+                    )
+                    if self._graph_live_test_hook_enabled(payload.get("_crash_after_provider_handle"), node_id=node_id):
+                        raise _GraphDispatchCrashAfterHandleAccepted(f"graph node {node_id} crashed after provider handle acceptance")
                     execution.update(
                         {
                             "execution_thread_id": execution_thread_id,
                             "turn_id": turn_id,
                             "started_monotonic": time.monotonic(),
+                            "attempt_count": attempt_count,
+                            "lease_id": str(lease.get("lease_id") or "").strip() or None,
+                            "attempt_operation_id": operation_id,
+                            "attempt_provider_id": attempt_provider_id or None,
+                            "attempt_model": attempt_model or None,
+                            "retry_policy": retry_policy,
                         }
                     )
                     started_executions.append(execution)
-                live_run_ref = self._graph_live_run_snapshot(
-                    run_ref=live_run_ref,
-                    node_states=node_states,
-                    event_refs=event_refs,
-                    artifact_refs=run_artifact_refs,
-                    policy_snapshot=run_manifest["run_policy_snapshot"],
-                    status="running",
-                )
-                self._write_graph_live_run_manifest_snapshot(
-                    run_manifest_path=run_manifest_path,
-                    run_manifest=run_manifest,
-                    node_states=node_states,
-                    artifact_refs=run_artifact_refs,
-                    event_refs=event_refs,
-                    status="running",
-                    updated_at=str(live_run_ref.get("updated_at") or ""),
-                )
-                for execution in runnable_nodes:
+                for execution in [
+                    item
+                    for item in runnable_nodes
+                    if str(item.get("execution_thread_id") or "").strip()
+                    and str(item.get("turn_id") or "").strip()
+                ]:
                     node_id = str(execution["node_id"])
                     active_node_id = node_id
                     graph_node = dict(execution["graph_node"] or {})
                     profile = dict(execution["profile"] or {})
                     worker = dict(execution["worker"] or {})
-                    runtime_status = self._prepare_runtime(profile, require_secret=True)
-                    client = self._ensure_client(runtime_status)
-                    terminal_thread = self._wait_for_probe_turn_terminal(
-                        client,
-                        thread_id=str(execution.get("execution_thread_id") or worker.get("thread_id") or ""),
-                        turn_id=str(execution.get("turn_id") or ""),
-                        timeout_seconds=float(execution.get("timeout_seconds") or 210.0),
-                        operation_label=f"task graph node {self._tasks._graph_node_label(graph, node_id)}",
-                    )
-                    if int(execution.get("token_budget") or 0) > 0:
-                        self._stop_bounded_turn_follow_on_execution(
+                    retry_policy = dict(execution.get("retry_policy") or {})
+                    worker_output: dict[str, Any] | None = None
+                    while True:
+                        attempt_count = max(1, int(execution.get("attempt_count") or 1))
+                        attempt_provider_id = str(execution.get("attempt_provider_id") or profile.get("provider_id") or graph_node.get("provider_id") or "").strip()
+                        attempt_model = str(execution.get("attempt_model") or graph_node.get("model_id") or profile.get("model") or "").strip()
+                        lease_id = str(execution.get("lease_id") or "").strip()
+                        heartbeat_stop: threading.Event | None = None
+                        heartbeat_thread: threading.Thread | None = None
+                        retry_next_attempt: dict[str, Any] | None = None
+                        runtime_status = self._prepare_runtime(profile, require_secret=True)
+                        client = self._ensure_client(runtime_status)
+                        try:
+                            if lease_id:
+                                heartbeat_stop, heartbeat_thread = self._start_graph_live_lease_heartbeat(
+                                    store=durable_store,
+                                    lease_id=lease_id,
+                                    owner_boot_id=self._graph_scheduler.owner_id,
+                                    ttl_seconds=self._graph_live_lease_ttl_seconds(payload),
+                                )
+                            terminal_thread = self._wait_for_probe_turn_terminal(
+                                client,
+                                thread_id=str(execution.get("execution_thread_id") or worker.get("thread_id") or ""),
+                                turn_id=str(execution.get("turn_id") or ""),
+                                timeout_seconds=float(execution.get("timeout_seconds") or 210.0),
+                                operation_label=f"task graph node {self._tasks._graph_node_label(graph, node_id)}",
+                            )
+                            if int(execution.get("token_budget") or 0) > 0:
+                                self._stop_bounded_turn_follow_on_execution(
+                                    profile,
+                                    client,
+                                    thread_id=str(execution.get("execution_thread_id") or worker.get("thread_id") or ""),
+                                    completed_turn_id=str(execution.get("turn_id") or ""),
+                                )
+                            else:
+                                self._clear_active_turn_execution_policy(
+                                    thread_id=str(execution.get("execution_thread_id") or worker.get("thread_id") or ""),
+                                    turn_id=str(execution.get("turn_id") or ""),
+                                )
+                            thread_status, final_text, reasoning_text = self._probe_turn_result(
+                                terminal_thread,
+                                turn_id=str(execution.get("turn_id") or ""),
+                            )
+                            execution_key = (
+                                str(execution.get("execution_thread_id") or ""),
+                                str(execution.get("turn_id") or ""),
+                            )
+                            settled_execution_keys.add(execution_key)
+                            completion_inbox_key = self._graph_live_completion_inbox_key(
+                                run_id=run_id,
+                                node_id=node_id,
+                                attempt=attempt_count,
+                                execution_thread_id=str(execution.get("execution_thread_id") or ""),
+                                turn_id=str(execution.get("turn_id") or ""),
+                            )
+                            if not durable_store.record_inbox(
+                                completion_inbox_key,
+                                run_id=run_id,
+                                event_id=f"{run_id}-{node_id}-terminal-{attempt_count}",
+                                payload={"node_id": node_id, "attempt_count": attempt_count},
+                            ):
+                                duplicate_operation_id = str(execution.get("attempt_operation_id") or node_states.get(node_id, {}).get("attempt_operation_id") or "").strip()
+                                if duplicate_operation_id:
+                                    durable_store.record_external_operation(
+                                        duplicate_operation_id,
+                                        run_id,
+                                        kind="provider_turn_start",
+                                        classification="non_idempotent_write",
+                                        status="completed",
+                                        external_handle=f"{str(execution.get('execution_thread_id') or '')}:{str(execution.get('turn_id') or '')}",
+                                        payload={"node_id": node_id, "attempt_count": attempt_count},
+                                    )
+                                    durable_store.update_outbox_status(
+                                        duplicate_operation_id,
+                                        status="completed",
+                                        payload={"node_id": node_id, "attempt_count": attempt_count},
+                                    )
+                                self._record_event(
+                                    {
+                                        "type": "duplicate_effect_suppressed",
+                                        "trace_id": f"trace-{run_id}",
+                                        "run_id": run_id,
+                                        "node_id": node_id,
+                                        "attempt_count": attempt_count,
+                                        "thread_id": str(execution.get("execution_thread_id") or "").strip() or None,
+                                        "turn_id": str(execution.get("turn_id") or "").strip() or None,
+                                        "operation_id": duplicate_operation_id or None,
+                                        "reason": "delivery_completion_inbox_duplicate",
+                                    }
+                                )
+                                worker_output = {"worker_binding": {}, "run_ref": self._tasks.graph_run_ref(run_id)}
+                                break
+                            finished_at = now_iso()
+                            elapsed_ms = max(
+                                0,
+                                int((time.monotonic() - float(execution.get("started_monotonic") or time.monotonic())) * 1000),
+                            )
+                            usage_signal = self._graph_live_turn_usage_signal(
+                                thread_id=str(execution.get("execution_thread_id") or ""),
+                                turn_id=str(execution.get("turn_id") or ""),
+                                provider_id=attempt_provider_id or None,
+                                model=attempt_model or None,
+                            )
+                            policy_violation = self._turn_execution_policy_violation(
+                                thread_id=str(execution.get("execution_thread_id") or ""),
+                                turn_id=str(execution.get("turn_id") or ""),
+                            )
+                            token_budget = int(execution.get("token_budget") or 0)
+                            observed_tokens = dict(usage_signal.get("tokens") or {}).get("total_tokens")
+                            budget_exceeded = (
+                                token_budget > 0
+                                and isinstance(observed_tokens, int)
+                                and observed_tokens > token_budget
+                            )
+                            parsed_output = self._graph_live_run_parse_response(final_text)
+                            terminal_outcome = self._graph_live_run_terminal_outcome(
+                                node_label=self._tasks._graph_node_label(graph, node_id),
+                                thread_status=thread_status,
+                                final_text=final_text,
+                                reasoning_text=reasoning_text,
+                                parsed_output=parsed_output,
+                                policy_violation=policy_violation,
+                                budget_exceeded=budget_exceeded,
+                                observed_tokens=observed_tokens,
+                                token_budget=token_budget,
+                            )
+                            node_status = str(terminal_outcome.get("node_status") or "failed")
+                            outcome = str(terminal_outcome.get("outcome") or "failed")
+                            summary = str(terminal_outcome.get("summary") or "").strip() or (
+                                f"{self._tasks._graph_node_label(graph, node_id)} finished with status {thread_status or 'failed'}."
+                            )
+                            output_human_summary = str(terminal_outcome.get("output_human_summary") or "").strip()
+                            machine_result = dict(terminal_outcome.get("machine_result") or {})
+                            contract_failure = None
+                            if node_status == "completed":
+                                contract_failure = self._graph_live_validate_machine_result_contract(
+                                    graph=graph,
+                                    node_id=node_id,
+                                    node_label=self._tasks._graph_node_label(graph, node_id),
+                                    machine_result=machine_result,
+                                )
+                            if isinstance(contract_failure, dict):
+                                node_status = str(contract_failure.get("node_status") or "failed")
+                                outcome = str(contract_failure.get("outcome") or "schema_violation")
+                                summary = str(contract_failure.get("summary") or "").strip() or summary
+                                output_human_summary = str(contract_failure.get("output_human_summary") or "").strip()
+                                machine_result = dict(contract_failure.get("machine_result") or {})
+                                terminal_outcome["next_action_hints"] = list(contract_failure.get("next_action_hints") or [])
+                            effective_policy_violation = dict(terminal_outcome.get("policy_violation") or {}) or None
+                            tool_call_count = int(dict(effective_policy_violation or {}).get("blocked_tool_call_count") or 0)
+                            next_action_hints = [
+                                str(item).strip()
+                                for item in list(terminal_outcome.get("next_action_hints") or [])
+                                if str(item or "").strip()
+                            ]
+                            node_states[node_id].update(
+                                {
+                                    "status": node_status,
+                                    "outcome": outcome,
+                                    "updated_at": finished_at,
+                                    "elapsed_ms": elapsed_ms,
+                                    "provider_call_count": attempt_count,
+                                    "tool_call_count": tool_call_count,
+                                    "execution_policy": effective_policy_violation,
+                                    "usage_signal": usage_signal,
+                                    "token_budget": token_budget or None,
+                                    "provider_id": attempt_provider_id or None,
+                                    "model_id": attempt_model or None,
+                                }
+                            )
+                            completion_operation_id = str(execution.get("attempt_operation_id") or node_states.get(node_id, {}).get("attempt_operation_id") or "").strip()
+                            current_durable_run = durable_store.load_run(run_id, include_events=False)
+                            cancellation_requested = self._graph_live_cancellation_requested(current_durable_run)
+                            failure_notice: dict[str, Any] | None = None
+                            retryable = False
+                            if (
+                                node_status == "failed"
+                                and attempt_count < max(1, int(retry_policy.get("max_attempts") or 1))
+                                and not cancellation_requested
+                                and not bool(dict(graph_node.get("execution_policy") or {}).get("allow_code_changes"))
+                                and not bool(dict(graph_node.get("execution_policy") or {}).get("allow_install"))
+                                and tool_call_count == 0
+                                and outcome not in {"invalid_output", "policy_violated", "needs_review", "schema_violation", "handoff_contract_violation"}
+                            ):
+                                failure_notice = self._graph_live_failure_notice(
+                                    " ".join(
+                                        part
+                                        for part in (summary, str(machine_result.get("response_text") or ""), final_text)
+                                        if str(part or "").strip()
+                                    ),
+                                    provider_id=attempt_provider_id,
+                                    model_id=attempt_model,
+                                )
+                                retryable = bool(failure_notice.get("retryable"))
+                            if retryable:
+                                next_attempt_count = attempt_count + 1
+                                next_attempt_model = self._graph_live_next_attempt_model(
+                                    current_model=attempt_model,
+                                    retry_policy=retry_policy,
+                                    failure_notice=failure_notice or {},
+                                )
+                                delay_seconds = self._graph_live_retry_delay_seconds(
+                                    run_id=run_id,
+                                    node_id=node_id,
+                                    attempt_count=attempt_count,
+                                    retry_policy=retry_policy,
+                                    failure_notice=failure_notice or {},
+                                    raw_message=" ".join(
+                                        part
+                                        for part in (summary, str(machine_result.get("response_text") or ""), final_text)
+                                        if str(part or "").strip()
+                                    ),
+                                )
+                                if completion_operation_id:
+                                    durable_store.record_external_operation(
+                                        completion_operation_id,
+                                        run_id,
+                                        kind="provider_turn_start",
+                                        classification="non_idempotent_write",
+                                        status="failed",
+                                        external_handle=f"{str(execution.get('execution_thread_id') or '')}:{str(execution.get('turn_id') or '')}",
+                                        payload={
+                                            "node_id": node_id,
+                                            "attempt_count": attempt_count,
+                                            "node_status": node_status,
+                                            "outcome": outcome,
+                                            "failure_notice": failure_notice,
+                                        },
+                                    )
+                                    durable_store.update_outbox_status(
+                                        completion_operation_id,
+                                        status="failed",
+                                        payload={
+                                            "node_id": node_id,
+                                            "attempt_count": attempt_count,
+                                            "node_status": node_status,
+                                            "outcome": outcome,
+                                            "failure_notice": failure_notice,
+                                        },
+                                    )
+                                retry_event_id = f"{run_id}-{node_id}-retry-{next_attempt_count}"
+                                event_refs.append(
+                                    {
+                                        "event_id": retry_event_id,
+                                        "run_id": run_id,
+                                        "task_id": graph["task_id"],
+                                        "trace_id": f"trace-{run_id}",
+                                        "event_type": "node_progress",
+                                        "created_at": finished_at,
+                                        "summary": (
+                                            f"{self._tasks._graph_node_label(graph, node_id)} scheduled retry attempt {next_attempt_count} "
+                                            f"after {int(delay_seconds * 1000)} ms"
+                                            + (f" using fallback model {next_attempt_model}." if next_attempt_model != attempt_model else ".")
+                                        ),
+                                        "node_id": node_id,
+                                        "parallel_group_id": group_id,
+                                    }
+                                )
+                                for handoff_item in list(execution.get("incoming_handoffs") or []):
+                                    envelope = dict(dict(handoff_item).get("agent_envelope") or {})
+                                    metadata = dict(envelope.get("metadata") or {})
+                                    delivery = dict(envelope.get("delivery") or {})
+                                    envelope_id = str(envelope.get("envelope_id") or "").strip()
+                                    if not envelope_id:
+                                        continue
+                                    self._graph_live_append_unique_event(
+                                        event_refs,
+                                        {
+                                            "event_id": f"{run_id}-{envelope_id}-retry-{next_attempt_count}",
+                                            "run_id": run_id,
+                                            "task_id": graph["task_id"],
+                                            "trace_id": f"trace-{run_id}",
+                                            "event_type": "handoff_retry_scheduled",
+                                            "created_at": finished_at,
+                                            "summary": f"Structured handoff for {self._tasks._graph_node_label(graph, node_id)} scheduled retry attempt {next_attempt_count}.",
+                                            "node_id": node_id,
+                                            "parallel_group_id": group_id,
+                                            "payload": {
+                                                "envelope_id": envelope_id,
+                                                "message_id": str(envelope.get("message_id") or "").strip() or None,
+                                                "delivery_idempotency_key": str(delivery.get("idempotency_key") or "").strip() or None,
+                                                "correlation_id": str(metadata.get("correlation_id") or "").strip() or None,
+                                                "causation_id": str(metadata.get("causation_id") or "").strip() or None,
+                                                "source_node_id": str(metadata.get("source_node_id") or "").strip() or None,
+                                                "target_node_id": str(metadata.get("target_node_id") or "").strip() or None,
+                                                "retry_attempt": next_attempt_count,
+                                            },
+                                        },
+                                    )
+                                node_states[node_id].update(
+                                    {
+                                        "status": "queued",
+                                        "outcome": "pending",
+                                        "updated_at": finished_at,
+                                        "attempt_count": next_attempt_count,
+                                        "provider_id": attempt_provider_id or None,
+                                        "model_id": next_attempt_model or None,
+                                    }
+                                )
+                                retry_next_attempt = {
+                                    "attempt_count": next_attempt_count,
+                                    "attempt_model": next_attempt_model,
+                                    "attempt_provider_id": attempt_provider_id,
+                                    "delay_seconds": delay_seconds,
+                                    "finished_at": finished_at,
+                                }
+                            else:
+                                completion_status = "needs_review" if node_status == "needs_review" or outcome == "needs_review" else ("failed" if node_status == "failed" else "completed")
+                                if completion_operation_id:
+                                    durable_store.record_external_operation(
+                                        completion_operation_id,
+                                        run_id,
+                                        kind="provider_turn_start",
+                                        classification="non_idempotent_write",
+                                        status=completion_status,
+                                        external_handle=f"{str(execution.get('execution_thread_id') or '')}:{str(execution.get('turn_id') or '')}",
+                                        payload={
+                                            "node_id": node_id,
+                                            "attempt_count": attempt_count,
+                                            "node_status": node_status,
+                                            "outcome": outcome,
+                                            "failure_notice": failure_notice,
+                                        },
+                                    )
+                                    durable_store.update_outbox_status(
+                                        completion_operation_id,
+                                        status=completion_status,
+                                        payload={
+                                            "node_id": node_id,
+                                            "attempt_count": attempt_count,
+                                            "node_status": node_status,
+                                            "outcome": outcome,
+                                            "failure_notice": failure_notice,
+                                        },
+                                    )
+                                worker_output_payload = {
+                                    "graph_id": graph_id,
+                                    "run_id": run_id,
+                                    "node_id": node_id,
+                                    "worker_thread_id": str(worker.get("thread_id") or ""),
+                                    "parent_thread_id": str(worker.get("parent_thread_id") or ""),
+                                    "spawn_mode": str(worker.get("spawn_mode") or ""),
+                                    "worker_origin": str(worker.get("worker_origin") or ""),
+                                    "agent_role": str(worker.get("agent_role") or ""),
+                                    "agent_nickname": str(worker.get("agent_nickname") or ""),
+                                    "execution_backend": str(dict(worker.get("settings") or {}).get("execution_backend") or "app_server"),
+                                    "human_summary": output_human_summary,
+                                    "machine_result": machine_result,
+                                    "next_action_hints": next_action_hints,
+                                    "status": node_status,
+                                    "provider_id": attempt_provider_id or None,
+                                    "model": attempt_model or None,
+                                    "provider_call_count": attempt_count,
+                                    "tool_call_count": tool_call_count,
+                                    "execution_policy": effective_policy_violation,
+                                    "usage_signal": usage_signal,
+                                    "elapsed_ms": elapsed_ms,
+                                    "attempt_count": attempt_count,
+                                }
+                                try:
+                                    worker_output = self._tasks.record_graph_worker_output(
+                                        worker_output_payload,
+                                        graph_definition=graph,
+                                    )
+                                except GraphContractValidationError as exc:
+                                    node_status = "failed"
+                                    outcome = "handoff_contract_violation"
+                                    summary = (
+                                        f"{self._tasks._graph_node_label(graph, node_id)} produced output that violated the live handoff contract."
+                                    )
+                                    output_human_summary = ""
+                                    machine_result = {
+                                        "status": "handoff_contract_violation",
+                                        "error": str(exc),
+                                    }
+                                    next_action_hints = [
+                                        "Fix the source node output or edge port bindings before rerunning this graph."
+                                    ]
+                                    node_states[node_id].update(
+                                        {
+                                            "status": node_status,
+                                            "outcome": outcome,
+                                            "updated_at": finished_at,
+                                        }
+                                    )
+                                    if completion_operation_id:
+                                        durable_store.record_external_operation(
+                                            completion_operation_id,
+                                            run_id,
+                                            kind="provider_turn_start",
+                                            classification="non_idempotent_write",
+                                            status="failed",
+                                            external_handle=f"{str(execution.get('execution_thread_id') or '')}:{str(execution.get('turn_id') or '')}",
+                                            payload={
+                                                "node_id": node_id,
+                                                "attempt_count": attempt_count,
+                                                "node_status": node_status,
+                                                "outcome": outcome,
+                                                "failure_notice": {"message": str(exc)},
+                                            },
+                                        )
+                                        durable_store.update_outbox_status(
+                                            completion_operation_id,
+                                            status="failed",
+                                            payload={
+                                                "node_id": node_id,
+                                                "attempt_count": attempt_count,
+                                                "node_status": node_status,
+                                                "outcome": outcome,
+                                                "failure_notice": {"message": str(exc)},
+                                            },
+                                        )
+                                    worker_output_payload.update(
+                                        {
+                                            "human_summary": output_human_summary,
+                                            "machine_result": machine_result,
+                                            "next_action_hints": next_action_hints,
+                                            "status": node_status,
+                                        }
+                                    )
+                                    worker_output = self._tasks.record_graph_worker_output(
+                                        worker_output_payload,
+                                        graph_definition=graph,
+                                    )
+                                if node_status == "failed":
+                                    for handoff_item in list(execution.get("incoming_handoffs") or []):
+                                        envelope = dict(dict(handoff_item).get("agent_envelope") or {})
+                                        metadata = dict(envelope.get("metadata") or {})
+                                        delivery = dict(envelope.get("delivery") or {})
+                                        envelope_id = str(envelope.get("envelope_id") or "").strip()
+                                        if not envelope_id:
+                                            continue
+                                        self._graph_live_append_unique_event(
+                                            event_refs,
+                                            {
+                                                "event_id": f"{run_id}-{envelope_id}-delivery-failed-{attempt_count}",
+                                                "run_id": run_id,
+                                                "task_id": graph["task_id"],
+                                                "trace_id": f"trace-{run_id}",
+                                                "event_type": "handoff_delivery_failed",
+                                                "created_at": finished_at,
+                                                "summary": f"Structured handoff for {self._tasks._graph_node_label(graph, node_id)} ended in delivery failure.",
+                                                "node_id": node_id,
+                                                "parallel_group_id": group_id,
+                                                "payload": {
+                                                    "envelope_id": envelope_id,
+                                                    "message_id": str(envelope.get("message_id") or "").strip() or None,
+                                                    "delivery_idempotency_key": str(delivery.get("idempotency_key") or "").strip() or None,
+                                                    "correlation_id": str(metadata.get("correlation_id") or "").strip() or None,
+                                                    "causation_id": str(metadata.get("causation_id") or "").strip() or None,
+                                                    "source_node_id": str(metadata.get("source_node_id") or "").strip() or None,
+                                                    "target_node_id": str(metadata.get("target_node_id") or "").strip() or None,
+                                                    "node_outcome": outcome,
+                                                },
+                                            },
+                                        )
+                        finally:
+                            if heartbeat_stop is not None:
+                                heartbeat_stop.set()
+                            if heartbeat_thread is not None:
+                                heartbeat_thread.join(timeout=2.0)
+                            if lease_id:
+                                try:
+                                    durable_store.release_lease(
+                                        lease_id,
+                                        owner_boot_id=self._graph_scheduler.owner_id,
+                                    )
+                                except Exception:
+                                    pass
+                        if retry_next_attempt is None:
+                            break
+                        live_run_ref = self._graph_live_run_snapshot(
+                            run_ref=live_run_ref,
+                            node_states=node_states,
+                            event_refs=event_refs,
+                            artifact_refs=run_artifact_refs,
+                            policy_snapshot=run_manifest["run_policy_snapshot"],
+                            status="running",
+                        )
+                        self._write_graph_live_run_manifest_snapshot(
+                            run_manifest_path=run_manifest_path,
+                            run_manifest=run_manifest,
+                            node_states=node_states,
+                            artifact_refs=run_artifact_refs,
+                            event_refs=event_refs,
+                            status="running",
+                            updated_at=str(live_run_ref.get("updated_at") or ""),
+                        )
+                        delay_seconds = float(retry_next_attempt.get("delay_seconds") or 0.0)
+                        if delay_seconds > 0:
+                            time.sleep(delay_seconds)
+                        current_durable_run = durable_store.load_run(run_id, include_events=False)
+                        if self._graph_live_cancellation_requested(current_durable_run):
+                            break
+                        next_attempt_count = int(retry_next_attempt["attempt_count"])
+                        next_attempt_model = str(retry_next_attempt["attempt_model"] or "").strip()
+                        next_started_at = now_iso()
+                        next_operation_id = self._graph_live_operation_id(
+                            run_id=run_id,
+                            node_id=node_id,
+                            attempt=next_attempt_count,
+                            kind="provider_turn_start",
+                        )
+                        next_lease = durable_store.acquire_lease(
+                            run_id,
+                            node_id,
+                            next_attempt_count,
+                            owner_boot_id=self._graph_scheduler.owner_id,
+                            ttl_seconds=self._graph_live_lease_ttl_seconds(payload),
+                        )
+                        durable_store.record_node_attempt(
+                            run_id,
+                            node_id,
+                            next_attempt_count,
+                            status="queued",
+                            started_at=next_started_at,
+                            updated_at=next_started_at,
+                            payload={
+                                "node_id": node_id,
+                                "run_id": run_id,
+                                "attempt_count": next_attempt_count,
+                                "status": "queued",
+                                "outcome": "pending",
+                                "started_at": next_started_at,
+                                "updated_at": next_started_at,
+                                "worker_origin": str(worker.get("worker_origin") or "").strip() or "provider_lane",
+                                "provider_id": attempt_provider_id or None,
+                                "model_id": next_attempt_model or None,
+                                "retry_policy": retry_policy,
+                                "lease_id": str(next_lease.get("lease_id") or "").strip() or None,
+                                "attempt_operation_id": next_operation_id,
+                            },
+                        )
+                        durable_store.enqueue_outbox(
+                            next_operation_id,
+                            run_id,
+                            kind="provider_turn_start",
+                            node_id=node_id,
+                            payload={
+                                "node_id": node_id,
+                                "attempt_count": next_attempt_count,
+                                "classification": "non_idempotent_write",
+                            },
+                        )
+                        retry_turn_result = self.start_turn(
                             profile,
-                            client,
-                            thread_id=str(execution.get("execution_thread_id") or worker.get("thread_id") or ""),
-                            completed_turn_id=str(execution.get("turn_id") or ""),
+                            thread_id=str(worker.get("thread_id") or ""),
+                            text=str(execution.get("prompt_text") or ""),
+                            attachments=[deepcopy(item) for item in list(execution.get("attachments") or []) if isinstance(item, dict)],
+                            model=next_attempt_model or None,
+                            effort=str(graph_node.get("reasoning_effort") or "").strip() or None,
+                            permission_mode=str(graph_node.get("permission_mode") or "auto").strip() or "auto",
+                            collaboration_mode=self._normalize_graph_worker_collaboration_mode(graph_node),
+                            context_mode="no_context",
+                            execution_policy=str(
+                                node_states.get(node_id, {}).get("turn_execution_policy")
+                                or self._graph_worker_turn_execution_policy(
+                                    self._graph_worker_tool_policy(
+                                        dict(graph_node.get("tools") or {}),
+                                        node=graph_node,
+                                        graph_policy=dict(graph.get("graph_policy") or {}),
+                                        node_id=node_id,
+                                        mcp_tool_policy_snapshot=deepcopy(
+                                            dict(
+                                                dict(dict(run_manifest.get("run_policy_snapshot") or {}).get("node_mcp_tool_policies") or {}).get(node_id)
+                                                or {}
+                                            )
+                                        ),
+                                    )
+                                )
+                            ),
+                            token_budget=int(execution.get("token_budget") or 0) or None,
+                            token_budget_objective=(
+                                f"{str(graph.get('title') or graph_id).strip()} / "
+                                f"{self._tasks._graph_node_label(graph, node_id)}"
+                            ),
+                            mcp_tool_policy_snapshot=deepcopy(
+                                dict(
+                                    dict(dict(run_manifest.get("run_policy_snapshot") or {}).get("node_mcp_tool_policies") or {}).get(node_id)
+                                    or {}
+                                )
+                            ),
+                            mcp_tool_policy_context={
+                                "graph_id": graph_id,
+                                "run_id": run_id,
+                                "node_id": node_id,
+                                "attempt_count": next_attempt_count,
+                                "worker_thread_id": str(worker.get("thread_id") or "").strip() or None,
+                            },
                         )
-                    else:
-                        self._clear_active_turn_execution_policy(
-                            thread_id=str(execution.get("execution_thread_id") or worker.get("thread_id") or ""),
-                            turn_id=str(execution.get("turn_id") or ""),
+                        retry_execution_thread_id = str(retry_turn_result.get("thread_id") or worker.get("thread_id") or "").strip()
+                        retry_turn_id = str(dict(retry_turn_result.get("turn") or {}).get("id") or "").strip()
+                        if not retry_execution_thread_id or not retry_turn_id:
+                            raise RuntimeError("Task-graph retry turn start did not return an execution thread and turn id.")
+                        durable_store.record_external_operation(
+                            next_operation_id,
+                            run_id,
+                            kind="provider_turn_start",
+                            classification="non_idempotent_write",
+                            status="accepted",
+                            external_handle=f"{retry_execution_thread_id}:{retry_turn_id}",
+                            payload={
+                                "node_id": node_id,
+                                "attempt_count": next_attempt_count,
+                                "worker_thread_id": str(worker.get("thread_id") or "") or None,
+                                "execution_thread_id": retry_execution_thread_id,
+                                "turn_id": retry_turn_id,
+                            },
                         )
-                    thread_status, final_text, reasoning_text = self._probe_turn_result(
-                        terminal_thread,
-                        turn_id=str(execution.get("turn_id") or ""),
-                    )
-                    execution_key = (
-                        str(execution.get("execution_thread_id") or ""),
-                        str(execution.get("turn_id") or ""),
-                    )
-                    settled_execution_keys.add(execution_key)
-                    finished_at = now_iso()
-                    elapsed_ms = max(
-                        0,
-                        int((time.monotonic() - float(execution.get("started_monotonic") or time.monotonic())) * 1000),
-                    )
-                    usage_signal = self._graph_live_turn_usage_signal(
-                        thread_id=str(execution.get("execution_thread_id") or ""),
-                        turn_id=str(execution.get("turn_id") or ""),
-                        provider_id=str(profile.get("provider_id") or "").strip() or None,
-                        model=str(graph_node.get("model_id") or profile.get("model") or "").strip() or None,
-                    )
-                    policy_violation = self._turn_execution_policy_violation(
-                        thread_id=str(execution.get("execution_thread_id") or ""),
-                        turn_id=str(execution.get("turn_id") or ""),
-                    )
-                    token_budget = int(execution.get("token_budget") or 0)
-                    observed_tokens = dict(usage_signal.get("tokens") or {}).get("total_tokens")
-                    budget_exceeded = (
-                        token_budget > 0
-                        and isinstance(observed_tokens, int)
-                        and observed_tokens > token_budget
-                    )
-                    parsed_output = self._graph_live_run_parse_response(final_text)
-                    terminal_outcome = self._graph_live_run_terminal_outcome(
-                        node_label=self._tasks._graph_node_label(graph, node_id),
-                        thread_status=thread_status,
-                        final_text=final_text,
-                        reasoning_text=reasoning_text,
-                        parsed_output=parsed_output,
-                        policy_violation=policy_violation,
-                        budget_exceeded=budget_exceeded,
-                        observed_tokens=observed_tokens,
-                        token_budget=token_budget,
-                    )
-                    node_status = str(terminal_outcome.get("node_status") or "failed")
-                    outcome = str(terminal_outcome.get("outcome") or "failed")
-                    summary = str(terminal_outcome.get("summary") or "").strip() or (
-                        f"{self._tasks._graph_node_label(graph, node_id)} finished with status {thread_status or 'failed'}."
-                    )
-                    machine_result = dict(terminal_outcome.get("machine_result") or {})
-                    effective_policy_violation = dict(terminal_outcome.get("policy_violation") or {}) or None
-                    next_action_hints = [
-                        str(item).strip()
-                        for item in list(terminal_outcome.get("next_action_hints") or [])
-                        if str(item or "").strip()
-                    ]
-                    node_states[node_id].update(
-                        {
-                            "status": node_status,
-                            "outcome": outcome,
-                            "updated_at": finished_at,
-                            "elapsed_ms": elapsed_ms,
-                            "provider_call_count": 1,
-                            "tool_call_count": int(dict(effective_policy_violation or {}).get("blocked_tool_call_count") or 0),
-                            "execution_policy": effective_policy_violation,
-                            "usage_signal": usage_signal,
-                            "token_budget": token_budget or None,
-                        }
-                    )
-                    worker_output = self._tasks.record_graph_worker_output(
-                        {
-                            "graph_id": graph_id,
-                            "run_id": run_id,
-                            "node_id": node_id,
-                            "worker_thread_id": str(worker.get("thread_id") or ""),
-                            "human_summary": summary,
-                            "machine_result": machine_result,
-                            "next_action_hints": next_action_hints,
-                            "status": node_status,
-                            "provider_id": str(profile.get("provider_id") or "").strip() or None,
-                            "model": str(graph_node.get("model_id") or profile.get("model") or "").strip() or None,
-                            "provider_call_count": 1,
-                            "tool_call_count": int(dict(effective_policy_violation or {}).get("blocked_tool_call_count") or 0),
-                            "execution_policy": effective_policy_violation,
-                            "usage_signal": usage_signal,
-                            "elapsed_ms": elapsed_ms,
-                            "attempt_count": 1,
-                        },
-                        graph_definition=graph,
-                    )
+                        durable_store.update_outbox_status(
+                            next_operation_id,
+                            status="accepted",
+                            payload={
+                                "node_id": node_id,
+                                "attempt_count": next_attempt_count,
+                                "worker_thread_id": str(worker.get("thread_id") or "") or None,
+                                "execution_thread_id": retry_execution_thread_id,
+                                "turn_id": retry_turn_id,
+                            },
+                        )
+                        node_states[node_id].update(
+                            {
+                                "status": "running",
+                                "outcome": "pending",
+                                "attempt_count": next_attempt_count,
+                                "started_at": next_started_at,
+                                "updated_at": next_started_at,
+                                "provider_id": attempt_provider_id or None,
+                                "model_id": next_attempt_model or None,
+                                "execution_thread_id": retry_execution_thread_id,
+                                "turn_id": retry_turn_id,
+                                "attempt_operation_id": next_operation_id,
+                                "lease_id": str(next_lease.get("lease_id") or "").strip() or None,
+                            }
+                        )
+                        event_refs.append(
+                            {
+                                "event_id": f"{run_id}-{node_id}-attempt-{next_attempt_count}-started",
+                                "run_id": run_id,
+                                "task_id": graph["task_id"],
+                                "trace_id": f"trace-{run_id}",
+                                "event_type": "node_started",
+                                "created_at": next_started_at,
+                                "summary": (
+                                    f"{self._tasks._graph_node_label(graph, node_id)} retry attempt {next_attempt_count} started"
+                                    + (f" with fallback model {next_attempt_model}." if next_attempt_model != attempt_model else ".")
+                                ),
+                                "node_id": node_id,
+                                "parallel_group_id": group_id,
+                                "worker_thread_id": str(worker.get("thread_id") or "") or None,
+                                "execution_thread_id": retry_execution_thread_id,
+                            }
+                        )
+                        execution.update(
+                            {
+                                "execution_thread_id": retry_execution_thread_id,
+                                "turn_id": retry_turn_id,
+                                "started_monotonic": time.monotonic(),
+                                "attempt_count": next_attempt_count,
+                                "lease_id": str(next_lease.get("lease_id") or "").strip() or None,
+                                "attempt_operation_id": next_operation_id,
+                                "attempt_provider_id": attempt_provider_id or None,
+                                "attempt_model": next_attempt_model or None,
+                            }
+                        )
+                        live_run_ref = self._graph_live_run_snapshot(
+                            run_ref=live_run_ref,
+                            node_states=node_states,
+                            event_refs=event_refs,
+                            artifact_refs=run_artifact_refs,
+                            policy_snapshot=run_manifest["run_policy_snapshot"],
+                            status="running",
+                        )
+                        self._write_graph_live_run_manifest_snapshot(
+                            run_manifest_path=run_manifest_path,
+                            run_manifest=run_manifest,
+                            node_states=node_states,
+                            artifact_refs=run_artifact_refs,
+                            event_refs=event_refs,
+                            status="running",
+                            updated_at=str(live_run_ref.get("updated_at") or ""),
+                        )
+                    if worker_output is None:
+                        active_node_id = None
+                        continue
                     binding = dict(worker_output.get("worker_binding") or {})
                     for handoff in list(binding.get("downstream_handoffs") or []):
                         if not isinstance(handoff, dict):
@@ -2537,6 +4073,33 @@ class RuntimeService:
                         target_node_id = str(handoff.get("to_node_id") or "").strip()
                         if not target_node_id:
                             continue
+                        envelope = dict(handoff.get("agent_envelope") or {})
+                        metadata = dict(envelope.get("metadata") or {})
+                        delivery = dict(envelope.get("delivery") or {})
+                        envelope_id = str(envelope.get("envelope_id") or "").strip() or f"{node_id}-{target_node_id}"
+                        self._graph_live_append_unique_event(
+                            event_refs,
+                            {
+                                "event_id": f"{run_id}-{envelope_id}-created",
+                                "run_id": run_id,
+                                "task_id": graph["task_id"],
+                                "trace_id": f"trace-{run_id}",
+                                "event_type": "handoff_created",
+                                "created_at": finished_at,
+                                "summary": f"Structured handoff from {self._tasks._graph_node_label(graph, node_id)} to {self._tasks._graph_node_label(graph, target_node_id)} was persisted.",
+                                "node_id": node_id,
+                                "parallel_group_id": group_id,
+                                "payload": {
+                                    "envelope_id": envelope_id,
+                                    "message_id": str(envelope.get("message_id") or "").strip() or None,
+                                    "delivery_idempotency_key": str(delivery.get("idempotency_key") or "").strip() or None,
+                                    "correlation_id": str(metadata.get("correlation_id") or "").strip() or None,
+                                    "causation_id": str(metadata.get("causation_id") or "").strip() or None,
+                                    "source_node_id": str(metadata.get("source_node_id") or "").strip() or node_id,
+                                    "target_node_id": str(metadata.get("target_node_id") or "").strip() or target_node_id,
+                                },
+                            },
+                        )
                         incoming_handoffs.setdefault(target_node_id, []).append(
                             {
                                 "source_node_id": node_id,
@@ -2555,7 +4118,15 @@ class RuntimeService:
                             "run_id": run_id,
                             "task_id": graph["task_id"],
                             "trace_id": f"trace-{run_id}",
-                            "event_type": "node_completed" if node_status == "completed" else ("node_cancelled" if node_status == "cancelled" else "node_failed"),
+                            "event_type": (
+                                "node_completed"
+                                if node_status == "completed"
+                                else (
+                                    "node_cancelled"
+                                    if node_status == "cancelled"
+                                    else ("node_needs_review" if node_status == "needs_review" or outcome == "needs_review" else "node_failed")
+                                )
+                            ),
                             "created_at": finished_at,
                             "summary": summary,
                             "node_id": node_id,
@@ -2586,25 +4157,33 @@ class RuntimeService:
                 node_id
                 for node_id in compiled_nodes
                 if str(dict(node_states.get(node_id) or {}).get("status") or "").strip()
-                not in {"completed", "failed", "cancelled"}
+                not in {"completed", "failed", "cancelled", "needs_review"}
             ]
+            current_durable_run = durable_store.load_run(run_id, include_events=False)
+            cancellation_requested = self._graph_live_cancellation_requested(current_durable_run)
             for node_id in unresolved_nodes:
+                unresolved_status = "cancelled" if cancellation_requested else "blocked"
+                unresolved_summary = (
+                    f"{self._tasks._graph_node_label(graph, node_id)} was cancelled before a later provider dispatch."
+                    if cancellation_requested
+                    else f"{self._tasks._graph_node_label(graph, node_id)} remained blocked because upstream dependencies did not produce a runnable handoff."
+                )
                 node_states[node_id].update(
                     {
-                        "status": "blocked",
-                        "outcome": "blocked",
+                        "status": unresolved_status,
+                        "outcome": unresolved_status,
                         "updated_at": now_iso(),
                     }
                 )
                 event_refs.append(
                     {
-                        "event_id": f"{run_id}-{node_id}-blocked-unstarted",
+                        "event_id": f"{run_id}-{node_id}-{unresolved_status}-unstarted",
                         "run_id": run_id,
                         "task_id": graph["task_id"],
                         "trace_id": f"trace-{run_id}",
-                        "event_type": "node_blocked",
+                        "event_type": "node_cancelled" if unresolved_status == "cancelled" else "node_blocked",
                         "created_at": str(node_states[node_id].get("updated_at") or now_iso()),
-                        "summary": f"{self._tasks._graph_node_label(graph, node_id)} remained blocked because upstream dependencies did not produce a runnable handoff.",
+                        "summary": unresolved_summary,
                         "node_id": node_id,
                     }
                 )
@@ -2665,7 +4244,11 @@ class RuntimeService:
                     "run_id": run_id,
                     "task_id": graph["task_id"],
                     "trace_id": f"trace-{run_id}",
-                    "event_type": "run_completed" if final_status == "completed" else "run_failed",
+                    "event_type": (
+                        "run_completed"
+                        if final_status == "completed"
+                        else ("run_cancelled" if final_status == "cancelled" else ("run_needs_review" if final_status == "needs_review" else "run_failed"))
+                    ),
                     "created_at": final_updated_at,
                     "summary": f"{graph['title']} live task-graph run finished with status {final_status}.",
                 }
@@ -2698,6 +4281,8 @@ class RuntimeService:
                 "graph": graph,
                 "task": self._tasks.task_view(self._tasks.current_task(), compact_graph_runs=True),
             }
+        except _GraphDurablePause:
+            raise
         except Exception as exc:
             reconciliation_records = self._reconcile_graph_live_started_turns(
                 graph=graph,
@@ -2772,6 +4357,122 @@ class RuntimeService:
             return None
         return value if value > 0 else None
 
+    @staticmethod
+    def _graph_live_retry_policy(
+        *,
+        compiled_node: dict[str, Any],
+        graph_node: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw = dict(dict(compiled_node.get("execution") or {}).get("retry_policy") or {})
+        graph_raw = dict(dict(graph_node.get("execution_policy") or {}).get("retry_policy") or {})
+        if graph_raw:
+            raw = {**raw, **graph_raw}
+
+        def _int(value: Any, default: int, *, minimum: int = 0) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                parsed = default
+            return parsed if parsed >= minimum else default
+
+        max_attempts = _int(raw.get("max_attempts"), 1, minimum=1)
+        base_delay_value = raw["base_delay_ms"] if "base_delay_ms" in raw else raw.get("backoff_ms")
+        base_delay_ms = _int(base_delay_value, 250, minimum=0)
+        max_delay_value = raw["max_delay_ms"] if "max_delay_ms" in raw else raw.get("cap_delay_ms")
+        max_delay_ms = _int(max_delay_value, max(base_delay_ms, 5000), minimum=base_delay_ms)
+        jitter_value = raw["jitter_ms"] if "jitter_ms" in raw else min(250, max_delay_ms)
+        jitter_ms = _int(jitter_value, min(250, max_delay_ms), minimum=0)
+        return {
+            "max_attempts": max_attempts,
+            "base_delay_ms": base_delay_ms,
+            "max_delay_ms": max_delay_ms,
+            "jitter_ms": jitter_ms,
+            "allow_model_fallback": bool(raw.get("allow_model_fallback", True)),
+            "raw": raw,
+        }
+
+    @staticmethod
+    def _graph_live_failure_notice(
+        raw_message: str,
+        *,
+        provider_id: str,
+        model_id: str,
+    ) -> dict[str, Any]:
+        return classify_runtime_failure(
+            raw_message,
+            current_provider=provider_id,
+            current_model=model_id,
+        ).to_payload()
+
+    @staticmethod
+    def _graph_live_retry_delay_seconds(
+        *,
+        run_id: str,
+        node_id: str,
+        attempt_count: int,
+        retry_policy: dict[str, Any],
+        failure_notice: dict[str, Any],
+        raw_message: str,
+    ) -> float:
+        message = " ".join(
+            part.strip()
+            for part in (
+                str(raw_message or ""),
+                str(failure_notice.get("message") or ""),
+            )
+            if str(part or "").strip()
+        )
+        retry_after_match = re.search(r"retry-after[^0-9]*([0-9]+(?:\.[0-9]+)?)", message, re.IGNORECASE)
+        if retry_after_match:
+            try:
+                return max(0.0, float(retry_after_match.group(1)))
+            except (TypeError, ValueError):
+                pass
+        base_delay_ms = int(retry_policy.get("base_delay_ms") or 0)
+        max_delay_ms = max(base_delay_ms, int(retry_policy.get("max_delay_ms") or 0))
+        jitter_ms = max(0, int(retry_policy.get("jitter_ms") or 0))
+        exponential_ms = base_delay_ms * max(1, 2 ** max(0, attempt_count - 1))
+        capped_ms = min(exponential_ms, max_delay_ms or exponential_ms)
+        if jitter_ms > 0:
+            seed = f"{run_id}:{node_id}:{attempt_count}"
+            jitter_seed = int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8], 16)
+            capped_ms += jitter_seed % (jitter_ms + 1)
+        return max(0.0, capped_ms / 1000.0)
+
+    @staticmethod
+    def _graph_live_next_attempt_model(
+        *,
+        current_model: str,
+        retry_policy: dict[str, Any],
+        failure_notice: dict[str, Any],
+    ) -> str:
+        if not bool(retry_policy.get("allow_model_fallback")):
+            return current_model
+        fallback_models = [
+            str(item).strip()
+            for item in list(failure_notice.get("fallback_models") or [])
+            if str(item or "").strip()
+        ]
+        for candidate in fallback_models:
+            if candidate != current_model:
+                return candidate
+        return current_model
+
+    @staticmethod
+    def _graph_live_cancellation_record(run: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(run, dict):
+            return {}
+        value = run.get("cancellation")
+        return dict(value) if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _graph_live_cancellation_requested(run: dict[str, Any] | None) -> bool:
+        cancellation = RuntimeService._graph_live_cancellation_record(run)
+        if not cancellation:
+            return False
+        status = str(cancellation.get("status") or "").strip().lower()
+        return status in {"requested", "interrupting", "timed_out"} or bool(cancellation.get("requested_at"))
+
     def _prepare_graph_live_run_nodes(
         self,
         *,
@@ -2799,6 +4500,7 @@ class RuntimeService:
             model_id = str(graph_node.get("model_id") or "").strip()
             prompt_template = str(graph_node.get("human_summary_template") or "").strip()
             execution_policy = dict(graph_node.get("execution_policy") or {})
+            compiled_node = dict(compiled_nodes.get(node_id) or {})
             if not provider_id:
                 raise ValueError(f"Graph node {node_id} is missing an explicit provider.")
             if not model_id:
@@ -2818,6 +4520,7 @@ class RuntimeService:
                 "profile": self._resolve_graph_worker_profile(graph_node),
                 "token_budget": base_allocation + (1 if index < remainder else 0),
                 "timeout_seconds": timeout_seconds,
+                "retry_policy": self._graph_live_retry_policy(compiled_node=compiled_node, graph_node=graph_node),
             }
         allocated = sum(int(item["token_budget"]) for item in prepared.values())
         if allocated != run_token_limit:
@@ -2888,6 +4591,7 @@ class RuntimeService:
         graph: dict[str, Any],
         node: dict[str, Any],
         incoming_handoffs: list[dict[str, Any]],
+        neutral_context: dict[str, Any] | None = None,
     ) -> str:
         goal = task.get("goal")
         if isinstance(goal, str):
@@ -2914,21 +4618,82 @@ class RuntimeService:
                 output_summary = dict(item.get("output_summary") or {})
                 handoff = dict(item.get("handoff") or {})
                 downstream_input = dict(handoff.get("downstream_input") or {})
+                envelope = dict(item.get("agent_envelope") or {})
+                metadata = dict(envelope.get("metadata") or {})
+                typed_handoff = dict(metadata.get("typed_handoff") or {})
+                typed_inputs = dict(typed_handoff.get("inputs") or {})
+                content_parts = [
+                    dict(part)
+                    for part in list(envelope.get("content") or [])
+                    if isinstance(part, dict)
+                ]
+                artifact_uris = [
+                    str(dict(part.get("artifact") or {}).get("artifact_uri") or "").strip()
+                    for part in content_parts
+                    if isinstance(part.get("artifact"), dict)
+                    and str(dict(part.get("artifact") or {}).get("artifact_uri") or "").strip()
+                ]
                 artifact_paths = [
                     str(path).strip()
                     for path in list(downstream_input.get("artifact_paths") or [])
                     if str(path or "").strip()
                 ]
+                artifact_summary = ", ".join(artifact_uris or artifact_paths) if (artifact_uris or artifact_paths) else "none"
+                text_parts = [
+                    str(part.get("text") or "").strip()
+                    for part in content_parts
+                    if str(part.get("kind") or "").strip() == "text" and str(part.get("text") or "").strip()
+                ]
+                json_previews = [
+                    json.dumps(part.get("data") or {}, ensure_ascii=False)[:320]
+                    for part in content_parts
+                    if str(part.get("kind") or "").strip() == "json" and isinstance(part.get("data"), dict)
+                ]
+                part_kinds = [
+                    str(part.get("kind") or "").strip()
+                    for part in content_parts
+                    if str(part.get("kind") or "").strip()
+                ]
+                typed_inputs_preview = json.dumps(typed_inputs, ensure_ascii=False)[:600] if typed_inputs else "none"
                 handoff_lines.append(
                     (
                         f"{index}. From {str(item.get('source_label') or item.get('source_node_id') or 'upstream').strip()}: "
-                        f"summary={str(output_summary.get('human_summary') or '').strip()[:320] or 'none'}; "
-                        f"machine_result_preview={str(output_summary.get('machine_result_preview') or '').strip()[:320] or 'none'}; "
-                        f"artifacts={', '.join(artifact_paths) if artifact_paths else 'none'}"
+                        f"typed_inputs={typed_inputs_preview}; "
+                        f"parts={', '.join(part_kinds) if part_kinds else 'none'}; "
+                        f"text={'; '.join(text_parts)[:320] or str(output_summary.get('human_summary') or '').strip()[:320] or 'none'}; "
+                        f"json={'; '.join(json_previews)[:320] or str(output_summary.get('machine_result_preview') or '').strip()[:320] or 'none'}; "
+                        f"artifacts={artifact_summary}"
                     )
                 )
             sections.extend(["Upstream handoffs:", *handoff_lines])
+        if isinstance(neutral_context, dict) and neutral_context:
+            typed_input_port_ids = [
+                str(item).strip()
+                for item in list(neutral_context.get("typed_input_port_ids") or [])
+                if str(item or "").strip()
+            ]
+            provider_pairs = [
+                f"{str(dict(item).get('source_provider') or '').strip()}->{str(dict(item).get('target_provider') or '').strip()}"
+                for item in list(neutral_context.get("provider_pairs") or [])
+                if isinstance(item, dict)
+            ]
+            sections.extend(
+                [
+                    "Neutral handoff context:",
+                    f"Attached neutral context bundle: {str(neutral_context.get('bundle_path') or '').strip() or 'attached'}",
+                    f"Typed input ports: {', '.join(typed_input_port_ids) if typed_input_port_ids else 'none'}",
+                    f"Provider projection pairs: {', '.join(provider_pairs) if provider_pairs else 'none'}",
+                    f"Projection warnings: {int(neutral_context.get('projection_warning_count') or 0)}",
+                    f"Tool-pair repairs: {int(neutral_context.get('total_repaired_tool_pairs') or 0)}",
+                    (
+                        "Use the attached neutral context bundle and attached artifacts as the authoritative upstream state. "
+                        "Do not rely on provider-native transcript fields, hidden reasoning, or preview-only summaries."
+                    ),
+                ]
+            )
         schema_hint = node.get("machine_result_schema")
+        if not isinstance(schema_hint, dict) or not schema_hint:
+            schema_hint = dict(node.get("output_contract") or {}).get("machine_result_schema")
         if isinstance(schema_hint, dict) and schema_hint:
             sections.extend(["Machine-result JSON schema hint:", json.dumps(schema_hint, ensure_ascii=False, indent=2)[:3000]])
         sections.extend(
@@ -2937,11 +4702,370 @@ class RuntimeService:
                 "This is one bounded task-graph node. Finish in a single reply and stop.",
                 "Return a single JSON object with keys `human_summary` and `machine_result`.",
                 "`human_summary` must be plain text. `machine_result` must be an object.",
+                "When typed upstream inputs are present, treat them as authoritative; previews and summaries are advisory only.",
                 "Do not open an extended planning loop, do not inspect the repository, and do not call tools unless the prompt explicitly requires them.",
                 "Do not include markdown fences, preambles, or trailing commentary outside the JSON object.",
             ]
         )
         return "\n\n".join(section for section in sections if section)
+
+    @staticmethod
+    def _graph_live_append_unique_event(
+        event_refs: list[dict[str, Any]],
+        event: dict[str, Any],
+    ) -> None:
+        event_id = str(dict(event).get("event_id") or "").strip()
+        if event_id and any(str(item.get("event_id") or "").strip() == event_id for item in event_refs):
+            return
+        event_refs.append(dict(event))
+
+    def _graph_live_prepare_incoming_handoffs(
+        self,
+        *,
+        graph: dict[str, Any],
+        node_id: str,
+        incoming_handoffs: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        orchestration_graph = (
+            graph
+            if graph.get("schema_registry") is not None
+            else self._tasks._orchestration_graph_for_task_graph(graph)
+        )
+        prepared: list[dict[str, Any]] = []
+        seen_delivery_keys: set[str] = set()
+        for item in incoming_handoffs:
+            if not isinstance(item, dict):
+                continue
+            handoff = dict(item.get("handoff") or {})
+            envelope = self._tasks._load_graph_handoff_agent_envelope(
+                handoff,
+                expected_target_node_id=node_id,
+                graph_definition=orchestration_graph,
+            )
+            delivery_key = str(dict(envelope.get("delivery") or {}).get("idempotency_key") or "").strip()
+            if delivery_key and delivery_key in seen_delivery_keys:
+                continue
+            if delivery_key:
+                seen_delivery_keys.add(delivery_key)
+            prepared.append({**dict(item), "agent_envelope": envelope})
+        return prepared
+
+    def _graph_live_validate_machine_result_contract(
+        self,
+        *,
+        graph: dict[str, Any],
+        node_id: str,
+        node_label: str,
+        machine_result: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        verdict = self._tasks.validate_graph_node_machine_result_contract(
+            graph,
+            node_id=node_id,
+            machine_result=machine_result,
+        )
+        if verdict is None:
+            return None
+        errors = [
+            str(item).strip()
+            for item in list(dict(verdict).get("errors") or [])
+            if str(item or "").strip()
+        ]
+        schema_ref = str(dict(verdict).get("schema_ref") or "").strip() or f"schema.{node_id}.machine_result"
+        clean_label = str(node_label or node_id).strip() or node_id
+        first_error = errors[0] if errors else "machine_result violated the declared schema."
+        return {
+            "node_status": "failed",
+            "outcome": "schema_violation",
+            "summary": f"{clean_label} returned a machine_result that violated {schema_ref}.",
+            "output_human_summary": "",
+            "machine_result": {
+                "status": "schema_violation",
+                "schema_ref": schema_ref,
+                "errors": errors,
+                "received_machine_result": deepcopy(machine_result),
+            },
+            "next_action_hints": [
+                f"Fix the node output so machine_result satisfies {schema_ref}.",
+                first_error,
+            ],
+        }
+
+    @staticmethod
+    def _graph_live_artifact_attachment_key(artifact_ref: dict[str, Any]) -> str:
+        metadata = dict(artifact_ref.get("metadata") or {})
+        return (
+            str(metadata.get("relative_path") or "").strip()
+            or str(artifact_ref.get("artifact_uri") or "").strip()
+            or str(artifact_ref.get("artifact_id") or "").strip()
+        )
+
+    def _graph_live_attachment_from_artifact_ref(self, artifact_ref: dict[str, Any]) -> dict[str, Any] | None:
+        metadata = dict(artifact_ref.get("metadata") or {})
+        relative_path = str(metadata.get("relative_path") or artifact_ref.get("path") or "").strip()
+        if not relative_path:
+            return None
+        resolved = resolve_under(self._projects.require_workspace_root(), relative_path)
+        if resolved is None or not resolved.exists() or not resolved.is_file():
+            return None
+        media_type = str(artifact_ref.get("media_type") or artifact_ref.get("mime_type") or "").strip() or (
+            mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+        )
+        return {
+            "path": resolved.as_posix(),
+            "name": resolved.name,
+            "mime_type": media_type,
+            "kind": "image" if media_type.startswith("image/") else "file",
+            "source": "graph_handoff_artifact",
+        }
+
+    def _graph_live_trim_projection_detail(self, detail: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        trimmed = deepcopy(detail)
+        warnings = [
+            str(item).strip()
+            for item in list(trimmed.get("warnings") or [])
+            if str(item or "").strip()
+        ]
+        truncation = {
+            "applied": False,
+            "message_limit": GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_HISTORY_MESSAGES,
+            "replayable_artifact_limit": GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_REPLAYABLE_ARTIFACTS,
+            "json_byte_limit": GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_JSON_BYTES,
+            "reasons": [],
+        }
+        messages = [deepcopy(item) for item in list(trimmed.get("messages") or []) if isinstance(item, dict)]
+        original_message_count = len(messages)
+        if original_message_count > GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_HISTORY_MESSAGES:
+            messages = messages[-GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_HISTORY_MESSAGES :]
+            reason = (
+                f"Projected history messages were truncated deterministically from {original_message_count} "
+                f"to {len(messages)} by keeping the newest messages."
+            )
+            warnings.append(reason)
+            truncation["applied"] = True
+            truncation["reasons"].append(reason)
+        trimmed["messages"] = messages
+        trimmed["projected_message_count"] = len(messages)
+        replayable_artifacts = [
+            deepcopy(item)
+            for item in list(trimmed.get("replayable_artifacts") or [])
+            if isinstance(item, dict)
+        ]
+        original_artifact_count = len(replayable_artifacts)
+        if original_artifact_count > GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_REPLAYABLE_ARTIFACTS:
+            replayable_artifacts = replayable_artifacts[:GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_REPLAYABLE_ARTIFACTS]
+            reason = (
+                f"Replayable projected artifacts were truncated deterministically from {original_artifact_count} "
+                f"to {len(replayable_artifacts)} by keeping the earliest replayable artifacts."
+            )
+            warnings.append(reason)
+            truncation["applied"] = True
+            truncation["reasons"].append(reason)
+        trimmed["replayable_artifacts"] = replayable_artifacts
+        trimmed["replayable_artifact_count"] = len(replayable_artifacts)
+        trimmed["warnings"] = warnings
+        return trimmed, truncation
+
+    def _graph_live_prepare_neutral_context_bundle(
+        self,
+        *,
+        graph: dict[str, Any],
+        node: dict[str, Any],
+        run_id: str,
+        incoming_handoffs: list[dict[str, Any]],
+        artifact_root: Path,
+        attempt_count: int,
+        target_provider_id: str,
+    ) -> dict[str, Any] | None:
+        if not incoming_handoffs:
+            return None
+        node_id = str(node.get("node_id") or "").strip()
+        if not node_id:
+            return None
+        workspace_root = self._projects.require_workspace_root()
+        bundle_root = artifact_root / node_id
+        bundle_root.mkdir(parents=True, exist_ok=True)
+        bundle_path = bundle_root / f"neutral-context-attempt-{max(1, int(attempt_count or 1))}.json"
+        merged_typed_inputs: dict[str, Any] = {}
+        projection_warnings: list[str] = []
+        attachments: list[dict[str, Any]] = []
+        seen_attachment_keys: set[str] = set()
+        incoming_entries: list[dict[str, Any]] = []
+        provider_pairs: list[dict[str, Any]] = []
+        total_repaired_tool_pairs = 0
+        stripped_private_state = False
+        for index, item in enumerate(incoming_handoffs, start=1):
+            handoff = dict(item.get("handoff") or {})
+            envelope = dict(item.get("agent_envelope") or {})
+            metadata = dict(envelope.get("metadata") or {})
+            delivery = dict(envelope.get("delivery") or {})
+            sender = dict(envelope.get("sender") or {})
+            typed_handoff = dict(metadata.get("typed_handoff") or {})
+            typed_inputs = deepcopy(dict(typed_handoff.get("inputs") or {}))
+            for port_id, value in typed_inputs.items():
+                clean_port_id = str(port_id or "").strip()
+                if not clean_port_id:
+                    continue
+                if clean_port_id not in merged_typed_inputs:
+                    merged_typed_inputs[clean_port_id] = deepcopy(value)
+                elif merged_typed_inputs[clean_port_id] != value:
+                    warning = (
+                        f"Incoming handoffs disagreed on target input port {clean_port_id}; preserved the first validated payload."
+                    )
+                    if warning not in projection_warnings:
+                        projection_warnings.append(warning)
+            source_thread_id = str(dict(metadata.get("provenance") or {}).get("source_worker_thread_id") or dict(sender).get("lane_id") or "").strip()
+            projection_detail = self._handoff_projection_detail(
+                source_thread_id=source_thread_id,
+                target_provider_id=target_provider_id,
+            )
+            projection_truncation = None
+            if projection_detail:
+                projection_detail, projection_truncation = self._graph_live_trim_projection_detail(projection_detail)
+                total_repaired_tool_pairs += int(projection_detail.get("repaired_tool_pairs") or 0)
+                for warning in list(projection_detail.get("warnings") or []):
+                    clean_warning = str(warning or "").strip()
+                    if clean_warning:
+                        projection_warnings.append(clean_warning)
+                        if "provider-private" in clean_warning.lower():
+                            stripped_private_state = True
+            artifact_refs: list[dict[str, Any]] = []
+            downstream_input = dict(handoff.get("downstream_input") or {})
+            for artifact in list(downstream_input.get("artifact_refs") or []):
+                if isinstance(artifact, dict):
+                    artifact_refs.append(deepcopy(artifact))
+            for part in list(envelope.get("content") or []):
+                if not isinstance(part, dict):
+                    continue
+                artifact = dict(part.get("artifact") or {})
+                if artifact:
+                    artifact_refs.append(deepcopy(artifact))
+            deduped_artifact_refs: list[dict[str, Any]] = []
+            seen_artifact_keys: set[str] = set()
+            for artifact_ref in artifact_refs:
+                key = self._graph_live_artifact_attachment_key(artifact_ref)
+                if not key or key in seen_artifact_keys:
+                    continue
+                seen_artifact_keys.add(key)
+                deduped_artifact_refs.append(artifact_ref)
+                attachment = self._graph_live_attachment_from_artifact_ref(artifact_ref)
+                if attachment:
+                    attachment_key = str(attachment.get("path") or "").strip()
+                    if attachment_key and attachment_key not in seen_attachment_keys:
+                        attachments.append(attachment)
+                        seen_attachment_keys.add(attachment_key)
+            source_provider = str(sender.get("provider_id") or "").strip() or None
+            if projection_detail and str(projection_detail.get("source_provider") or "").strip():
+                source_provider = str(projection_detail.get("source_provider") or "").strip()
+            if source_provider:
+                pair = {"source_provider": source_provider, "target_provider": target_provider_id}
+                if pair not in provider_pairs:
+                    provider_pairs.append(pair)
+            incoming_entries.append(
+                {
+                    "index": index,
+                    "source_node_id": str(metadata.get("source_node_id") or item.get("source_node_id") or "").strip() or None,
+                    "source_label": str(item.get("source_label") or metadata.get("source_node_id") or "").strip() or None,
+                    "target_node_id": str(metadata.get("target_node_id") or node_id).strip() or node_id,
+                    "edge_id": str(metadata.get("edge_id") or "").strip() or None,
+                    "envelope_id": str(envelope.get("envelope_id") or "").strip() or None,
+                    "message_id": str(envelope.get("message_id") or "").strip() or None,
+                    "source_provider_id": source_provider,
+                    "target_provider_id": target_provider_id,
+                    "trace_id": str(delivery.get("trace_id") or "").strip() or None,
+                    "correlation_id": str(metadata.get("correlation_id") or "").strip() or None,
+                    "causation_id": str(metadata.get("causation_id") or "").strip() or None,
+                    "schema_refs": [str(ref).strip() for ref in list(metadata.get("schema_refs") or []) if str(ref or "").strip()],
+                    "typed_inputs": typed_inputs,
+                    "artifact_refs": deduped_artifact_refs,
+                    "resource_refs": [str(ref).strip() for ref in list(downstream_input.get("resource_refs") or []) if str(ref or "").strip()],
+                    "context_policy": deepcopy(dict(metadata.get("context_policy_snapshot") or {})),
+                    "provenance": deepcopy(dict(metadata.get("provenance") or {})),
+                    "projected_history": projection_detail,
+                    "projection_truncation": projection_truncation,
+                }
+            )
+        deduped_projection_warnings: list[str] = []
+        for warning in projection_warnings:
+            clean_warning = str(warning or "").strip()
+            if clean_warning and clean_warning not in deduped_projection_warnings:
+                deduped_projection_warnings.append(clean_warning)
+        bundle = {
+            "schema_version": "astrabridge-graph-neutral-context-v1",
+            "graph_id": str(graph.get("graph_id") or "").strip(),
+            "run_id": run_id,
+            "task_id": str(graph.get("task_id") or "").strip(),
+            "target_node_id": node_id,
+            "target_provider_id": target_provider_id,
+            "target_model_id": str(node.get("model_id") or "").strip() or None,
+            "created_at": now_iso(),
+            "typed_inputs": merged_typed_inputs,
+            "incoming_handoffs": incoming_entries,
+            "provider_pairs": provider_pairs,
+            "projection_warnings": deduped_projection_warnings,
+            "provider_private_state_removed": stripped_private_state,
+            "total_repaired_tool_pairs": total_repaired_tool_pairs,
+            "budget": {
+                "history_message_limit": GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_HISTORY_MESSAGES,
+                "replayable_artifact_limit": GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_REPLAYABLE_ARTIFACTS,
+                "json_byte_limit": GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_JSON_BYTES,
+            },
+            "estimated_json_bytes": 0,
+            "truncation": {
+                "applied": any(bool(dict(entry.get("projection_truncation") or {}).get("applied")) for entry in incoming_entries),
+                "reasons": [
+                    reason
+                    for entry in incoming_entries
+                    for reason in list(dict(entry.get("projection_truncation") or {}).get("reasons") or [])
+                    if str(reason or "").strip()
+                ],
+            },
+        }
+        encoded = json.dumps(bundle, ensure_ascii=False, indent=2)
+        bundle["estimated_json_bytes"] = len(encoded.encode("utf-8"))
+        if bundle["estimated_json_bytes"] > GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_JSON_BYTES:
+            warning = (
+                f"Neutral context bundle estimated size {bundle['estimated_json_bytes']} bytes exceeds the configured budget "
+                f"{GRAPH_LIVE_NEUTRAL_CONTEXT_MAX_JSON_BYTES} bytes; deterministic per-handoff truncation was applied first."
+            )
+            if warning not in bundle["projection_warnings"]:
+                bundle["projection_warnings"].append(warning)
+            bundle["truncation"]["applied"] = True
+            bundle["truncation"]["reasons"].append(warning)
+        bundle_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+        context_attachment = {
+            "path": bundle_path.as_posix(),
+            "name": f"{node_id}-neutral-context.json",
+            "mime_type": "application/json",
+            "kind": "file",
+            "source": "graph_neutral_context_bundle",
+        }
+        bundle_artifact_ref = {
+            "artifact_id": f"{run_id}-{node_id}-neutral-context-json-{max(1, int(attempt_count or 1))}",
+            "artifact_kind": "structured_json",
+            "task_id": str(graph.get("task_id") or "").strip(),
+            "run_id": run_id,
+            "source_node_id": node_id,
+            "path": bundle_path.relative_to(Path(workspace_root)).as_posix(),
+            "media_type": "application/json",
+            "status": "ready",
+            "created_at": str(bundle.get("created_at") or now_iso()),
+        }
+        return {
+            "bundle_path": bundle_path.relative_to(Path(workspace_root)).as_posix(),
+            "bundle": bundle,
+            "attachments": [context_attachment, *attachments],
+            "artifact_refs": [bundle_artifact_ref],
+            "summary": {
+                "bundle_path": bundle_path.relative_to(Path(workspace_root)).as_posix(),
+                "incoming_handoff_count": len(incoming_entries),
+                "typed_input_port_ids": sorted(merged_typed_inputs),
+                "provider_pairs": provider_pairs,
+                "projection_warning_count": len(bundle["projection_warnings"]),
+                "total_repaired_tool_pairs": total_repaired_tool_pairs,
+                "provider_private_state_removed": stripped_private_state,
+                "truncation_applied": bool(bundle["truncation"]["applied"]),
+            },
+        }
 
     def _normalize_graph_worker_collaboration_mode(
         self,
@@ -3011,6 +5135,7 @@ class RuntimeService:
                     "outcome": "partial",
                     "summary": human_summary
                     or f"{clean_label} returned a bounded result after blocked tool requests were ignored.",
+                    "output_human_summary": human_summary,
                     "machine_result": parsed_machine_result,
                     "policy_violation": violation_detail,
                     "next_action_hints": [
@@ -3039,6 +5164,7 @@ class RuntimeService:
                     f"{clean_label} exceeded its enforced token allocation "
                     f"({observed_tokens} / {token_budget})."
                 ),
+                "output_human_summary": f"{clean_label} exceeded its enforced token allocation ({observed_tokens} / {token_budget}).",
                 "machine_result": {
                     "status": "budget_exceeded",
                     "observed_total_tokens": observed_tokens,
@@ -3051,16 +5177,43 @@ class RuntimeService:
                 ],
             }
         if clean_status == "completed":
+            if not isinstance(parsed_json, dict):
+                return {
+                    "node_status": "failed",
+                    "outcome": "invalid_output",
+                    "summary": f"{clean_label} completed without returning the required JSON envelope.",
+                    "output_human_summary": "",
+                    "machine_result": {
+                        "status": "invalid_output",
+                        "response_text": clean_text[:4000],
+                    },
+                    "policy_violation": None,
+                    "next_action_hints": [
+                        "Fix the node prompt or output contract so the worker returns `human_summary` plus an object `machine_result`.",
+                    ],
+                }
             machine_result = parsed_machine_result
             if not isinstance(machine_result, dict) or not machine_result:
-                machine_result = {
-                    "response_text": clean_text[:4000],
-                    "reasoning_excerpt": clean_reasoning[:800] if clean_reasoning else None,
+                return {
+                    "node_status": "failed",
+                    "outcome": "invalid_output",
+                    "summary": f"{clean_label} completed without a valid object `machine_result` payload.",
+                    "output_human_summary": "",
+                    "machine_result": {
+                        "status": "invalid_output",
+                        "response_text": clean_text[:4000],
+                        "reasoning_excerpt": clean_reasoning[:800] if clean_reasoning else None,
+                    },
+                    "policy_violation": None,
+                    "next_action_hints": [
+                        "Fix the node output schema or response template before retrying.",
+                    ],
                 }
             return {
                 "node_status": "completed",
                 "outcome": "passed",
                 "summary": human_summary or (clean_text[:400] if clean_text else f"{clean_label} completed."),
+                "output_human_summary": human_summary,
                 "machine_result": machine_result,
                 "policy_violation": None,
                 "next_action_hints": [],
@@ -3070,6 +5223,7 @@ class RuntimeService:
                 "node_status": "cancelled",
                 "outcome": "cancelled",
                 "summary": f"{clean_label} was cancelled before completion.",
+                "output_human_summary": f"{clean_label} was cancelled before completion.",
                 "machine_result": {"status": "cancelled", "response_text": clean_text[:4000]},
                 "policy_violation": None,
                 "next_action_hints": [],
@@ -3078,6 +5232,7 @@ class RuntimeService:
             "node_status": "failed",
             "outcome": "failed",
             "summary": f"{clean_label} finished with status {clean_status or 'failed'}.",
+            "output_human_summary": f"{clean_label} finished with status {clean_status or 'failed'}.",
             "machine_result": {"status": clean_status or "failed", "response_text": clean_text[:4000]},
             "policy_violation": None,
             "next_action_hints": [],
@@ -3357,7 +5512,23 @@ class RuntimeService:
         summary = str(terminal_outcome.get("summary") or "").strip() or (
             f"{self._tasks._graph_node_label(graph, node_id)} finished with status {thread_status or 'failed'}."
         )
+        output_human_summary = str(terminal_outcome.get("output_human_summary") or "").strip()
         machine_result = dict(terminal_outcome.get("machine_result") or {})
+        contract_failure = None
+        if node_status == "completed":
+            contract_failure = self._graph_live_validate_machine_result_contract(
+                graph=graph,
+                node_id=node_id,
+                node_label=self._tasks._graph_node_label(graph, node_id),
+                machine_result=machine_result,
+            )
+        if isinstance(contract_failure, dict):
+            node_status = str(contract_failure.get("node_status") or "failed")
+            outcome = str(contract_failure.get("outcome") or "schema_violation")
+            summary = str(contract_failure.get("summary") or "").strip() or summary
+            output_human_summary = str(contract_failure.get("output_human_summary") or "").strip()
+            machine_result = dict(contract_failure.get("machine_result") or {})
+            terminal_outcome["next_action_hints"] = list(contract_failure.get("next_action_hints") or [])
         effective_policy_violation = dict(terminal_outcome.get("policy_violation") or {}) or None
         next_action_hints = [
             str(item).strip()
@@ -3377,28 +5548,60 @@ class RuntimeService:
                 "token_budget": token_budget or None,
             }
         )
-        worker_output = self._tasks.record_graph_worker_output(
-            {
-                "graph_id": graph_id,
-                "run_id": run_id,
-                "node_id": node_id,
-                "worker_thread_id": str(worker.get("thread_id") or ""),
-                "human_summary": summary,
-                "machine_result": machine_result,
-                "next_action_hints": next_action_hints,
-                "status": node_status,
-                "provider_id": str(profile.get("provider_id") or "").strip() or None,
-                "model": str(graph_node.get("model_id") or profile.get("model") or "").strip() or None,
-                "provider_call_count": 1,
-                "tool_call_count": int(dict(effective_policy_violation or {}).get("blocked_tool_call_count") or 0),
-                "execution_policy": effective_policy_violation,
-                "usage_signal": usage_signal,
-                "elapsed_ms": elapsed_ms,
-                "attempt_count": 1,
-                "updated_at": finished_at,
-            },
-            graph_definition=graph,
-        )
+        worker_output_payload = {
+            "graph_id": graph_id,
+            "run_id": run_id,
+            "node_id": node_id,
+            "worker_thread_id": str(worker.get("thread_id") or ""),
+            "human_summary": output_human_summary,
+            "machine_result": machine_result,
+            "next_action_hints": next_action_hints,
+            "status": node_status,
+            "provider_id": str(profile.get("provider_id") or "").strip() or None,
+            "model": str(graph_node.get("model_id") or profile.get("model") or "").strip() or None,
+            "provider_call_count": 1,
+            "tool_call_count": int(dict(effective_policy_violation or {}).get("blocked_tool_call_count") or 0),
+            "execution_policy": effective_policy_violation,
+            "usage_signal": usage_signal,
+            "elapsed_ms": elapsed_ms,
+            "attempt_count": 1,
+            "updated_at": finished_at,
+        }
+        try:
+            worker_output = self._tasks.record_graph_worker_output(
+                worker_output_payload,
+                graph_definition=graph,
+            )
+        except GraphContractValidationError as exc:
+            node_status = "failed"
+            outcome = "handoff_contract_violation"
+            summary = f"{self._tasks._graph_node_label(graph, node_id)} produced output that violated the live handoff contract."
+            machine_result = {
+                "status": "handoff_contract_violation",
+                "error": str(exc),
+            }
+            next_action_hints = [
+                "Fix the source node output or edge port bindings before rerunning this graph."
+            ]
+            node_states[node_id].update(
+                {
+                    "status": node_status,
+                    "outcome": outcome,
+                    "updated_at": finished_at,
+                }
+            )
+            worker_output_payload.update(
+                {
+                    "human_summary": "",
+                    "machine_result": machine_result,
+                    "next_action_hints": next_action_hints,
+                    "status": node_status,
+                }
+            )
+            worker_output = self._tasks.record_graph_worker_output(
+                worker_output_payload,
+                graph_definition=graph,
+            )
         binding = dict(worker_output.get("worker_binding") or {})
         merged_artifact_refs = self._tasks._merge_graph_worker_artifact_refs(
             artifact_refs,
@@ -3660,6 +5863,8 @@ class RuntimeService:
         next_run_ref["diagnostic_refs"] = self._tasks._extract_graph_run_diagnostic_refs(
             {"artifact_refs": list(next_run_ref.get("artifact_refs") or [])}
         )
+        next_run_ref["node_run_states"] = [deepcopy(item) for item in node_states.values()]
+        next_run_ref["event_refs"] = [deepcopy(item) for item in event_refs]
         next_run_ref["timeline_events"] = self._tasks._compact_graph_run_timeline_events(event_refs)
         next_run_ref["latest_event_type"] = str(dict(event_refs[-1]).get("event_type") or "").strip() if event_refs else None
         next_run_ref["latest_event_at"] = str(dict(event_refs[-1]).get("created_at") or "").strip() if event_refs else None
@@ -3769,17 +5974,94 @@ class RuntimeService:
             raise ValueError(f"Graph worker {node_id} requested worktree isolation, which is not supported yet.")
         return policy
 
-    def _graph_worker_tool_policy(self, value: dict[str, Any]) -> dict[str, Any]:
+    def _graph_worker_tool_policy(
+        self,
+        value: dict[str, Any],
+        *,
+        node: dict[str, Any] | None = None,
+        graph_policy: dict[str, Any] | None = None,
+        node_id: str | None = None,
+        mcp_tool_policy_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         allowed_tool_classes = [
             str(item).strip()
             for item in list(value.get("allowed_tool_classes") or [])
             if str(item or "").strip()
         ]
+        mcp_tool_policy = (
+            deepcopy(mcp_tool_policy_snapshot)
+            if isinstance(mcp_tool_policy_snapshot, dict) and mcp_tool_policy_snapshot
+            else resolve_node_mcp_tool_policy(
+                tools=value,
+                mcp_preset_ids=[
+                    str(item).strip()
+                    for item in list(dict(node or {}).get("mcp_preset_ids") or [])
+                    if str(item or "").strip()
+                ],
+                graph_policy=graph_policy,
+                enabled_servers=self._enabled_mcp_servers_snapshot(),
+                node_id=str(node_id or dict(node or {}).get("node_id") or "").strip() or None,
+            )
+        )
         return {
             "approval_mode": str(value.get("approval_mode") or "").strip().lower() or "ask",
             "allowed_tool_classes": allowed_tool_classes,
             "supports_mcp": bool(value.get("supports_mcp")),
+            "mcp_tool_policy": mcp_tool_policy,
         }
+
+    def _enabled_mcp_servers_snapshot(self) -> list[dict[str, Any]]:
+        try:
+            return [dict(item) for item in self._mcp_config.enabled_servers() if isinstance(item, dict)]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _graph_worker_dynamic_tool_filter(tool_policy: dict[str, Any]) -> tuple[set[str] | None, bool]:
+        mcp_tool_policy = dict(tool_policy.get("mcp_tool_policy") or {})
+        allowed_mcp_tools = allowed_mcp_dynamic_tool_names(mcp_tool_policy)
+        supports_mcp = bool(tool_policy.get("supports_mcp")) or bool(allowed_mcp_tools)
+        allow_browser_smoke = "web" in {
+            str(item).strip()
+            for item in list(tool_policy.get("allowed_tool_classes") or [])
+            if str(item or "").strip()
+        }
+        if not supports_mcp:
+            return set(), allow_browser_smoke
+        return allowed_mcp_tools, allow_browser_smoke
+
+    def _graph_node_mcp_tool_policy_snapshots(
+        self,
+        *,
+        graph: dict[str, Any],
+        compiled_plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        graph_policy = dict(graph.get("graph_policy") or {})
+        compiled_tool_policies = {
+            str(item.get("node_id") or "").strip(): deepcopy(dict(dict(item.get("tool_policy") or {}).get("mcp_tool_policy") or {}))
+            for item in list(compiled_plan.get("nodes") or [])
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+        }
+        snapshots: dict[str, Any] = {}
+        for node in list(graph.get("nodes") or []):
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get("node_id") or "").strip()
+            if not node_id:
+                continue
+            snapshots[node_id] = deepcopy(
+                dict(
+                    self._graph_worker_tool_policy(
+                        dict(node.get("tools") or {}),
+                        node=node,
+                        graph_policy=graph_policy,
+                        node_id=node_id,
+                        mcp_tool_policy_snapshot=compiled_tool_policies.get(node_id),
+                    ).get("mcp_tool_policy")
+                    or {}
+                )
+            )
+        return snapshots
 
     @staticmethod
     def _graph_worker_turn_execution_policy(tool_policy: dict[str, Any]) -> str:
@@ -3788,7 +6070,10 @@ class RuntimeService:
             for item in list(tool_policy.get("allowed_tool_classes") or [])
             if str(item or "").strip()
         ]
-        if not allowed_tool_classes and not bool(tool_policy.get("supports_mcp")):
+        has_mcp_tools = bool(tool_policy.get("supports_mcp")) or bool(
+            list(dict(tool_policy.get("mcp_tool_policy") or {}).get("exposed_tools") or [])
+        )
+        if not allowed_tool_classes and not has_mcp_tools:
             return NO_TOOLS_EXECUTION_POLICY
         return "standard"
 
@@ -4011,6 +6296,8 @@ class RuntimeService:
         execution_policy: str | None = None,
         token_budget: int | None = None,
         token_budget_objective: str | None = None,
+        mcp_tool_policy_snapshot: dict[str, Any] | None = None,
+        mcp_tool_policy_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not getattr(self._runtime_operation_local, "in_start_turn", False):
             with self._runtime_operation_lock:
@@ -4030,6 +6317,8 @@ class RuntimeService:
                         execution_policy=execution_policy,
                         token_budget=token_budget,
                         token_budget_objective=token_budget_objective,
+                        mcp_tool_policy_snapshot=mcp_tool_policy_snapshot,
+                        mcp_tool_policy_context=mcp_tool_policy_context,
                     )
                 finally:
                     self._runtime_operation_local.in_start_turn = False
@@ -4039,6 +6328,15 @@ class RuntimeService:
             raise ValueError("thread_id is required.")
         normalized_context_mode = self._normalize_context_mode(context_mode)
         normalized_execution_policy = self._normalize_turn_execution_policy(execution_policy)
+        allowed_mcp_tool_names = None
+        allow_browser_smoke = True
+        if isinstance(mcp_tool_policy_snapshot, dict) and mcp_tool_policy_snapshot:
+            allowed_mcp_tool_names = allowed_mcp_dynamic_tool_names(mcp_tool_policy_snapshot)
+            allow_browser_smoke = "web" in {
+                str(item).strip()
+                for item in list(dict(mcp_tool_policy_snapshot).get("allowed_tool_classes") or [])
+                if str(item or "").strip()
+            }
         effective_permission_mode = "ask" if normalized_execution_policy == NO_TOOLS_EXECUTION_POLICY else permission_mode
         execution_backend = self._thread_execution_backend(requested_thread_id, profile)
         if normalized_execution_policy == PATCH_ONLY_EXECUTION_POLICY and not self._supports_patch_only_execution_policy(profile, execution_backend):
@@ -4132,6 +6430,8 @@ class RuntimeService:
                     desired=desired,
                     reason=reason,
                     include_dynamic_tools=normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY,
+                    allowed_mcp_tool_names=allowed_mcp_tool_names,
+                    allow_browser_smoke=allow_browser_smoke,
                 )
             else:
                 prepared_thread_id, prepared_handoff = self._ensure_provider_thread_for_turn(
@@ -4144,6 +6444,8 @@ class RuntimeService:
                     collaboration_mode=collaboration_mode,
                     context_mode=normalized_context_mode,
                     include_dynamic_tools=normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY,
+                    allowed_mcp_tool_names=allowed_mcp_tool_names,
+                    allow_browser_smoke=allow_browser_smoke,
                 )
             if normalized_context_mode == "minimal_visual" and self._tasks is not None:
                 guard_state = self._context_guard_state(prepared_thread_id)
@@ -4165,6 +6467,8 @@ class RuntimeService:
                         desired=desired,
                         reason="minimal_visual_hot_thread",
                         include_dynamic_tools=normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY,
+                        allowed_mcp_tool_names=allowed_mcp_tool_names,
+                        allow_browser_smoke=allow_browser_smoke,
                     )
             self._raise_if_context_guard_blocks_turn(active_client, prepared_thread_id)
             return prepared_thread_id, prepared_handoff
@@ -4242,7 +6546,12 @@ class RuntimeService:
         )
         if mode_params:
             params["collaborationMode"] = mode_params
-        self._register_active_turn_execution_policy(effective_thread_id, normalized_execution_policy)
+        self._register_active_turn_execution_policy(
+            effective_thread_id,
+            normalized_execution_policy,
+            mcp_tool_policy_snapshot=mcp_tool_policy_snapshot,
+            mcp_tool_policy_context=mcp_tool_policy_context,
+        )
         try:
             result = client.request("turn/start", params, timeout=TURN_START_TIMEOUT_SECONDS)
         except TimeoutError as exc:
@@ -4274,6 +6583,8 @@ class RuntimeService:
                 collaboration_mode=collaboration_mode,
                 reason="turn_start_thread_missing",
                 include_dynamic_tools=normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY,
+                allowed_mcp_tool_names=allowed_mcp_tool_names,
+                allow_browser_smoke=allow_browser_smoke,
             )
             try:
                 inputs = self._build_user_inputs(
@@ -5049,6 +7360,16 @@ class RuntimeService:
                     if reconciled_status in {"failed", "cancelled", "errored"} or bool(
                         final_text.strip()
                     ):
+                        notification_lag_ms = max(
+                            0,
+                            int(
+                                (
+                                    time.monotonic()
+                                    - float(dict(notification or {}).get("observed_at_monotonic") or time.monotonic())
+                                )
+                                * 1000
+                            ),
+                        )
                         self._record_event(
                             {
                                 "type": "runtime_turn_terminal_notification_reconciled",
@@ -5060,6 +7381,7 @@ class RuntimeService:
                                 "final_text_present": bool(final_text.strip()),
                                 "thread_read_error_type": latest_read_error_type,
                                 "thread_read_error_message": latest_read_error_message or None,
+                                "terminal_projection_lag_ms": notification_lag_ms,
                             }
                         )
                         return reconciled_thread
@@ -5114,6 +7436,7 @@ class RuntimeService:
                             "projected_status": latest_projected_status,
                             "notification_status": latest_notification_status,
                             "final_text_present": bool(final_text.strip()),
+                            "terminal_projection_lag_ms": max(0, int(notification_age * 1000)),
                         }
                     )
                     return reconciled_thread
@@ -5920,6 +8243,8 @@ class RuntimeService:
         collaboration_mode: str | None,
         context_mode: str = "default",
         include_dynamic_tools: bool = True,
+        allowed_mcp_tool_names: set[str] | None = None,
+        allow_browser_smoke: bool = True,
     ) -> tuple[str, dict[str, Any] | None]:
         if self._tasks is None:
             return source_thread_id, None
@@ -5955,6 +8280,8 @@ class RuntimeService:
                 desired=desired,
                 reason="no_context_fresh_thread",
                 include_dynamic_tools=include_dynamic_tools,
+                allowed_mcp_tool_names=allowed_mcp_tool_names,
+                allow_browser_smoke=allow_browser_smoke,
             )
 
         reusable = self._tasks.find_provider_thread(
@@ -6010,6 +8337,8 @@ class RuntimeService:
                 collaboration_mode=collaboration_mode,
                 reason="provider_handoff_source_missing",
                 include_dynamic_tools=include_dynamic_tools,
+                allowed_mcp_tool_names=allowed_mcp_tool_names,
+                allow_browser_smoke=allow_browser_smoke,
             )
 
         if not source_thread_id:
@@ -6023,6 +8352,8 @@ class RuntimeService:
                 desired=desired,
                 reason="provider_handoff_no_source_thread",
                 include_dynamic_tools=include_dynamic_tools,
+                allowed_mcp_tool_names=allowed_mcp_tool_names,
+                allow_browser_smoke=allow_browser_smoke,
             )
 
         if handoff_needed:
@@ -6041,6 +8372,8 @@ class RuntimeService:
                 desired=desired,
                 reason="provider_handoff_cross_provider_fresh_thread",
                 include_dynamic_tools=include_dynamic_tools,
+                allowed_mcp_tool_names=allowed_mcp_tool_names,
+                allow_browser_smoke=allow_browser_smoke,
             )
 
         params = {
@@ -6050,6 +8383,8 @@ class RuntimeService:
                 model=model,
                 permission_mode=permission_mode,
                 include_dynamic_tools=include_dynamic_tools,
+                allowed_mcp_tool_names=allowed_mcp_tool_names,
+                allow_browser_smoke=allow_browser_smoke,
             ),
         }
         try:
@@ -6080,6 +8415,8 @@ class RuntimeService:
                 collaboration_mode=collaboration_mode,
                 reason="provider_handoff_source_missing",
                 include_dynamic_tools=include_dynamic_tools,
+                allowed_mcp_tool_names=allowed_mcp_tool_names,
+                allow_browser_smoke=allow_browser_smoke,
             )
         thread = dict(result.get("thread") or {})
         target_thread_id = str(thread.get("id") or "")
@@ -6129,12 +8466,16 @@ class RuntimeService:
         desired: dict[str, Any],
         reason: str,
         include_dynamic_tools: bool = True,
+        allowed_mcp_tool_names: set[str] | None = None,
+        allow_browser_smoke: bool = True,
     ) -> tuple[str, dict[str, Any] | None]:
         params = self._thread_start_params(
             profile=profile,
             model=model,
             permission_mode=permission_mode,
             include_dynamic_tools=include_dynamic_tools,
+            allowed_mcp_tool_names=allowed_mcp_tool_names,
+            allow_browser_smoke=allow_browser_smoke,
         )
         result = client.request("thread/start", params, timeout=THREAD_START_TIMEOUT_SECONDS)
         thread = dict(result.get("thread") or {})
@@ -6188,6 +8529,8 @@ class RuntimeService:
         collaboration_mode: str | None,
         reason: str,
         include_dynamic_tools: bool = True,
+        allowed_mcp_tool_names: set[str] | None = None,
+        allow_browser_smoke: bool = True,
     ) -> tuple[str, dict[str, Any] | None]:
         desired = self._task_thread_settings(
             profile,
@@ -6202,6 +8545,8 @@ class RuntimeService:
             model=model,
             permission_mode=permission_mode,
             include_dynamic_tools=include_dynamic_tools,
+            allowed_mcp_tool_names=allowed_mcp_tool_names,
+            allow_browser_smoke=allow_browser_smoke,
         )
         result = client.request("thread/start", params, timeout=THREAD_START_TIMEOUT_SECONDS)
         thread = dict(result.get("thread") or {})
@@ -6368,34 +8713,33 @@ class RuntimeService:
         path = shell_root / "runtime_events.jsonl"
         if self._hydrated_event_log_path == path:
             return
-        if not path.is_file():
-            self._hydrated_event_log_path = path
-            return
         loaded: deque[dict[str, Any]] = deque(maxlen=EVENT_HYDRATE_TAIL_LIMIT)
-        try:
-            size = path.stat().st_size
-            with path.open("rb") as handle:
-                if size > EVENT_HYDRATE_MAX_BYTES:
-                    handle.seek(-EVENT_HYDRATE_MAX_BYTES, os.SEEK_END)
-                payload = handle.read(EVENT_HYDRATE_MAX_BYTES + 1)
-            lines = payload.decode("utf-8", errors="replace").splitlines()
-            if size > EVENT_HYDRATE_MAX_BYTES and lines:
-                lines = lines[1:]
-            for line in lines[-EVENT_HYDRATE_TAIL_LIMIT:]:
-                raw = line.strip()
-                if not raw:
-                    continue
-                try:
-                    item = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(item, dict):
-                    loaded.append(redact_sensitive(item))
-        except Exception:
-            return
+        if path.is_file():
+            try:
+                size = path.stat().st_size
+                with path.open("rb") as handle:
+                    if size > EVENT_HYDRATE_MAX_BYTES:
+                        handle.seek(-EVENT_HYDRATE_MAX_BYTES, os.SEEK_END)
+                    payload = handle.read(EVENT_HYDRATE_MAX_BYTES + 1)
+                lines = payload.decode("utf-8", errors="replace").splitlines()
+                if size > EVENT_HYDRATE_MAX_BYTES and lines:
+                    lines = lines[1:]
+                for line in lines[-EVENT_HYDRATE_TAIL_LIMIT:]:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        item = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(item, dict):
+                        loaded.append(enrich_runtime_event(redact_sensitive(item)))
+            except Exception:
+                return
+        host_events = load_host_lineage_events(shell_root.parent)
         merged: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for item in [*list(loaded), *self._events]:
+        for item in [*list(loaded), *host_events, *self._events]:
             fingerprint = json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
             if fingerprint in seen:
                 continue
@@ -7301,15 +9645,34 @@ class RuntimeService:
         if not isinstance(arguments, dict):
             arguments = {}
         try:
-            if tool not in self._dynamic_tool_names():
+            active_policy = self._active_turn_execution_policy_for(payload)
+            allowed_names = None
+            allow_browser_smoke = True
+            active_mcp_policy = dict(dict(active_policy or {}).get("mcp_tool_policy") or {})
+            if active_mcp_policy:
+                allowed_names = allowed_mcp_dynamic_tool_names(active_mcp_policy)
+                allow_browser_smoke = "web" in {
+                    str(item).strip()
+                    for item in list(dict(active_mcp_policy).get("allowed_tool_classes") or [])
+                    if str(item or "").strip()
+                }
+            if tool not in self._dynamic_tool_names(
+                allowed_mcp_tool_names=allowed_names,
+                allow_browser_smoke=allow_browser_smoke,
+            ):
                 raise ValueError(f"Unsupported AstraBridge dynamic tool: {tool}")
             arguments = self._arguments_with_tool_context(tool, arguments)
-            result = self._call_dynamic_tool(tool, arguments)
+            broker_internal_meta = self._dynamic_tool_broker_internal_meta(payload, active_policy=active_policy)
+            result = self._call_dynamic_tool(tool, arguments, broker_internal_meta=broker_internal_meta)
             summary = self._summarize_dynamic_tool_result(tool, result)
             context = sanitize_tool_context(arguments.get("tool_context"))
             if context:
                 summary["tool_context"] = context
             tool_server = self._dynamic_tool_server(tool)
+            self._commit_active_mcp_tool_policy_decision(
+                payload,
+                decision=dict(dict(summary.get("mcp") or {}).get("policy_decision") or {}),
+            )
             usage_delta = self._record_yunwu_image_usage_from_tool_result(server=tool_server, tool=tool, result=summary)
             content_text = self._dynamic_tool_text_result(tool, summary)
             self._record_event(
@@ -7320,11 +9683,37 @@ class RuntimeService:
                     "thread_id": payload.get("threadId"),
                     "turn_id": payload.get("turnId"),
                     "success": True,
+                    "mcp_request_id": dict(summary.get("mcp") or {}).get("request_id"),
+                    "mcp_operation_id": dict(summary.get("mcp") or {}).get("operation_id"),
+                    "mcp_policy_decision": dict(summary.get("mcp") or {}).get("policy_decision"),
+                    "mcp_audit_event": dict(summary.get("mcp") or {}).get("audit_event"),
                     "usage_delta": usage_delta,
                     "result": summary,
                 }
             )
             return {"success": True, "contentItems": [{"type": "inputText", "text": content_text}]}
+        except McpToolPolicyDenied as exc:
+            decision = deepcopy(exc.decision)
+            self._record_event(
+                {
+                    "type": "dynamic_tool_policy_blocked",
+                    "server": self._dynamic_tool_server(tool),
+                    "tool": tool,
+                    "thread_id": payload.get("threadId"),
+                    "turn_id": payload.get("turnId"),
+                    "success": False,
+                    "mcp_policy_decision": decision,
+                }
+            )
+            return {
+                "success": False,
+                "contentItems": [
+                    {
+                        "type": "inputText",
+                        "text": f"AstraBridge blocked this MCP tool call: {str(exc)}",
+                    }
+                ],
+            }
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
             self._record_event(
@@ -7340,14 +9729,20 @@ class RuntimeService:
             )
             return {"success": False, "contentItems": [{"type": "inputText", "text": f"AstraBridge dynamic tool failed: {message}"}]}
 
-    def _call_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _call_dynamic_tool(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        *,
+        broker_internal_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if tool in BROWSER_SMOKE_TOOL_ALIASES:
             return self._call_browser_smoke_dynamic_tool(arguments)
         if _is_astrabridge_web_tool(tool):
-            return self._call_astrabridge_web_dynamic_tool(tool, arguments)
+            return self._call_astrabridge_web_dynamic_tool(tool, arguments, broker_internal_meta=broker_internal_meta)
         if tool.startswith("astrabridge_capability_"):
-            return self._call_astrabridge_capability_dynamic_tool(tool, arguments)
-        return self._call_yunwu_dynamic_tool(tool, arguments)
+            return self._call_astrabridge_capability_dynamic_tool(tool, arguments, broker_internal_meta=broker_internal_meta)
+        return self._call_yunwu_dynamic_tool(tool, arguments, broker_internal_meta=broker_internal_meta)
 
     def _arguments_with_tool_context(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         merged = dict(arguments or {})
@@ -7359,7 +9754,10 @@ class RuntimeService:
 
     def _summarize_dynamic_tool_result(self, tool: str, result: dict[str, Any]) -> dict[str, Any]:
         if tool.startswith("yunwu_image_"):
-            return summarize_yunwu_image_result(result)
+            summary = summarize_yunwu_image_result(result)
+            if isinstance(result.get("mcp"), dict):
+                summary["mcp"] = dict(result.get("mcp") or {})
+            return summary
         if tool.startswith("astrabridge_capability_"):
             return result
         if _is_astrabridge_web_tool(tool):
@@ -7392,6 +9790,71 @@ class RuntimeService:
         if tool.startswith("yunwu_image_"):
             return "yunwu_image"
         return "astrabridge"
+
+    def _dynamic_tool_broker_internal_meta(
+        self,
+        payload: dict[str, Any],
+        *,
+        active_policy: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        policy = dict(dict(active_policy or {}).get("mcp_tool_policy") or {})
+        trace_context = {
+            **deepcopy(dict(active_policy or {}).get("mcp_tool_policy_context") or {}),
+            "thread_id": str(payload.get("threadId") or "").strip() or None,
+            "turn_id": str(payload.get("turnId") or "").strip() or None,
+        }
+        run_id = str(trace_context.get("run_id") or "").strip()
+        trace_payload = {
+            "trace_id": f"trace-{run_id}" if run_id else None,
+            "run_id": run_id or None,
+            "node_id": str(trace_context.get("node_id") or "").strip() or None,
+            "attempt_count": int(trace_context.get("attempt_count") or 0) or None,
+            "thread_id": str(trace_context.get("thread_id") or "").strip() or None,
+            "turn_id": str(trace_context.get("turn_id") or "").strip() or None,
+            "worker_thread_id": str(trace_context.get("worker_thread_id") or "").strip() or None,
+        }
+        if not policy:
+            return {"astrabridge_trace": trace_payload} if any(trace_payload.values()) else {}
+        return {
+            "astrabridge_mcp_tool_policy": policy,
+            "astrabridge_mcp_policy_state": {
+                "tool_call_counts": deepcopy(dict(active_policy or {}).get("mcp_tool_call_counts") or {}),
+                "approval_cache": deepcopy(dict(active_policy or {}).get("mcp_tool_approval_cache") or {}),
+                "auto_bootstrap_approval": True,
+            },
+            "astrabridge_mcp_policy_context": trace_context,
+            "astrabridge_trace": trace_payload,
+        }
+
+    def _commit_active_mcp_tool_policy_decision(self, payload: dict[str, Any], *, decision: dict[str, Any]) -> None:
+        if not isinstance(decision, dict) or str(decision.get("decision") or "") != "allow":
+            return
+        thread_id = str(payload.get("threadId") or "").strip()
+        turn_id = str(payload.get("turnId") or "").strip()
+        if not thread_id:
+            return
+        counter_key = str(dict(decision.get("budget") or {}).get("counter_key") or "").strip()
+        next_count = int(dict(decision.get("budget") or {}).get("observed_calls_after") or 0)
+        approval_key = str(decision.get("server") or "").strip() + "::" + str(decision.get("tool") or "").strip()
+        approval_reused = bool(decision.get("approval_reused"))
+        approval_mode = str(decision.get("approval_mode") or "").strip().lower()
+        with self._lock:
+            active = self._active_turn_execution_policies.get(thread_id)
+            if not active:
+                return
+            active_turn_id = str(active.get("turn_id") or "").strip()
+            if active_turn_id and turn_id and active_turn_id != turn_id and not bool(active.get("strict_thread_scope")):
+                if self._observed_turn_alias_target(thread_id=thread_id, observed_turn_id=turn_id) != active_turn_id:
+                    return
+            if counter_key:
+                active.setdefault("mcp_tool_call_counts", {})
+                active["mcp_tool_call_counts"][counter_key] = max(0, next_count)
+            if approval_mode in {"ask", "manual"} and approval_key and not approval_reused:
+                active.setdefault("mcp_tool_approval_cache", {})
+                active["mcp_tool_approval_cache"][approval_key] = {
+                    "approved_at": now_iso(),
+                    "reason": str(decision.get("approval_decision") or "").strip() or "ask_auto_bootstrap",
+                }
 
     def _call_browser_smoke_dynamic_tool(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._dogfood_run is None:
@@ -7831,29 +10294,48 @@ class RuntimeService:
             ],
         }
 
-    def _call_astrabridge_web_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if tool == "astrabridge_web_search_batch":
-            return self._web_tools.search_batch(arguments)
-        if tool == "astrabridge_web_research_brief":
-            return self._web_tools.research_brief(arguments)
+    def _call_astrabridge_web_dynamic_tool(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        *,
+        broker_internal_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        broker_arguments = dict(arguments)
         if tool == "astrabridge_web_search":
-            return self._web_tools.search_batch(
-                {
-                    "queries": [{"query": str(arguments.get("query") or ""), "max_results": int(arguments.get("max_results") or 5)}],
-                    "dedupe": True,
-                    "timeout_sec": int(arguments.get("timeout_sec") or 20),
-                    "tool_context": arguments.get("tool_context"),
-                }
-            )
-        if tool == "astrabridge_web_fetch":
-            return self._web_tools.fetch(arguments)
+            broker_arguments = {
+                "query": str(arguments.get("query") or ""),
+                "max_results": int(arguments.get("max_results") or 5),
+                "timeout_sec": int(arguments.get("timeout_sec") or 20),
+                "tool_context": arguments.get("tool_context"),
+            }
+        broker_result = self._mcp_broker.invoke_tool(
+            "astrabridge_web",
+            tool,
+            broker_arguments,
+            caller="runtime_dynamic_tool",
+            operation_id=new_id("mcp-web-tool"),
+            internal_meta=broker_internal_meta,
+        )
+        return self._with_broker_metadata(dict(broker_result.get("result") or {}), broker_result)
         raise ValueError(f"Unsupported AstraBridge web dynamic tool: {tool}")
 
-    def _call_astrabridge_capability_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if self._capability_runtime is None:
-            raise ValueError("Capability runtime is not available.")
+    def _call_astrabridge_capability_dynamic_tool(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        *,
+        broker_internal_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if tool == "astrabridge_capability_routes":
-            return self._capability_runtime.route_snapshot(str(arguments.get("capability_id") or "").strip() or None)
+            broker_result = self._mcp_broker.invoke_capability(
+                "routes",
+                {"capability_id": str(arguments.get("capability_id") or "").strip() or None, **dict(arguments)},
+                caller="runtime_dynamic_tool",
+                operation_id=new_id("mcp-capability-routes"),
+                internal_meta=broker_internal_meta,
+            )
+            return self._with_broker_metadata(dict(broker_result.get("result") or {}), broker_result)
         tool_map = {
             "astrabridge_capability_image_generate": "image.generate",
             "astrabridge_capability_vision_analyze": "vision.analyze",
@@ -7863,53 +10345,38 @@ class RuntimeService:
         capability_id = tool_map.get(tool)
         if not capability_id:
             raise ValueError(f"Unsupported AstraBridge capability dynamic tool: {tool}")
-        return self._capability_runtime.invoke(capability_id, arguments)
+        broker_result = self._mcp_broker.invoke_capability(
+            capability_id,
+            arguments,
+            caller="runtime_dynamic_tool",
+            operation_id=new_id("mcp-capability-tool"),
+            internal_meta=broker_internal_meta,
+        )
+        return self._with_broker_metadata(dict(broker_result.get("result") or {}), broker_result)
 
-    def _call_yunwu_dynamic_tool(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        workspace_root = self._projects.require_workspace_root()
-        if tool == "yunwu_image_generate":
-            return self._yunwu_image.generate(
-                prompt=str(arguments.get("prompt") or ""),
-                model=str(arguments.get("model") or "gpt-image-2"),
-                size=str(arguments.get("size") or "1024x1024"),
-                n=int(arguments.get("n") or 1),
-                image_urls=[str(item) for item in (arguments.get("image_urls") or [])],
-                response_format=str(arguments.get("response_format") or "url"),
-                quality=str(arguments.get("quality") or "high"),
-                image_format=str(arguments.get("format") or arguments.get("output_format") or "png"),
-                background=str(arguments.get("background") or "auto") or None,
-                prompt_category=str(arguments.get("prompt_category") or ""),
-                workspace_root=workspace_root,
-                purpose=str(arguments.get("purpose") or "agent_generated_asset"),
-            )
-        if tool == "yunwu_image_transparent_asset":
-            return self._yunwu_image.transparent_asset(
-                prompt=str(arguments.get("prompt") or ""),
-                model=str(arguments.get("model") or "gpt-image-2"),
-                size=str(arguments.get("size") or "1024x1024"),
-                n=int(arguments.get("n") or 1),
-                quality=str(arguments.get("quality") or "high"),
-                moderation=str(arguments.get("moderation") or "auto"),
-                prompt_category=str(arguments.get("prompt_category") or "game_asset_japanese_anime"),
-                workspace_root=workspace_root,
-                purpose=str(arguments.get("purpose") or "agent_transparent_asset"),
-            )
-        if tool == "yunwu_image_edit":
-            return self._yunwu_image.edit(
-                prompt=str(arguments.get("prompt") or ""),
-                image_paths=[str(item) for item in (arguments.get("image_paths") or [])],
-                mask_path=str(arguments.get("mask_path") or "") or None,
-                model=str(arguments.get("model") or "gpt-image-2"),
-                size=str(arguments.get("size") or "1024x1024"),
-                n=int(arguments.get("n") or 1),
-                quality=str(arguments.get("quality") or "high"),
-                background=str(arguments.get("background") or "transparent"),
-                moderation=str(arguments.get("moderation") or "auto"),
-                prompt_category=str(arguments.get("prompt_category") or ""),
-                workspace_root=workspace_root,
-                purpose=str(arguments.get("purpose") or "agent_edited_asset"),
-            )
+    def _call_yunwu_dynamic_tool(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        *,
+        broker_internal_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        broker_result = self._mcp_broker.invoke_tool(
+            "yunwu_image",
+            tool,
+            arguments,
+            caller="runtime_dynamic_tool",
+            operation_id=new_id("mcp-yunwu-tool"),
+            internal_meta=broker_internal_meta,
+        )
+        return self._with_broker_metadata(dict(broker_result.get("result") or {}), broker_result)
         raise ValueError(f"Unsupported Yunwu dynamic tool: {tool}")
+
+    @staticmethod
+    def _with_broker_metadata(result: dict[str, Any], broker_result: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(result or {})
+        merged["mcp"] = dict(broker_result.get("mcp") or {})
+        return merged
 
     def _dynamic_tool_text_result(self, tool: str, summary: dict[str, Any]) -> str:
         return "AstraBridge dynamic tool result for " + tool + ":\n" + json.dumps(summary, ensure_ascii=False, indent=2)
@@ -8204,7 +10671,7 @@ class RuntimeService:
             "warnings": list(summary.get("warnings") or []),
         }
 
-    def _handoff_projection_summary(self, *, source_thread_id: str | None, target_provider_id: str) -> dict[str, Any] | None:
+    def _handoff_projection_detail(self, *, source_thread_id: str | None, target_provider_id: str) -> dict[str, Any] | None:
         source_thread = self._thread_for_handoff_projection(source_thread_id)
         target_provider = str(target_provider_id or "").strip().lower()
         if not source_thread or not target_provider:
@@ -8228,6 +10695,23 @@ class RuntimeService:
             "projected_message_count": len(projected.messages),
             "replayable_artifact_count": projected.replayable_artifact_count,
             "projection_preview": projected.projection_preview,
+            "messages": deepcopy(projected.messages),
+            "replayable_artifacts": deepcopy(projected.replayable_artifacts),
+        }
+
+    def _handoff_projection_summary(self, *, source_thread_id: str | None, target_provider_id: str) -> dict[str, Any] | None:
+        detail = self._handoff_projection_detail(source_thread_id=source_thread_id, target_provider_id=target_provider_id)
+        if not detail:
+            return None
+        return {
+            "source_provider": detail.get("source_provider"),
+            "target_provider": detail.get("target_provider"),
+            "dropped_artifacts": detail.get("dropped_artifacts"),
+            "repaired_tool_pairs": detail.get("repaired_tool_pairs"),
+            "warnings": list(detail.get("warnings") or []),
+            "projected_message_count": int(detail.get("projected_message_count") or 0),
+            "replayable_artifact_count": int(detail.get("replayable_artifact_count") or 0),
+            "projection_preview": detail.get("projection_preview"),
         }
 
     def _thread_for_handoff_projection(self, source_thread_id: str | None) -> dict[str, Any] | None:
@@ -9234,6 +11718,8 @@ for host in candidates:
         model: str | None,
         permission_mode: str,
         include_dynamic_tools: bool = True,
+        allowed_mcp_tool_names: set[str] | None = None,
+        allow_browser_smoke: bool = True,
     ) -> dict[str, Any]:
         params = {
             "cwd": self._runtime_workspace_root(),
@@ -9242,15 +11728,27 @@ for host in candidates:
             "model": codex_model_id(profile, model),
             "serviceName": "astrabridge_desktop",
         }
-        dynamic_tools = self._dynamic_tools() if include_dynamic_tools else []
+        dynamic_tools = (
+            self._dynamic_tools(
+                allowed_mcp_tool_names=allowed_mcp_tool_names,
+                allow_browser_smoke=allow_browser_smoke,
+            )
+            if include_dynamic_tools
+            else []
+        )
         if dynamic_tools:
             params["dynamicTools"] = dynamic_tools
         params.update(self._thread_permission_overrides(permission_mode))
         return params
 
-    def _dynamic_tools(self) -> list[dict[str, Any]]:
+    def _dynamic_tools(
+        self,
+        *,
+        allowed_mcp_tool_names: set[str] | None = None,
+        allow_browser_smoke: bool = True,
+    ) -> list[dict[str, Any]]:
         dynamic_tools: list[dict[str, Any]] = []
-        if self._dogfood_run is not None:
+        if self._dogfood_run is not None and allow_browser_smoke:
             dynamic_tools.append(
                 {
                     "name": BROWSER_SMOKE_TOOL_NAME,
@@ -9367,6 +11865,8 @@ for host in candidates:
                 name = str(tool.get("name") or "").strip()
                 if not name:
                     continue
+                if allowed_mcp_tool_names is not None and name not in allowed_mcp_tool_names:
+                    continue
                 if name not in web_tool_names:
                     web_tools.append(
                         {
@@ -9383,6 +11883,8 @@ for host in candidates:
             for tool in astrabridge_capability_dynamic_tools():
                 name = str(tool.get("name") or "").strip()
                 if not name or name in capability_tool_names:
+                    continue
+                if allowed_mcp_tool_names is not None and name not in allowed_mcp_tool_names:
                     continue
                 capability_tools.append(
                     {
@@ -9402,11 +11904,26 @@ for host in candidates:
                 }
                 for tool in yunwu_image_dynamic_tools()
                 if tool.get("name")
+                and (
+                    allowed_mcp_tool_names is None
+                    or str(tool.get("name") or "").strip() in allowed_mcp_tool_names
+                )
             )
         return dynamic_tools
 
-    def _dynamic_tool_names(self) -> set[str]:
-        return {str(tool.get("name") or "") for tool in self._dynamic_tools()}
+    def _dynamic_tool_names(
+        self,
+        *,
+        allowed_mcp_tool_names: set[str] | None = None,
+        allow_browser_smoke: bool = True,
+    ) -> set[str]:
+        return {
+            str(tool.get("name") or "")
+            for tool in self._dynamic_tools(
+                allowed_mcp_tool_names=allowed_mcp_tool_names,
+                allow_browser_smoke=allow_browser_smoke,
+            )
+        }
 
     def _mcp_server_enabled(self, name: str) -> bool:
         try:
@@ -9484,21 +12001,35 @@ for host in candidates:
             f"{text}"
         )
 
-    def _register_active_turn_execution_policy(self, thread_id: str, policy: str) -> None:
+    def _register_active_turn_execution_policy(
+        self,
+        thread_id: str,
+        policy: str,
+        *,
+        mcp_tool_policy_snapshot: dict[str, Any] | None = None,
+        mcp_tool_policy_context: dict[str, Any] | None = None,
+    ) -> None:
         if not thread_id:
             return
         with self._lock:
-            if policy in {PATCH_ONLY_EXECUTION_POLICY, NO_TOOLS_EXECUTION_POLICY}:
+            if policy in {PATCH_ONLY_EXECUTION_POLICY, NO_TOOLS_EXECUTION_POLICY} or bool(mcp_tool_policy_snapshot):
                 self._active_turn_execution_policies[thread_id] = {
                     "policy": policy,
                     "turn_id": "",
                     "strict_thread_scope": policy == NO_TOOLS_EXECUTION_POLICY,
+                    "mcp_tool_policy": deepcopy(dict(mcp_tool_policy_snapshot or {})),
+                    "mcp_tool_policy_context": deepcopy(dict(mcp_tool_policy_context or {})),
+                    "mcp_tool_call_counts": {},
+                    "mcp_tool_approval_cache": {},
                 }
             else:
                 self._active_turn_execution_policies.pop(thread_id, None)
 
     def _record_execution_policy_started(self, *, thread_id: str, turn_id: str, policy: str) -> None:
-        if policy not in {PATCH_ONLY_EXECUTION_POLICY, NO_TOOLS_EXECUTION_POLICY}:
+        with self._lock:
+            active = self._active_turn_execution_policies.get(thread_id)
+            active_snapshot = dict(active or {})
+        if policy not in {PATCH_ONLY_EXECUTION_POLICY, NO_TOOLS_EXECUTION_POLICY} and not dict(active_snapshot.get("mcp_tool_policy") or {}):
             return
         with self._lock:
             active = self._active_turn_execution_policies.get(thread_id)
@@ -9522,8 +12053,15 @@ for host in candidates:
                 "enforcement": (
                     "no_dynamic_tools_read_only_with_auto_decline_and_trace_audit"
                     if policy == NO_TOOLS_EXECUTION_POLICY
-                    else "native_apply_patch_only_with_approval_fallback"
+                    else (
+                        "node_scoped_mcp_tool_reauthorization_with_allowlisted_exposure"
+                        if dict(active_snapshot.get("mcp_tool_policy") or {})
+                        else "native_apply_patch_only_with_approval_fallback"
+                    )
                 ),
+                "mcp_policy_fingerprint": str(dict(active_snapshot.get("mcp_tool_policy") or {}).get("fingerprint") or "").strip() or None,
+                "mcp_policy_revision": int(dict(active_snapshot.get("mcp_tool_policy") or {}).get("revision") or 0) or None,
+                "mcp_policy_context": deepcopy(dict(active_snapshot.get("mcp_tool_policy_context") or {})),
             }
         )
 
@@ -10657,7 +13195,7 @@ for host in candidates:
         )
 
     def _record_event(self, event: dict[str, Any]) -> None:
-        record = redact_sensitive({"index": None, "timestamp": now_iso(), **event})
+        record = enrich_runtime_event(redact_sensitive({"index": None, "timestamp": now_iso(), **event}))
         with self._lock:
             record["index"] = len(self._events)
             self._events.append(record)

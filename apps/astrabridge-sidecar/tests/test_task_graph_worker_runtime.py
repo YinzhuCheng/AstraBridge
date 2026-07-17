@@ -10,8 +10,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from astrabridge_sidecar import agent_orchestration_file_format as orchestration_file_format_module
+from astrabridge_sidecar.agent_orchestration_contract import (
+    lower_agent_orchestration_graph_to_task_graph,
+    validate_agent_orchestration_graph,
+)
 from astrabridge_sidecar.common import now_iso
 from astrabridge_sidecar.agent_orchestration_file_format import load_agent_orchestration_example
+from astrabridge_sidecar.mcp_config_service import astrabridge_capabilities_preset, astrabridge_web_preset
 from astrabridge_sidecar.modal_service import ModalService
 from astrabridge_sidecar.project_service import ProjectService
 from astrabridge_sidecar.runtime_service import RuntimeService
@@ -607,7 +613,23 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
                                 "text": json.dumps(
                                     {
                                         "human_summary": "Recovered structured response.",
-                                        "machine_result": {"status": "ok", "result": "bounded"},
+                                        "machine_result": {
+                                            "status": "ok",
+                                            "plan": "bounded plan",
+                                            "result": "bounded",
+                                            "confidence": "high",
+                                            "summary": "bounded",
+                                            "decision": "partial",
+                                            "goal": "bounded goal",
+                                            "next_nodes": [],
+                                            "next_workers": ["worker-a"],
+                                            "questions": ["q1"],
+                                            "branches": ["worker-a"],
+                                            "findings": ["finding-a"],
+                                            "sources": ["source-a"],
+                                            "synthesis": "bounded synthesis",
+                                            "gaps": [],
+                                        },
                                     }
                                 ),
                             }
@@ -702,7 +724,12 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
                                 "text": json.dumps(
                                     {
                                         "human_summary": "Research Branch A recovered its bounded output.",
-                                        "machine_result": {"branch": "A", "status": "completed"},
+                                        "machine_result": {
+                                            "branch": "A",
+                                            "status": "completed",
+                                            "findings": ["finding-a"],
+                                            "sources": ["source-a"],
+                                        },
                                     }
                                 ),
                             }
@@ -822,7 +849,12 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
                                     "text": json.dumps(
                                         {
                                             "human_summary": "Research Branch A completed before cancellation could be confirmed.",
-                                            "machine_result": {"branch": "A", "status": "completed"},
+                                            "machine_result": {
+                                                "branch": "A",
+                                                "status": "completed",
+                                                "findings": ["finding-a"],
+                                                "sources": ["source-a"],
+                                            },
                                         }
                                     ),
                                 }
@@ -1022,7 +1054,23 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
                                         "text": json.dumps(
                                             {
                                                 "human_summary": "Recovered after read timeout.",
-                                                "machine_result": {"status": "ok"},
+                                                "machine_result": {
+                                                    "status": "ok",
+                                                    "plan": "bounded plan",
+                                                    "goal": "bounded goal",
+                                                    "next_nodes": [],
+                                                    "next_workers": ["worker-a"],
+                                                    "result": "bounded",
+                                                    "confidence": "high",
+                                                    "summary": "bounded",
+                                                    "decision": "complete",
+                                                    "questions": ["q1"],
+                                                    "branches": ["worker-a"],
+                                                    "findings": ["finding-a"],
+                                                    "sources": ["source-a"],
+                                                    "synthesis": "bounded synthesis",
+                                                    "gaps": [],
+                                                },
                                             }
                                         ),
                                     }
@@ -1112,7 +1160,23 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
                                 "text": json.dumps(
                                     {
                                         "human_summary": "Recovered from the richer cached snapshot.",
-                                        "machine_result": {"status": "ok"},
+                                        "machine_result": {
+                                            "status": "ok",
+                                            "plan": "bounded plan",
+                                            "goal": "bounded goal",
+                                            "next_nodes": [],
+                                            "next_workers": ["worker-a"],
+                                            "result": "bounded",
+                                            "confidence": "high",
+                                            "summary": "bounded",
+                                            "decision": "complete",
+                                            "questions": ["q1"],
+                                            "branches": ["worker-a"],
+                                            "findings": ["finding-a"],
+                                            "sources": ["source-a"],
+                                            "synthesis": "bounded synthesis",
+                                            "gaps": [],
+                                        },
                                     }
                                 ),
                             }
@@ -1453,7 +1517,7 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
                                     "items": [
                                         {
                                             "type": "agentMessage",
-                                            "text": '{"human_summary":"From transcript","machine_result":{"status":"ok"}}',
+                                            "text": '{"human_summary":"From transcript","machine_result":{"status":"ok","plan":"bounded plan","goal":"bounded goal","next_nodes":[],"next_workers":["worker-a"],"result":"bounded","confidence":"high","summary":"bounded","decision":"complete","questions":["q1"],"branches":["worker-a"],"findings":["finding-a"],"sources":["source-a"],"synthesis":"bounded synthesis","gaps":[]}}',
                                         }
                                     ],
                                 }
@@ -1577,7 +1641,13 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
                                 "text": json.dumps(
                                     {
                                         "human_summary": "Planner completed.",
-                                        "machine_result": {"status": "ok"},
+                                        "machine_result": {
+                                            "status": "ok",
+                                            "plan": "bounded plan",
+                                            "goal": "bounded goal",
+                                            "next_nodes": [],
+                                            "next_workers": ["worker-a"],
+                                        },
                                     }
                                 ),
                             }
@@ -1856,7 +1926,16 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
                     json.dumps(
                         {
                             "human_summary": f"{node_id} summary",
-                            "machine_result": {"node_id": node_id, "status": "ok"},
+                            "machine_result": {
+                                "node_id": node_id,
+                                "status": "ok",
+                                "questions": ["q1"],
+                                "branches": ["branch-a", "branch-b"],
+                                "findings": [f"{node_id}-finding"],
+                                "sources": [f"{node_id}-source"],
+                                "synthesis": f"{node_id} synthesis",
+                                "gaps": [],
+                            },
                         }
                     ),
                     "",
@@ -2177,6 +2256,7 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
             client = FakeClient()
             runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id")}  # type: ignore[method-assign]  # noqa: ARG005
             runtime._ensure_client = lambda runtime_status: client  # type: ignore[method-assign]  # noqa: ARG005
+            runtime._mcp_config.enabled_servers = lambda: [astrabridge_web_preset(), astrabridge_capabilities_preset()]  # type: ignore[method-assign]
 
             result = runtime.start_graph_worker(
                 {
@@ -2209,6 +2289,10 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
 
             start_method, start_params = client.requests[0]
             self.assertEqual(start_method, "thread/start")
+            dynamic_tool_names = {item["name"] for item in start_params.get("dynamicTools", [])}
+            self.assertIn("astrabridge_web_search_batch", dynamic_tool_names)
+            self.assertIn("astrabridge_capability_image_generate", dynamic_tool_names)
+            self.assertNotIn("yunwu_image_generate", dynamic_tool_names)
             self.assertEqual(
                 start_params["source"],
                 {
@@ -2247,6 +2331,24 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
             self.assertEqual(binding["runtime_contract"]["tool_policy"]["approval_mode"], "ask")
             self.assertEqual(binding["runtime_contract"]["tool_policy"]["allowed_tool_classes"], ["read_file", "shell"])
             self.assertTrue(binding["runtime_contract"]["tool_policy"]["supports_mcp"])
+            self.assertTrue(binding["runtime_contract"]["tool_policy"]["mcp_tool_policy"]["fingerprint"])
+            self.assertEqual(
+                {
+                    item["tool"]
+                    for item in binding["runtime_contract"]["tool_policy"]["mcp_tool_policy"]["exposed_tools"]
+                },
+                {
+                    "astrabridge_web_search_batch",
+                    "astrabridge_web_research_brief",
+                    "astrabridge_web_search",
+                    "astrabridge_web_fetch",
+                    "astrabridge_capability_routes",
+                    "astrabridge_capability_image_generate",
+                    "astrabridge_capability_vision_analyze",
+                    "astrabridge_capability_speech_transcribe",
+                    "astrabridge_capability_speech_synthesize",
+                },
+            )
             self.assertEqual(binding["runtime_contract"]["mcp_preset_ids"], ["astrabridge_web", "astrabridge_capabilities"])
             self.assertEqual(binding["runtime_contract"]["skill_ids"], ["agent-orchestration-operator"])
             self.assertEqual(binding["runtime_contract"]["subagent_policy"]["isolation_mode"], "lane")
@@ -2264,7 +2366,8 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
                     "worker_thread_id": "thread-worker-1",
                     "human_summary": "Worker produced a bounded result for the synthesizer.",
                     "machine_result": {
-                        "summary": "bounded result",
+                        "result": "bounded result",
+                        "confidence": "high",
                         "artifact_refs": ["PRIVATE/task-graph/workers/report.md"],
                         "raw_history": "must not become downstream context",
                     },
@@ -2291,14 +2394,12 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
             self.assertEqual(output["worker_binding"]["output_summary"]["output_envelope_path"], f"PRIVATE/task-graph/workers/{dry_run['run_id']}/node_worker/output-envelope.json")
             self.assertEqual(output["worker_binding"]["downstream_handoffs"][0]["downstream_input"]["source"], "artifact_refs_and_context_policy")
             self.assertIn("machine_result", output["worker_binding"]["downstream_handoffs"][0]["downstream_input"]["message_part_types"])
-            self.assertIn("artifact_ref", output["worker_binding"]["downstream_handoffs"][0]["downstream_input"]["message_part_types"])
             self.assertTrue(output["worker_binding"]["downstream_handoffs"][0]["downstream_input"]["exclude_private_memory"])
             self.assertNotIn("raw_history", str(output["worker_binding"]["downstream_handoffs"]))
             input_envelope_path = workspace / output["worker_binding"]["downstream_handoffs"][0]["downstream_input"]["input_envelope_path"]
             input_envelope = json.loads(input_envelope_path.read_text(encoding="utf-8"))
             self.assertTrue(input_envelope["exclude_private_memory"])
             self.assertIn("machine_result", input_envelope["message_part_types"])
-            self.assertIn("artifact_ref", input_envelope["message_part_types"])
             self.assertEqual(len(input_envelope["artifact_refs"]), 2)
             self.assertNotIn("raw_history", json.dumps(input_envelope, ensure_ascii=False))
             output_envelope_path = workspace / output["worker_binding"]["output_summary"]["output_envelope_path"]
@@ -2329,6 +2430,105 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
             self.assertEqual(export_payload["metrics"]["token_usage"]["total_tokens"], 1500)
             self.assertNotIn("authorization", json.dumps(export_payload, ensure_ascii=False))
             self.assertNotIn("raw_history", json.dumps(export_payload, ensure_ascii=False))
+
+    def test_start_graph_worker_uses_snapshotted_mcp_tool_policy_instead_of_later_server_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Graph worker snapshot", root / "graph-worker-snapshot.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Graph worker snapshot task",
+                thread_id="thread-parent",
+                settings={
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3-coder-plus",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+            graph = tasks.instantiate_graph_template("supervisor_worker_synthesizer")["graph"]
+            node_worker = next(item for item in graph["nodes"] if item["node_id"] == "node_worker")
+            node_worker["tools"] = {
+                "approval_mode": "ask",
+                "allowed_tool_classes": [],
+                "supports_mcp": True,
+            }
+            tasks.upsert_graph_definition(graph)
+
+            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            runtime._mcp_config.enabled_servers = lambda: [astrabridge_web_preset()]  # type: ignore[method-assign]
+            snapshotted_policy = runtime._graph_worker_tool_policy(  # type: ignore[attr-defined]
+                dict(node_worker.get("tools") or {}),
+                node=node_worker,
+                graph_policy=dict(graph.get("graph_policy") or {}),
+                node_id="node_worker",
+            )["mcp_tool_policy"]
+            runtime._mcp_config.enabled_servers = lambda: [astrabridge_web_preset(), astrabridge_capabilities_preset()]  # type: ignore[method-assign]
+
+            dry_run = tasks.dry_run_graph({"graph_id": graph["graph_id"]})["dry_run"]
+
+            class FakeClient:
+                def __init__(self) -> None:
+                    self.requests: list[tuple[str, dict[str, object]]] = []
+
+                def request(self, method: str, params: dict[str, object], timeout: float | None = None) -> dict[str, object]:
+                    self.requests.append((method, dict(params or {})))
+                    if method == "thread/start":
+                        return {"thread": {"id": "thread-worker-drift", "name": "worker"}}
+                    if method == "thread/name/set":
+                        return {"ok": True}
+                    raise AssertionError(f"Unexpected method {method}")
+
+            client = FakeClient()
+            runtime._prepare_runtime = lambda profile, require_secret=False: {"provider_id": profile.get("provider_id")}  # type: ignore[method-assign]  # noqa: ARG005
+            runtime._ensure_client = lambda runtime_status: client  # type: ignore[method-assign]  # noqa: ARG005
+
+            runtime.start_graph_worker(
+                {
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3-coder-plus",
+                    "reasoning_effort": "high",
+                },
+                graph_id=graph["graph_id"],
+                run_id=dry_run["run_id"],
+                node_id="node_worker",
+                parent_thread_id="thread-parent",
+                mcp_tool_policy_snapshot=snapshotted_policy,
+            )
+
+            start_method, start_params = client.requests[0]
+            self.assertEqual(start_method, "thread/start")
+            dynamic_tool_names = {item["name"] for item in start_params.get("dynamicTools", [])}
+            self.assertEqual(
+                dynamic_tool_names,
+                {
+                    "astrabridge_web_search_batch",
+                    "astrabridge_web_research_brief",
+                    "astrabridge_web_search",
+                    "astrabridge_web_fetch",
+                },
+            )
+            run_ref = tasks.graph_run_ref(dry_run["run_id"])
+            binding = run_ref["worker_bindings"][0]
+            self.assertEqual(
+                {
+                    item["tool"]
+                    for item in binding["runtime_contract"]["tool_policy"]["mcp_tool_policy"]["exposed_tools"]
+                },
+                {
+                    "astrabridge_web_search_batch",
+                    "astrabridge_web_research_brief",
+                    "astrabridge_web_search",
+                    "astrabridge_web_fetch",
+                },
+            )
 
     def test_start_graph_worker_blocks_unsupported_nested_or_worktree_subagents(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2448,7 +2648,7 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
             self.assertTrue(any(str(item["path"]).endswith("/summary.md") for item in bindings["node_research_b"]["artifact_refs"]))
             self.assertIn("consumed_worker_artifacts", str(bindings["node_merge"]["output_summary"]["machine_result_preview"]))
             self.assertEqual(bindings["node_research_a"]["downstream_handoffs"][0]["downstream_input"]["source"], "artifact_refs_and_context_policy")
-            self.assertEqual(bindings["node_research_b"]["downstream_handoffs"][0]["downstream_input"]["source"], "artifact_refs_and_context_policy")
+            self.assertEqual(bindings["node_research_b"]["downstream_handoffs"], [])
 
             reloaded_tasks = TaskService(projects)
             restored_run_ref = reloaded_tasks.graph_run_ref(fixture_run["run_id"])
@@ -2516,6 +2716,402 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
             restored_run_ref = reloaded_tasks.graph_run_ref(approved_pending["run_id"])
             self.assertEqual(restored_run_ref["status"], "completed")
             self.assertEqual(restored_run_ref["approval_details"]["status"], "approved")
+
+    def test_mixed_registry_graph_passes_dry_run_and_fixture_execution_after_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Mixed registry graph", root / "mixed-registry-graph.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task(
+                "Mixed registry graph task",
+                thread_id="thread-parent",
+                settings={
+                    "profile_id": "qwen-default",
+                    "provider_id": "qwen",
+                    "model": "qwen3-coder-plus",
+                    "reasoning_effort": "high",
+                    "permission_mode": "auto",
+                },
+            )
+
+            schema_registry = {
+                "schema.agent_brief": {
+                    "type": "object",
+                    "required": ["brief"],
+                    "properties": {"brief": {"type": "string"}},
+                },
+                "schema.tool_result": {
+                    "type": "object",
+                    "required": ["payload"],
+                    "properties": {"payload": {"type": "string"}},
+                },
+                "schema.transformed_result": {
+                    "type": "object",
+                    "required": ["decision"],
+                    "properties": {"decision": {"type": "string"}},
+                },
+                "schema.approval_record": {
+                    "type": "object",
+                    "required": ["decision"],
+                    "properties": {"decision": {"type": "string"}},
+                },
+                "schema.artifact_record": {
+                    "type": "object",
+                    "required": ["artifact_path"],
+                    "properties": {"artifact_path": {"type": "string"}},
+                },
+            }
+
+            nodes = [
+                orchestration_file_format_module._node(  # noqa: SLF001
+                    node_id="node_agent",
+                    kind="agent_model",
+                    role="worker",
+                    label="Agent Brief",
+                    card_ref="agent_card_mixed_agent",
+                    provider_id="qwen",
+                    model_id="qwen3-coder-plus",
+                    prompt="Return a bounded machine_result brief for the downstream MCP node.",
+                    tool_classes=[],
+                    output_mode="structured_and_artifacts",
+                    machine_result_schema_ref="schema.agent_brief",
+                    artifact_specs=[{"kind": "structured_json", "id": "agent_brief"}],
+                    spawn_mode="isolated_lane",
+                    timeout_ms=120000,
+                    risk_class="low",
+                    allow_provider_calls=True,
+                    allow_code_changes=False,
+                    allow_install=False,
+                    requires_human_approval=False,
+                    x=80,
+                    y=120,
+                    output_ports=[
+                        {
+                            "port_id": "machine_result",
+                            "label": "Machine Result",
+                            "port_type": "structured_json",
+                            "schema_ref": "schema.agent_brief",
+                            "artifact_kind": "structured_json",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                ),
+                orchestration_file_format_module._node(  # noqa: SLF001
+                    node_id="node_mcp",
+                    kind="mcp_tool",
+                    role="custom",
+                    label="Query MCP Tool",
+                    card_ref="agent_card_mixed_mcp",
+                    provider_id=None,
+                    model_id=None,
+                    prompt="Read one MCP tool result using the upstream task brief.",
+                    tool_classes=["web"],
+                    output_mode="structured_and_artifacts",
+                    machine_result_schema_ref="schema.tool_result",
+                    artifact_specs=[{"kind": "structured_json", "id": "tool_payload"}],
+                    spawn_mode="inline_lane",
+                    timeout_ms=90000,
+                    risk_class="low",
+                    allow_provider_calls=False,
+                    allow_code_changes=False,
+                    allow_install=False,
+                    requires_human_approval=False,
+                    x=300,
+                    y=120,
+                    input_ports=[
+                        {
+                            "port_id": "task_context",
+                            "label": "Task Context",
+                            "port_type": "structured_json",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                    output_ports=[
+                        {
+                            "port_id": "tool_result",
+                            "label": "Tool Result",
+                            "port_type": "tool_result",
+                            "schema_ref": "schema.tool_result",
+                            "artifact_kind": "structured_json",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                ),
+                orchestration_file_format_module._node(  # noqa: SLF001
+                    node_id="node_transform",
+                    kind="transform",
+                    role="custom",
+                    label="Normalize Result",
+                    card_ref="agent_card_mixed_transform",
+                    provider_id=None,
+                    model_id=None,
+                    prompt="Normalize the MCP result into a compact promotion decision.",
+                    tool_classes=[],
+                    output_mode="structured_and_artifacts",
+                    machine_result_schema_ref="schema.transformed_result",
+                    artifact_specs=[{"kind": "structured_json", "id": "normalized_decision"}],
+                    spawn_mode="inline_lane",
+                    timeout_ms=90000,
+                    risk_class="low",
+                    allow_provider_calls=False,
+                    allow_code_changes=False,
+                    allow_install=False,
+                    requires_human_approval=False,
+                    x=520,
+                    y=120,
+                    input_ports=[
+                        {
+                            "port_id": "tool_result",
+                            "label": "Tool Result",
+                            "port_type": "tool_result",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                    output_ports=[
+                        {
+                            "port_id": "machine_result",
+                            "label": "Machine Result",
+                            "port_type": "structured_json",
+                            "schema_ref": "schema.transformed_result",
+                            "artifact_kind": "structured_json",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                ),
+                orchestration_file_format_module._node(  # noqa: SLF001
+                    node_id="node_gate",
+                    kind="human_approval",
+                    role="gate",
+                    label="Human Gate",
+                    card_ref="agent_card_mixed_gate",
+                    provider_id=None,
+                    model_id=None,
+                    prompt="Require human approval before persisting the artifact.",
+                    tool_classes=[],
+                    output_mode="structured_and_artifacts",
+                    machine_result_schema_ref="schema.approval_record",
+                    artifact_specs=[{"kind": "approval_record", "id": "approval_record"}],
+                    spawn_mode="manual_only",
+                    timeout_ms=90000,
+                    risk_class="moderate",
+                    allow_provider_calls=False,
+                    allow_code_changes=False,
+                    allow_install=False,
+                    requires_human_approval=True,
+                    x=740,
+                    y=120,
+                    approval_kind="human_gate",
+                    input_ports=[
+                        {
+                            "port_id": "approval_input",
+                            "label": "Approval Input",
+                            "port_type": "structured_json",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                    output_ports=[
+                        {
+                            "port_id": "approval_record",
+                            "label": "Approval Record",
+                            "port_type": "approval_record",
+                            "schema_ref": "schema.approval_record",
+                            "artifact_kind": "approval_record",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                ),
+                orchestration_file_format_module._node(  # noqa: SLF001
+                    node_id="node_sink",
+                    kind="artifact_sink",
+                    role="custom",
+                    label="Artifact Sink",
+                    card_ref="agent_card_mixed_sink",
+                    provider_id=None,
+                    model_id=None,
+                    prompt="Persist the approved result as the final artifact record.",
+                    tool_classes=[],
+                    output_mode="structured_and_artifacts",
+                    machine_result_schema_ref="schema.artifact_record",
+                    artifact_specs=[{"kind": "structured_json", "id": "artifact_record"}],
+                    spawn_mode="inline_lane",
+                    timeout_ms=90000,
+                    risk_class="low",
+                    allow_provider_calls=False,
+                    allow_code_changes=False,
+                    allow_install=False,
+                    requires_human_approval=False,
+                    x=960,
+                    y=120,
+                    input_ports=[
+                        {
+                            "port_id": "artifact_input",
+                            "label": "Artifact Input",
+                            "port_type": "approval_record",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                    output_ports=[
+                        {
+                            "port_id": "artifact_record",
+                            "label": "Artifact Record",
+                            "port_type": "structured_json",
+                            "schema_ref": "schema.artifact_record",
+                            "artifact_kind": "structured_json",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                ),
+            ]
+            edges = [
+                orchestration_file_format_module._edge(  # noqa: SLF001
+                    edge_id="edge_agent_mcp",
+                    from_node_id="node_agent",
+                    to_node_id="node_mcp",
+                    edge_type="context_handoff",
+                    schema_ref="schema.agent_brief",
+                    message_template="Hand the agent brief to the MCP node.",
+                    x=200,
+                    y=120,
+                    port_bindings=[{"from_port_id": "machine_result", "to_port_id": "task_context"}],
+                ),
+                orchestration_file_format_module._edge(  # noqa: SLF001
+                    edge_id="edge_mcp_transform",
+                    from_node_id="node_mcp",
+                    to_node_id="node_transform",
+                    edge_type="artifact_handoff",
+                    schema_ref="schema.tool_result",
+                    message_template="Normalize the MCP tool result.",
+                    x=420,
+                    y=120,
+                    port_bindings=[{"from_port_id": "tool_result", "to_port_id": "tool_result"}],
+                ),
+                orchestration_file_format_module._edge(  # noqa: SLF001
+                    edge_id="edge_transform_gate",
+                    from_node_id="node_transform",
+                    to_node_id="node_gate",
+                    edge_type="approval_dependency",
+                    schema_ref="schema.transformed_result",
+                    message_template="Review the normalized result before continuing.",
+                    x=640,
+                    y=120,
+                    port_bindings=[{"from_port_id": "machine_result", "to_port_id": "approval_input"}],
+                ),
+                orchestration_file_format_module._edge(  # noqa: SLF001
+                    edge_id="edge_gate_sink",
+                    from_node_id="node_gate",
+                    to_node_id="node_sink",
+                    edge_type="artifact_handoff",
+                    schema_ref="schema.approval_record",
+                    message_template="Persist the approved artifact record.",
+                    x=860,
+                    y=120,
+                    port_bindings=[{"from_port_id": "approval_record", "to_port_id": "artifact_input"}],
+                ),
+            ]
+            orchestration_graph = orchestration_file_format_module._base_graph(  # noqa: SLF001
+                graph_id="graph_mixed_registry_runtime_v1",
+                title="Mixed Registry Runtime",
+                template_id="custom_blank_graph",
+                tags=["registry", "mcp", "approval", "fixture"],
+                entry_node_ids=["node_agent"],
+                nodes=nodes,
+                edges=edges,
+                schema_registry=schema_registry,
+            )
+            orchestration_graph["graph_policy"]["max_depth"] = 5
+            validated_orchestration = validate_agent_orchestration_graph(
+                orchestration_graph,
+            )
+            task_graph = lower_agent_orchestration_graph_to_task_graph(
+                validated_orchestration,
+            )
+            task_graph["task_id"] = str(tasks.current_task()["task_id"])
+            task_graph["graph_policy"]["max_depth"] = 5
+            task_graph["status"] = "ready"
+            task_graph["updated_at"] = now_iso()
+            saved_graph = tasks.save_graph_definition({"graph": task_graph})[
+                "graph"
+            ]
+
+            dry_run = tasks.dry_run_graph(
+                {"graph_id": saved_graph["graph_id"]},
+                profiles_snapshot={
+                    "profiles": [
+                        {
+                            "profile_id": "qwen-default",
+                            "provider_id": "qwen",
+                            "model": "qwen3-coder-plus",
+                            "reasoning_effort": "high",
+                            "input_modalities": ["text"],
+                        }
+                    ]
+                },
+                configured_models=[
+                    {
+                        "id": "qwen/qwen3-coder-plus",
+                        "provider": "qwen",
+                        "native_model": "qwen3-coder-plus",
+                        "input_modalities": ["text"],
+                    }
+                ],
+            )["dry_run"]
+            self.assertEqual(dry_run["overall_status"], "pass")
+            self.assertEqual(dry_run["status_counts"]["blocked"], 0)
+            self.assertTrue((workspace / dry_run["artifact_paths"]["compiled_plan_json"]).exists())
+
+            pending = tasks.execute_fixture_graph({"graph_id": saved_graph["graph_id"]})["fixture_run"]
+            pending_run = pending["run_ref"]
+            self.assertEqual(pending["run_status"], "paused_for_review")
+            self.assertEqual(pending_run["status"], "paused_for_review")
+            self.assertEqual(pending_run["approval_state"], "pending")
+            self.assertEqual(pending_run["worker_count"], 5)
+
+            approved = tasks.resolve_graph_run_approval(
+                {
+                    "run_id": pending["run_id"],
+                    "decision": "approve",
+                    "notes": "Fixture approval granted for the mixed registry graph.",
+                }
+            )
+            approved_run = approved["run_ref"]
+            self.assertEqual(approved_run["status"], "completed")
+            self.assertEqual(approved_run["approval_state"], "approved")
+            self.assertEqual(approved_run["node_outcome_counts"]["passed"], 4)
+            self.assertEqual(approved_run["node_outcome_counts"]["blocked"], 1)
+            sink_binding = next(item for item in approved_run["worker_bindings"] if item["node_id"] == "node_sink")
+            self.assertEqual(sink_binding["status"], "blocked")
+
+            recovery = tasks.recover_graph_run(
+                {
+                    "run_id": pending["run_id"],
+                    "strategy": "partial_execution",
+                    "selected_node_ids": ["node_sink"],
+                }
+            )
+            recovered_run = recovery["fixture_run"]["run_ref"]
+            self.assertEqual(recovered_run["status"], "completed")
+            self.assertEqual(recovered_run["node_outcome_counts"]["passed"], 5)
+            recovered_sink_binding = next(
+                item
+                for item in recovered_run["worker_bindings"]
+                if item["node_id"] == "node_sink"
+            )
+            self.assertEqual(recovered_sink_binding["status"], "completed")
+            self.assertTrue(recovered_sink_binding["artifact_refs"])
 
     def test_template_specific_fixture_runs_complete_for_linear_workflows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

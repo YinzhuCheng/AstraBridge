@@ -8,7 +8,6 @@ import os
 import re
 import socket
 import sys
-import traceback
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
@@ -16,6 +15,14 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, BinaryIO
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from astrabridge_sidecar.mcp_server_core import McpServerCore, McpStdioFramingState, read_stdio_message, run_stdio_mcp_server, write_stdio_message
+    from astrabridge_sidecar.multimodal_result_envelope import enrich_web_result, typed_result_text_summary
+else:
+    from .mcp_server_core import McpServerCore, McpStdioFramingState, read_stdio_message, run_stdio_mcp_server, write_stdio_message
+    from .multimodal_result_envelope import enrich_web_result, typed_result_text_summary
 
 
 SERVER_NAME = "astrabridge-web-tools"
@@ -25,7 +32,7 @@ DEFAULT_MAX_CHARS = 6000
 DEFAULT_BATCH_MAX_QUERIES = 8
 DEFAULT_RESEARCH_FETCH_TOP_N = 6
 FETCH_CACHE_MAX_ENTRIES = 48
-_OUTPUT_FRAMING = "header"
+_STREAM_STATE = McpStdioFramingState()
 _FETCH_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 def _normalize_web_tool_name(name: str) -> str:
     return str(name or "").strip()
@@ -96,51 +103,21 @@ MAGIC_TOWER_ALIASES = (
 
 def main() -> None:
     _debug("started", argv=sys.argv[:3])
-    while True:
-        message = _read_message(sys.stdin.buffer)
-        if message is None:
-            _debug("eof")
-            break
-        response = _handle_message(message)
-        if response is not None:
-            _write_message(sys.stdout.buffer, response)
+    run_stdio_mcp_server(_server_core(), sys.stdin.buffer, sys.stdout.buffer, state=_STREAM_STATE, log_hook=_debug)
 
 
-def _handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
-    request_id = message.get("id")
-    method = str(message.get("method") or "")
-    params = message.get("params") or {}
-    try:
-        if method == "initialize":
-            return _result(
-                request_id,
-                {
-                    "protocolVersion": str(params.get("protocolVersion") or "2024-11-05"),
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                    "instructions": (
-                        "Use AstraBridge web tools for batch source lookup and lightweight research briefs. "
-                        "Return URLs with claims. Do not pass secrets, Authorization headers, cookies, or API keys."
-                    ),
-                },
-            )
-        if method in {"notifications/initialized", "initialized"}:
-            return None
-        if method == "tools/list":
-            return _result(request_id, {"tools": _tools()})
-        if method == "resources/list":
-            return _result(request_id, {"resources": []})
-        if method == "resources/templates/list":
-            return _result(request_id, {"resourceTemplates": []})
-        if method == "tools/call":
-            return _result(request_id, _call_tool(params))
-        if request_id is None:
-            return None
-        return _error(request_id, -32601, f"Unsupported method: {method}")
-    except Exception as exc:  # noqa: BLE001
-        details = "".join(traceback.format_exception_only(type(exc), exc)).strip()
-        _debug("handler_error", method=method, error=details[:500])
-        return _error(request_id, -32000, details)
+def _server_core() -> McpServerCore:
+    return McpServerCore(
+        server_name=SERVER_NAME,
+        server_version=SERVER_VERSION,
+        instructions=(
+            "Use AstraBridge web tools for batch source lookup and lightweight research briefs. "
+            "Return URLs with claims. Do not pass secrets, Authorization headers, cookies, or API keys."
+        ),
+        tools_provider=_tools,
+        tool_handler=lambda name, arguments, _context: _dispatch_tool(name, arguments),
+        log_hook=_debug,
+    )
 
 
 def _tools() -> list[dict[str, Any]]:
@@ -268,10 +245,14 @@ def _tools() -> list[dict[str, Any]]:
 def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
     name = _normalize_web_tool_name(str(params.get("name") or ""))
     args = params.get("arguments") or {}
-    if not _is_web_tool_name(name):
-        raise ValueError(f"Unknown AstraBridge web tool: {name}")
     if not isinstance(args, dict):
         raise ValueError("Tool arguments must be an object.")
+    return _dispatch_tool(name, args)
+
+
+def _dispatch_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    if not _is_web_tool_name(name):
+        raise ValueError(f"Unknown AstraBridge web tool: {name}")
     canonical_name = name
     if canonical_name == "astrabridge_web_search_batch":
         payload = _search_batch(
@@ -282,7 +263,8 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         context = _sanitize_tool_context(args.get("tool_context"))
         if context:
             payload["tool_context"] = context
-        return _tool_text(_canonicalize_tool_payload(name, payload))
+        payload = enrich_web_result(canonical_name, _canonicalize_tool_payload(name, payload), workspace_root=_tool_context_workspace_root(context))
+        return _tool_text(payload)
     if canonical_name == "astrabridge_web_research_brief":
         payload = _research_brief(
             research_goal=str(args.get("research_goal") or "").strip(),
@@ -296,7 +278,8 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         context = _sanitize_tool_context(args.get("tool_context"))
         if context:
             payload["tool_context"] = context
-        return _tool_text(_canonicalize_tool_payload(name, payload))
+        payload = enrich_web_result(canonical_name, _canonicalize_tool_payload(name, payload), workspace_root=_tool_context_workspace_root(context))
+        return _tool_text(payload)
     if canonical_name == "astrabridge_web_search":
         query = str(args.get("query") or "").strip()
         if not query:
@@ -310,7 +293,8 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         context = _sanitize_tool_context(args.get("tool_context"))
         if context:
             payload["tool_context"] = context
-        return _tool_text(_canonicalize_tool_payload(name, payload))
+        payload = enrich_web_result(canonical_name, _canonicalize_tool_payload(name, payload), workspace_root=_tool_context_workspace_root(context))
+        return _tool_text(payload)
     if canonical_name == "astrabridge_web_fetch":
         url = str(args.get("url") or "").strip()
         if not url:
@@ -319,7 +303,8 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         context = _sanitize_tool_context(args.get("tool_context"))
         if context:
             payload["tool_context"] = context
-        return _tool_text(_canonicalize_tool_payload(name, payload))
+        payload = enrich_web_result(canonical_name, _canonicalize_tool_payload(name, payload), workspace_root=_tool_context_workspace_root(context))
+        return _tool_text(payload)
     raise ValueError(f"Unknown AstraBridge web tool: {name}")
 
 
@@ -409,6 +394,11 @@ def _safe_context_text(value: Any, limit: int) -> str:
     if not text:
         return ""
     return text[:limit]
+
+
+def _tool_context_workspace_root(context: dict[str, Any]) -> str | None:
+    text = str(dict(context or {}).get("workspace_root") or "").strip()
+    return text or None
 
 
 def _search_batch(queries: Any, *, dedupe: bool, timeout_sec: int) -> dict[str, Any]:
@@ -1353,87 +1343,17 @@ def _redact_sensitive_text(text: str) -> str:
 
 
 def _tool_text(payload: dict[str, Any]) -> dict[str, Any]:
-    return {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False, indent=2)}]}
-
-
-def _result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "result": result}
-
-
-def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
-
+    return {
+        "structuredContent": payload,
+        "content": [{"type": "text", "text": typed_result_text_summary(payload, title="AstraBridge web tool result:")}],
+    }
 
 def _read_message(stream: BinaryIO) -> dict[str, Any] | None:
-    global _OUTPUT_FRAMING
-    first = _read_first_nonempty_byte(stream)
-    if not first:
-        return None
-    if first == b"{":
-        _OUTPUT_FRAMING = "raw"
-        return json.loads(_read_json_object(stream, first).decode("utf-8"))
-    _OUTPUT_FRAMING = "header"
-    headers: dict[str, str] = {}
-    line = first + stream.readline()
-    while line and line.strip():
-        text = line.decode("ascii", errors="replace")
-        if ":" in text:
-            key, value = text.split(":", 1)
-            headers[key.lower()] = value.strip()
-        line = stream.readline()
-    length = int(headers.get("content-length") or 0)
-    if length <= 0:
-        return None
-    return json.loads(stream.read(length).decode("utf-8"))
-
-
-def _read_first_nonempty_byte(stream: BinaryIO) -> bytes:
-    while True:
-        chunk = stream.read(1)
-        if not chunk:
-            return b""
-        if chunk in b" \t\r\n":
-            continue
-        return chunk
-
-
-def _read_json_object(stream: BinaryIO, first: bytes) -> bytes:
-    buffer = bytearray(first)
-    depth = 1
-    in_string = False
-    escaped = False
-    while depth > 0:
-        chunk = stream.read(1)
-        if not chunk:
-            break
-        char = chunk[0]
-        buffer.extend(chunk)
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == 92:
-                escaped = True
-            elif char == 34:
-                in_string = False
-            continue
-        if char == 34:
-            in_string = True
-        elif char == 123:
-            depth += 1
-        elif char == 125:
-            depth -= 1
-    return bytes(buffer)
+    return read_stdio_message(stream, state=_STREAM_STATE, log_hook=_debug)
 
 
 def _write_message(stream: BinaryIO, message: dict[str, Any]) -> None:
-    body = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    if _OUTPUT_FRAMING == "raw":
-        stream.write(body + b"\n")
-        stream.flush()
-        return
-    stream.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
-    stream.write(body)
-    stream.flush()
+    write_stdio_message(stream, message, state=_STREAM_STATE)
 
 
 def _debug(event: str, **fields: Any) -> None:

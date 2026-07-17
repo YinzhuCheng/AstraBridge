@@ -9,6 +9,7 @@ from typing import Any, Callable
 import requests
 
 from ..common import new_id, now_iso, path_for_host, write_json
+from ..multimodal_result_envelope import enrich_capability_result
 
 
 SPEECH_TRANSCRIBE_CAPABILITY_RESULT_SCHEMA = "astrabridge-speech-transcribe-capability-result-v1"
@@ -84,7 +85,7 @@ class QwenSpeechTranscribeAdapter:
         persisted = self.persist_artifacts(payload, request_body, response_body, result)
         if persisted:
             result.update(persisted)
-        return result
+        return enrich_capability_result("speech.transcribe", result, workspace_root=payload.get("workspace_root"))
 
     def build_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         audio_parts = self._normalize_audio_parts(payload.get("audio_inputs") or [])

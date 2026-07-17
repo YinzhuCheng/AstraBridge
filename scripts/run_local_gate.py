@@ -72,6 +72,15 @@ def full_commands() -> list[tuple[list[str], Path]]:
             ],
             REPO_ROOT,
         ),
+        (
+            [
+                sys.executable,
+                "scripts/run_runtime_stability_gate.py",
+                "--mode",
+                "fast",
+            ],
+            REPO_ROOT,
+        ),
         ([npm_command(), "run", "test"], desktop),
         ([npm_command(), "run", "build"], desktop),
     ]

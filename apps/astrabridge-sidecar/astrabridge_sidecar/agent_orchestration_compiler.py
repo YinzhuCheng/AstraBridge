@@ -5,6 +5,8 @@ from typing import Any
 
 from .agent_orchestration_contract import validate_agent_orchestration_graph
 from .common import now_iso
+from .mcp_node_policy import resolve_node_mcp_tool_policy
+from .node_type_registry import OPAQUE_DISABLED_NODE_TYPE_ID, resolve_node_type
 
 
 AGENT_ORCHESTRATION_COMPILED_PLAN_VERSION = "astrabridge-agent-orchestration-compiled-plan-v1"
@@ -77,15 +79,43 @@ def compile_agent_orchestration_graph(
     }
     compiled_nodes: list[dict[str, Any]] = []
     approval_nodes: list[str] = []
+    graph_policy = dict(canonical.get("graph_policy") or {})
+    node_type_registry_fingerprint = ""
     for node_id, node in node_map.items():
         execution = dict(node.get("execution") or {})
         safety = dict(node.get("safety") or {})
+        tools = dict(node.get("tools") or {})
         incoming = incoming_edges.get(node_id, [])
+        resolved_node_type = resolve_node_type(str(node.get("kind") or ""), allow_unknown=True)
+        spec = dict(resolved_node_type.get("spec") or {})
+        node_type_registry_fingerprint = str(node.get("node_type_registry_fingerprint") or resolved_node_type.get("registry_fingerprint") or node_type_registry_fingerprint)
         join_mode = _join_mode(node=node, incoming_edges=incoming)
         manual_gate = str(execution.get("spawn_mode") or "") == "manual_only"
         approval_required = bool(safety.get("requires_human_approval")) or manual_gate or any(
             str(edge.get("edge_type") or "").strip() == "approval_dependency" for edge in incoming
         )
+        if str(resolved_node_type.get("resolved_type_id") or "") == "human_approval":
+            approval_required = True
+            join_mode = "approval_gate_required"
+        compiled_tool_policy = {
+            "approval_mode": str(tools.get("approval_mode") or "").strip().lower() or "ask",
+            "allowed_tool_classes": [
+                str(item).strip()
+                for item in list(tools.get("allowed_tool_classes") or [])
+                if str(item or "").strip()
+            ],
+            "supports_mcp": bool(tools.get("supports_mcp")),
+            "mcp_tool_policy": resolve_node_mcp_tool_policy(
+                tools=tools,
+                mcp_preset_ids=[
+                    str(item).strip()
+                    for item in list(node.get("mcp_preset_ids") or [])
+                    if str(item or "").strip()
+                ],
+                graph_policy=graph_policy,
+                node_id=node_id,
+            ),
+        }
         if approval_required:
             approval_nodes.append(node_id)
         compiled_nodes.append(
@@ -104,6 +134,10 @@ def compile_agent_orchestration_graph(
                     "join_mode": join_mode,
                     "requires_all_dependencies": join_mode in {"all_required", "approval_gate_required"},
                 },
+                "resolved_node_type_id": str(node.get("resolved_node_type_id") or resolved_node_type.get("resolved_type_id") or ""),
+                "resolved_node_type_version": int(node.get("resolved_node_type_version") or spec.get("version") or 1),
+                "compiler_executor_id": str(spec.get("compiler_executor_id") or resolved_node_type.get("resolved_type_id") or ""),
+                "node_type_registry_fingerprint": str(node.get("node_type_registry_fingerprint") or resolved_node_type.get("registry_fingerprint") or ""),
                 "execution": {
                     "spawn_mode": str(execution.get("spawn_mode") or ""),
                     "execution_backend": str(execution.get("execution_backend") or ""),
@@ -112,6 +146,7 @@ def compile_agent_orchestration_graph(
                     "collaboration_mode": str(execution.get("collaboration_mode") or ""),
                     "subagent_policy": deepcopy(execution.get("subagent_policy") or {}),
                 },
+                "tool_policy": compiled_tool_policy,
                 "approval_required": approval_required,
                 "approval_kind": str(safety.get("approval_kind") or "").strip() or None,
                 "input_ports": [
@@ -131,6 +166,11 @@ def compile_agent_orchestration_graph(
                     for item in list(dict(node.get("ports") or {}).get("outputs") or [])
                     if isinstance(item, dict)
                 ],
+                "disabled_reason": (
+                    list(node.get("node_type_diagnostics") or [])
+                    if str(node.get("resolved_node_type_id") or resolved_node_type.get("resolved_type_id") or "") == OPAQUE_DISABLED_NODE_TYPE_ID
+                    else []
+                ),
             }
         )
     compiled_edges: list[dict[str, Any]] = []
@@ -163,6 +203,7 @@ def compile_agent_orchestration_graph(
         "task_id": canonical["task_id"],
         "graph_schema_version": canonical["schema_version"],
         "compiled_at": now_iso(),
+        "node_type_registry_fingerprint": node_type_registry_fingerprint,
         "entry_node_ids": entry_node_ids,
         "topology": {
             "node_count": len(compiled_nodes),

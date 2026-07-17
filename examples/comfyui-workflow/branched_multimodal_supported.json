@@ -1,0 +1,553 @@
+{
+  "version": 1.0,
+  "state": {
+    "lastNodeId": 5,
+    "lastLinkId": 4
+  },
+  "last_node_id": 5,
+  "last_link_id": 4,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "astrabridge/artifact_source",
+      "title": "Request Text",
+      "pos": [40, 40],
+      "size": [240, 150],
+      "outputs": [
+        {
+          "name": "Task context",
+          "type": "text",
+          "id": "task_context",
+          "shape": "single",
+          "required": true,
+          "artifact_kind": "document"
+        }
+      ],
+      "widgets_values": ["text_report", "workspace://PRIVATE/comfyui/inputs/request.md"],
+      "properties": {
+        "Node name for S&R": "AstraBridge Artifact Source",
+        "astrabridge": {
+          "node_id": "node_request_text",
+          "label": "Request Text",
+          "role": "custom",
+          "card_ref": "agent_card_comfyui_artifact_source",
+          "node_type_id": "artifact_source",
+          "node_type_config": {
+            "artifact_kind": "text_report",
+            "artifact_uri": "workspace://PRIVATE/comfyui/inputs/request.md"
+          },
+          "artifact_kind": "text_report",
+          "artifact_uri": "workspace://PRIVATE/comfyui/inputs/request.md",
+          "input_contract": {
+            "mode": "typed_ports",
+            "port_ids": []
+          },
+          "output_contract": {
+            "mode": "artifact_only",
+            "artifact_specs": [
+              {
+                "kind": "text_report",
+                "id": "task_context"
+              }
+            ],
+            "human_summary_required": true
+          },
+          "execution": {
+            "spawn_mode": "inline_lane",
+            "timeout_ms": 120000,
+            "retry_policy": {
+              "max_attempts": 1
+            },
+            "execution_backend": "app_server",
+            "collaboration_mode": "default"
+          },
+          "safety": {
+            "risk_class": "low",
+            "allow_provider_calls": false,
+            "allow_code_changes": false,
+            "allow_install": false,
+            "requires_human_approval": false
+          },
+          "status": "ready"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "astrabridge/artifact_source",
+      "title": "Reference Image",
+      "pos": [40, 240],
+      "size": [240, 150],
+      "outputs": [
+        {
+          "name": "Probe image",
+          "type": "image",
+          "id": "probe_image",
+          "shape": "single",
+          "required": true,
+          "artifact_kind": "image"
+        }
+      ],
+      "widgets_values": ["image", "workspace://PRIVATE/comfyui/inputs/reference.png"],
+      "properties": {
+        "Node name for S&R": "AstraBridge Artifact Source",
+        "astrabridge": {
+          "node_id": "node_request_image",
+          "label": "Reference Image",
+          "role": "custom",
+          "card_ref": "agent_card_comfyui_artifact_source",
+          "node_type_id": "artifact_source",
+          "node_type_config": {
+            "artifact_kind": "image",
+            "artifact_uri": "workspace://PRIVATE/comfyui/inputs/reference.png"
+          },
+          "artifact_kind": "image",
+          "artifact_uri": "workspace://PRIVATE/comfyui/inputs/reference.png",
+          "input_contract": {
+            "mode": "typed_ports",
+            "port_ids": []
+          },
+          "output_contract": {
+            "mode": "artifact_only",
+            "artifact_specs": [
+              {
+                "kind": "image",
+                "id": "probe_image"
+              }
+            ],
+            "human_summary_required": true
+          },
+          "execution": {
+            "spawn_mode": "inline_lane",
+            "timeout_ms": 120000,
+            "retry_policy": {
+              "max_attempts": 1
+            },
+            "execution_backend": "app_server",
+            "collaboration_mode": "default"
+          },
+          "safety": {
+            "risk_class": "low",
+            "allow_provider_calls": false,
+            "allow_code_changes": false,
+            "allow_install": false,
+            "requires_human_approval": false
+          },
+          "status": "ready"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "astrabridge/agent",
+      "title": "Multimodal Agent",
+      "pos": [360, 140],
+      "size": [280, 180],
+      "inputs": [
+        {
+          "name": "Task context",
+          "type": "text",
+          "id": "task_context",
+          "shape": "single",
+          "required": true
+        },
+        {
+          "name": "Probe image",
+          "type": "image",
+          "id": "probe_image",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Machine result",
+          "type": "structured_json",
+          "id": "machine_result",
+          "shape": "single",
+          "required": true,
+          "schema_ref": "schema.node_multimodal_agent.machine_result"
+        }
+      ],
+      "widgets_values": ["Multimodal Agent", "worker", "qwen", "qwen3.7-plus"],
+      "properties": {
+        "Node name for S&R": "AstraBridge Agent",
+        "astrabridge": {
+          "node_id": "node_multimodal_agent",
+          "label": "Multimodal Agent",
+          "role": "worker",
+          "card_ref": "agent_card_comfyui_agent",
+          "node_type_id": "agent_model",
+          "node_type_config": {
+            "routing": {
+              "selection_mode": "explicit",
+              "provider_id": "qwen",
+              "model_id": "qwen3.7-plus"
+            },
+            "prompt": {
+              "template_mode": "inline",
+              "template": "Read the request and use the image as supporting context."
+            },
+            "execution": {
+              "spawn_mode": "inline_lane",
+              "timeout_ms": 120000,
+              "retry_policy": {
+                "max_attempts": 1
+              },
+              "execution_backend": "app_server",
+              "collaboration_mode": "default"
+            },
+            "safety": {
+              "risk_class": "low",
+              "allow_provider_calls": true,
+              "allow_code_changes": false,
+              "allow_install": false,
+              "requires_human_approval": false
+            }
+          },
+          "routing": {
+            "selection_mode": "explicit",
+            "provider_id": "qwen",
+            "model_id": "qwen3.7-plus"
+          },
+          "prompt": {
+            "template_mode": "inline",
+            "template": "Read the request and use the image as supporting context."
+          },
+          "tools": {
+            "approval_mode": "ask",
+            "allowed_tool_classes": []
+          },
+          "input_contract": {
+            "mode": "typed_ports",
+            "port_ids": ["task_context", "probe_image"]
+          },
+          "output_contract": {
+            "mode": "structured_and_artifacts",
+            "machine_result_schema_ref": "schema.node_multimodal_agent.machine_result",
+            "artifact_specs": [],
+            "human_summary_required": true
+          },
+          "execution": {
+            "spawn_mode": "inline_lane",
+            "timeout_ms": 120000,
+            "retry_policy": {
+              "max_attempts": 1
+            },
+            "execution_backend": "app_server",
+            "collaboration_mode": "default"
+          },
+          "safety": {
+            "risk_class": "low",
+            "allow_provider_calls": true,
+            "allow_code_changes": false,
+            "allow_install": false,
+            "requires_human_approval": false
+          },
+          "status": "ready"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "astrabridge/human_approval",
+      "title": "Manual Gate",
+      "pos": [700, 140],
+      "size": [240, 160],
+      "inputs": [
+        {
+          "name": "Approval input",
+          "type": "structured_json",
+          "id": "approval_input",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Approval record",
+          "type": "approval_record",
+          "id": "approval_record",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "widgets_values": ["human_gate"],
+      "properties": {
+        "Node name for S&R": "AstraBridge Human Approval",
+        "astrabridge": {
+          "node_id": "node_manual_gate",
+          "label": "Manual Gate",
+          "role": "gate",
+          "card_ref": "agent_card_comfyui_human_approval",
+          "node_type_id": "human_approval",
+          "node_type_config": {
+            "review_kind": "human_gate"
+          },
+          "review_kind": "human_gate",
+          "input_contract": {
+            "mode": "typed_ports",
+            "port_ids": ["approval_input"]
+          },
+          "output_contract": {
+            "mode": "artifact_only",
+            "artifact_specs": [
+              {
+                "kind": "approval_record",
+                "id": "approval_record"
+              }
+            ],
+            "human_summary_required": true
+          },
+          "execution": {
+            "spawn_mode": "manual_only",
+            "timeout_ms": 120000,
+            "retry_policy": {
+              "max_attempts": 1
+            },
+            "execution_backend": "human_review",
+            "collaboration_mode": "default"
+          },
+          "safety": {
+            "risk_class": "moderate",
+            "allow_provider_calls": false,
+            "allow_code_changes": false,
+            "allow_install": false,
+            "requires_human_approval": true,
+            "approval_kind": "human_gate"
+          },
+          "status": "ready"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "astrabridge/artifact_sink",
+      "title": "Approval Archive",
+      "pos": [1020, 140],
+      "size": [240, 150],
+      "inputs": [
+        {
+          "name": "Artifact input",
+          "type": "approval_record",
+          "id": "artifact_input",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Artifact record",
+          "type": "structured_json",
+          "id": "artifact_record",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "widgets_values": ["approval_record"],
+      "properties": {
+        "Node name for S&R": "AstraBridge Artifact Sink",
+        "astrabridge": {
+          "node_id": "node_sink",
+          "label": "Approval Archive",
+          "role": "custom",
+          "card_ref": "agent_card_comfyui_artifact_sink",
+          "node_type_id": "artifact_sink",
+          "node_type_config": {
+            "target_kind": "approval_record"
+          },
+          "target_kind": "approval_record",
+          "input_contract": {
+            "mode": "typed_ports",
+            "port_ids": ["artifact_input"]
+          },
+          "output_contract": {
+            "mode": "artifact_only",
+            "artifact_specs": [
+              {
+                "kind": "approval_record",
+                "id": "artifact_record"
+              }
+            ],
+            "human_summary_required": true
+          },
+          "execution": {
+            "spawn_mode": "inline_lane",
+            "timeout_ms": 120000,
+            "retry_policy": {
+              "max_attempts": 1
+            },
+            "execution_backend": "app_server",
+            "collaboration_mode": "default"
+          },
+          "safety": {
+            "risk_class": "low",
+            "allow_provider_calls": false,
+            "allow_code_changes": false,
+            "allow_install": false,
+            "requires_human_approval": false
+          },
+          "status": "ready"
+        }
+      }
+    }
+  ],
+  "links": [
+    [1, 1, 0, 3, 0, "text"],
+    [2, 2, 0, 3, 1, "image"],
+    [3, 3, 0, 4, 0, "structured_json"],
+    [4, 4, 0, 5, 0, "approval_record"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "astrabridge": {
+      "graph_id": "graph_comfyui_branched_multimodal_supported",
+      "task_id": "task_comfyui_examples",
+      "metadata": {
+        "title": "Branched Multimodal Supported Workflow",
+        "template_id": "custom_blank_graph",
+        "created_at": "2026-07-17T00:00:00Z",
+        "updated_at": "2026-07-17T00:00:00Z",
+        "description": "Representative branched multimodal ComfyUI workflow for the AstraBridge adapter.",
+        "tags": ["comfyui", "branched", "multimodal"],
+        "owners": []
+      },
+      "graph_policy": {
+        "entry_node_ids": ["node_request_text", "node_request_image"],
+        "max_depth": 6,
+        "default_permission_mode": "ask",
+        "default_collaboration_mode": "default",
+        "default_execution_backend": "app_server",
+        "requires_dry_run_before_live": true
+      },
+      "schema_registry": {
+        "schema.node_multimodal_agent.machine_result": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string"
+            },
+            "signals": {
+              "type": "array"
+            }
+          }
+        }
+      },
+      "migration": {
+        "source_kind": "comfyui_fixture"
+      },
+      "links": {
+        "1": {
+          "edge_id": "edge_request_text_agent",
+          "edge_type": "artifact_handoff",
+          "handoff_contract": {
+            "message_template": "Deliver the request text to the multimodal agent.",
+            "message_part_modes": ["machine_result", "artifact_ref"],
+            "required_output_schema_refs": [],
+            "port_bindings": [
+              {
+                "from_port_id": "task_context",
+                "to_port_id": "task_context"
+              }
+            ]
+          },
+          "context_policy": {
+            "policy_id": "policy_edge_request_text_agent",
+            "history_mode": "explicit_refs_only",
+            "artifact_mode": "required_output_only",
+            "exclude_private_memory": true,
+            "include_machine_results": true,
+            "include_human_summaries": true,
+            "summary_strategy": "human_and_machine"
+          },
+          "status": "ready",
+          "source_port_id": "task_context",
+          "target_port_id": "task_context"
+        },
+        "2": {
+          "edge_id": "edge_request_image_agent",
+          "edge_type": "artifact_handoff",
+          "handoff_contract": {
+            "message_template": "Deliver the reference image to the multimodal agent.",
+            "message_part_modes": ["machine_result", "artifact_ref"],
+            "required_output_schema_refs": [],
+            "port_bindings": [
+              {
+                "from_port_id": "probe_image",
+                "to_port_id": "probe_image"
+              }
+            ]
+          },
+          "context_policy": {
+            "policy_id": "policy_edge_request_image_agent",
+            "history_mode": "explicit_refs_only",
+            "artifact_mode": "required_output_only",
+            "exclude_private_memory": true,
+            "include_machine_results": true,
+            "include_human_summaries": true,
+            "summary_strategy": "human_and_machine"
+          },
+          "status": "ready",
+          "source_port_id": "probe_image",
+          "target_port_id": "probe_image"
+        },
+        "3": {
+          "edge_id": "edge_agent_gate",
+          "edge_type": "artifact_handoff",
+          "handoff_contract": {
+            "message_template": "Deliver the multimodal result to the gate.",
+            "message_part_modes": ["machine_result", "artifact_ref"],
+            "required_output_schema_refs": ["schema.node_multimodal_agent.machine_result"],
+            "port_bindings": [
+              {
+                "from_port_id": "machine_result",
+                "to_port_id": "approval_input"
+              }
+            ]
+          },
+          "context_policy": {
+            "policy_id": "policy_edge_agent_gate",
+            "history_mode": "explicit_refs_only",
+            "artifact_mode": "required_output_only",
+            "exclude_private_memory": true,
+            "include_machine_results": true,
+            "include_human_summaries": true,
+            "summary_strategy": "human_and_machine"
+          },
+          "status": "ready",
+          "source_port_id": "machine_result",
+          "target_port_id": "approval_input"
+        },
+        "4": {
+          "edge_id": "edge_gate_sink",
+          "edge_type": "artifact_handoff",
+          "handoff_contract": {
+            "message_template": "Persist the approval record.",
+            "message_part_modes": ["machine_result", "artifact_ref"],
+            "required_output_schema_refs": [],
+            "port_bindings": [
+              {
+                "from_port_id": "approval_record",
+                "to_port_id": "artifact_input"
+              }
+            ]
+          },
+          "context_policy": {
+            "policy_id": "policy_edge_gate_sink",
+            "history_mode": "explicit_refs_only",
+            "artifact_mode": "required_output_only",
+            "exclude_private_memory": true,
+            "include_machine_results": true,
+            "include_human_summaries": true,
+            "summary_strategy": "human_and_machine"
+          },
+          "status": "ready",
+          "source_port_id": "approval_record",
+          "target_port_id": "artifact_input"
+        }
+      },
+      "state_version": 1
+    }
+  }
+}

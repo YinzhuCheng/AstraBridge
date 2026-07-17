@@ -1,6 +1,6 @@
 # AstraBridge Document Registry
 
-Last verified: 2026-07-10
+Last verified: 2026-07-17
 
 ## Purpose
 
@@ -93,6 +93,7 @@ The registry downgrade is documentary only. It does not delete or alter any hist
 Reference documents include:
 
 - architecture, ownership, product semantics, release, security, and demo runbooks;
+- runtime rollout, migration, rollback-readback, and maintenance runbooks;
 - Agent Graph contracts, maintenance runbooks, canvas UX targets, internal contracts, and surface maps;
 - capability runtime, automation, kernel, plugin/skill, and provider compatibility contracts or surface maps;
 - interface governance for HTTP, SSE, payload, provider metadata, CLI/launcher, MCP, and compatibility shims;
@@ -140,12 +141,12 @@ When adding or changing a guiding document or execution plan:
 
 ## Current Counts
 
-As verified on 2026-07-16, the registry contains 104 entries:
+As verified on 2026-07-17, the registry contains 106 entries:
 
 | Status | Count |
 | --- | ---: |
 | `active` | 14 |
 | `complete` | 25 |
-| `reference` | 43 |
+| `reference` | 46 |
 | `superseded` | 20 |
 | `archived` | 1 |

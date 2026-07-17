@@ -7,6 +7,10 @@ from typing import Any
 
 from .common import now_iso
 from .providers import classify_runtime_failure
+from .runtime_observability import (
+    build_runtime_observability_summary,
+    load_external_operations_for_observability,
+)
 from .security import redact_sensitive
 
 
@@ -36,6 +40,7 @@ class RuntimeSupervisorService:
         thread_status = self._latest_thread_status(events, selected_thread_id)
         thread_snapshot = self._thread_snapshot(selected_thread_id, profile)
         thread_status = self._normalize_thread_status_from_snapshot(thread_status, thread_snapshot)
+        current_task = self._current_task()
         runtime_error = self._latest_runtime_error(
             events,
             selected_thread_id,
@@ -61,6 +66,13 @@ class RuntimeSupervisorService:
         dogfood = self._dogfood.snapshot().get("run", {})
         browser = self._latest_browser_smoke(dogfood)
         workspace_root = self._workspace_root()
+        observability = build_runtime_observability_summary(
+            events,
+            workspace_root=workspace_root,
+            current_task=current_task,
+            thread_id=selected_thread_id,
+            external_operations=self._external_operations(),
+        )
         environment = {
             "project_name": current_project.get("name") or "",
             "cwd": str(workspace_root) if workspace_root else "",
@@ -84,6 +96,7 @@ class RuntimeSupervisorService:
                 "thread_status": thread_status,
                 "runtime_error": runtime_error,
                 "compaction": compaction,
+                "observability": observability,
                 "environment": environment,
                 "browser": browser,
                 "dogfood": {
@@ -139,6 +152,26 @@ class RuntimeSupervisorService:
         except Exception:
             return ""
         return ""
+
+    def _current_task(self) -> dict[str, Any] | None:
+        tasks = getattr(self._runtime, "_tasks", None)
+        if tasks is None:
+            return None
+        try:
+            task = tasks.current_task() or {}
+        except Exception:
+            return None
+        return dict(task) if isinstance(task, dict) else None
+
+    def _external_operations(self) -> list[dict[str, Any]]:
+        tasks = getattr(self._runtime, "_tasks", None)
+        if tasks is None:
+            return []
+        try:
+            store = tasks.durable_run_store()
+        except Exception:
+            return []
+        return load_external_operations_for_observability(getattr(store, "db_path", None))
 
     def _effective_thread_id_for_status(self, requested_thread_id: str, profile: dict[str, Any] | None) -> str:
         clean_requested = str(requested_thread_id or "")

@@ -147,6 +147,29 @@ const CAPABILITY_SURFACE_STATUS_KEYS: Record<CapabilitySurfaceStatus, string> = 
   standalone: "manager_capability_status_standalone",
 };
 
+function formatArtifactBytes(value?: number) {
+  const numeric = Number(value ?? 0);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "";
+  if (numeric < 1024) return `${Math.round(numeric)} B`;
+  if (numeric < 1024 * 1024) return `${(numeric / 1024).toFixed(1)} KB`;
+  if (numeric < 1024 * 1024 * 1024) return `${(numeric / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(numeric / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function compactArtifactDigest(value?: string) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return `sha256:${text.slice(0, 12)}`;
+}
+
+function artifactRefDisplayPath(ref: CapabilityArtifactEntry["artifact_refs"][number]) {
+  return String(ref.artifact_uri || ref.relative_path || "").trim();
+}
+
+function artifactRefDetail(ref: CapabilityArtifactEntry["artifact_refs"][number]) {
+  return [ref.mime_type, formatArtifactBytes(ref.size_bytes), compactArtifactDigest(ref.digest_sha256)].filter(Boolean).join(" · ");
+}
+
 function smokeProviderError(result: CapabilitySmokeResult | undefined): string {
   const value = result?.sanitized_response?.provider_error;
   return typeof value === "string" ? value.trim() : "";
@@ -986,6 +1009,12 @@ export function CapabilityRoutesPanel({
                               <span>{artifact.saved_at || t(locale, "manager_capability_unknown_time")}</span>
                               <span>{artifact.relative_summary_path}</span>
                               <span>{artifact.artifact_refs.length} {t(locale, "manager_capability_artifact_refs")}</span>
+                              {artifact.artifact_refs.slice(0, 2).map((ref) => (
+                                <span key={`${artifact.artifact_id}-${ref.artifact_type}-${ref.relative_path}`}>
+                                  {artifactRefDisplayPath(ref)}
+                                  {artifactRefDetail(ref) ? ` · ${artifactRefDetail(ref)}` : ""}
+                                </span>
+                              ))}
                             </div>
                           </article>
                         );

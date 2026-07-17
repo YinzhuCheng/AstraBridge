@@ -185,6 +185,12 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
             self.assertEqual(len(result["artifact_refs"]), 4)
 
             artifact_dir = Path(result["artifact_dir"])
+            self.assertEqual(len(result["protocol_artifact_refs"]), 1)
+            self.assertEqual(result["protocol_artifact_refs"][0]["artifact_uri"], f"workspace://.astrabridge/capabilities/vision_analyze/{artifact_dir.name}/text.txt")
+            self.assertEqual(len(result["diagnostic_refs"]), 3)
+            self.assertEqual(result["capability_output"]["status"], "ok")
+            self.assertEqual(result["content_parts"][0]["kind"], "text")
+            self.assertEqual(result["content_parts"][1]["kind"], "document")
             request_payload = json.loads((artifact_dir / "request.json").read_text(encoding="utf-8"))
             response_payload = json.loads((artifact_dir / "response.json").read_text(encoding="utf-8"))
             text_value = (artifact_dir / "text.txt").read_text(encoding="utf-8")

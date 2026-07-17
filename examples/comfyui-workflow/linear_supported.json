@@ -1,0 +1,371 @@
+{
+  "version": 1.0,
+  "state": {
+    "lastNodeId": 3,
+    "lastLinkId": 2
+  },
+  "last_node_id": 3,
+  "last_link_id": 2,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "astrabridge/agent",
+      "title": "Planner Agent",
+      "pos": [40, 120],
+      "size": [280, 180],
+      "inputs": [
+        {
+          "name": "Task context",
+          "type": "text",
+          "id": "task_context",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Task draft",
+          "type": "structured_json",
+          "id": "machine_result",
+          "shape": "single",
+          "required": true,
+          "schema_ref": "schema.node_planner.machine_result"
+        }
+      ],
+      "widgets_values": ["Planner Agent", "supervisor", "qwen", "qwen3.7-plus"],
+      "properties": {
+        "Node name for S&R": "AstraBridge Agent",
+        "astrabridge": {
+          "node_id": "node_planner",
+          "label": "Planner Agent",
+          "role": "supervisor",
+          "card_ref": "agent_card_comfyui_agent",
+          "node_type_id": "agent_model",
+          "node_type_config": {
+            "routing": {
+              "selection_mode": "explicit",
+              "provider_id": "qwen",
+              "model_id": "qwen3.7-plus"
+            },
+            "prompt": {
+              "template_mode": "inline",
+              "template": "Plan the next bounded action."
+            },
+            "execution": {
+              "spawn_mode": "inline_lane",
+              "timeout_ms": 120000,
+              "retry_policy": {
+                "max_attempts": 1
+              },
+              "execution_backend": "app_server",
+              "collaboration_mode": "default"
+            },
+            "safety": {
+              "risk_class": "low",
+              "allow_provider_calls": true,
+              "allow_code_changes": false,
+              "allow_install": false,
+              "requires_human_approval": false
+            }
+          },
+          "routing": {
+            "selection_mode": "explicit",
+            "provider_id": "qwen",
+            "model_id": "qwen3.7-plus"
+          },
+          "prompt": {
+            "template_mode": "inline",
+            "template": "Plan the next bounded action."
+          },
+          "tools": {
+            "approval_mode": "ask",
+            "allowed_tool_classes": []
+          },
+          "input_contract": {
+            "mode": "task_context_and_typed_ports",
+            "port_ids": ["task_context"]
+          },
+          "output_contract": {
+            "mode": "structured_and_artifacts",
+            "machine_result_schema_ref": "schema.node_planner.machine_result",
+            "artifact_specs": [],
+            "human_summary_required": true
+          },
+          "execution": {
+            "spawn_mode": "inline_lane",
+            "timeout_ms": 120000,
+            "retry_policy": {
+              "max_attempts": 1
+            },
+            "execution_backend": "app_server",
+            "collaboration_mode": "default"
+          },
+          "safety": {
+            "risk_class": "low",
+            "allow_provider_calls": true,
+            "allow_code_changes": false,
+            "allow_install": false,
+            "requires_human_approval": false
+          },
+          "status": "ready"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "astrabridge/mcp_tool",
+      "title": "Inspect Policy",
+      "pos": [380, 120],
+      "size": [260, 160],
+      "inputs": [
+        {
+          "name": "Task draft",
+          "type": "structured_json",
+          "id": "task_context",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Tool result",
+          "type": "tool_result",
+          "id": "tool_result",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "widgets_values": ["filesystem", "read_file"],
+      "properties": {
+        "Node name for S&R": "AstraBridge MCP Tool",
+        "astrabridge": {
+          "node_id": "node_tool",
+          "label": "Inspect Policy",
+          "role": "custom",
+          "card_ref": "agent_card_comfyui_mcp_tool",
+          "node_type_id": "mcp_tool",
+          "node_type_config": {
+            "server": "filesystem",
+            "tool": "read_file"
+          },
+          "server": "filesystem",
+          "tool": "read_file",
+          "routing": {},
+          "prompt": {
+            "template_mode": "inline",
+            "template": "Run the declared MCP tool."
+          },
+          "tools": {
+            "approval_mode": "ask",
+            "allowed_tool_classes": []
+          },
+          "input_contract": {
+            "mode": "typed_ports",
+            "port_ids": ["task_context"]
+          },
+          "output_contract": {
+            "mode": "artifact_only",
+            "artifact_specs": [],
+            "human_summary_required": true
+          },
+          "execution": {
+            "spawn_mode": "inline_lane",
+            "timeout_ms": 120000,
+            "retry_policy": {
+              "max_attempts": 1
+            },
+            "execution_backend": "app_server",
+            "collaboration_mode": "default"
+          },
+          "safety": {
+            "risk_class": "low",
+            "allow_provider_calls": false,
+            "allow_code_changes": false,
+            "allow_install": false,
+            "requires_human_approval": false
+          },
+          "status": "ready"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "astrabridge/artifact_sink",
+      "title": "Archive Result",
+      "pos": [720, 120],
+      "size": [240, 150],
+      "inputs": [
+        {
+          "name": "Artifact input",
+          "type": "tool_result",
+          "id": "artifact_input",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Artifact record",
+          "type": "structured_json",
+          "id": "artifact_record",
+          "shape": "single",
+          "required": true
+        }
+      ],
+      "widgets_values": ["validation_report"],
+      "properties": {
+        "Node name for S&R": "AstraBridge Artifact Sink",
+        "astrabridge": {
+          "node_id": "node_sink",
+          "label": "Archive Result",
+          "role": "custom",
+          "card_ref": "agent_card_comfyui_artifact_sink",
+          "node_type_id": "artifact_sink",
+          "node_type_config": {
+            "target_kind": "validation_report"
+          },
+          "target_kind": "validation_report",
+          "routing": {},
+          "prompt": {
+            "template_mode": "inline",
+            "template": "Persist the final result."
+          },
+          "tools": {
+            "approval_mode": "deny",
+            "allowed_tool_classes": []
+          },
+          "input_contract": {
+            "mode": "typed_ports",
+            "port_ids": ["artifact_input"]
+          },
+          "output_contract": {
+            "mode": "artifact_only",
+            "artifact_specs": [
+              {
+                "kind": "validation_report",
+                "id": "artifact_record"
+              }
+            ],
+            "human_summary_required": true
+          },
+          "execution": {
+            "spawn_mode": "inline_lane",
+            "timeout_ms": 120000,
+            "retry_policy": {
+              "max_attempts": 1
+            },
+            "execution_backend": "app_server",
+            "collaboration_mode": "default"
+          },
+          "safety": {
+            "risk_class": "low",
+            "allow_provider_calls": false,
+            "allow_code_changes": false,
+            "allow_install": false,
+            "requires_human_approval": false
+          },
+          "status": "ready"
+        }
+      }
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "structured_json"],
+    [2, 2, 0, 3, 0, "tool_result"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "astrabridge": {
+      "graph_id": "graph_comfyui_linear_supported",
+      "task_id": "task_comfyui_examples",
+      "metadata": {
+        "title": "Linear Supported Workflow",
+        "template_id": "custom_blank_graph",
+        "created_at": "2026-07-17T00:00:00Z",
+        "updated_at": "2026-07-17T00:00:00Z",
+        "description": "Representative linear supported ComfyUI workflow for the AstraBridge adapter.",
+        "tags": ["comfyui", "linear"],
+        "owners": []
+      },
+      "graph_policy": {
+        "entry_node_ids": ["node_planner"],
+        "max_depth": 4,
+        "default_permission_mode": "ask",
+        "default_collaboration_mode": "default",
+        "default_execution_backend": "app_server",
+        "requires_dry_run_before_live": true
+      },
+      "schema_registry": {
+        "schema.node_planner.machine_result": {
+          "type": "object",
+          "properties": {
+            "plan": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "migration": {
+        "source_kind": "comfyui_fixture"
+      },
+      "links": {
+        "1": {
+          "edge_id": "edge_planner_tool",
+          "edge_type": "artifact_handoff",
+          "handoff_contract": {
+            "message_template": "Deliver the task draft to the MCP tool.",
+            "message_part_modes": ["machine_result", "artifact_ref"],
+            "required_output_schema_refs": ["schema.node_planner.machine_result"],
+            "port_bindings": [
+              {
+                "from_port_id": "machine_result",
+                "to_port_id": "task_context"
+              }
+            ]
+          },
+          "context_policy": {
+            "policy_id": "policy_edge_planner_tool",
+            "history_mode": "explicit_refs_only",
+            "artifact_mode": "required_output_only",
+            "exclude_private_memory": true,
+            "include_machine_results": true,
+            "include_human_summaries": true,
+            "summary_strategy": "human_and_machine"
+          },
+          "status": "ready",
+          "source_port_id": "machine_result",
+          "target_port_id": "task_context"
+        },
+        "2": {
+          "edge_id": "edge_tool_sink",
+          "edge_type": "artifact_handoff",
+          "handoff_contract": {
+            "message_template": "Persist the tool result as the terminal artifact.",
+            "message_part_modes": ["machine_result", "artifact_ref"],
+            "required_output_schema_refs": [],
+            "port_bindings": [
+              {
+                "from_port_id": "tool_result",
+                "to_port_id": "artifact_input"
+              }
+            ]
+          },
+          "context_policy": {
+            "policy_id": "policy_edge_tool_sink",
+            "history_mode": "explicit_refs_only",
+            "artifact_mode": "required_output_only",
+            "exclude_private_memory": true,
+            "include_machine_results": true,
+            "include_human_summaries": true,
+            "summary_strategy": "human_and_machine"
+          },
+          "status": "ready",
+          "source_port_id": "tool_result",
+          "target_port_id": "artifact_input"
+        }
+      },
+      "state_version": 1
+    }
+  }
+}

@@ -174,7 +174,7 @@
         "task_id": {"$ref": "#/$defs/Identifier"},
         "trace_id": {"$ref": "#/$defs/Identifier"},
         "sequence": {"type": "integer", "minimum": 0},
-        "event_type": {"type": "string", "enum": ["run_created", "run_dry_run_started", "run_dry_run_completed", "node_queued", "node_started", "node_progress", "node_completed", "node_blocked", "node_failed", "node_cancelled", "artifact_created", "artifact_redacted", "approval_requested", "approval_resolved", "handoff_created", "run_cancel_requested", "run_cancelled", "run_completed", "run_failed", "run_rolled_back"]},
+        "event_type": {"type": "string", "enum": ["run_created", "run_dry_run_started", "run_dry_run_completed", "node_queued", "node_started", "node_progress", "node_completed", "node_blocked", "node_failed", "node_cancelled", "artifact_created", "artifact_redacted", "approval_requested", "approval_resolved", "handoff_created", "handoff_acknowledged", "handoff_rejected", "handoff_retry_scheduled", "handoff_delivery_failed", "run_cancel_requested", "run_cancelled", "run_completed", "run_failed", "run_rolled_back"]},
         "created_at": {"$ref": "#/$defs/Timestamp"},
         "payload": {"$ref": "#/$defs/LooseObject"},
         "artifact_refs": {"type": "array", "items": {"$ref": "#/$defs/ArtifactRef"}}

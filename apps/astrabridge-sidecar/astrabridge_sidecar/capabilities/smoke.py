@@ -401,7 +401,12 @@ def _provider_status_notes(capability_id: str, result: dict[str, Any]) -> tuple[
     if capability_id in {"vision.analyze", "speech.transcribe"} and not str(result.get("text") or "").strip():
         notes.append("Provider returned no visible text for the fixture; transport passed but semantic output is empty.")
         return "warn", notes
-    if capability_id == "speech.synthesize" and not result.get("audio_bytes_base64") and not result.get("artifact_refs"):
+    if (
+        capability_id == "speech.synthesize"
+        and not result.get("audio_bytes_base64")
+        and not result.get("artifact_refs")
+        and not result.get("protocol_artifact_refs")
+    ):
         notes.append("Provider returned no audio artifact for the fixture.")
         return "warn", notes
     if capability_id == "image.generate" and not _has_persisted_image_artifact(result.get("artifact_refs") or []):

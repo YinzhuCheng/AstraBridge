@@ -3,6 +3,14 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .mcp_node_policy import resolve_node_mcp_tool_policy
+from .node_type_registry import (
+    NODE_TYPE_ROLE_IDS,
+    compatible_roles_for_kind,
+    default_role_for_kind,
+    project_task_graph_kind,
+    resolve_node_type,
+)
 from .security import DESKTOP_KEY_PATH_RE, SECRET_RE, SecurityError
 from .task_graph_contract import (
     ARTIFACT_KINDS,
@@ -31,35 +39,12 @@ PORT_TYPES = ("text", "structured_json", "image", "audio", "video", "document", 
 PORT_SHAPES = ("single", "list")
 SUBAGENT_ISOLATION_MODES = ("lane", "worktree")
 UI_LAYOUT_MODES = ("canvas", "inspector_only")
-NODE_ROLES = (
-    "supervisor",
-    "worker",
-    "synthesizer",
-    "extractor",
-    "validator",
-    "reviewer",
-    "planner",
-    "coder",
-    "researcher",
-    "gate",
-    "custom",
-)
 MESSAGE_PART_MODES = ("machine_result", "human_summary", "artifact_ref", "structured_json", "text")
 SOURCE_KINDS = ("native_authoring", "legacy_task_graph", "imported_file")
 
 _DEFAULT_CREATED_AT = "2026-07-07T00:00:00+09:00"
 _DEFAULT_UPDATED_AT = "2026-07-07T00:05:00+09:00"
 _DEFAULT_PROMPT = "TODO: replace migration stub with a canonical prompt template."
-_ROLE_COMPATIBILITY: dict[str, set[str]] = {
-    "supervisor": {"supervisor", "planner"},
-    "worker": {"worker", "coder", "researcher", "custom"},
-    "synthesizer": {"synthesizer"},
-    "extractor": {"extractor", "researcher"},
-    "validator": {"validator"},
-    "reviewer": {"reviewer"},
-    "gate": {"gate"},
-    "artifact_source": {"custom"},
-}
 
 
 def validate_agent_orchestration_graph(
@@ -112,6 +97,8 @@ def validate_agent_orchestration_graph(
     node_ids: set[str] = set()
     node_schema_refs: dict[str, str] = {}
     node_ports: dict[str, dict[str, dict[str, Any]]] = {}
+    allow_unknown_node_types = str(dict(normalized.get("migration") or {}).get("source_kind") or "").strip() == "imported_file"
+    validated_nodes: list[dict[str, Any]] = []
     for node in normalized["nodes"]:
         validated_node = _validate_node(
             node,
@@ -122,6 +109,7 @@ def validate_agent_orchestration_graph(
             known_provider_ids=known_provider_ids or set(),
             known_model_ids=known_model_ids or set(),
             known_model_capabilities=known_model_capabilities or {},
+            allow_unknown_node_types=allow_unknown_node_types,
         )
         node_id = validated_node["node_id"]
         if node_id in node_ids:
@@ -135,6 +123,8 @@ def validate_agent_orchestration_graph(
             "inputs": {str(item["port_id"]): item for item in list(ports.get("inputs") or []) if isinstance(item, dict)},
             "outputs": {str(item["port_id"]): item for item in list(ports.get("outputs") or []) if isinstance(item, dict)},
         }
+        validated_nodes.append(validated_node)
+    normalized["nodes"] = validated_nodes
 
     edge_ids: set[str] = set()
     adjacency: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
@@ -197,9 +187,22 @@ def lift_task_graph_to_agent_orchestration_graph(task_graph: dict[str, Any]) -> 
         )
         prompt_template = str(node.get("human_summary_template") or "").strip() or _DEFAULT_PROMPT
         warnings.append(f"node:{node['node_id']}: lifted legacy graph without first-class prompt definition")
-        warnings.append(f"node:{node['node_id']}: lifted legacy graph without explicit tool policy")
+        if not isinstance(node.get("tools"), dict):
+            warnings.append(f"node:{node['node_id']}: lifted legacy graph without explicit tool policy")
         positions[str(node["node_id"])] = deepcopy(node["position"])
         node_schema_refs[str(node["node_id"])] = schema_ref
+        lifted_tools = (
+            deepcopy(node.get("tools"))
+            if isinstance(node.get("tools"), dict)
+            else {
+                "approval_mode": "ask",
+                "allowed_tool_classes": [],
+                "supports_mcp": False,
+                "supports_web": False,
+                "supports_apply_patch": bool(execution_policy.get("allow_code_changes")),
+                "supports_shell": bool(execution_policy.get("allow_code_changes") or execution_policy.get("allow_install")),
+            }
+        )
         nodes.append(
             {
                 "node_id": node["node_id"],
@@ -212,14 +215,7 @@ def lift_task_graph_to_agent_orchestration_graph(task_graph: dict[str, Any]) -> 
                     "template_mode": "migration_stub",
                     "template": prompt_template,
                 },
-                "tools": {
-                    "approval_mode": "ask",
-                    "allowed_tool_classes": [],
-                    "supports_mcp": False,
-                    "supports_web": False,
-                    "supports_apply_patch": bool(execution_policy.get("allow_code_changes")),
-                    "supports_shell": bool(execution_policy.get("allow_code_changes") or execution_policy.get("allow_install")),
-                },
+                "tools": lifted_tools,
                 "ports": {
                     "inputs": [
                         {
@@ -288,7 +284,13 @@ def lift_task_graph_to_agent_orchestration_graph(task_graph: dict[str, Any]) -> 
             }
         )
 
-    warnings.append("graph: lifted legacy task graph without graph_policy.max_depth; defaulted to 2")
+    legacy_graph_policy = deepcopy(dict(legacy.get("graph_policy") or {}))
+    raw_max_depth = legacy_graph_policy.get("max_depth")
+    if isinstance(raw_max_depth, int) and raw_max_depth > 0:
+        max_depth = raw_max_depth
+    else:
+        warnings.append("graph: lifted legacy task graph without graph_policy.max_depth; defaulted to 2")
+        max_depth = 2
     lifted = {
         "schema_version": AGENT_ORCHESTRATION_SCHEMA_VERSION,
         "graph_id": legacy["graph_id"],
@@ -305,11 +307,12 @@ def lift_task_graph_to_agent_orchestration_graph(task_graph: dict[str, Any]) -> 
         },
         "graph_policy": {
             "entry_node_ids": list(dict(legacy["graph_policy"]).get("entry_node_ids") or []),
-            "max_depth": 2,
+            "max_depth": max_depth,
             "default_permission_mode": "ask",
             "default_collaboration_mode": "default",
             "default_execution_backend": "app_server",
             "requires_dry_run_before_live": True,
+            "mcp_policy": deepcopy(legacy_graph_policy.get("mcp_policy") or {}),
         },
         "nodes": nodes,
         "edges": edges,
@@ -343,9 +346,10 @@ def lower_agent_orchestration_graph_to_task_graph(graph: dict[str, Any]) -> dict
         lowered_node: dict[str, Any] = {
             "node_id": node["node_id"],
             "graph_id": canonical["graph_id"],
-            "kind": node["kind"],
+            "kind": project_task_graph_kind(authored_kind=str(node["kind"]), allow_unknown=True),
             "label": node["label"],
             "agent_card_ref": node["card_ref"],
+            "tools": deepcopy(dict(node.get("tools") or {})),
             "execution_policy": {
                 "spawn_mode": node["execution"]["spawn_mode"],
                 "retry_policy": deepcopy(node["execution"]["retry_policy"]),
@@ -362,12 +366,26 @@ def lower_agent_orchestration_graph_to_task_graph(graph: dict[str, Any]) -> dict
             },
             "position": deepcopy(node["ui"]["position"]),
             "status": node["status"],
+            "ui_hints": {
+                "node_type_id": str(node.get("resolved_node_type_id") or ""),
+                "node_type_registry_fingerprint": str(node.get("node_type_registry_fingerprint") or ""),
+                "palette_role": str(node.get("role") or "custom"),
+            },
         }
         if machine_schema_ref:
             lowered_node["output_contract"]["machine_result_schema"] = deepcopy(schema_registry.get(machine_schema_ref) or {"type": "object"})
         approval_kind = str(node["safety"].get("approval_kind") or "").strip()
         if approval_kind:
             lowered_node["approval_gate"] = {"review_kind": approval_kind}
+        diagnostics = [
+            deepcopy(item)
+            for item in list(node.get("node_type_diagnostics") or [])
+            if isinstance(item, dict)
+        ]
+        if diagnostics:
+            lowered_node["status"] = "disabled"
+            lowered_node["ui_hints"]["node_type_diagnostics"] = diagnostics
+            lowered_node["ui_hints"]["original_node_type_kind"] = str(node.get("kind") or "")
         nodes.append(lowered_node)
 
     edges: list[dict[str, Any]] = []
@@ -393,7 +411,10 @@ def lower_agent_orchestration_graph_to_task_graph(graph: dict[str, Any]) -> dict
         "status": canonical["status"],
         "nodes": nodes,
         "edges": edges,
-        "graph_policy": {"entry_node_ids": list(canonical["graph_policy"]["entry_node_ids"])},
+        "graph_policy": {
+            "entry_node_ids": list(canonical["graph_policy"]["entry_node_ids"]),
+            "mcp_policy": deepcopy(dict(canonical["graph_policy"]).get("mcp_policy") or {}),
+        },
         "created_at": canonical["metadata"]["created_at"],
         "updated_at": canonical["metadata"]["updated_at"],
         "state_version": canonical["state_version"],
@@ -449,6 +470,13 @@ def _validate_graph_policy(value: Any) -> None:
     _require_enum(data["default_collaboration_mode"], field="graph_policy.default_collaboration_mode", allowed=COLLABORATION_MODES)
     _require_enum(data["default_execution_backend"], field="graph_policy.default_execution_backend", allowed=EXECUTION_BACKENDS)
     _require_bool(data["requires_dry_run_before_live"], field="graph_policy.requires_dry_run_before_live")
+    if data.get("mcp_policy") is not None:
+        resolve_node_mcp_tool_policy(
+            tools={},
+            graph_policy={"mcp_policy": deepcopy(data.get("mcp_policy"))},
+            mcp_preset_ids=[],
+            node_id="graph_policy_validation",
+        )
 
 
 def _validate_node(
@@ -461,6 +489,7 @@ def _validate_node(
     known_provider_ids: set[str],
     known_model_ids: set[str],
     known_model_capabilities: dict[str, dict[str, Any]],
+    allow_unknown_node_types: bool,
 ) -> dict[str, Any]:
     data = _ensure_dict(value, "agent_orchestration_node")
     _require_fields(
@@ -470,14 +499,22 @@ def _validate_node(
     )
     validated = deepcopy(data)
     validated["node_id"] = _require_non_empty_string(validated["node_id"], field="agent_orchestration_node.node_id")
-    _require_enum(validated["kind"], field="agent_orchestration_node.kind", allowed=NODE_KINDS)
+    validated["kind"] = _require_non_empty_string(validated["kind"], field="agent_orchestration_node.kind")
     _require_non_empty_string(validated["label"], field="agent_orchestration_node.label")
-    _require_enum(validated["role"], field="agent_orchestration_node.role", allowed=NODE_ROLES)
+    _require_enum(validated["role"], field="agent_orchestration_node.role", allowed=NODE_TYPE_ROLE_IDS)
     _require_non_empty_string(validated["card_ref"], field="agent_orchestration_node.card_ref")
     _require_enum(validated["status"], field="agent_orchestration_node.status", allowed=NODE_DEFINITION_STATUSES)
-    allowed_roles = _ROLE_COMPATIBILITY.get(str(validated["kind"]), {"custom"})
+    resolved_node_type = resolve_node_type(str(validated["kind"]), allow_unknown=allow_unknown_node_types)
+    allowed_roles = compatible_roles_for_kind(str(validated["kind"]))
     if str(validated["role"]) not in allowed_roles:
         raise ValueError(f"agent_orchestration_node.role {validated['role']} is incompatible with kind {validated['kind']}.")
+    validated["resolved_node_type_id"] = str(resolved_node_type.get("resolved_type_id") or "")
+    validated["resolved_node_type_version"] = int(dict(resolved_node_type.get("spec") or {}).get("version") or 1)
+    validated["node_type_registry_fingerprint"] = str(resolved_node_type.get("registry_fingerprint") or "")
+    diagnostics = [deepcopy(item) for item in list(resolved_node_type.get("diagnostics") or []) if isinstance(item, dict)]
+    if diagnostics:
+        validated["status"] = "disabled"
+        validated["node_type_diagnostics"] = diagnostics
     _validate_prompt(validated["prompt"], node_id=validated["node_id"], prompt_registry=prompt_registry)
     _validate_tools(validated["tools"], node_id=validated["node_id"])
     _validate_output_contract(validated["output_contract"], node_id=validated["node_id"], schema_registry=schema_registry)
@@ -614,6 +651,16 @@ def _validate_tools(value: Any, *, node_id: str) -> None:
     _require_enum(data["approval_mode"], field=f"tools[{node_id}].approval_mode", allowed=TOOL_APPROVAL_MODES)
     if not isinstance(data["allowed_tool_classes"], list) or not all(isinstance(item, str) for item in data["allowed_tool_classes"]):
         raise ValueError(f"tools[{node_id}].allowed_tool_classes must be a list of strings.")
+    resolve_node_mcp_tool_policy(
+        tools=deepcopy(data),
+        mcp_preset_ids=[
+            str(item).strip()
+            for item in list(data.get("mcp_preset_ids") or [])
+            if str(item or "").strip()
+        ],
+        graph_policy={},
+        node_id=node_id,
+    )
 
 
 def _validate_input_contract(value: Any, *, node_id: str, schema_registry: dict[str, Any], input_port_ids: set[str]) -> None:
@@ -971,17 +1018,7 @@ def _risk_class_for_legacy_policy(execution_policy: dict[str, Any]) -> str:
 
 
 def _default_role_for_kind(kind: str) -> str:
-    defaults = {
-        "supervisor": "supervisor",
-        "worker": "worker",
-        "synthesizer": "synthesizer",
-        "extractor": "extractor",
-        "validator": "validator",
-        "reviewer": "reviewer",
-        "gate": "gate",
-        "artifact_source": "custom",
-    }
-    return defaults.get(kind, "custom")
+    return default_role_for_kind(kind)
 
 
 def _artifact_kind_to_port_type(kind: str) -> str:

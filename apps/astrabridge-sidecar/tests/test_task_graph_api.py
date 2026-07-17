@@ -19,6 +19,18 @@ from astrabridge_sidecar.server import Handler
 from astrabridge_sidecar.task_service import GRAPH_DEFINITION_LIMIT, TaskService
 
 
+COMFYUI_EXAMPLE_ROOT = Path(__file__).resolve().parents[3] / "examples" / "comfyui-workflow"
+LANGGRAPH_EXAMPLE_ROOT = Path(__file__).resolve().parents[3] / "examples" / "langgraph-stategraph"
+
+
+def _load_comfyui_example_text(name: str) -> str:
+    return (COMFYUI_EXAMPLE_ROOT / name).read_text(encoding="utf-8")
+
+
+def _load_langgraph_example_text(name: str) -> str:
+    return (LANGGRAPH_EXAMPLE_ROOT / name).read_text(encoding="utf-8")
+
+
 class TaskGraphApiTests(unittest.TestCase):
     def test_orchestration_sync_promotes_reachable_drafts_and_prunes_disconnected_records(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -127,6 +139,169 @@ class TaskGraphApiTests(unittest.TestCase):
             self.assertEqual(diff_report["summary"]["change_count"], 0)
             self.assertEqual(reexported["orchestration_graph"]["nodes"][0]["ports"]["inputs"][1]["port_type"], "image")
             self.assertEqual(reexported["orchestration_graph"]["edges"][0]["handoff_contract"]["port_bindings"][1]["to_port_id"], "probe_image")
+
+    def test_comfyui_import_export_reimport_round_trip_preserves_semantics_and_defaults_to_comfyui_format(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("ComfyUI Round Trip", root / "comfyui-roundtrip.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task("ComfyUI round-trip task")
+
+            imported = tasks.import_graph_from_orchestration_file(
+                {"graph_text": _load_comfyui_example_text("branched_multimodal_supported.json")}
+            )
+            exported = tasks.export_graph_for_orchestration_file({"graph_id": imported["graph"]["graph_id"]})
+            reimported = tasks.import_graph_from_orchestration_file({"graph_text": exported["serialized_text"]})
+            diff_report = diff_agent_orchestration_graphs(imported["orchestration_graph"], reimported["orchestration_graph"])
+
+            first_node = imported["graph"]["nodes"][0]
+            self.assertEqual(imported["source_format"], "comfyui_workflow")
+            self.assertEqual(imported["loss_report"]["status"], "pass")
+            self.assertEqual(first_node["ui_hints"]["node_type_config"]["artifact_uri"], "workspace://PRIVATE/comfyui/inputs/request.md")
+            self.assertEqual(exported["source_format"], "comfyui_workflow")
+            self.assertEqual(exported["export_format"], "comfyui_workflow")
+            self.assertEqual(diff_report["status"], "no_change")
+            self.assertEqual(diff_report["summary"]["change_count"], 0)
+
+    def test_comfyui_import_reexports_updated_node_type_config_from_task_graph_ui_hints(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("ComfyUI UI Edit", root / "comfyui-ui-edit.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task("ComfyUI UI edit task")
+
+            imported = tasks.import_graph_from_orchestration_file(
+                {"graph_text": _load_comfyui_example_text("linear_supported.json")}
+            )
+            edited_graph = deepcopy(imported["graph"])
+            tool_node = next(item for item in edited_graph["nodes"] if item["kind"] == "mcp_tool")
+            tool_node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["server"] = "workspace"
+            tool_node["ui_hints"]["node_type_config"]["tool"] = "list_directory"
+
+            saved = tasks.save_graph_definition({"graph": edited_graph})
+            exported = tasks.export_graph_for_orchestration_file({"graph_id": saved["graph"]["graph_id"]})
+            workflow = json.loads(exported["serialized_text"])
+            exported_tool = next(item for item in workflow["nodes"] if item["type"] == "astrabridge/mcp_tool")
+
+            self.assertEqual(exported["export_format"], "comfyui_workflow")
+            self.assertEqual(exported_tool["properties"]["astrabridge"]["node_type_config"]["server"], "workspace")
+            self.assertEqual(exported_tool["properties"]["astrabridge"]["node_type_config"]["tool"], "list_directory")
+            self.assertEqual(exported_tool["widgets_values"][:2], ["workspace", "list_directory"])
+
+    def test_langgraph_import_export_reimport_round_trip_preserves_semantics_and_defaults_to_langgraph_format(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("LangGraph Round Trip", root / "langgraph-roundtrip.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task("LangGraph round-trip task")
+
+            imported = tasks.import_graph_from_orchestration_file(
+                {"graph_text": _load_langgraph_example_text("conditional_subgraph_interrupt_supported.json")}
+            )
+            exported = tasks.export_graph_for_orchestration_file({"graph_id": imported["graph"]["graph_id"]})
+            reimported = tasks.import_graph_from_orchestration_file({"graph_text": exported["serialized_text"]})
+            diff_report = diff_agent_orchestration_graphs(imported["orchestration_graph"], reimported["orchestration_graph"])
+
+            route_node = next(item for item in imported["graph"]["nodes"] if item["kind"] == "router_condition")
+            self.assertEqual(imported["source_format"], "langgraph_stategraph_manifest")
+            self.assertEqual(imported["loss_report"]["status"], "pass")
+            self.assertEqual(route_node["ui_hints"]["node_type_config"]["condition"]["field"], "route")
+            self.assertEqual(exported["source_format"], "langgraph_stategraph_manifest")
+            self.assertEqual(exported["export_format"], "langgraph_stategraph_manifest")
+            self.assertIn("builder.add_conditional_edges", exported["generated_python"])
+            self.assertEqual(diff_report["status"], "no_change")
+            self.assertEqual(diff_report["summary"]["change_count"], 0)
+
+    def test_langgraph_import_reexports_updated_node_type_config_from_task_graph_ui_hints(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("LangGraph UI Edit", root / "langgraph-ui-edit.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task("LangGraph UI edit task")
+
+            imported = tasks.import_graph_from_orchestration_file(
+                {"graph_text": _load_langgraph_example_text("conditional_subgraph_interrupt_supported.json")}
+            )
+            edited_graph = deepcopy(imported["graph"])
+            subgraph_node = next(item for item in edited_graph["nodes"] if item["kind"] == "subgraph")
+            subgraph_node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["graph_ref"] = "graph_review_subflow_v2"
+
+            saved = tasks.save_graph_definition({"graph": edited_graph})
+            exported = tasks.export_graph_for_orchestration_file({"graph_id": saved["graph"]["graph_id"]})
+            manifest = json.loads(exported["serialized_text"])
+            exported_subgraph = next(item for item in manifest["graph"]["nodes"] if item["type"] == "astrabridge/subgraph")
+
+            self.assertEqual(exported["export_format"], "langgraph_stategraph_manifest")
+            self.assertEqual(exported_subgraph["node_type_config"]["graph_ref"], "graph_review_subflow_v2")
+
+    def test_http_task_graph_import_export_supports_langgraph_manifest_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("HTTP LangGraph", root / "http-langgraph.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task("HTTP LangGraph task")
+
+            class Context:
+                admin_token = "unit-admin-token"
+
+            Context.projects = projects
+            Context.tasks = tasks
+
+            class TaskGraphHandler(Handler):
+                pass
+
+            TaskGraphHandler.context = Context()  # type: ignore[assignment]
+            server = ThreadingHTTPServer(("127.0.0.1", 0), TaskGraphHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base_url = f"http://127.0.0.1:{server.server_address[1]}"
+                imported = _post_json(
+                    base_url + "/api/task-graphs/import",
+                    {"graph_text": _load_langgraph_example_text("conditional_subgraph_interrupt_supported.json")},
+                )
+                exported = _post_json(
+                    base_url + "/api/task-graphs/export",
+                    {"graph_id": imported["graph"]["graph_id"]},
+                )
+
+                self.assertEqual(imported["source_format"], "langgraph_stategraph_manifest")
+                self.assertEqual(exported["source_format"], "langgraph_stategraph_manifest")
+                self.assertEqual(exported["export_format"], "langgraph_stategraph_manifest")
+                self.assertIn("builder.add_conditional_edges", exported["generated_python"])
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
 
     def test_instantiating_a_new_graph_keeps_it_within_the_graph_definition_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -686,6 +861,7 @@ class TaskGraphApiTests(unittest.TestCase):
                         "human_summary": "Smoke worker produced a gate-ready summary.",
                         "machine_result": {
                             "matrix": ["qwen", "kimi"],
+                            "blocked_cases": [],
                             "history_transcript": "should not become downstream history",
                         },
                         "next_action_hints": ["Review the output bundle before the gate node."],
@@ -970,10 +1146,7 @@ class TaskGraphApiTests(unittest.TestCase):
                     fanout_bindings["node_research_a"]["downstream_handoffs"][0]["downstream_input"]["source"],
                     "artifact_refs_and_context_policy",
                 )
-                self.assertEqual(
-                    fanout_bindings["node_research_b"]["downstream_handoffs"][0]["downstream_input"]["source"],
-                    "artifact_refs_and_context_policy",
-                )
+                self.assertEqual(fanout_bindings["node_research_b"]["downstream_handoffs"], [])
                 self.assertGreaterEqual(fanout_current["task"]["graph_activity_summary"]["graph_count"], 3)
                 self.assertGreaterEqual(fanout_current["task"]["graph_activity_summary"]["run_count"], 5)
                 self.assertIn(
@@ -1018,6 +1191,51 @@ class TaskGraphApiTests(unittest.TestCase):
                 )
                 self.assertGreaterEqual(gate_current["task"]["graph_activity_summary"]["graph_count"], 3)
                 self.assertGreaterEqual(gate_current["task"]["graph_activity_summary"]["run_count"], 5)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_http_task_graph_import_export_supports_comfyui_workflow_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("HTTP ComfyUI", root / "http-comfyui.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task("HTTP ComfyUI task")
+
+            class Context:
+                admin_token = "unit-admin-token"
+
+            Context.projects = projects
+            Context.tasks = tasks
+
+            class TaskGraphHandler(Handler):
+                pass
+
+            TaskGraphHandler.context = Context()  # type: ignore[assignment]
+            server = ThreadingHTTPServer(("127.0.0.1", 0), TaskGraphHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base_url = f"http://127.0.0.1:{server.server_address[1]}"
+                imported = _post_json(
+                    base_url + "/api/task-graphs/import",
+                    {"graph_text": _load_comfyui_example_text("linear_supported.json")},
+                )
+                exported = _post_json(
+                    base_url + "/api/task-graphs/export",
+                    {"graph_id": imported["graph"]["graph_id"]},
+                )
+
+                self.assertEqual(imported["source_format"], "comfyui_workflow")
+                self.assertEqual(exported["source_format"], "comfyui_workflow")
+                self.assertEqual(exported["export_format"], "comfyui_workflow")
+                self.assertIn('"type": "astrabridge/mcp_tool"', exported["serialized_text"])
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
@@ -1216,6 +1434,82 @@ class TaskGraphApiTests(unittest.TestCase):
                 self.assertEqual(live_run["graph"]["graph_id"], graph["graph"]["graph_id"])
                 self.assertEqual(live_run["task"]["task_id"], task["task_id"])
                 self.assertNotIn("live_run", live_run)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_live_cancel_and_recover_routes_prefer_runtime_handlers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Graph http", root / "graph-http.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task("Graph http task")
+
+            class Context:
+                admin_token = "unit-admin-token"
+
+            Context.projects = projects
+            Context.tasks = tasks
+
+            class FakeRuntime:
+                def __init__(self) -> None:
+                    self.cancel_payload: dict[str, object] | None = None
+                    self.recover_payload: dict[str, object] | None = None
+
+                def cancel_task_graph_run(self, payload: dict[str, object]) -> dict[str, object]:
+                    self.cancel_payload = dict(payload)
+                    return {
+                        "cancellation": {
+                            "run_id": str(payload.get("run_id") or ""),
+                            "status": "cancelled",
+                            "requested_at": "2026-07-16T10:00:00+09:00",
+                            "interrupt_results": [],
+                        },
+                        "route": "runtime-cancel",
+                    }
+
+                def recover_task_graph_run(self, payload: dict[str, object]) -> dict[str, object]:
+                    self.recover_payload = dict(payload)
+                    return {
+                        "recovery": {
+                            "run_id": str(payload.get("run_id") or ""),
+                            "strategy": str(payload.get("strategy") or ""),
+                            "status": "needs_review",
+                            "safe_to_resume": False,
+                        },
+                        "route": "runtime-recover",
+                    }
+
+            runtime = FakeRuntime()
+            Context.runtime = runtime
+
+            class TaskGraphHandler(Handler):
+                pass
+
+            TaskGraphHandler.context = Context()  # type: ignore[assignment]
+            server = ThreadingHTTPServer(("127.0.0.1", 0), TaskGraphHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base_url = f"http://127.0.0.1:{server.server_address[1]}"
+                cancelled = _post_json(
+                    base_url + "/api/task-graphs/run/cancel",
+                    {"run_id": "graph-run-live-http", "notes": "Cancel from HTTP test"},
+                )
+                recovered = _post_json(
+                    base_url + "/api/task-graphs/run/recover",
+                    {"run_id": "graph-run-live-http", "strategy": "resume_run"},
+                )
+                self.assertEqual(cancelled["route"], "runtime-cancel")
+                self.assertEqual(recovered["route"], "runtime-recover")
+                self.assertEqual(runtime.cancel_payload, {"run_id": "graph-run-live-http", "notes": "Cancel from HTTP test"})
+                self.assertEqual(runtime.recover_payload, {"run_id": "graph-run-live-http", "strategy": "resume_run"})
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

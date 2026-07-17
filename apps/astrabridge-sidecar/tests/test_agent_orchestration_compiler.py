@@ -4,6 +4,7 @@ import sys
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -12,6 +13,7 @@ from astrabridge_sidecar.agent_orchestration_compiler import (  # noqa: E402
     compile_agent_orchestration_graph,
 )
 from astrabridge_sidecar.agent_orchestration_file_format import load_agent_orchestration_example  # noqa: E402
+from astrabridge_sidecar import node_type_registry as node_type_registry_module  # noqa: E402
 
 
 class AgentOrchestrationCompilerTests(unittest.TestCase):
@@ -44,6 +46,29 @@ class AgentOrchestrationCompilerTests(unittest.TestCase):
         self.assertTrue(gate["approval_required"])
         self.assertEqual(gate["join_mode"], "approval_gate_required")
         self.assertIn("node_gate", compiled["approval_nodes"])
+        self.assertEqual(gate["resolved_node_type_id"], "human_approval")
+        self.assertEqual(gate["compiler_executor_id"], "human_approval")
+
+    def test_registry_fingerprint_and_executor_resolution_ignore_ui_hint_changes(self) -> None:
+        graph = load_agent_orchestration_example("supervisor_worker_synthesizer")
+        base_compiled = compile_agent_orchestration_graph(graph)
+        base_specs = list(node_type_registry_module._base_node_type_specs())  # noqa: SLF001
+        mutated_specs = deepcopy(base_specs)
+        mutated_specs[0]["ui_hints"]["icon"] = "rocket"
+        mutated_specs[0]["ui_hints"]["tone"] = "planner"
+
+        with patch.object(node_type_registry_module, "_base_node_type_specs", return_value=tuple(mutated_specs)):
+            mutated_compiled = compile_agent_orchestration_graph(graph)
+
+        self.assertEqual(
+            base_compiled["node_type_registry_fingerprint"],
+            mutated_compiled["node_type_registry_fingerprint"],
+        )
+        base_node = next(item for item in base_compiled["nodes"] if item["node_id"] == "node_supervisor")
+        mutated_node = next(item for item in mutated_compiled["nodes"] if item["node_id"] == "node_supervisor")
+        self.assertEqual(base_node["resolved_node_type_id"], "agent_model")
+        self.assertEqual(mutated_node["resolved_node_type_id"], "agent_model")
+        self.assertEqual(base_node["compiler_executor_id"], mutated_node["compiler_executor_id"])
 
     def test_invalid_cycle_bubbles_up_from_contract_validation(self) -> None:
         graph = load_agent_orchestration_example("code_fix_review")
