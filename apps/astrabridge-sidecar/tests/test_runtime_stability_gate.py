@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import sys
 
@@ -48,10 +50,13 @@ class RuntimeStabilityGateTests(unittest.TestCase):
 
             self.assertEqual(summary["status"], "pass")
             self.assertEqual(summary["mode"], "fast")
-            self.assertEqual(summary["suite_count"], 5)
-            self.assertEqual(len(calls), 5)
+            self.assertEqual(summary["suite_count"], 11)
+            self.assertEqual(len(calls), 11)
             self.assertTrue(Path(summary["artifact_paths"]["summary_json"]).exists())
             self.assertTrue(Path(summary["artifact_paths"]["report_md"]).exists())
+            self.assertTrue(Path(summary["artifact_paths"]["fault_matrix_json"]).exists())
+            self.assertTrue(Path(summary["artifact_paths"]["long_horizon_bundle_json"]).exists())
+            self.assertTrue(Path(summary["artifact_paths"]["injected_chaos_drills_json"]).exists())
             self.assertTrue((root / "PRIVATE" / "runtime-stability").exists())
             for suite in summary["suites"]:
                 self.assertEqual(suite["status"], "pass")
@@ -61,6 +66,18 @@ class RuntimeStabilityGateTests(unittest.TestCase):
                     self.assertTrue(Path(iteration["stderr_path"]).exists())
             self.assertTrue(Path(summary["process_inventories"]["before"]).exists())
             self.assertTrue(Path(summary["process_inventories"]["after"]).exists())
+            self.assertEqual(summary["fault_matrix"]["schema_version"], "astrabridge-runtime-stability-fault-matrix-v1")
+            self.assertEqual(summary["fault_matrix"]["case_count"], 9)
+            self.assertEqual(summary["fault_matrix"]["status"], "partial")
+            self.assertFalse(summary["fault_matrix"]["release_ready"])
+            self.assertEqual(summary["long_horizon_bundle"]["status"], "partial")
+            self.assertFalse(summary["long_horizon_bundle"]["release_qualified"])
+            self.assertIn("supervised_update_policy_and_containment", summary["long_horizon_bundle"]["suite_labels"])
+            self.assertEqual(summary["injected_chaos_drills"]["status"], "partial")
+            self.assertFalse(summary["injected_chaos_drills"]["release_qualified"])
+            self.assertIn("provider_retry_storm_and_circuit_breaker_chaos", summary["injected_chaos_drills"]["drill_labels"])
+            process_kill = next(item for item in summary["fault_matrix"]["cases"] if item["fault_id"] == "process_level_kill")
+            self.assertEqual(process_kill["status"], "partial")
 
     def test_release_mode_marks_gate_failed_when_one_critical_iteration_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -118,11 +135,110 @@ class RuntimeStabilityGateTests(unittest.TestCase):
             self.assertEqual(report["findings"][0]["code"], "secret-like")
             self.assertIn("[redacted]", report["findings"][0]["excerpt"].lower())
 
+    def test_fault_matrix_records_required_failure_classes_and_release_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            def fake_runner(command: list[str], cwd: Path) -> dict[str, object]:  # noqa: ARG001
+                return {"exit_code": 0, "stdout": "ok\n", "stderr": ""}
+
+            summary = run_runtime_stability_gate(
+                workspace_root=root,
+                mode="release",
+                include_fixture_evidence=False,
+                include_process_inventory=False,
+                command_runner=fake_runner,
+            )
+
+            self.assertEqual(summary["fault_matrix"]["status"], "pass")
+            self.assertTrue(summary["fault_matrix"]["release_ready"])
+            self.assertEqual(summary["long_horizon_bundle"]["status"], "pass")
+            self.assertTrue(summary["long_horizon_bundle"]["release_qualified"])
+            self.assertEqual(summary["injected_chaos_drills"]["status"], "pass")
+            self.assertTrue(summary["injected_chaos_drills"]["release_qualified"])
+            by_id = {item["fault_id"]: item for item in summary["fault_matrix"]["cases"]}
+            self.assertEqual(
+                sorted(by_id),
+                sorted(
+                    [
+                        "process_level_kill",
+                        "disk_full_or_read_only",
+                        "sqlite_damage",
+                        "clock_shift",
+                        "network_partition",
+                        "truncated_stream",
+                        "update_interruption",
+                        "multimodal_no_final_answer",
+                        "cross_version",
+                    ]
+                ),
+            )
+            self.assertEqual(by_id["process_level_kill"]["stale_process_count"]["value"], 0)
+            self.assertEqual(by_id["multimodal_no_final_answer"]["downgraded_authority_visibility"]["status"], "pass")
+            for record in by_id.values():
+                self.assertIn("final_state", record)
+                self.assertIn("duplicate_effects", record)
+                self.assertIn("recovery_time", record)
+                self.assertIn("evidence_completeness", record)
+                self.assertIn("stale_process_count", record)
+                self.assertIn("downgraded_authority_visibility", record)
+
+    def test_release_mode_long_horizon_bundle_requires_supervised_updater_containment_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            def fake_runner(command: list[str], cwd: Path) -> dict[str, object]:  # noqa: ARG001
+                return {"exit_code": 0, "stdout": "ok\n", "stderr": ""}
+
+            summary = run_runtime_stability_gate(
+                workspace_root=root,
+                mode="release",
+                include_fixture_evidence=False,
+                include_process_inventory=False,
+                command_runner=fake_runner,
+            )
+
+            bundle = dict(summary["long_horizon_bundle"])
+            self.assertEqual(bundle["bundle_id"], "shipping_state_long_horizon_stability")
+            self.assertEqual(bundle["status"], "pass")
+            self.assertTrue(bundle["release_qualified"])
+            self.assertIn("supervised_update_policy_and_containment", bundle["suite_labels"])
+            supervised_suite = next(item for item in bundle["suites"] if item["label"] == "supervised_update_policy_and_containment")
+            self.assertEqual(supervised_suite["executed_iterations"], 8)
+            self.assertEqual(supervised_suite["required_pass_count"], 8)
+
+    def test_release_mode_requires_provider_retry_storm_chaos_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            def fake_runner(command: list[str], cwd: Path) -> dict[str, object]:  # noqa: ARG001
+                return {"exit_code": 0, "stdout": "ok\n", "stderr": ""}
+
+            summary = run_runtime_stability_gate(
+                workspace_root=root,
+                mode="release",
+                include_fixture_evidence=False,
+                include_process_inventory=False,
+                command_runner=fake_runner,
+            )
+
+            drills = dict(summary["injected_chaos_drills"])
+            self.assertEqual(drills["drill_pack_id"], "cross_lane_injected_chaos")
+            self.assertEqual(drills["status"], "pass")
+            self.assertTrue(drills["release_qualified"])
+            self.assertIn("provider_retry_storm_and_circuit_breaker_chaos", drills["drill_labels"])
+            provider_drill = next(item for item in drills["drills"] if item["label"] == "provider_retry_storm_and_circuit_breaker_chaos")
+            self.assertEqual(provider_drill["executed_iterations"], 8)
+            self.assertEqual(provider_drill["required_pass_count"], 8)
+            self.assertTrue(provider_drill["thresholds"]["retry_budget_exhaustion_stops_after_single_retry"])
+
     def test_fixture_evidence_capture_writes_projection_and_store_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir) / "fixture-evidence"
+            runtime_root = Path(temp_dir) / "runtime-root"
 
-            evidence = capture_runtime_stability_fixture_evidence(output_dir=output_dir)
+            with patch.dict(os.environ, {"ASTRABRIDGE_RUNTIME_ROOT": str(runtime_root)}):
+                evidence = capture_runtime_stability_fixture_evidence(output_dir=output_dir)
 
             self.assertEqual(evidence["status"], "pass")
             self.assertEqual(evidence["provider_gate"]["approved_status"], "completed")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -9,18 +10,24 @@ import urllib.request
 from copy import deepcopy
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from astrabridge_sidecar.agent_orchestration_checks import diff_agent_orchestration_graphs
 from astrabridge_sidecar.agent_orchestration_file_format import load_agent_orchestration_example
+from astrabridge_sidecar.langgraph_stategraph_adapter import LangGraphStateGraphLossError
 from astrabridge_sidecar.project_service import ProjectService
 from astrabridge_sidecar.server import Handler
-from astrabridge_sidecar.task_service import GRAPH_DEFINITION_LIMIT, TaskService
+from astrabridge_sidecar.task_service import GRAPH_DEFINITION_LIMIT, GraphRevisionConflictError, GraphSourceOwnershipError, TaskService
 
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
 COMFYUI_EXAMPLE_ROOT = Path(__file__).resolve().parents[3] / "examples" / "comfyui-workflow"
 LANGGRAPH_EXAMPLE_ROOT = Path(__file__).resolve().parents[3] / "examples" / "langgraph-stategraph"
+TYPESCRIPT_CUSTOM_BLANK_FIXTURE_PATH = (
+    REPO_ROOT / "apps" / "astrabridge-desktop" / "src" / "features" / "runtime" / "fixtures" / "customBlankGraph.fromTs.json"
+)
 
 
 def _load_comfyui_example_text(name: str) -> str:
@@ -31,7 +38,43 @@ def _load_langgraph_example_text(name: str) -> str:
     return (LANGGRAPH_EXAMPLE_ROOT / name).read_text(encoding="utf-8")
 
 
+def _expected_revision_payload(graph: dict[str, Any]) -> dict[str, Any]:
+    revision = dict(graph.get("graph_revision") or {})
+    return {"expected_revision": str(revision.get("revision_id") or "").strip()}
+
+
 class TaskGraphApiTests(unittest.TestCase):
+    def test_task_service_routes_graph_mutation_entrypoints_through_shared_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+
+            with patch.dict(os.environ, {"ASTRABRIDGE_RUNTIME_ROOT": str(root / "runtime-root")}):
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Delegation", root / "delegation.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Delegation task")
+
+                with patch.object(tasks._graph_mutation, "export_graph_for_orchestration_file", return_value={"kind": "export"}) as export_mock, \
+                    patch.object(tasks._graph_mutation, "save_graph_definition", return_value={"kind": "save"}) as save_mock, \
+                    patch.object(tasks._graph_mutation, "import_graph_from_orchestration_file", return_value={"kind": "import"}) as import_mock, \
+                    patch.object(tasks._graph_mutation, "update_graph_node", return_value={"kind": "node"}) as node_mock, \
+                    patch.object(tasks._graph_mutation, "update_graph_edge", return_value={"kind": "edge"}) as edge_mock:
+                    self.assertEqual(tasks.export_graph_for_orchestration_file({"graph_id": "graph-1"})["kind"], "export")
+                    self.assertEqual(tasks.save_graph_definition({"graph": {"graph_id": "graph-1"}})["kind"], "save")
+                    self.assertEqual(tasks.import_graph_from_orchestration_file({"graph_text": "{}"})["kind"], "import")
+                    self.assertEqual(tasks.update_graph_node({"graph_id": "graph-1", "node_id": "node-1"})["kind"], "node")
+                    self.assertEqual(tasks.update_graph_edge({"graph_id": "graph-1", "edge_id": "edge-1"})["kind"], "edge")
+
+                export_mock.assert_called_once()
+                save_mock.assert_called_once()
+                import_mock.assert_called_once()
+                node_mock.assert_called_once()
+                edge_mock.assert_called_once()
+
     def test_orchestration_sync_promotes_reachable_drafts_and_prunes_disconnected_records(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -51,6 +94,7 @@ class TaskGraphApiTests(unittest.TestCase):
                 {
                     "graph_id": graph_id,
                     "node_id": "node_auditor",
+                    **_expected_revision_payload(instantiated["graph"]),
                     "create": {
                         "kind": "artifact_source",
                         "label": "API Auditor",
@@ -68,6 +112,7 @@ class TaskGraphApiTests(unittest.TestCase):
                 {
                     "graph_id": graph_id,
                     "edge_id": "edge_supervisor_auditor",
+                    **_expected_revision_payload(node_update["graph"]),
                     "from_node_id": "node_supervisor",
                     "to_node_id": "node_auditor",
                     "edge_type": "control_dependency",
@@ -116,7 +161,9 @@ class TaskGraphApiTests(unittest.TestCase):
 
             source_graph = load_agent_orchestration_example("multimodal_capability_adapter")
             source_text = json.dumps(source_graph, ensure_ascii=False, indent=2) + "\n"
-            imported = tasks.import_graph_from_orchestration_file({"graph_text": source_text})
+            imported = tasks.import_graph_from_orchestration_file(
+                {"graph_text": source_text, **_expected_revision_payload(instantiated["graph"])}
+            )
             imported_graph = imported["graph"]
             imported_graph_id = imported_graph["graph_id"]
             imported_orchestration = dict(imported["orchestration_graph"] or {})
@@ -127,7 +174,9 @@ class TaskGraphApiTests(unittest.TestCase):
                     "export_path": "PRIVATE/agent-graph-dynamic-workflow/step3-roundtrip/exported-multimodal.json",
                 }
             )
-            reimported = tasks.import_graph_from_orchestration_file({"graph_text": exported["serialized_text"]})
+            reimported = tasks.import_graph_from_orchestration_file(
+                {"graph_text": exported["serialized_text"], **_expected_revision_payload(imported_graph)}
+            )
             reexported = tasks.export_graph_for_orchestration_file({"graph_id": reimported["graph"]["graph_id"]})
             diff_report = diff_agent_orchestration_graphs(imported_orchestration, reexported["orchestration_graph"])
 
@@ -156,8 +205,12 @@ class TaskGraphApiTests(unittest.TestCase):
             imported = tasks.import_graph_from_orchestration_file(
                 {"graph_text": _load_comfyui_example_text("branched_multimodal_supported.json")}
             )
-            exported = tasks.export_graph_for_orchestration_file({"graph_id": imported["graph"]["graph_id"]})
-            reimported = tasks.import_graph_from_orchestration_file({"graph_text": exported["serialized_text"]})
+            exported = tasks.export_graph_for_orchestration_file(
+                {"graph_id": imported["graph"]["graph_id"], "emit_generated_python": False}
+            )
+            reimported = tasks.import_graph_from_orchestration_file(
+                {"graph_text": exported["serialized_text"], **_expected_revision_payload(imported["graph"])}
+            )
             diff_report = diff_agent_orchestration_graphs(imported["orchestration_graph"], reimported["orchestration_graph"])
 
             first_node = imported["graph"]["nodes"][0]
@@ -216,8 +269,12 @@ class TaskGraphApiTests(unittest.TestCase):
             imported = tasks.import_graph_from_orchestration_file(
                 {"graph_text": _load_langgraph_example_text("conditional_subgraph_interrupt_supported.json")}
             )
-            exported = tasks.export_graph_for_orchestration_file({"graph_id": imported["graph"]["graph_id"]})
-            reimported = tasks.import_graph_from_orchestration_file({"graph_text": exported["serialized_text"]})
+            exported = tasks.export_graph_for_orchestration_file(
+                {"graph_id": imported["graph"]["graph_id"], "emit_generated_python": False}
+            )
+            reimported = tasks.import_graph_from_orchestration_file(
+                {"graph_text": exported["serialized_text"], **_expected_revision_payload(imported["graph"])}
+            )
             diff_report = diff_agent_orchestration_graphs(imported["orchestration_graph"], reimported["orchestration_graph"])
 
             route_node = next(item for item in imported["graph"]["nodes"] if item["kind"] == "router_condition")
@@ -226,7 +283,7 @@ class TaskGraphApiTests(unittest.TestCase):
             self.assertEqual(route_node["ui_hints"]["node_type_config"]["condition"]["field"], "route")
             self.assertEqual(exported["source_format"], "langgraph_stategraph_manifest")
             self.assertEqual(exported["export_format"], "langgraph_stategraph_manifest")
-            self.assertIn("builder.add_conditional_edges", exported["generated_python"])
+            self.assertIsNone(exported["generated_python"])
             self.assertEqual(diff_report["status"], "no_change")
             self.assertEqual(diff_report["summary"]["change_count"], 0)
 
@@ -251,12 +308,66 @@ class TaskGraphApiTests(unittest.TestCase):
             subgraph_node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["graph_ref"] = "graph_review_subflow_v2"
 
             saved = tasks.save_graph_definition({"graph": edited_graph})
-            exported = tasks.export_graph_for_orchestration_file({"graph_id": saved["graph"]["graph_id"]})
+            exported = tasks.export_graph_for_orchestration_file(
+                {"graph_id": saved["graph"]["graph_id"], "emit_generated_python": False}
+            )
             manifest = json.loads(exported["serialized_text"])
             exported_subgraph = next(item for item in manifest["graph"]["nodes"] if item["type"] == "astrabridge/subgraph")
 
             self.assertEqual(exported["export_format"], "langgraph_stategraph_manifest")
             self.assertEqual(exported_subgraph["node_type_config"]["graph_ref"], "graph_review_subflow_v2")
+
+    def test_langgraph_export_blocks_generated_python_for_runtime_bound_nodes_with_structured_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("LangGraph Blocked Export", root / "langgraph-blocked.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task("LangGraph blocked export task")
+
+            imported = tasks.import_graph_from_orchestration_file(
+                {"graph_text": _load_langgraph_example_text("conditional_subgraph_interrupt_supported.json")}
+            )
+
+            with self.assertRaises(LangGraphStateGraphLossError) as ctx:
+                tasks.export_graph_for_orchestration_file({"graph_id": imported["graph"]["graph_id"]})
+
+            payload = dict(ctx.exception.public_payload)
+            self.assertEqual(payload["source_format"], "langgraph_stategraph_manifest")
+            self.assertEqual(payload["loss_report"]["status"], "blocked")
+            issue_codes = {item["code"] for item in list(payload["loss_report"]["issues"] or [])}
+            self.assertIn("generated_python_unsupported_node_type", issue_codes)
+            self.assertIn("generated_python_unsupported_conditional_source", issue_codes)
+
+    def test_langgraph_export_emits_executable_generated_python_for_supported_router_subset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("LangGraph Executable Export", root / "langgraph-executable.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task("LangGraph executable export task")
+
+            imported = tasks.import_graph_from_orchestration_file(
+                {"graph_text": _load_langgraph_example_text("conditional_router_executable_supported.json")}
+            )
+            exported = tasks.export_graph_for_orchestration_file({"graph_id": imported["graph"]["graph_id"]})
+
+            generated_python = str(exported["generated_python"] or "")
+            self.assertEqual(exported["export_format"], "langgraph_stategraph_manifest")
+            self.assertTrue(generated_python)
+            self.assertIn("builder.add_conditional_edges", generated_python)
+            self.assertNotIn("NotImplementedError", generated_python)
+            compile(generated_python, "generated_langgraph.py", "exec")
 
     def test_http_task_graph_import_export_supports_langgraph_manifest_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -291,13 +402,13 @@ class TaskGraphApiTests(unittest.TestCase):
                 )
                 exported = _post_json(
                     base_url + "/api/task-graphs/export",
-                    {"graph_id": imported["graph"]["graph_id"]},
+                    {"graph_id": imported["graph"]["graph_id"], "emit_generated_python": False},
                 )
 
                 self.assertEqual(imported["source_format"], "langgraph_stategraph_manifest")
                 self.assertEqual(exported["source_format"], "langgraph_stategraph_manifest")
                 self.assertEqual(exported["export_format"], "langgraph_stategraph_manifest")
-                self.assertIn("builder.add_conditional_edges", exported["generated_python"])
+                self.assertIsNone(exported["generated_python"])
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
@@ -348,16 +459,34 @@ class TaskGraphApiTests(unittest.TestCase):
 
             templates = tasks.list_graph_templates(
                 configured_models=[
-                    {"id": "qwen/qwen3.7-plus", "provider": "qwen", "native_model": "qwen3.7-plus"},
+                    {
+                        "id": "qwen/qwen3.7-plus",
+                        "provider": "qwen",
+                        "native_model": "qwen3.7-plus",
+                        "apply_patch_tool_type": "freeform",
+                        "tool_mode": "native",
+                        "supports_mcp_tools": True,
+                        "mcp_tool_call_policy": "verified",
+                        "mcp_smoke_status": "pass_direct_tool_call",
+                    },
                     {"id": "glm/glm-5.2", "provider": "glm", "native_model": "glm-5.2"},
-                    {"id": "deepseek/deepseek-v4-pro", "provider": "deepseek", "native_model": "deepseek-v4-pro"},
+                    {
+                        "id": "deepseek/deepseek-v4-pro",
+                        "provider": "deepseek",
+                        "native_model": "deepseek-v4-pro",
+                        "apply_patch_tool_type": "freeform",
+                        "tool_mode": "native",
+                        "supports_mcp_tools": True,
+                        "mcp_tool_call_policy": "verified",
+                        "mcp_smoke_status": "pass_direct_tool_call",
+                    },
                 ]
             )
             by_id = {item["template_id"]: item for item in templates["templates"]}
 
             self.assertEqual(
                 by_id["provider_update_smoke_gate"]["recommended_model_ids"],
-                ["qwen3.7-plus", "glm-5.2"],
+                ["qwen3.7-plus"],
             )
             self.assertEqual(
                 by_id["code_fix_test_review"]["recommended_model_ids"][:2],
@@ -382,11 +511,11 @@ class TaskGraphApiTests(unittest.TestCase):
 
             self.assertEqual(
                 by_id["supervisor_worker_synthesizer"]["recommended_model_ids"],
-                ["qwen3.7-plus", "kimi-k2.6"],
+                [],
             )
             self.assertEqual(
                 by_id["provider_update_smoke_gate"]["recommended_model_ids"],
-                ["qwen3.7-plus", "glm-5.2"],
+                [],
             )
 
     def test_dry_run_repairs_stale_template_defaults_against_current_configured_models(self) -> None:
@@ -423,6 +552,11 @@ class TaskGraphApiTests(unittest.TestCase):
                         "id": "qwen/qwen3.7-plus",
                         "provider": "qwen",
                         "native_model": "qwen3.7-plus",
+                        "apply_patch_tool_type": "freeform",
+                        "tool_mode": "native",
+                        "supports_mcp_tools": True,
+                        "mcp_tool_call_policy": "verified",
+                        "mcp_smoke_status": "pass_direct_tool_call",
                     }
                 ],
             )
@@ -546,10 +680,877 @@ class TaskGraphApiTests(unittest.TestCase):
             self.assertEqual(diff["diff_report"]["status"], "changed")
             self.assertIn("node_routing_changed", diff["diff_report"]["summary"]["change_types"])
 
-            rolled_back = tasks.rollback_graph_to_snapshot({"snapshot_id": old_snapshot_id})
+            current_graph = tasks.graph_definition(graph_id)
+            assert current_graph is not None
+            rolled_back = tasks.rollback_graph_to_snapshot(
+                {"snapshot_id": old_snapshot_id, **_expected_revision_payload(current_graph)}
+            )
             rolled_back_node = next(item for item in rolled_back["graph"]["nodes"] if item["node_id"] == "node_research_b")
             self.assertEqual(rolled_back_node["provider_id"], "kimi")
             self.assertEqual(rolled_back_node["model_id"], "kimi-k2.6")
+
+    def test_graph_save_promotes_canonical_graph_document_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Canonical Graph Document", root / "canonical-graph-document.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Canonical graph document task")
+
+                instantiated = tasks.instantiate_graph_template("custom_blank_graph", title="Canonical doc target")
+                graph = deepcopy(instantiated["graph"])
+                graph["title"] = "Canonical doc target v2"
+
+                saved = tasks.save_graph_definition({"graph": graph})["graph"]
+                graph_document = dict(saved.get("graph_document") or {})
+                graph_revision = dict(saved.get("graph_revision") or {})
+
+                self.assertEqual(graph_document["schema_version"], "astrabridge-graph-document-v3")
+                self.assertEqual(graph_document["compatibility_projection"]["writable_source"], "canonical_orchestration_graph")
+                self.assertEqual(graph_revision["revision_index"], saved["state_version"])
+                self.assertEqual(graph_revision["revision_id"], graph_document["current_revision"]["revision_id"])
+                self.assertEqual(saved["orchestration_graph"]["title"], "Canonical doc target v2")
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_graph_document_compatibility_ranges_stay_stable_across_noop_save(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Compatibility Range Stability", root / "compatibility-range-stability.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Compatibility range stability task")
+
+                instantiated = tasks.instantiate_graph_template("custom_blank_graph", title="Stable compatibility target")
+                first_saved = tasks.save_graph_definition({"graph": deepcopy(instantiated["graph"])})["graph"]
+                second_saved = tasks.save_graph_definition({"graph": deepcopy(first_saved)})["graph"]
+
+                self.assertEqual(
+                    second_saved["graph_document"]["migration"],
+                    first_saved["graph_document"]["migration"],
+                )
+                self.assertEqual(
+                    second_saved["graph_document"]["compatibility_projection"]["generated_at"],
+                    first_saved["graph_document"]["compatibility_projection"]["generated_at"],
+                )
+                compatibility_ranges = dict(second_saved["graph_document"]["migration"]["compatibility_ranges"] or {})
+                self.assertEqual(
+                    compatibility_ranges["document_schema_versions"]["write"],
+                    "astrabridge-graph-document-v3",
+                )
+                self.assertEqual(
+                    compatibility_ranges["task_graph_consumers"]["write"],
+                    "astrabridge-task-graph-v1",
+                )
+                self.assertEqual(
+                    compatibility_ranges["orchestration_consumers"]["write"],
+                    "astrabridge-agent-orchestration-graph-v1",
+                )
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_imported_source_owned_graph_blocks_gui_mutations_until_detached(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Source-owned graph", root / "source-owned-graph.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Source-owned graph task")
+
+                graph_path = workspace / ".astrabridge" / "sdk" / "custom_blank_graph.json"
+                graph_path.parent.mkdir(parents=True, exist_ok=True)
+                graph_path.write_text(
+                    json.dumps(load_agent_orchestration_example("custom_blank_graph"), ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+
+                imported = tasks.import_graph_from_orchestration_file(
+                    {"graph_path": graph_path.relative_to(workspace).as_posix()}
+                )["graph"]
+                graph_id = imported["graph_id"]
+
+                self.assertEqual(
+                    imported["graph_document"]["compatibility_projection"]["writable_source"],
+                    "source_owned_canonical_file",
+                )
+                self.assertEqual(
+                    imported["graph_document"]["source_ownership"]["ownership_mode"],
+                    "source_owned",
+                )
+                self.assertEqual(
+                    imported["graph_document"]["source_ownership"]["source_file"]["path"],
+                    ".astrabridge/sdk/custom_blank_graph.json",
+                )
+
+                with self.assertRaises(GraphSourceOwnershipError) as blocked:
+                    tasks.update_graph_node(
+                        {
+                            "graph_id": graph_id,
+                            "node_id": "node_start_here",
+                            **_expected_revision_payload(imported),
+                            "configuration": {"label": "Blocked GUI Edit"},
+                        }
+                    )
+                self.assertEqual(blocked.exception.payload["error"], "graph_source_owned")
+                self.assertEqual(blocked.exception.payload["action"], "update_graph_node")
+
+                detached = tasks.save_graph_definition(
+                    {"graph": deepcopy(imported), "source_owner_action": "detach"}
+                )["graph"]
+                self.assertEqual(
+                    detached["graph_document"]["source_ownership"]["ownership_mode"],
+                    "detached_gui_edit",
+                )
+                self.assertEqual(
+                    detached["graph_document"]["compatibility_projection"]["writable_source"],
+                    "detached_gui_graph",
+                )
+
+                updated = tasks.update_graph_node(
+                    {
+                        "graph_id": graph_id,
+                        "node_id": "node_start_here",
+                        **_expected_revision_payload(detached),
+                        "configuration": {"label": "Detached GUI Edit"},
+                    }
+                )["graph"]
+                self.assertEqual(
+                    next(item for item in updated["nodes"] if item["node_id"] == "node_start_here")["label"],
+                    "Detached GUI Edit",
+                )
+                self.assertEqual(
+                    updated["graph_document"]["source_ownership"]["ownership_mode"],
+                    "detached_gui_edit",
+                )
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_typescript_sdk_fixture_survives_import_dry_run_fixture_run_export_reload_and_reimport(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("TS SDK round trip", root / "ts-sdk-roundtrip.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("TS SDK round-trip task")
+
+                graph_path = workspace / ".astrabridge" / "sdk" / "custom_blank_graph.fromTs.json"
+                graph_path.parent.mkdir(parents=True, exist_ok=True)
+                graph_path.write_text(TYPESCRIPT_CUSTOM_BLANK_FIXTURE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+
+                imported = tasks.import_graph_from_orchestration_file(
+                    {"graph_path": graph_path.relative_to(workspace).as_posix()}
+                )["graph"]
+                graph_id = imported["graph_id"]
+                opened = tasks.graph_definition(graph_id)
+
+                self.assertIsNotNone(opened)
+                self.assertEqual(imported["template_id"], "custom_blank_graph")
+                self.assertEqual(imported["graph_document"]["compatibility_projection"]["writable_source"], "source_owned_canonical_file")
+                self.assertEqual(
+                    imported["graph_document"]["source_ownership"]["source_file"]["path"],
+                    ".astrabridge/sdk/custom_blank_graph.fromTs.json",
+                )
+                self.assertEqual(
+                    next(item for item in imported["nodes"] if item["node_id"] == "node_start_here")["label"],
+                    "Start Here",
+                )
+
+                dry_run = tasks.dry_run_graph({"graph_id": graph_id})
+                self.assertEqual(dry_run["dry_run"]["overall_status"], "pass")
+                self.assertEqual(dry_run["dry_run"]["run_status"], "dry_run_passed")
+
+                fixture_run = tasks.execute_fixture_graph({"graph_id": graph_id})["fixture_run"]
+                self.assertEqual(fixture_run["run_status"], "completed")
+                self.assertEqual(fixture_run["run_ref"]["status"], "completed")
+
+                exported = tasks.export_graph_for_orchestration_file(
+                    {
+                        "graph_id": graph_id,
+                        "export_path": "PRIVATE/sdk-roundtrip/exported-custom-blank.fromTs.json",
+                    }
+                )
+                self.assertTrue((workspace / exported["export_path"]).exists())
+
+                reloaded_tasks = TaskService(projects)
+                reloaded_graph = reloaded_tasks.graph_definition(graph_id)
+                self.assertIsNotNone(reloaded_graph)
+
+                reexported = reloaded_tasks.export_graph_for_orchestration_file({"graph_id": graph_id})
+                persisted_diff = diff_agent_orchestration_graphs(
+                    exported["orchestration_graph"],
+                    reexported["orchestration_graph"],
+                )
+                self.assertEqual(persisted_diff["status"], "no_change")
+
+                reimported = reloaded_tasks.import_graph_from_orchestration_file(
+                    {
+                        "graph_text": reexported["serialized_text"],
+                        **_expected_revision_payload(reloaded_graph),
+                    }
+                )
+                final_export = reloaded_tasks.export_graph_for_orchestration_file(
+                    {"graph_id": reimported["graph"]["graph_id"]}
+                )
+                round_trip_diff = diff_agent_orchestration_graphs(
+                    reexported["orchestration_graph"],
+                    final_export["orchestration_graph"],
+                )
+
+                self.assertEqual(round_trip_diff["status"], "no_change")
+                self.assertEqual(round_trip_diff["summary"]["change_count"], 0)
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_update_graph_node_rejects_stale_expected_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Graph Revision Conflict", root / "graph-revision-conflict.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Graph revision conflict task")
+
+                instantiated = tasks.instantiate_graph_template("supervisor_worker_synthesizer")
+                graph = instantiated["graph"]
+                graph_id = graph["graph_id"]
+                stale_revision = _expected_revision_payload(graph)
+
+                updated = tasks.update_graph_node(
+                    {
+                        "graph_id": graph_id,
+                        "node_id": "node_worker",
+                        **stale_revision,
+                        "configuration": {"label": "Current worker label"},
+                    }
+                )["graph"]
+                self.assertNotEqual(
+                    updated["graph_revision"]["revision_id"],
+                    stale_revision["expected_revision"],
+                )
+
+                with self.assertRaises(GraphRevisionConflictError) as exc:
+                    tasks.update_graph_node(
+                        {
+                            "graph_id": graph_id,
+                            "node_id": "node_worker",
+                            **stale_revision,
+                            "configuration": {"label": "Stale write should fail"},
+                        }
+                    )
+                self.assertEqual(exc.exception.payload["error"], "graph_revision_conflict")
+                self.assertEqual(exc.exception.payload["action"], "update_graph_node")
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_update_graph_node_preserves_non_conflicting_stale_layout_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Node merge preservation", root / "node-merge-preservation.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Node merge preservation task")
+
+                instantiated = tasks.instantiate_graph_template("supervisor_worker_synthesizer")
+                graph = instantiated["graph"]
+                graph_id = graph["graph_id"]
+                stale_revision = _expected_revision_payload(graph)
+
+                current = tasks.update_graph_node(
+                    {
+                        "graph_id": graph_id,
+                        "node_id": "node_worker",
+                        **stale_revision,
+                        "configuration": {"label": "Worker Current Label"},
+                    }
+                )["graph"]
+                merged = tasks.update_graph_node(
+                    {
+                        "graph_id": graph_id,
+                        "node_id": "node_worker",
+                        **stale_revision,
+                        "position": {"x": 777, "y": 222},
+                    }
+                )["graph"]
+                merged_node = next(item for item in merged["nodes"] if item["node_id"] == "node_worker")
+
+                self.assertEqual(current["graph_revision"]["revision_index"], 2)
+                self.assertEqual(merged_node["label"], "Worker Current Label")
+                self.assertEqual(merged_node["position"], {"x": 777, "y": 222})
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_save_graph_definition_preserves_non_conflicting_policy_and_edge_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Save merge preservation", root / "save-merge-preservation.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Save merge preservation task")
+
+                instantiated = tasks.instantiate_graph_template("fanout_fanin_research")
+                graph = instantiated["graph"]
+                graph_id = graph["graph_id"]
+                stale_revision = _expected_revision_payload(graph)
+
+                edge_payload = {
+                    "graph_id": graph_id,
+                    "edge_id": "edge_plan_a",
+                    **stale_revision,
+                    "context_policy": {
+                        **dict(next(item for item in graph["edges"] if item["edge_id"] == "edge_plan_a")["context_policy"]),
+                        "history_mode": "last_n_messages",
+                        "history_length": 3,
+                    },
+                }
+                current = tasks.update_graph_edge(edge_payload)["graph"]
+
+                stale_graph = deepcopy(graph)
+                stale_graph["graph_policy"] = {
+                    **dict(stale_graph.get("graph_policy") or {}),
+                    "max_parallelism_hint": 2,
+                }
+                stale_target_node = next(item for item in stale_graph["nodes"] if item["node_id"] == "node_research_b")
+                stale_target_node["position"] = {"x": 920, "y": 420}
+                merged = tasks.save_graph_definition({"graph": stale_graph})["graph"]
+
+                merged_edge = next(item for item in merged["edges"] if item["edge_id"] == "edge_plan_a")
+                merged_node = next(item for item in merged["nodes"] if item["node_id"] == "node_research_b")
+
+                self.assertEqual(current["graph_revision"]["revision_index"], 2)
+                self.assertEqual(merged["graph_policy"]["max_parallelism_hint"], 2)
+                self.assertEqual(merged_node["position"], {"x": 920, "y": 420})
+                self.assertEqual(merged_edge["context_policy"]["history_mode"], "last_n_messages")
+                self.assertEqual(merged_edge["context_policy"]["history_length"], 3)
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_overlapping_stale_node_edit_fails_with_base_current_incoming_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Conflict payload detail", root / "conflict-payload-detail.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Conflict payload detail task")
+
+                instantiated = tasks.instantiate_graph_template("supervisor_worker_synthesizer")
+                graph = instantiated["graph"]
+                graph_id = graph["graph_id"]
+                stale_revision = _expected_revision_payload(graph)
+
+                tasks.update_graph_node(
+                    {
+                        "graph_id": graph_id,
+                        "node_id": "node_worker",
+                        **stale_revision,
+                        "configuration": {"label": "Worker Current Label"},
+                    }
+                )
+                with self.assertRaises(GraphRevisionConflictError) as exc:
+                    tasks.update_graph_node(
+                        {
+                            "graph_id": graph_id,
+                            "node_id": "node_worker",
+                            **stale_revision,
+                            "configuration": {"label": "Worker Incoming Label"},
+                        }
+                    )
+                payload = exc.exception.payload
+                self.assertEqual(payload["merge_status"], "overlap_rejected")
+                self.assertEqual(payload["edits"]["base"]["revision"]["revision_id"], stale_revision["expected_revision"])
+                self.assertIn("nodes.node_worker.label", payload["edits"]["current"]["changed_paths"])
+                self.assertIn("nodes.node_worker.label", payload["edits"]["incoming"]["changed_paths"])
+                self.assertEqual(payload["overlapping_edits"][0]["path"], "nodes.node_worker.label")
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_import_graph_from_orchestration_file_preserves_non_conflicting_stale_import_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Import merge preservation", root / "import-merge-preservation.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Import merge preservation task")
+
+                instantiated = tasks.instantiate_graph_template("fanout_fanin_research")
+                graph = instantiated["graph"]
+                graph_id = graph["graph_id"]
+                stale_revision = _expected_revision_payload(graph)
+
+                exported = tasks.export_graph_for_orchestration_file({"graph_id": graph_id})
+                orchestration = json.loads(exported["serialized_text"])
+                imported_target = next(item for item in orchestration["nodes"] if item["node_id"] == "node_research_b")
+                imported_target["routing"] = {
+                    **dict(imported_target.get("routing") or {}),
+                    "provider_id": "qwen",
+                    "model_id": "qwen3-coder-plus",
+                }
+
+                current = tasks.update_graph_node(
+                    {
+                        "graph_id": graph_id,
+                        "node_id": "node_supervisor",
+                        **stale_revision,
+                        "position": {"x": 999, "y": 111},
+                    }
+                )["graph"]
+                merged = tasks.import_graph_from_orchestration_file(
+                    {
+                        "graph_text": json.dumps(orchestration, ensure_ascii=False, indent=2) + "\n",
+                        **stale_revision,
+                    }
+                )["graph"]
+
+                merged_supervisor = next(item for item in merged["nodes"] if item["node_id"] == "node_supervisor")
+                merged_target = next(item for item in merged["orchestration_graph"]["nodes"] if item["node_id"] == "node_research_b")
+
+                self.assertEqual(current["graph_revision"]["revision_index"], 2)
+                self.assertEqual(merged_supervisor["position"], {"x": 999, "y": 111})
+                self.assertEqual(merged_target["routing"]["provider_id"], "qwen")
+                self.assertEqual(merged_target["routing"]["model_id"], "qwen3-coder-plus")
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_imported_file_live_dry_run_is_quarantined_until_reviewed_for_live_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Imported compatibility quarantine", root / "imported-compatibility.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Imported compatibility quarantine task")
+
+                graph = load_agent_orchestration_example("custom_blank_graph")
+                graph["migration"]["source_kind"] = "imported_file"
+                node = graph["nodes"][0]
+                node["routing"] = {
+                    "selection_mode": "explicit",
+                    "provider_id": "qwen",
+                    "model_id": "qwen3-coder-plus",
+                }
+                node["safety"]["allow_provider_calls"] = True
+
+                imported = tasks.import_graph_from_orchestration_file(
+                    {"graph_text": json.dumps(graph, ensure_ascii=False, indent=2) + "\n"}
+                )
+                dry_run = tasks.dry_run_graph(
+                    {"graph_id": imported["graph"]["graph_id"], "validation_mode": "live"},
+                    profiles_snapshot={
+                        "profiles": [
+                            {"profile_id": "profile-qwen", "provider_id": "qwen", "model": "qwen3-coder-plus"}
+                        ]
+                    },
+                    configured_models=[
+                        {"id": "qwen/qwen3-coder-plus", "provider": "qwen", "native_model": "qwen3-coder-plus"}
+                    ],
+                )
+
+                self.assertEqual(dry_run["dry_run"]["overall_status"], "blocked")
+                self.assertEqual(dry_run["dry_run"]["compatibility_gate"]["source_kind"], "imported_file")
+                self.assertFalse(dry_run["dry_run"]["compatibility_gate"]["reviewed_for_live_execution"])
+                self.assertTrue(
+                    any(
+                        "reviewed_for_live_execution" in reason
+                        for reason in list(dry_run["dry_run"]["graph_result"]["reasons"] or [])
+                    )
+                )
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_imported_file_review_override_does_not_bypass_disabled_unknown_node_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Imported unknown node blocker", root / "imported-unknown.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Imported unknown node blocker task")
+
+                graph = load_agent_orchestration_example("custom_blank_graph")
+                graph["migration"]["source_kind"] = "imported_file"
+                graph["migration"]["compatibility"]["reviewed_for_live_execution"] = True
+                graph["nodes"][0]["kind"] = "vendor_unknown/custom_tool"
+                graph["nodes"][0]["routing"] = {
+                    "selection_mode": "explicit",
+                    "provider_id": "qwen",
+                    "model_id": "qwen3-coder-plus",
+                }
+                graph["nodes"][0]["safety"]["allow_provider_calls"] = True
+
+                imported = tasks.import_graph_from_orchestration_file(
+                    {"graph_text": json.dumps(graph, ensure_ascii=False, indent=2) + "\n"}
+                )
+                dry_run = tasks.dry_run_graph(
+                    {"graph_id": imported["graph"]["graph_id"], "validation_mode": "live"},
+                    profiles_snapshot={
+                        "profiles": [
+                            {"profile_id": "profile-qwen", "provider_id": "qwen", "model": "qwen3-coder-plus"}
+                        ]
+                    },
+                    configured_models=[
+                        {"id": "qwen/qwen3-coder-plus", "provider": "qwen", "native_model": "qwen3-coder-plus"}
+                    ],
+                )
+
+                self.assertEqual(dry_run["dry_run"]["overall_status"], "blocked")
+                self.assertTrue(dry_run["dry_run"]["compatibility_gate"]["reviewed_for_live_execution"])
+                blocked_node = next(
+                    item for item in dry_run["dry_run"]["node_results"] if item["node_id"] == "node_start_here"
+                )
+                self.assertEqual(blocked_node["status"], "blocked")
+                self.assertTrue(
+                    any(
+                        "disabled until its type mapping is reviewed" in reason
+                        for reason in list(blocked_node["reasons"] or [])
+                    )
+                )
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_rollback_graph_to_snapshot_preserves_non_conflicting_stale_current_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                project = projects.create_project("Rollback merge preservation", root / "rollback-merge-preservation.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                task = tasks.create_task("Rollback merge preservation task")
+
+                instantiated = tasks.instantiate_graph_template("fanout_fanin_research")
+                graph = instantiated["graph"]
+                graph_id = graph["graph_id"]
+                stale_revision = _expected_revision_payload(graph)
+                base_snapshot = tasks.create_graph_snapshot(
+                    {"graph_id": graph_id, "label": "Base snapshot", "reason": "manual_snapshot"}
+                )["snapshot"]
+
+                snapshot_graph = deepcopy(graph)
+                snapshot_node = next(item for item in snapshot_graph["nodes"] if item["node_id"] == "node_research_b")
+                snapshot_node["provider_id"] = "qwen"
+                snapshot_node["model_id"] = "qwen3-coder-plus"
+                snapshot_graph["orchestration_graph"] = tasks._orchestration_graph_for_task_graph(snapshot_graph)
+                snapshot_orchestration = dict(snapshot_graph["orchestration_graph"] or {})
+
+                snapshot_id = "snapshot-routing-merge"
+                snapshot_dir = (
+                    workspace
+                    / ".astrabridge"
+                    / "task-graph"
+                    / "snapshots"
+                    / task["task_id"]
+                    / graph_id
+                    / snapshot_id
+                )
+                snapshot_dir.mkdir(parents=True)
+                (snapshot_dir / "task-graph.json").write_text(json.dumps(snapshot_graph, ensure_ascii=False, indent=2), encoding="utf-8")
+                (snapshot_dir / "orchestration-graph.json").write_text(json.dumps(snapshot_orchestration, ensure_ascii=False, indent=2), encoding="utf-8")
+
+                task = tasks.current_task()
+                assert task is not None
+                task["graph_snapshot_refs"] = [
+                    *list(task.get("graph_snapshot_refs") or []),
+                    {
+                        "snapshot_id": snapshot_id,
+                        "task_id": task["task_id"],
+                        "graph_id": graph_id,
+                        "project_id": project["project_id"],
+                        "label": "Routing snapshot",
+                        "reason": "manual_snapshot",
+                        "source_action": "unit_test",
+                        "state_version": snapshot_graph["state_version"],
+                        "created_at": snapshot_graph["created_at"],
+                        "updated_at": snapshot_graph["updated_at"],
+                        "based_on_snapshot_id": base_snapshot["snapshot_id"],
+                        "artifact_paths": {
+                            "snapshot_dir": f".astrabridge/task-graph/snapshots/{task['task_id']}/{graph_id}/{snapshot_id}",
+                            "task_graph_json": f".astrabridge/task-graph/snapshots/{task['task_id']}/{graph_id}/{snapshot_id}/task-graph.json",
+                            "orchestration_graph_json": f".astrabridge/task-graph/snapshots/{task['task_id']}/{graph_id}/{snapshot_id}/orchestration-graph.json",
+                        },
+                        "summary": {"node_count": 4, "edge_count": 4, "change_count": 1, "change_types": ["node_routing_changed"]},
+                    },
+                ]
+                tasks._save_task(task)
+
+                current = tasks.update_graph_node(
+                    {
+                        "graph_id": graph_id,
+                        "node_id": "node_supervisor",
+                        **stale_revision,
+                        "position": {"x": 901, "y": 177},
+                    }
+                )["graph"]
+                rolled_back = tasks.rollback_graph_to_snapshot(
+                    {"snapshot_id": snapshot_id, **stale_revision}
+                )["graph"]
+
+                supervisor = next(item for item in rolled_back["nodes"] if item["node_id"] == "node_supervisor")
+                target = next(item for item in rolled_back["nodes"] if item["node_id"] == "node_research_b")
+
+                self.assertEqual(current["graph_revision"]["revision_index"], 2)
+                self.assertEqual(supervisor["position"], {"x": 901, "y": 177})
+                self.assertEqual(target["provider_id"], "qwen")
+                self.assertEqual(target["model_id"], "qwen3-coder-plus")
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_legacy_graph_definition_is_migrated_to_graph_document_on_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Legacy Graph Migration", root / "legacy-graph-migration.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                task = tasks.create_task("Legacy graph migration task")
+                graph = tasks.instantiate_graph_template("fanout_fanin_research")["graph"]
+                legacy_graph = deepcopy(graph)
+                legacy_graph.pop("graph_document", None)
+                legacy_graph.pop("graph_revision", None)
+                task = tasks.current_task() or task
+                task["graph_definitions"] = [legacy_graph]
+                tasks._save_task(task)
+
+                reloaded = TaskService(projects)
+                migrated = reloaded.graph_definition(graph["graph_id"])
+                self.assertIsNotNone(migrated)
+                assert migrated is not None
+                self.assertEqual(migrated["graph_document"]["schema_version"], "astrabridge-graph-document-v3")
+                self.assertEqual(migrated["graph_document"]["migration"]["upgraded_from"], "legacy_task_graph_definition")
+                self.assertEqual(
+                    migrated["graph_document"]["migration"]["compatibility_ranges"]["task_graph_consumers"]["write"],
+                    "astrabridge-task-graph-v1",
+                )
+                self.assertEqual(
+                    migrated["graph_document"]["migration"]["compatibility_ranges"]["orchestration_consumers"]["write"],
+                    "astrabridge-agent-orchestration-graph-v1",
+                )
+                second_read = reloaded.graph_definition(graph["graph_id"])
+                self.assertEqual(
+                    second_read["graph_revision"]["revision_id"],
+                    migrated["graph_revision"]["revision_id"],
+                )
+                self.assertEqual(
+                    second_read["graph_document"]["migration"],
+                    migrated["graph_document"]["migration"],
+                )
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_snapshot_and_rollback_preview_surface_graph_document_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Snapshot document evidence", root / "snapshot-document-evidence.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Snapshot document evidence task")
+
+                instantiated = tasks.instantiate_graph_template("fanout_fanin_research", title="Snapshot document evidence graph")
+                graph = instantiated["graph"]
+                graph_id = graph["graph_id"]
+
+                first_snapshot = tasks.create_graph_snapshot(
+                    {
+                        "graph_id": graph_id,
+                        "label": "Before provider route change",
+                        "reason": "manual_snapshot",
+                        "source_action": "unit_test",
+                    }
+                )["snapshot"]
+                self.assertEqual(
+                    first_snapshot["graph_document_evidence"]["document_schema_version"],
+                    "astrabridge-graph-document-v3",
+                )
+                self.assertEqual(
+                    first_snapshot["graph_document_evidence"]["compatibility_mode"],
+                    "generated_compatibility_projection",
+                )
+                self.assertTrue(
+                    (workspace / first_snapshot["artifact_paths"]["graph_document_json"]).exists()
+                )
+
+                modified_graph = deepcopy(graph)
+                target_node = next(item for item in modified_graph["nodes"] if item["node_id"] == "node_research_b")
+                target_node["provider_id"] = "qwen"
+                target_node["model_id"] = "qwen3-coder-plus"
+                saved = tasks.save_graph_definition({"graph": modified_graph})["graph"]
+
+                diff = tasks.diff_graph_snapshot({"snapshot_id": first_snapshot["snapshot_id"]})
+                self.assertEqual(diff["rollback_preview"]["comparison_mode"], "snapshot_to_current")
+                self.assertEqual(
+                    diff["rollback_preview"]["restored_document"]["migration_origin"],
+                    first_snapshot["graph_document_evidence"]["migration_origin"],
+                )
+                self.assertEqual(
+                    diff["rollback_preview"]["current_document"]["compatibility_mode"],
+                    "generated_compatibility_projection",
+                )
+
+                rolled_back = tasks.rollback_graph_to_snapshot(
+                    {
+                        "snapshot_id": first_snapshot["snapshot_id"],
+                        **_expected_revision_payload(saved),
+                    }
+                )
+                rolled_back_node = next(item for item in rolled_back["graph"]["nodes"] if item["node_id"] == "node_research_b")
+                self.assertEqual(rolled_back_node["provider_id"], "kimi")
+                self.assertEqual(rolled_back_node["model_id"], "kimi-k2.6")
+                self.assertEqual(
+                    rolled_back["rollback_preview"]["restored_document"]["document_schema_version"],
+                    "astrabridge-graph-document-v3",
+                )
+                self.assertEqual(
+                    rolled_back["rollback_preview"]["restored_document"]["migration_origin"],
+                    first_snapshot["graph_document_evidence"]["migration_origin"],
+                )
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
 
     def test_http_api_lists_templates_instantiates_graph_and_updates_node_and_edge(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -673,6 +1674,7 @@ class TaskGraphApiTests(unittest.TestCase):
                     {
                         "graph_id": graph_id,
                         "node_id": "node_smoke",
+                        **_expected_revision_payload(fetched["graph"]),
                         "position": {"x": 444, "y": 222},
                         "configuration": {
                             "human_summary_template": "Summarize {{node_label}} for {{provider_id}} / {{model_id}}.",
@@ -715,6 +1717,7 @@ class TaskGraphApiTests(unittest.TestCase):
                     {
                         "graph_id": graph_id,
                         "node_id": "node_custom",
+                        **_expected_revision_payload(updated["graph"]),
                         "create": {
                             "kind": "artifact_source",
                             "label": "Custom Agent",
@@ -732,6 +1735,7 @@ class TaskGraphApiTests(unittest.TestCase):
                     base_url + "/api/task-graphs/edge/update",
                     {
                         "graph_id": graph_id,
+                        **_expected_revision_payload(created_node["graph"]),
                         "from_node_id": "node_discover",
                         "to_node_id": "node_gate",
                         "edge_type": "control_dependency",
@@ -759,6 +1763,7 @@ class TaskGraphApiTests(unittest.TestCase):
                     {
                         "graph_id": graph_id,
                         "edge_id": "edge_smoke_gate",
+                        **_expected_revision_payload(created_edge["graph"]),
                         "from_node_id": "node_smoke",
                         "to_node_id": "node_gate",
                         "edge_type": "approval_dependency",
@@ -810,6 +1815,7 @@ class TaskGraphApiTests(unittest.TestCase):
                     base_url + "/api/task-graphs/rollback",
                     {
                         "snapshot_id": manual_snapshot["snapshot"]["snapshot_id"],
+                        **_expected_revision_payload(saved_graph_result["graph"]),
                     },
                 )
                 exported = _post_json(
@@ -823,6 +1829,7 @@ class TaskGraphApiTests(unittest.TestCase):
                     base_url + "/api/task-graphs/import",
                     {
                         "graph_text": example_graph_text,
+                        **_expected_revision_payload(rolled_back["graph"]),
                     },
                 )
                 imported_exported = _post_json(
@@ -1574,12 +2581,12 @@ def _post_json(url: str, payload: dict) -> dict:
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with urllib.request.urlopen(request, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def _get_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=15) as response:
+    with urllib.request.urlopen(url, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
 

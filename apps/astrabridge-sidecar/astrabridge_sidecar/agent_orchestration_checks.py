@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-import json
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +15,13 @@ from .agent_orchestration_contract import (
 from .agent_orchestration_compiler import compile_agent_orchestration_graph
 from .agent_orchestration_file_format import load_agent_orchestration_graph_file, serialize_agent_orchestration_graph, write_agent_orchestration_graph_file
 from .model_catalog.catalog import effective_model_records
+from .provider_capability_snapshot import graph_port_capabilities_from_snapshot
 from .providers import get_provider_profile, resolve_provider_id
 from .task_graph_contract import validate_graph_definition
 
 
 AGENT_ORCHESTRATION_LINT_SCHEMA_VERSION = "astrabridge-agent-orchestration-lint-v1"
+AGENT_ORCHESTRATION_COMPILE_SCHEMA_VERSION = "astrabridge-agent-orchestration-compile-v1"
 AGENT_ORCHESTRATION_DRY_RUN_SCHEMA_VERSION = "astrabridge-agent-orchestration-dry-run-v1"
 AGENT_ORCHESTRATION_DIFF_SCHEMA_VERSION = "astrabridge-agent-orchestration-diff-v1"
 AGENT_ORCHESTRATION_MIGRATE_SCHEMA_VERSION = "astrabridge-agent-orchestration-migrate-v1"
@@ -126,6 +127,15 @@ def _merge_model_capability_source(target: dict[str, dict[str, Any]], keys: list
 def _port_capabilities_for_record(record: dict[str, Any]) -> dict[str, Any]:
     input_port_types = set(_GENERIC_INPUT_PORT_TYPES)
     output_port_types = set(_GENERIC_OUTPUT_PORT_TYPES)
+    snapshot = dict(record.get("verified_capability_snapshot") or {})
+    snapshot_status = str(record.get("verified_capability_snapshot_status") or snapshot.get("status") or "").strip().lower()
+    snapshot_ports = graph_port_capabilities_from_snapshot(snapshot) if snapshot_status in {"verified", "partial"} else {}
+    for port_type in list(snapshot_ports.get("input_port_types") or []):
+        if str(port_type).strip() in PORT_TYPES:
+            input_port_types.add(str(port_type).strip())
+    for port_type in list(snapshot_ports.get("output_port_types") or []):
+        if str(port_type).strip() in PORT_TYPES:
+            output_port_types.add(str(port_type).strip())
     input_modalities = [str(item).strip().lower() for item in list(record.get("input_modalities") or []) if str(item).strip()]
     for modality in input_modalities:
         port_type = _MODALITY_TO_PORT_TYPE.get(modality)
@@ -164,6 +174,60 @@ def lint_agent_orchestration_graph_file(path: str | Path) -> dict[str, Any]:
             "task_graph_schema_version": lowered["schema_version"],
             "template_id": lowered["template_id"],
         },
+        "warnings": [],
+    }
+
+
+def compile_agent_orchestration_graph_file(
+    path: str | Path,
+    *,
+    known_profile_ids: set[str] | None = None,
+    known_provider_ids: set[str] | None = None,
+    known_model_ids: set[str] | None = None,
+    configured_models: list[dict[str, Any]] | None = None,
+    profile_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    file_path = Path(path)
+    graph = load_agent_orchestration_graph_file(file_path)
+    known_model_capabilities = build_known_model_capabilities(
+        graph=graph,
+        configured_models=configured_models,
+        profile_records=profile_records,
+    )
+    graph = validate_agent_orchestration_graph(
+        graph,
+        known_profile_ids=known_profile_ids,
+        known_provider_ids=known_provider_ids,
+        known_model_ids=known_model_ids,
+        known_model_capabilities=known_model_capabilities,
+    )
+    compiled_plan = compile_agent_orchestration_graph(
+        graph,
+        known_profile_ids=known_profile_ids,
+        known_provider_ids=known_provider_ids,
+        known_model_ids=known_model_ids,
+        known_model_capabilities=known_model_capabilities,
+    )
+    lowered = lower_agent_orchestration_graph_to_task_graph(graph)
+    return {
+        "schema_version": AGENT_ORCHESTRATION_COMPILE_SCHEMA_VERSION,
+        "status": "pass",
+        "file_path": str(file_path),
+        "graph_id": graph["graph_id"],
+        "graph_schema_version": graph["schema_version"],
+        "summary": {
+            "node_count": len(list(graph.get("nodes") or [])),
+            "edge_count": len(list(graph.get("edges") or [])),
+            "parallel_group_count": int(dict(compiled_plan.get("topology") or {}).get("parallel_group_count") or 0),
+            "approval_node_count": len(list(compiled_plan.get("approval_nodes") or [])),
+            "task_graph_schema_version": lowered["schema_version"],
+        },
+        "lowering": {
+            "status": "pass",
+            "task_graph_schema_version": lowered["schema_version"],
+            "template_id": lowered["template_id"],
+        },
+        "compiled_plan": compiled_plan,
         "warnings": [],
     }
 
@@ -316,6 +380,8 @@ def render_agent_orchestration_report_markdown(report: dict[str, Any]) -> str:
     schema_version = str(report.get("schema_version") or "")
     if schema_version == AGENT_ORCHESTRATION_LINT_SCHEMA_VERSION:
         return _render_lint_markdown(report)
+    if schema_version == AGENT_ORCHESTRATION_COMPILE_SCHEMA_VERSION:
+        return _render_compile_markdown(report)
     if schema_version == AGENT_ORCHESTRATION_DRY_RUN_SCHEMA_VERSION:
         return _render_dry_run_markdown(report)
     if schema_version == AGENT_ORCHESTRATION_DIFF_SCHEMA_VERSION:
@@ -516,6 +582,25 @@ def _render_dry_run_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- `{item.get('edge_id')}` / `{item.get('status')}`")
         for reason in list(item.get("reasons") or []):
             lines.append(f"  - {reason}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _render_compile_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Agent Orchestration Graph Compile",
+        "",
+        f"- File: `{report.get('file_path')}`",
+        f"- Graph ID: `{report.get('graph_id')}`",
+        f"- Status: `{report.get('status')}`",
+        f"- Node count: `{dict(report.get('summary') or {}).get('node_count')}`",
+        f"- Edge count: `{dict(report.get('summary') or {}).get('edge_count')}`",
+        f"- Parallel group count: `{dict(report.get('summary') or {}).get('parallel_group_count')}`",
+        f"- Approval node count: `{dict(report.get('summary') or {}).get('approval_node_count')}`",
+        "",
+        "## Lowering",
+        f"- Task graph schema version: `{dict(report.get('lowering') or {}).get('task_graph_schema_version')}`",
+        f"- Template ID: `{dict(report.get('lowering') or {}).get('template_id')}`",
+    ]
     return "\n".join(lines).strip() + "\n"
 
 

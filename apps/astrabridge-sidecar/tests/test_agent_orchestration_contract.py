@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 import unittest
 from copy import deepcopy
@@ -13,6 +15,7 @@ from astrabridge_sidecar.agent_orchestration_contract import (  # noqa: E402
     lower_agent_orchestration_graph_to_task_graph,
     validate_agent_orchestration_graph,
 )
+from astrabridge_sidecar.external_a2a_gateway import EXTERNAL_A2A_CARD_REF_PREFIX  # noqa: E402
 from astrabridge_sidecar.task_graph_contract import (  # noqa: E402
     GRAPH_TEMPLATE_IDS,
     load_task_graph_fixture,
@@ -384,6 +387,77 @@ class AgentOrchestrationContractTests(unittest.TestCase):
             validate_agent_orchestration_graph(graph)
         self.assertIn("unknown schema", str(exc.exception))
 
+    def test_external_a2a_card_refs_require_a_valid_registry_and_are_normalized(self) -> None:
+        graph = _valid_graph()
+        graph["nodes"][0]["card_ref"] = f"{EXTERNAL_A2A_CARD_REF_PREFIX}geo_route"
+        public_card = {
+            "protocolVersion": "1.0",
+            "name": "Geo Route Agent",
+            "description": "Plans routes for external handoffs.",
+            "url": "https://geo.example.com/a2a",
+            "version": "2026.07.17",
+            "supportedInterfaces": [
+                {
+                    "url": "https://geo.example.com/a2a",
+                    "protocolBinding": "JSONRPC",
+                    "protocolVersion": "1.0",
+                }
+            ],
+            "capabilities": {
+                "streaming": True,
+                "pushNotifications": False,
+                "extendedAgentCard": False,
+            },
+            "defaultInputModes": ["text/plain", "application/json"],
+            "defaultOutputModes": ["text/plain", "application/json"],
+            "skills": [
+                {
+                    "id": "route-plan",
+                    "name": "Route Planner",
+                    "description": "Returns structured route plans.",
+                }
+            ],
+        }
+        encoded = json.dumps(public_card, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        graph["external_agent_card_registry"] = {
+            "schema_version": "astrabridge-external-agent-card-registry-v1",
+            "supported_protocol_versions": ["1.0"],
+            "cards": [
+                {
+                    "card_ref": f"{EXTERNAL_A2A_CARD_REF_PREFIX}geo_route",
+                    "trust_level": "workspace_trusted",
+                    "discovery": {
+                        "mode": "well_known",
+                        "url": "https://geo.example.com/.well-known/agent-card.json",
+                    },
+                    "public_agent_card": public_card,
+                    "public_agent_card_digest": f"sha256:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}",
+                }
+            ],
+        }
+
+        validated = validate_agent_orchestration_graph(
+            graph,
+            known_profile_ids={"profile-qwen-validator"},
+            known_provider_ids={"qwen"},
+            known_model_ids={"qwen3-coder-plus"},
+            known_model_capabilities={
+                "qwen3-coder-plus": {
+                    "input_port_types": ["text", "structured_json", "code_diff"],
+                    "output_port_types": ["structured_json", "code_diff", "agent_report"],
+                }
+            },
+        )
+        registry = dict(validated.get("external_agent_card_registry") or {})
+        self.assertEqual(registry["schema_version"], "astrabridge-external-agent-card-registry-v1")
+        self.assertEqual(registry["cards"][0]["card_ref"], f"{EXTERNAL_A2A_CARD_REF_PREFIX}geo_route")
+        self.assertEqual(registry["cards"][0]["trust_level"], "workspace_trusted")
+
+        graph_without_registry = _valid_graph()
+        graph_without_registry["nodes"][0]["card_ref"] = f"{EXTERNAL_A2A_CARD_REF_PREFIX}missing"
+        with self.assertRaisesRegex(ValueError, "external_agent_card_registry is missing"):
+            validate_agent_orchestration_graph(graph_without_registry)
+
     def test_legacy_task_graph_fixtures_lift_with_warnings_and_lower_back(self) -> None:
         for template_id in GRAPH_TEMPLATE_IDS:
             with self.subTest(template_id=template_id):
@@ -392,6 +466,10 @@ class AgentOrchestrationContractTests(unittest.TestCase):
                 warnings = list(lifted["migration"]["warnings"])
                 self.assertTrue(warnings)
                 self.assertEqual(lifted["migration"]["source_kind"], "legacy_task_graph")
+                self.assertTrue(all(node["prompt"]["template_mode"] == "inline" for node in lifted["nodes"]))
+                self.assertTrue(
+                    all("TODO: replace migration stub" not in str(node["prompt"]["template"]) for node in lifted["nodes"])
+                )
                 lowered = lower_agent_orchestration_graph_to_task_graph(lifted)
                 self.assertEqual(lowered["graph_id"], legacy["graph_id"])
                 self.assertEqual(lowered["template_id"], legacy["template_id"])
@@ -407,6 +485,16 @@ class AgentOrchestrationContractTests(unittest.TestCase):
                     [node["graph_id"] for node in lowered["nodes"]],
                     [node["graph_id"] for node in legacy["nodes"]],
                 )
+
+    def test_validate_agent_orchestration_graph_rejects_retired_migration_stub_prompt_mode(self) -> None:
+        graph = _valid_graph()
+        graph["nodes"][0]["prompt"] = {
+            "template_mode": "migration_stub",
+            "template": "TODO: replace migration stub with a canonical prompt template.",
+        }
+
+        with self.assertRaisesRegex(ValueError, "migration_stub"):
+            validate_agent_orchestration_graph(graph)
 
 
 if __name__ == "__main__":

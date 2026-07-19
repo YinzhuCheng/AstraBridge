@@ -13,6 +13,11 @@ from .agent_orchestration_contract import (
 
 AGENT_ORCHESTRATION_FILE_FORMAT_VERSION = "astrabridge-agent-orchestration-file-v1"
 AGENT_ORCHESTRATION_FILE_EXTENSIONS = (".json",)
+SOURCE_OWNED_DERIVED_NODE_FIELDS = (
+    "resolved_node_type_id",
+    "resolved_node_type_version",
+    "node_type_registry_fingerprint",
+)
 EXAMPLE_GRAPH_IDS = (
     "supervisor_worker_synthesizer",
     "code_fix_review",
@@ -30,11 +35,11 @@ def parse_agent_orchestration_graph_text(text: str, *, source_name: str = "<memo
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"{source_name} is not valid JSON: {exc.msg}") from exc
-    return validate_agent_orchestration_graph(payload)
+    return source_owned_agent_orchestration_graph(payload)
 
 
 def serialize_agent_orchestration_graph(graph: dict[str, Any]) -> str:
-    normalized = validate_agent_orchestration_graph(graph)
+    normalized = source_owned_agent_orchestration_graph(graph)
     return json.dumps(normalized, ensure_ascii=False, indent=2) + "\n"
 
 
@@ -81,6 +86,17 @@ def load_agent_orchestration_example(example_id: str) -> dict[str, Any]:
     except KeyError as exc:
         raise ValueError(f"Unknown agent orchestration example: {example_id}") from exc
     return deepcopy(graph)
+
+
+def source_owned_agent_orchestration_graph(graph: dict[str, Any]) -> dict[str, Any]:
+    normalized = validate_agent_orchestration_graph(graph)
+    source_owned = deepcopy(normalized)
+    for node in list(source_owned.get("nodes") or []):
+        if not isinstance(node, dict):
+            continue
+        for field in SOURCE_OWNED_DERIVED_NODE_FIELDS:
+            node.pop(field, None)
+    return source_owned
 
 
 def _require_supported_extension(path: Path) -> None:

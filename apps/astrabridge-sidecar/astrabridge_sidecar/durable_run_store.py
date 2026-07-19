@@ -10,20 +10,53 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sqlite3
 from typing import Any, Iterator
 
 from .common import WORKSPACE_STATE_DIRNAME, now_iso, write_json
+from .protocol.persistence import (
+    CANONICAL_PROTOCOL_VOCABULARIES,
+    canonicalize_protocol_agent_envelope,
+    canonicalize_protocol_artifact_ref,
+    canonicalize_protocol_delivery_contract,
+    canonicalize_protocol_run_event,
+    canonicalize_run_projection_payload,
+)
 from .security import SECRET_RE, SecurityError, redact_sensitive, resolve_under
 
 
 DURABLE_RUN_STORE_SCHEMA_VERSION = "astrabridge-durable-run-store-v1"
+DURABLE_RUN_STORE_SCHEMA_REVISION = 1
+DURABLE_RUN_STORE_MIGRATION_REPORT_VERSION = "astrabridge-durable-run-store-init-v1"
+DURABLE_RUN_STORE_READBACK_REPORT_VERSION = "astrabridge-durable-run-store-readback-v1"
 DURABLE_RUN_STORE_FILENAME = "durable_runs.sqlite3"
 DURABLE_RUN_MIGRATION_SCHEMA_VERSION = "astrabridge-durable-run-migration-v1"
 DURABLE_RUN_PROJECTION_SCHEMA_VERSION = "astrabridge-durable-run-projection-v1"
+STORE_MIGRATION_REPORT_DIRNAME = "durable-run-store-migrations"
+STORE_MIGRATION_BACKUP_DIRNAME = "durable-run-store-backups"
+REQUIRED_STORE_TABLES = frozenset(
+    {
+        "store_meta",
+        "runs",
+        "node_attempts",
+        "run_events",
+        "artifacts",
+        "agent_envelopes",
+        "leases",
+        "inbox",
+        "outbox",
+        "external_operations",
+        "run_idempotency",
+        "legacy_imports",
+        "migration_runs",
+    }
+)
+PROTOCOL_RUN_EVENT_TYPES = frozenset(CANONICAL_PROTOCOL_VOCABULARIES["run_event_types"])
 DELIVERY_LEDGER_EVENT_TYPES = frozenset(
     {
         "handoff_created",
@@ -80,6 +113,18 @@ class ImmutableRecordConflict(DurableRunStoreError):
     """An immutable event/artifact/attempt was submitted with different data."""
 
 
+class DeliveryPolicyConflict(DurableRunStoreError):
+    """A delivery violated ordering, replay, audience, or expiry policy."""
+
+
+class StoreInitializationBlocked(DurableRunStoreError):
+    """Durable store initialization stopped on a deterministic safety guard."""
+
+    def __init__(self, report: dict[str, Any]) -> None:
+        self.report = deepcopy(report)
+        super().__init__(str(report.get("message") or report.get("terminal_outcome") or "Durable run store initialization failed."))
+
+
 def _json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -91,6 +136,10 @@ def _json_load(value: str | None, default: Any) -> Any:
         return json.loads(value)
     except (TypeError, ValueError, json.JSONDecodeError):
         return deepcopy(default)
+
+
+def _payload_hash(value: Any) -> str:
+    return hashlib.sha256(_json_text(value).encode("utf-8")).hexdigest()
 
 
 def _redacted(value: Any) -> Any:
@@ -108,6 +157,17 @@ def _identifier(value: Any, field: str) -> str:
     if not clean:
         raise ValueError(f"{field} is required.")
     return clean
+
+
+def _parse_timestamp(value: Any, *, field: str) -> datetime | None:
+    clean = str(value or "").strip()
+    if not clean:
+        return None
+    normalized = clean[:-1] + "+00:00" if clean.endswith("Z") else clean
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise DeliveryPolicyConflict(f"{field} must be an ISO-8601 timestamp.") from exc
 
 
 def _safe_state_root(workspace_root: str | Path) -> tuple[Path, Path]:
@@ -134,12 +194,240 @@ class DurableRunEventStore:
             raise ValueError("Durable run store must remain under workspace-local .astrabridge/.") from exc
         self._initialized = False
 
+    def _new_store_migration_id(self) -> str:
+        seed = f"{self.db_path}:{now_iso()}"
+        return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+
+    def _store_migration_report_path(self, migration_id: str) -> Path:
+        return self.state_root / STORE_MIGRATION_REPORT_DIRNAME / f"{migration_id}.json"
+
+    def _store_readback_report_path(self, migration_id: str) -> Path:
+        return self.state_root / STORE_MIGRATION_REPORT_DIRNAME / f"{migration_id}.readback.json"
+
+    def _store_backup_root(self, migration_id: str) -> Path:
+        return self.state_root / STORE_MIGRATION_BACKUP_DIRNAME / migration_id
+
+    def _write_store_migration_report(self, report: dict[str, Any]) -> None:
+        write_json(self._store_migration_report_path(str(report.get("migration_id") or self._new_store_migration_id())), _redacted(report))
+
+    def _snapshot_store_files(self, migration_id: str) -> list[str]:
+        backup_root = self._store_backup_root(migration_id)
+        backup_root.mkdir(parents=True, exist_ok=True)
+        saved: list[str] = []
+        for candidate in (self.db_path, self.db_path.with_name(f"{self.db_path.name}-wal"), self.db_path.with_name(f"{self.db_path.name}-shm")):
+            if not candidate.exists():
+                continue
+            target = backup_root / candidate.name
+            shutil.copy2(candidate, target)
+            saved.append(target.relative_to(self.workspace_root).as_posix())
+        return saved
+
+    def _existing_store_file(self) -> bool:
+        return self.db_path.exists() and self.db_path.stat().st_size > 0
+
+    @staticmethod
+    def _table_names_in_connection(conn: sqlite3.Connection) -> set[str]:
+        return {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+
+    def _write_backup_readback_report(
+        self,
+        migration_id: str,
+        backup_paths: list[str],
+        *,
+        preferred_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        artifact = {
+            "schema_version": DURABLE_RUN_STORE_READBACK_REPORT_VERSION,
+            "migration_id": migration_id,
+            "backup_paths": list(backup_paths),
+            "status": "blocked",
+            "message": "No readable SQLite backup snapshot was available for readback.",
+            "readback_db_path": None,
+            "tables": [],
+            "store_metadata": {},
+            "run_count": 0,
+            "sample_run_id": None,
+            "projection": None,
+            "provider_participants": [],
+            "generated_at": now_iso(),
+        }
+        db_relative = next((item for item in backup_paths if item.endswith(".sqlite3")), None)
+        if db_relative is None:
+            write_json(self._store_readback_report_path(migration_id), artifact)
+            return {
+                "status": artifact["status"],
+                "message": artifact["message"],
+                "readback_path": self._store_readback_report_path(migration_id).relative_to(self.workspace_root).as_posix(),
+            }
+        snapshot_db = resolve_under(self.workspace_root, db_relative)
+        artifact["readback_db_path"] = db_relative
+        try:
+            conn = sqlite3.connect(snapshot_db, timeout=30, isolation_level=None, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            try:
+                tables = self._table_names_in_connection(conn)
+                artifact["tables"] = sorted(tables)
+                if "store_meta" in tables:
+                    try:
+                        rows = conn.execute("SELECT key, value FROM store_meta ORDER BY key").fetchall()
+                        artifact["store_metadata"] = {str(row["key"]): str(row["value"]) for row in rows if "value" in row.keys()}
+                    except sqlite3.DatabaseError as exc:
+                        artifact["store_metadata_error"] = type(exc).__name__
+                run_ids: list[str] = []
+                if "runs" in tables:
+                    run_rows = conn.execute("SELECT run_id FROM runs ORDER BY updated_at DESC, run_id DESC").fetchall()
+                    run_ids = [str(row["run_id"]) for row in run_rows]
+                artifact["run_count"] = len(run_ids)
+                sample_run_id = preferred_run_id if preferred_run_id in run_ids else (run_ids[0] if run_ids else None)
+                artifact["sample_run_id"] = sample_run_id
+                projection = self._projection_in_connection(conn, sample_run_id, available_tables=tables) if sample_run_id else None
+                artifact["projection"] = projection
+                participants: set[str] = set()
+                for envelope in list((projection or {}).get("agent_envelopes") or []):
+                    if not isinstance(envelope, dict):
+                        continue
+                    for party in ("sender", "recipient"):
+                        entry = envelope.get(party)
+                        if isinstance(entry, dict):
+                            provider_id = str(entry.get("provider_id") or "").strip()
+                            if provider_id:
+                                participants.add(provider_id)
+                artifact["provider_participants"] = sorted(participants)
+                artifact["status"] = "pass"
+                artifact["message"] = "Backup snapshot readback succeeded."
+            finally:
+                conn.close()
+        except Exception as exc:
+            artifact["status"] = "blocked"
+            artifact["message"] = f"Backup snapshot readback failed: {type(exc).__name__}"
+            artifact["error_type"] = type(exc).__name__
+        write_json(self._store_readback_report_path(migration_id), artifact)
+        return {
+            "status": artifact["status"],
+            "message": artifact["message"],
+            "readback_path": self._store_readback_report_path(migration_id).relative_to(self.workspace_root).as_posix(),
+            "readback_db_path": artifact["readback_db_path"],
+            "sample_run_id": artifact["sample_run_id"],
+            "run_count": artifact["run_count"],
+            "provider_participants": artifact["provider_participants"],
+        }
+
+    def _probe_store_state(self) -> dict[str, Any]:
+        if not self._existing_store_file():
+            return {"state": "empty", "schema_revision": 0, "tables": [], "missing_tables": sorted(REQUIRED_STORE_TABLES)}
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30, isolation_level=None, check_same_thread=False)
+            try:
+                revision_row = conn.execute("PRAGMA user_version").fetchone()
+                schema_revision = int(revision_row[0] if revision_row else 0)
+                table_rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                tables = sorted(str(row[0]) for row in table_rows)
+                quick_check = [str(row[0]) for row in conn.execute("PRAGMA quick_check").fetchall()]
+            finally:
+                conn.close()
+        except sqlite3.DatabaseError as exc:
+            return {
+                "state": "damaged",
+                "schema_revision": None,
+                "tables": [],
+                "missing_tables": sorted(REQUIRED_STORE_TABLES),
+                "error_type": type(exc).__name__,
+            }
+        missing_tables = sorted(table for table in REQUIRED_STORE_TABLES if table not in set(tables))
+        if any(item.lower() != "ok" for item in quick_check):
+            return {
+                "state": "damaged",
+                "schema_revision": schema_revision,
+                "tables": tables,
+                "missing_tables": missing_tables,
+                "quick_check": quick_check,
+            }
+        if schema_revision > DURABLE_RUN_STORE_SCHEMA_REVISION:
+            return {
+                "state": "future_version",
+                "schema_revision": schema_revision,
+                "tables": tables,
+                "missing_tables": missing_tables,
+            }
+        if not tables:
+            return {
+                "state": "empty",
+                "schema_revision": schema_revision,
+                "tables": tables,
+                "missing_tables": sorted(REQUIRED_STORE_TABLES),
+            }
+        if schema_revision < DURABLE_RUN_STORE_SCHEMA_REVISION or missing_tables:
+            return {
+                "state": "old",
+                "schema_revision": schema_revision,
+                "tables": tables,
+                "missing_tables": missing_tables,
+            }
+        return {
+            "state": "current",
+            "schema_revision": schema_revision,
+            "tables": tables,
+            "missing_tables": missing_tables,
+        }
+
     def initialize(self) -> dict[str, Any]:
         """Create the schema and enable WAL; safe to call repeatedly."""
 
-        with self._connection() as conn:
-            conn.executescript(
-                """
+        migration_id = self._new_store_migration_id()
+        started_at = now_iso()
+        report = {
+            "schema_version": DURABLE_RUN_STORE_MIGRATION_REPORT_VERSION,
+            "migration_id": migration_id,
+            "db_path": self.db_path.relative_to(self.workspace_root).as_posix(),
+            "store_schema_version": DURABLE_RUN_STORE_SCHEMA_VERSION,
+            "target_schema_revision": DURABLE_RUN_STORE_SCHEMA_REVISION,
+            "started_at": started_at,
+            "detected_state": None,
+            "prior_schema_revision": None,
+            "tables_before": [],
+            "missing_tables_before": [],
+            "backup_paths": [],
+            "terminal_outcome": None,
+            "status": "running",
+            "recovery_entry_point": None,
+            "readback": None,
+        }
+        probe = self._probe_store_state()
+        report["detected_state"] = str(probe.get("state") or "unknown")
+        report["prior_schema_revision"] = probe.get("schema_revision")
+        report["tables_before"] = list(probe.get("tables") or [])
+        report["missing_tables_before"] = list(probe.get("missing_tables") or [])
+        if report["detected_state"] == "damaged":
+            if self._existing_store_file():
+                report["backup_paths"] = self._snapshot_store_files(migration_id)
+                report["readback"] = self._write_backup_readback_report(migration_id, report["backup_paths"])
+            report["status"] = "blocked"
+            report["terminal_outcome"] = "blocked_damaged"
+            report["message"] = "Durable run store quick-check failed; restore the preserved backup before retrying."
+            report["error_type"] = probe.get("error_type")
+            report["quick_check"] = list(probe.get("quick_check") or [])
+            report["recovery_entry_point"] = report["backup_paths"][0] if report["backup_paths"] else "Delete the unreadable durable store and rebuild from preserved exports."
+            self._write_store_migration_report(report)
+            raise StoreInitializationBlocked(report)
+        if report["detected_state"] == "future_version":
+            if self._existing_store_file():
+                report["backup_paths"] = self._snapshot_store_files(migration_id)
+                report["readback"] = self._write_backup_readback_report(migration_id, report["backup_paths"])
+            report["status"] = "blocked"
+            report["terminal_outcome"] = "blocked_future_version"
+            report["message"] = "Durable run store schema revision is newer than this Sidecar build supports."
+            report["recovery_entry_point"] = report["backup_paths"][0] if report["backup_paths"] else "Re-open the workspace with the newer Sidecar build or restore a compatible backup."
+            self._write_store_migration_report(report)
+            raise StoreInitializationBlocked(report)
+        if report["detected_state"] == "old" and self._existing_store_file():
+            report["backup_paths"] = self._snapshot_store_files(migration_id)
+            report["recovery_entry_point"] = report["backup_paths"][0]
+            report["readback"] = self._write_backup_readback_report(migration_id, report["backup_paths"])
+        try:
+            with self._connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.executescript(
+                    """
                 CREATE TABLE IF NOT EXISTS store_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -282,13 +570,31 @@ class DurableRunEventStore:
                 CREATE INDEX IF NOT EXISTS idx_leases_active ON leases(run_id, node_id, status, expires_at);
                 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, updated_at);
                 """
-            )
-            conn.execute(
-                "INSERT INTO store_meta(key, value) VALUES(?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                ("schema_version", DURABLE_RUN_STORE_SCHEMA_VERSION),
-            )
+                )
+                conn.execute(
+                    "INSERT INTO store_meta(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("schema_version", DURABLE_RUN_STORE_SCHEMA_VERSION),
+                )
+                conn.execute(f"PRAGMA user_version={DURABLE_RUN_STORE_SCHEMA_REVISION}")
+                conn.commit()
+        except sqlite3.DatabaseError as exc:
+            report["status"] = "rolled_back"
+            report["terminal_outcome"] = "rolled_back"
+            report["message"] = "Durable run store schema apply failed and was rolled back."
+            report["error_type"] = type(exc).__name__
+            if not report["backup_paths"] and self._existing_store_file():
+                report["backup_paths"] = self._snapshot_store_files(migration_id)
+            if report["backup_paths"] and report["readback"] is None:
+                report["readback"] = self._write_backup_readback_report(migration_id, report["backup_paths"])
+            report["recovery_entry_point"] = report["backup_paths"][0] if report["backup_paths"] else "Delete the partial durable store and rebuild from preserved exports."
+            self._write_store_migration_report(report)
+            raise
         self._initialized = True
+        report["status"] = "pass"
+        report["terminal_outcome"] = "committed"
+        report["completed_at"] = now_iso()
+        self._write_store_migration_report(report)
         return self.store_metadata()
 
     @contextmanager
@@ -374,34 +680,53 @@ class DurableRunEventStore:
         )
         return payload
 
-    def _projection_in_connection(self, conn: sqlite3.Connection, run_id: str, *, include_events: bool = True) -> dict[str, Any] | None:
+    def _projection_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        run_id: str,
+        *,
+        include_events: bool = True,
+        available_tables: set[str] | None = None,
+    ) -> dict[str, Any] | None:
+        tables = available_tables or self._table_names_in_connection(conn)
+        if "runs" not in tables:
+            return None
         row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         if row is None:
             return None
         run = self._row_run(row)
-        attempts = conn.execute(
-            "SELECT * FROM node_attempts WHERE run_id = ? ORDER BY node_id, attempt",
-            (run_id,),
-        ).fetchall()
+        attempts = (
+            conn.execute(
+                "SELECT * FROM node_attempts WHERE run_id = ? ORDER BY node_id, attempt",
+                (run_id,),
+            ).fetchall()
+            if "node_attempts" in tables
+            else []
+        )
         run["node_run_states"] = [
             _json_load(item["payload_json"], {"node_id": item["node_id"], "attempt_count": item["attempt"]})
             for item in attempts
         ]
-        artifact_rows = conn.execute(
-            "SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at, artifact_id",
-            (run_id,),
-        ).fetchall()
-        run["artifact_refs"] = [_json_load(item["payload_json"], {}) for item in artifact_rows]
-        envelope_rows = conn.execute(
-            "SELECT payload_json FROM agent_envelopes WHERE run_id = ? ORDER BY created_at, envelope_id",
-            (run_id,),
-        ).fetchall()
-        run["agent_envelopes"] = [_json_load(item["payload_json"], {}) for item in envelope_rows]
-        if include_events:
-            event_rows = conn.execute(
-                "SELECT * FROM run_events WHERE run_id = ? ORDER BY sequence",
+        artifact_rows = (
+            conn.execute(
+                "SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at, artifact_id",
                 (run_id,),
             ).fetchall()
+            if "artifacts" in tables
+            else []
+        )
+        run["artifact_refs"] = [_json_load(item["payload_json"], {}) for item in artifact_rows]
+        envelope_rows = (
+            conn.execute(
+                "SELECT payload_json FROM agent_envelopes WHERE run_id = ? ORDER BY created_at, envelope_id",
+                (run_id,),
+            ).fetchall()
+            if "agent_envelopes" in tables
+            else []
+        )
+        run["agent_envelopes"] = [_json_load(item["payload_json"], {}) for item in envelope_rows]
+        if include_events and "run_events" in tables:
+            event_rows = conn.execute("SELECT * FROM run_events WHERE run_id = ? ORDER BY sequence", (run_id,)).fetchall()
             run["event_refs"] = [self._event_payload(item) for item in event_rows]
         else:
             run["event_refs"] = []
@@ -441,7 +766,7 @@ class DurableRunEventStore:
         self._require_initialized()
         if not isinstance(run, dict):
             raise TypeError("run must be an object.")
-        clean = _redacted(run)
+        clean = _redacted(canonicalize_run_projection_payload(run, source=source))
         run_id = _identifier(clean.get("run_id"), "run_id")
         graph_id = _identifier(clean.get("graph_id"), "graph_id")
         task_id = _identifier(clean.get("task_id"), "task_id")
@@ -600,7 +925,14 @@ class DurableRunEventStore:
                     continue
 
     def _insert_artifact(self, conn: sqlite3.Connection, *, run: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
-        clean = _redacted(artifact)
+        clean = _redacted(
+            canonicalize_protocol_artifact_ref(
+                artifact,
+                task_id=str(run.get("task_id") or ""),
+                run_id=str(run.get("run_id") or ""),
+                source_node_id=str(artifact.get("source_node_id") or "") or None,
+            )
+        )
         artifact_id = _identifier(clean.get("artifact_id"), "artifact_id")
         run_id = _identifier(run.get("run_id"), "run_id")
         existing = conn.execute("SELECT payload_json FROM artifacts WHERE artifact_id = ?", (artifact_id,)).fetchone()
@@ -645,7 +977,9 @@ class DurableRunEventStore:
         *,
         envelope: dict[str, Any],
     ) -> dict[str, Any]:
-        clean = _redacted(envelope)
+        clean = _redacted(canonicalize_protocol_agent_envelope(envelope))
+        delivery_contract = canonicalize_protocol_delivery_contract(clean)
+        payload_hash = _payload_hash(clean)
         envelope_id = _identifier(clean.get("envelope_id"), "envelope_id")
         run_id = _identifier(clean.get("run_id"), "run_id")
         task_id = _identifier(clean.get("task_id"), "task_id")
@@ -667,15 +1001,31 @@ class DurableRunEventStore:
             if _json_text(old) != _json_text(clean):
                 raise ImmutableRecordConflict(f"agent envelope is immutable: {envelope_id}")
             return old
+        existing_message = conn.execute(
+            "SELECT payload_json FROM agent_envelopes WHERE run_id = ? AND message_id = ?",
+            (run_id, message_id),
+        ).fetchone()
+        if existing_message is not None:
+            old = _json_load(existing_message["payload_json"], {})
+            if _payload_hash(old) != payload_hash:
+                raise ImmutableRecordConflict(f"message identity is immutable: {run_id}/{message_id}")
+            return old
         duplicate = conn.execute(
             "SELECT payload_json FROM agent_envelopes WHERE run_id = ? AND idempotency_key = ?",
             (run_id, idempotency_key),
         ).fetchone()
         if duplicate is not None:
             old = _json_load(duplicate["payload_json"], {})
-            if _json_text(old) != _json_text(clean):
+            if _payload_hash(old) != payload_hash:
                 raise ImmutableRecordConflict(f"delivery idempotency key is immutable: {run_id}/{idempotency_key}")
             return old
+        self._validate_agent_envelope_sequence_policy(
+            conn,
+            run_id=run_id,
+            envelope=clean,
+            delivery_contract=delivery_contract,
+            payload_hash=payload_hash,
+        )
         conn.execute(
             """INSERT INTO agent_envelopes(
                    envelope_id, run_id, task_id, graph_id, source_node_id, target_node_id,
@@ -696,6 +1046,52 @@ class DurableRunEventStore:
             ),
         )
         return clean
+
+    def _validate_agent_envelope_sequence_policy(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        envelope: dict[str, Any],
+        delivery_contract: dict[str, Any],
+        payload_hash: str,
+    ) -> None:
+        edge_id = str(delivery_contract.get("edge_id") or "").strip()
+        if not edge_id:
+            return
+        sequence = int(delivery_contract.get("sequence") or 0)
+        same_edge_rows = conn.execute(
+            "SELECT payload_json FROM agent_envelopes WHERE run_id = ? ORDER BY created_at, envelope_id",
+            (run_id,),
+        ).fetchall()
+        matching_contracts: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+        for row in same_edge_rows:
+            existing = _json_load(row["payload_json"], {})
+            if not isinstance(existing, dict):
+                continue
+            existing_contract = canonicalize_protocol_delivery_contract(existing)
+            if str(existing_contract.get("edge_id") or "").strip() != edge_id:
+                continue
+            matching_contracts.append((existing, existing_contract, _payload_hash(existing)))
+        if not matching_contracts:
+            if sequence != 0:
+                raise DeliveryPolicyConflict(f"delivery sequence must start at 0 for {run_id}/{edge_id}")
+            return
+        max_sequence = max(int(dict(item[1]).get("sequence") or 0) for item in matching_contracts)
+        for existing, existing_contract, existing_hash in matching_contracts:
+            if int(existing_contract.get("sequence") or 0) != sequence:
+                continue
+            if existing_hash == payload_hash:
+                return
+            raise DeliveryPolicyConflict(f"delivery sequence is already occupied for {run_id}/{edge_id}/{sequence}")
+        if sequence < max_sequence:
+            raise DeliveryPolicyConflict(
+                f"delivery sequence replayed for {run_id}/{edge_id}: {sequence} < {max_sequence}"
+            )
+        if sequence > max_sequence + 1:
+            raise DeliveryPolicyConflict(
+                f"delivery sequence is not yet admissible for {run_id}/{edge_id}: {sequence} > {max_sequence + 1}"
+            )
 
     def record_agent_envelope(self, envelope: dict[str, Any]) -> dict[str, Any]:
         self._require_initialized()
@@ -755,7 +1151,7 @@ class DurableRunEventStore:
             event.setdefault("run_id", run["run_id"])
             event.setdefault("task_id", run["task_id"])
             event.setdefault("trace_id", run.get("trace_id") or f"trace-{run['run_id']}")
-            event.setdefault("event_type", "state_snapshot")
+            event.setdefault("event_type", "run_created")
             event.setdefault("created_at", run.get("created_at") or now_iso())
             event.setdefault("sequence", next_sequence)
             sequence = int(event.get("sequence") or 0)
@@ -819,7 +1215,7 @@ class DurableRunEventStore:
             event.setdefault("run_id", run_id)
             event.setdefault("task_id", task_id)
             event.setdefault("trace_id", trace_id)
-            event.setdefault("event_type", "state_snapshot")
+            event.setdefault("event_type", "run_created")
             event.setdefault("created_at", run.get("updated_at") or run.get("created_at") or now_iso())
             if not str(event.get("event_id") or "").strip():
                 event["event_id"] = f"{run_id}-event-{hashlib.sha256(_json_text(event).encode('utf-8')).hexdigest()[:20]}"
@@ -846,19 +1242,32 @@ class DurableRunEventStore:
             self._insert_event(conn, event, sequence=None if event.get("sequence") is None else int(event["sequence"]))
 
     def _insert_event(self, conn: sqlite3.Connection, event: dict[str, Any], *, sequence: int | None = None) -> dict[str, Any]:
-        clean = _redacted(event)
-        event_id = _identifier(clean.get("event_id"), "event_id")
-        run_id = _identifier(clean.get("run_id"), "run_id")
-        task_id = _identifier(clean.get("task_id"), "task_id")
-        trace_id = _identifier(clean.get("trace_id"), "trace_id")
-        event_type = str(clean.get("event_type") or "state_snapshot").strip() or "state_snapshot"
-        created_at = str(clean.get("created_at") or now_iso()).strip()
+        event_id = _identifier(event.get("event_id"), "event_id")
+        run_id = _identifier(event.get("run_id"), "run_id")
         if sequence is None:
-            if clean.get("sequence") is not None:
-                sequence = int(clean["sequence"])
+            if event.get("sequence") is not None:
+                sequence = int(event["sequence"])
             else:
                 row = conn.execute("SELECT COALESCE(MAX(sequence), -1) AS latest FROM run_events WHERE run_id = ?", (run_id,)).fetchone()
                 sequence = int(row["latest"]) + 1
+        candidate = dict(event)
+        candidate["event_id"] = event_id
+        candidate["run_id"] = run_id
+        candidate["sequence"] = int(sequence)
+        clean = _redacted(
+            canonicalize_protocol_run_event(
+                candidate,
+                run_id=run_id,
+                task_id=str(event.get("task_id") or ""),
+                trace_id=str(event.get("trace_id") or ""),
+                created_at=str(event.get("created_at") or ""),
+                source_node_id=str(event.get("node_id") or "") or None,
+            )
+        )
+        task_id = _identifier(clean.get("task_id"), "task_id")
+        trace_id = _identifier(clean.get("trace_id"), "trace_id")
+        event_type = str(clean.get("event_type") or "run_created").strip() or "run_created"
+        created_at = str(clean.get("created_at") or now_iso()).strip()
         clean.update(
             {
                 "event_id": event_id,
@@ -1153,15 +1562,135 @@ class DurableRunEventStore:
             conn.execute("UPDATE leases SET status='released', heartbeat_at=?, expires_at=? WHERE lease_id=?", (now_iso(), now_iso(), lease_id))
             return True
 
-    def record_inbox(self, idempotency_key: str, *, run_id: str | None = None, event_id: str | None = None, payload: Any = None) -> bool:
-        self._require_initialized()
+    def _record_inbox_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        idempotency_key: str,
+        *,
+        run_id: str | None = None,
+        event_id: str | None = None,
+        payload: Any = None,
+        audience: str | None = None,
+        available_at: str | None = None,
+        expires_at: str | None = None,
+        replay_deadline_at: str | None = None,
+        received_at: str | None = None,
+    ) -> bool:
+        current_time = str(received_at or now_iso()).strip() or now_iso()
+        current_dt = _parse_timestamp(current_time, field="received_at")
+        available_dt = _parse_timestamp(available_at, field="available_at")
+        expires_dt = _parse_timestamp(expires_at, field="expires_at")
+        replay_deadline_dt = _parse_timestamp(replay_deadline_at, field="replay_deadline_at")
+        if available_dt is not None and current_dt is not None and current_dt < available_dt:
+            raise DeliveryPolicyConflict("delivery is not yet eligible for processing.")
+        effective_expiry = replay_deadline_dt or expires_dt
+        if effective_expiry is not None and current_dt is not None and current_dt > effective_expiry:
+            raise DeliveryPolicyConflict("delivery expired before processing.")
         key = _identifier(idempotency_key, "idempotency_key")
+        clean_payload = _redacted(payload or {})
+        stored_payload = {
+            "payload": clean_payload,
+            "audience": str(audience or "").strip() or None,
+            "available_at": str(available_at or "").strip() or None,
+            "expires_at": str(expires_at or "").strip() or None,
+            "replay_deadline_at": str(replay_deadline_at or "").strip() or None,
+        }
+        existing = conn.execute(
+            "SELECT run_id, event_id, payload_json FROM inbox WHERE idempotency_key = ?",
+            (key,),
+        ).fetchone()
+        if existing is not None:
+            old = _json_load(existing["payload_json"], {})
+            if (
+                str(existing["run_id"] or "") != str(run_id or "")
+                or str(existing["event_id"] or "") != str(event_id or "")
+                or _payload_hash(old) != _payload_hash(stored_payload)
+            ):
+                raise ImmutableRecordConflict(f"inbox idempotency key is immutable: {key}")
+            return False
+        conn.execute(
+            "INSERT INTO inbox(idempotency_key,run_id,event_id,received_at,payload_json) VALUES(?,?,?,?,?)",
+            (key, str(run_id or "") or None, str(event_id or "") or None, current_time, _json_text(stored_payload)),
+        )
+        return True
+
+    def record_inbox(
+        self,
+        idempotency_key: str,
+        *,
+        run_id: str | None = None,
+        event_id: str | None = None,
+        payload: Any = None,
+        audience: str | None = None,
+        available_at: str | None = None,
+        expires_at: str | None = None,
+        replay_deadline_at: str | None = None,
+    ) -> bool:
+        self._require_initialized()
         with self._transaction() as conn:
-            cursor = conn.execute(
-                "INSERT OR IGNORE INTO inbox(idempotency_key,run_id,event_id,received_at,payload_json) VALUES(?,?,?,?,?)",
-                (key, str(run_id or "") or None, str(event_id or "") or None, now_iso(), _json_text(_redacted(payload or {}))),
+            return self._record_inbox_in_connection(
+                conn,
+                idempotency_key,
+                run_id=run_id,
+                event_id=event_id,
+                payload=payload,
+                audience=audience,
+                available_at=available_at,
+                expires_at=expires_at,
+                replay_deadline_at=replay_deadline_at,
             )
-            return cursor.rowcount == 1
+
+    def admit_agent_envelope_processing(
+        self,
+        envelope: dict[str, Any],
+        *,
+        target_node_id: str,
+        target_provider_id: str | None = None,
+        processing_key: str | None = None,
+        now: str | None = None,
+    ) -> dict[str, Any]:
+        self._require_initialized()
+        audience_node_id = _identifier(target_node_id, "target_node_id")
+        current_time = str(now or now_iso()).strip() or now_iso()
+        with self._transaction() as conn:
+            clean = self._insert_agent_envelope(conn, envelope=envelope)
+            delivery_contract = canonicalize_protocol_delivery_contract(clean)
+            audience_lane_id = str(delivery_contract.get("audience_lane_id") or "").strip()
+            audience_provider_id = str(delivery_contract.get("audience_provider_id") or "").strip()
+            if audience_lane_id and audience_lane_id != audience_node_id:
+                raise DeliveryPolicyConflict(
+                    f"delivery audience mismatch for {clean.get('envelope_id')}: expected {audience_node_id}, got {audience_lane_id}"
+                )
+            if target_provider_id and audience_provider_id and audience_provider_id != str(target_provider_id).strip():
+                raise DeliveryPolicyConflict(
+                    f"delivery provider audience mismatch for {clean.get('envelope_id')}: expected {target_provider_id}, got {audience_provider_id}"
+                )
+            effective_processing_key = str(processing_key or "").strip() or (
+                f"handoff:{str(delivery_contract.get('delivery_idempotency_key') or clean.get('message_id') or clean.get('envelope_id'))}:{audience_node_id}"
+            )
+            accepted = self._record_inbox_in_connection(
+                conn,
+                effective_processing_key,
+                run_id=str(clean.get("run_id") or "") or None,
+                event_id=str(clean.get("envelope_id") or "") or None,
+                payload={
+                    "envelope_id": str(clean.get("envelope_id") or "") or None,
+                    "message_id": str(clean.get("message_id") or "") or None,
+                    "delivery_idempotency_key": str(delivery_contract.get("delivery_idempotency_key") or "") or None,
+                    "sequence": int(delivery_contract.get("sequence") or 0),
+                },
+                audience=audience_node_id,
+                available_at=str(delivery_contract.get("not_before_at") or "") or None,
+                expires_at=str(delivery_contract.get("expires_at") or delivery_contract.get("deadline_at") or "") or None,
+                replay_deadline_at=str(delivery_contract.get("replay_deadline_at") or "") or None,
+                received_at=current_time,
+            )
+            return {
+                "status": "accepted" if accepted else "duplicate",
+                "processing_key": effective_processing_key,
+                "delivery": delivery_contract,
+                "envelope": clean,
+            }
 
     def enqueue_outbox(self, operation_id: str, run_id: str, *, kind: str, payload: Any = None, node_id: str | None = None) -> dict[str, Any]:
         self._require_initialized()
@@ -1172,8 +1701,25 @@ class DurableRunEventStore:
         with self._transaction() as conn:
             if conn.execute("SELECT 1 FROM runs WHERE run_id=?", (rid,)).fetchone() is None:
                 raise ValueError(f"Unknown run_id: {rid}")
+            existing = conn.execute("SELECT * FROM outbox WHERE operation_id = ?", (op,)).fetchone()
+            if existing is not None:
+                old = self._outbox_row(existing)
+                old_payload = dict(old.get("payload") or {}) if isinstance(old.get("payload"), dict) else {}
+                old_status = str(old.get("status") or "").strip()
+                if (
+                    str(old.get("run_id") or "") != rid
+                    or str(old.get("node_id") or "") != str(node_id or "")
+                    or str(old.get("kind") or "") != str(kind or "dispatch")
+                ):
+                    raise ImmutableRecordConflict(f"outbox operation is immutable: {op}")
+                if old_status == "pending":
+                    if _payload_hash(old_payload) != _payload_hash(clean_payload):
+                        raise ImmutableRecordConflict(f"outbox operation payload is immutable: {op}")
+                elif any(key in old_payload and old_payload.get(key) != value for key, value in dict(clean_payload).items()):
+                    raise ImmutableRecordConflict(f"outbox operation payload is immutable: {op}")
+                return old
             conn.execute(
-                "INSERT OR IGNORE INTO outbox(operation_id,run_id,node_id,kind,status,created_at,updated_at,payload_json) VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO outbox(operation_id,run_id,node_id,kind,status,created_at,updated_at,payload_json) VALUES(?,?,?,?,?,?,?,?)",
                 (op, rid, str(node_id or "") or None, str(kind or "dispatch"), "pending", now, now, _json_text(clean_payload)),
             )
             return self._outbox_row(conn.execute("SELECT * FROM outbox WHERE operation_id=?", (op,)).fetchone())

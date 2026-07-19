@@ -61,6 +61,7 @@ pub struct SidecarLaunchConfig {
     pub state_root: PathBuf,
     pub build_version: String,
     pub python_candidates: Vec<String>,
+    pub launch_arguments: Vec<String>,
     pub extra_env: HashMap<String, String>,
     pub tuning: SidecarSupervisorTuning,
 }
@@ -786,6 +787,9 @@ impl SupervisorInner {
         if let Some(script_path) = script_path {
             command.arg(script_path);
         }
+        for argument in &self.config.launch_arguments {
+            command.arg(argument);
+        }
         command
             .arg("--serve")
             .arg("--port")
@@ -1423,6 +1427,7 @@ mod tests {
             state_root: paths.state_root.clone(),
             build_version: "0.1.0-test".to_string(),
             python_candidates: vec!["python".to_string(), "py".to_string()],
+            launch_arguments: Vec::new(),
             extra_env: HashMap::from([
                 ("ASTRABRIDGE_APPDATA".to_string(), paths.appdata.display().to_string()),
                 ("ASTRABRIDGE_RUNTIME_ROOT".to_string(), paths.runtime.display().to_string()),

@@ -38,15 +38,27 @@ from .profile_service import ProfileService
 from .project_context_service import ProjectContextService
 from .project_service import ProjectService
 from .project_tools_service import ProjectToolsService
+from .external_a2a_gateway import (
+    ExternalA2AConflictError,
+    ExternalA2AGatewayService,
+    ExternalA2ANotFoundError,
+    ExternalA2ARequestRejectedError,
+    RuntimeExternalA2ATaskExecutor,
+)
 from .provider_compatibility_smoke import run_provider_compatibility_smoke
 from .router_config_service import RouterConfigService
 from .router_service import RouterService
 from .runtime_supervisor_service import RuntimeSupervisorService
 from .runtime_service import RuntimeService
 from .secret_service import SecretService
+from .release_identity import (
+    desktop_update_status,
+    release_product_version,
+    run_windows_update_rehearsal,
+)
 from .sidecar_provenance import build_sidecar_provenance
 from .task_conversation_service import TaskConversationService
-from .task_service import TaskService, _display_task_title
+from .task_service import GraphRevisionConflictError, GraphSourceOwnershipError, TaskService, _display_task_title
 from .title_suggestion_service import TitleSuggestionService
 from .web_tool_service import AstraBridgeWebService
 from .wsl_dependency_service import WslDependencyService
@@ -126,6 +138,25 @@ def sse_frame(*, event: str | None = None, data: Any | None = None, comment: str
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def runtime_event_sse_frames(*, after: int, payload: dict[str, Any]) -> tuple[int, list[bytes]]:
+    """Translate a runtime-event batch into ordered SSE frames with per-event cursors."""
+    delivered_cursor = max(0, int(after))
+    events = list(payload.get("events") or [])
+    if events:
+        frames: list[bytes] = []
+        for event in events:
+            delivered_cursor += 1
+            frames.append(
+                sse_frame(
+                    event="astrabridge.event",
+                    data={"cursor": delivered_cursor, "event": event},
+                )
+            )
+        return delivered_cursor, frames
+    cursor = max(delivered_cursor, int(payload.get("cursor") or delivered_cursor))
+    return cursor, []
+
+
 def visible_task_title(value: Any) -> str:
     title = str(value or "").strip()
     if not title:
@@ -159,7 +190,10 @@ class AppContext:
         self.seed_root = seed_root.expanduser().resolve()
         self.boot_id = str(boot_id or os.environ.get("ASTRABRIDGE_SIDECAR_BOOT_ID") or "").strip() or f"astrabridge-sidecar-{int(time.time() * 1000)}"
         self.launch_record_path = launch_record_path.expanduser().resolve() if isinstance(launch_record_path, Path) else None
-        self.build_version = str(build_version or os.environ.get("ASTRABRIDGE_SIDECAR_BUILD_VERSION") or "dev").strip() or "dev"
+        self.build_version = (
+            str(build_version or os.environ.get("ASTRABRIDGE_SIDECAR_BUILD_VERSION") or release_product_version()).strip()
+            or release_product_version()
+        )
         self.listen_host = "127.0.0.1"
         self.listen_port: int | None = None
         self.ready_at: str | None = None
@@ -253,6 +287,19 @@ class AppContext:
             task_conversation=self.task_conversation,
         )
         self.runtime.attach_project_tools(self.project_tools)
+        self.external_a2a = ExternalA2AGatewayService(
+            executor=RuntimeExternalA2ATaskExecutor(
+                runtime=self.runtime,
+                profile_resolver=self.resolve_runtime_profile,
+                thread_id_resolver=lambda _task_record: (
+                    str(self.tasks.visible_provider_thread_id(include_missing_fallback=True) or "").strip()
+                    or str((self.projects.current_project or {}).get("current_thread_id") or "").strip()
+                    or None
+                ),
+            ),
+            event_recorder=self.runtime.record_external_event,
+            product_version=self.build_version,
+        )
         self.automations = AutomationService(
             self.projects,
             runtime_service=self.runtime,
@@ -529,11 +576,10 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             while time.monotonic() < deadline:
                 payload = self.context.runtime.list_events(after=cursor, limit=limit)
-                events = list(payload.get("events") or [])
-                cursor = int(payload.get("cursor") or cursor)
-                if events:
-                    for event in events:
-                        self.wfile.write(sse_frame(event="astrabridge.event", data={"cursor": cursor, "event": event}))
+                cursor, frames = runtime_event_sse_frames(after=cursor, payload=payload)
+                if frames:
+                    for frame in frames:
+                        self.wfile.write(frame)
                     self.wfile.flush()
                     last_heartbeat = time.monotonic()
                 elif time.monotonic() - last_heartbeat >= 15:
@@ -578,6 +624,15 @@ class Handler(BaseHTTPRequestHandler):
             seed_root=getattr(self.context, "seed_root", None),
         )
 
+    def _request_base_url(self) -> str:
+        host = str(self.headers.get("Host") or "").strip()
+        if host:
+            return f"http://{host}"
+        address = getattr(getattr(self, "server", None), "server_address", None)
+        if isinstance(address, tuple) and len(address) >= 2:
+            return f"http://{address[0]}:{address[1]}"
+        return "http://127.0.0.1"
+
     def _payload_thread_id(self, payload: dict[str, Any]) -> str:
         raw = payload.get("thread_id")
         thread_id = str(raw or "").strip()
@@ -595,6 +650,41 @@ class Handler(BaseHTTPRequestHandler):
             return ""
         return ""
 
+    def _send_external_a2a_task_stream(self, task_id: str, *, after: int = 0, limit: int | None = None, seconds: float = 60.0) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self._send_cors_headers()
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        cursor = max(0, int(after))
+        deadline = time.monotonic() + max(1.0, seconds)
+        last_heartbeat = 0.0
+        try:
+            self.wfile.write(sse_frame(event="external_a2a.hello", data={"taskId": task_id, "cursor": cursor}, retry=1000))
+            self.wfile.flush()
+            while time.monotonic() < deadline:
+                payload = self.context.external_a2a.task_events(task_id, after=cursor, limit=limit)
+                events = list(payload.get("events") or [])
+                cursor = int(payload.get("cursor") or cursor)
+                if events:
+                    for event in events:
+                        self.wfile.write(sse_frame(event="external_a2a.task", data={"cursor": cursor, "event": event}))
+                    self.wfile.flush()
+                    last_heartbeat = time.monotonic()
+                elif time.monotonic() - last_heartbeat >= 10:
+                    self.wfile.write(sse_frame(comment=f"heartbeat cursor={cursor} task_id={task_id}"))
+                    self.wfile.flush()
+                    last_heartbeat = time.monotonic()
+                if bool(payload.get("terminal")) and not events:
+                    break
+                time.sleep(0.25)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
+        finally:
+            self.close_connection = True
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         self._send(204, b"")
 
@@ -603,6 +693,22 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
             query = urllib.parse.parse_qs(parsed.query)
+            if path == "/.well-known/agent-card.json":
+                self.send_json(self.context.external_a2a.local_agent_card(base_url=self._request_base_url()))
+                return
+            if path.startswith("/a2a/tasks/"):
+                parts = [part for part in path.split("/") if part]
+                if len(parts) == 3 and parts[0] == "a2a" and parts[1] == "tasks":
+                    self.send_json(self.context.external_a2a.get_task(parts[2]))
+                    return
+                if len(parts) == 5 and parts[0] == "a2a" and parts[1] == "tasks" and parts[3] == "events" and parts[4] == "stream":
+                    after = int(query.get("after", ["0"])[0])
+                    limit_values = query.get("limit", [])
+                    limit = int(limit_values[0]) if limit_values and str(limit_values[0]).strip() else None
+                    seconds_values = query.get("seconds", [])
+                    seconds = float(seconds_values[0]) if seconds_values and str(seconds_values[0]).strip() else 30.0
+                    self._send_external_a2a_task_stream(parts[2], after=after, limit=limit, seconds=min(max(seconds, 1.0), 120.0))
+                    return
             if path == "/readyz":
                 self.send_json(self.context.ready_payload())
                 return
@@ -671,6 +777,13 @@ class Handler(BaseHTTPRequestHandler):
                 limit_values = query.get("limit", [])
                 limit = int(limit_values[0]) if limit_values and str(limit_values[0]).strip() else 30
                 self.send_json(self.context.project_tools.terminal_history(limit=limit))
+                return
+            if path == "/api/runtime/desktop-update":
+                self.send_json(
+                    desktop_update_status(
+                        project=self.context.projects.current_project,
+                    )
+                )
                 return
             if path in {"/api/project/tasks", "/api/tasks"}:
                 self.send_json(self.context.tasks.snapshot())
@@ -947,6 +1060,16 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             self.send_json({"ok": False, "error": "Not found"}, status=404)
+        except ExternalA2ANotFoundError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=404)
+        except ExternalA2AConflictError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=409)
+        except GraphRevisionConflictError as exc:
+            self.send_json(exc.response_payload(), status=409)
+        except GraphSourceOwnershipError as exc:
+            self.send_json(exc.response_payload(), status=409)
+        except ExternalA2ARequestRejectedError as exc:
+            self.send_json(exc.response_payload(), status=exc.status_code)
         except Exception as exc:  # noqa: BLE001
             self.send_json(public_error(exc), status=400)
 
@@ -970,6 +1093,14 @@ class Handler(BaseHTTPRequestHandler):
                         return
                 self._run_after_response(name="sidecar-shutdown", callback=_shutdown_server)
                 return
+            if path == "/a2a/tasks/send":
+                self.send_json(self.context.external_a2a.submit_task(payload))
+                return
+            if path.startswith("/a2a/tasks/"):
+                parts = [part for part in path.split("/") if part]
+                if len(parts) == 4 and parts[0] == "a2a" and parts[1] == "tasks" and parts[3] == "cancel":
+                    self.send_json(self.context.external_a2a.cancel_task(parts[2], payload))
+                    return
             if path.startswith("/api/") and path not in {"/api/projects/current", "/api/projects/recent"}:
                 if self.command == "POST":
                     self._require_admin_token()
@@ -1113,6 +1244,14 @@ class Handler(BaseHTTPRequestHandler):
                     skill_ref=payload.get("skill_ref") if isinstance(payload.get("skill_ref"), dict) else None,
                 )
                 self.send_json({"project": self.context.projects.update_project({"plugin_skill_presets": next_state})})
+                return
+            if path == "/api/runtime/desktop-update/rehearsal":
+                self.send_json(
+                    run_windows_update_rehearsal(
+                        project=self.context.projects.current_project,
+                        run_id=self._optional_string(payload, "run_id"),
+                    )
+                )
                 return
             if path == "/api/project/saves/create":
                 response = self.context.checkpoints.create(payload)
@@ -1265,6 +1404,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/agentic-updates/validate":
                 self.send_json(self.context.agentic_updates.validate(payload))
+                return
+            if path == "/api/agentic-updates/supervised-run":
+                self.send_json(self.context.agentic_updates.supervised_run(payload))
                 return
             if path == "/api/agentic-updates/kernel-verify":
                 self.send_json(self.context.agentic_updates.verify_kernel_candidate(payload))
@@ -1987,6 +2129,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(self.context.wsl_dependencies.launch_installer(self._optional_string(payload, "distro")))
                 return
             self.send_json({"ok": False, "error": "Not found"}, status=404)
+        except ExternalA2ANotFoundError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=404)
+        except ExternalA2AConflictError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=409)
+        except GraphRevisionConflictError as exc:
+            self.send_json(exc.response_payload(), status=409)
+        except GraphSourceOwnershipError as exc:
+            self.send_json(exc.response_payload(), status=409)
+        except ExternalA2ARequestRejectedError as exc:
+            self.send_json(exc.response_payload(), status=exc.status_code)
         except Exception as exc:  # noqa: BLE001
             self.send_json(public_error(exc), status=400)
 

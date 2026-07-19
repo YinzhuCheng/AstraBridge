@@ -1231,11 +1231,15 @@ export const api = {
     cursor_enhancement?: CursorEnhancementPreference;
     execution_host?: ExecutionHost;
     wsl_distro?: string;
+    update_channel?: ProjectFile["ui_preferences"]["update_channel"];
     left_sidebar_open?: boolean;
     left_sidebar_width?: number;
     right_sidebar_width?: number;
     right_sidebar_open?: boolean;
   }) => jsonRequest<{ project: ProjectFile }>("/api/projects/preferences", { ui_preferences: payload }),
+  desktopUpdateStatus: () => request<import("./types").DesktopUpdateStatus>("/api/runtime/desktop-update"),
+  runDesktopUpdateRehearsal: (payload?: { run_id?: string | null }) =>
+    jsonRequest<import("./types").DesktopUpdateRehearsalResult>("/api/runtime/desktop-update/rehearsal", payload ?? {}),
   updateProjectPluginSkillPresets: (payload: {
     operation: "add_plugin" | "remove_plugin" | "add_skill" | "remove_skill" | "reset";
     preset_id?: string;
@@ -1379,7 +1383,7 @@ export const api = {
   }) => jsonRequest<TaskGraphSnapshotDiffResponse>("/api/task-graphs/snapshot/diff", payload),
   rollbackTaskGraphToSnapshot: (payload: { snapshot_id: string; label?: string | null }) =>
     jsonRequest<TaskGraphRollbackResponse>("/api/task-graphs/rollback", payload),
-  saveTaskGraph: (payload: { graph: TaskGraphDefinition }) =>
+  saveTaskGraph: (payload: { graph: TaskGraphDefinition; source_owner_action?: "detach" | null }) =>
     jsonRequest<{ schema_version: string; graph: TaskGraphDefinition; task: ProjectTask | null }>("/api/task-graphs/save", payload),
   fixtureRunTaskGraph: (payload: {
     graph_id: string;

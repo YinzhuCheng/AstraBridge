@@ -1,4 +1,6 @@
 """AstraBridge desktop sidecar package."""
 
-__version__ = "0.1.0"
+from .release_identity import release_product_version
+
+__version__ = release_product_version()
 

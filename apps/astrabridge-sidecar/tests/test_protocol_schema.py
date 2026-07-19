@@ -88,6 +88,12 @@ class ProtocolSchemaTests(unittest.TestCase):
         self.assertEqual(canonical["topology"], compiled["topology"])
         self.assertEqual(canonical, migrate_compiled_plan(canonical))
 
+    def test_shared_protocol_graph_and_compiled_plan_fixtures_are_migration_stable(self) -> None:
+        graph = deepcopy(self.fixtures["valid"]["GraphDefinition"])
+        compiled = deepcopy(self.fixtures["valid"]["CompiledPlan"])
+        self.assertEqual(graph, migrate_graph_definition(graph))
+        self.assertEqual(compiled, migrate_compiled_plan(compiled))
+
     def test_artifact_adapter_preserves_lineage_and_rejects_external_paths(self) -> None:
         artifact = adapt_legacy_artifact_path(
             {

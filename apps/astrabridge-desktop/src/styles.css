@@ -2883,6 +2883,12 @@ body.resizing .resize-handle::before {
   min-height: 0;
 }
 
+.manager-stack {
+  display: grid;
+  gap: var(--space-3);
+  min-height: 0;
+}
+
 .setup-landing-panel,
 .view-workspace-panel {
   gap: 0.9rem;
@@ -8374,6 +8380,15 @@ body.resizing .task-graph-panel-resize-handle::after {
   text-transform: uppercase;
 }
 
+.task-graph-run-event-details {
+  padding: 0.04rem 0 0.12rem;
+  border-top: 1px solid rgba(32, 35, 40, 0.07);
+}
+
+.task-graph-run-event-details .task-graph-run-meta {
+  margin-top: 0.02rem;
+}
+
 .task-graph-run-primary-artifacts {
   display: grid;
   gap: 0;
@@ -8500,7 +8515,8 @@ body.resizing .task-graph-panel-resize-handle::after {
 }
 
 .task-graph-run-timeline,
-.task-graph-run-diagnostics {
+.task-graph-run-diagnostics,
+.task-graph-command-log {
   display: grid;
   gap: 0.1rem;
   padding: 0 0 0.12rem;
@@ -8542,6 +8558,68 @@ body.resizing .task-graph-panel-resize-handle::after {
 .task-graph-run-diagnostic-links {
   display: grid;
   gap: 0;
+}
+
+.task-graph-command-log-entry {
+  display: grid;
+  gap: 0.06rem;
+  padding: 0.16rem 0;
+  border-top: 1px solid rgba(32, 35, 40, 0.05);
+}
+
+.task-graph-command-log-entry:first-child {
+  border-top: 0;
+}
+
+.task-graph-command-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.16rem;
+}
+
+.task-graph-command-log-head strong {
+  font-size: 0.48rem;
+  line-height: 1.28;
+}
+
+.task-graph-command-log-meta {
+  color: var(--muted);
+  font-size: 0.4rem;
+  line-height: 1.28;
+}
+
+.task-graph-command-log-detail {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 0.43rem;
+  line-height: 1.34;
+}
+
+.task-graph-command-log-status {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.02rem 0.16rem;
+  font-size: 0.36rem;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.task-graph-command-log-status-pending {
+  background: rgba(186, 152, 32, 0.14);
+  color: #8f6b09;
+}
+
+.task-graph-command-log-status-applied {
+  background: rgba(43, 128, 88, 0.12);
+  color: #1f6b48;
+}
+
+.task-graph-command-log-status-failed {
+  background: rgba(176, 54, 54, 0.12);
+  color: #9f2f2f;
 }
 
 .task-graph-worker-timeline {

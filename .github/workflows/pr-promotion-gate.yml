@@ -1,0 +1,56 @@
+name: promotion-gate-pr
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  promotion-gate-pr:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Sync sidecar dependencies
+        run: uv sync --locked --project apps/astrabridge-sidecar --all-groups
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/astrabridge-desktop/package-lock.json
+
+      - name: Install desktop dependencies
+        working-directory: apps/astrabridge-desktop
+        run: npm ci
+
+      - name: Run PR promotion gate
+        shell: pwsh
+        run: >
+          python scripts/run_promotion_gate.py
+          --mode pr
+          --expected-commit "${{ github.sha }}"
+          --artifact-root "PRIVATE/promotion-gates"
+          --run-id "ci-pr-${{ github.sha }}"
+
+      - name: Upload promotion gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: promotion-gate-pr
+          path: PRIVATE/promotion-gates/
+          if-no-files-found: error

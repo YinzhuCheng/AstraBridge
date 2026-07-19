@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -10,6 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SIDECAR_ROOT = REPO_ROOT / "apps" / "astrabridge-sidecar"
 sys.path.insert(0, str(SIDECAR_ROOT))
 
+from astrabridge_sidecar.common import emit_json_stdout
 from astrabridge_sidecar.provider_capability_verification_gate import run_provider_capability_verification_gate
 
 
@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
         baseline_path=args.baseline,
         include_tests=not args.skip_tests,
     )
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    emit_json_stdout(summary)
     return 0 if str(summary.get("status") or "") == "pass" else 1
 
 

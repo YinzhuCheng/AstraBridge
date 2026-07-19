@@ -9,7 +9,10 @@ from .common import now_iso
 from .providers import classify_runtime_failure
 from .runtime_observability import (
     build_runtime_observability_summary,
+    build_runtime_support_bundle,
     load_external_operations_for_observability,
+    persist_runtime_observability_summary,
+    persist_runtime_support_bundle,
 )
 from .security import redact_sensitive
 
@@ -66,13 +69,6 @@ class RuntimeSupervisorService:
         dogfood = self._dogfood.snapshot().get("run", {})
         browser = self._latest_browser_smoke(dogfood)
         workspace_root = self._workspace_root()
-        observability = build_runtime_observability_summary(
-            events,
-            workspace_root=workspace_root,
-            current_task=current_task,
-            thread_id=selected_thread_id,
-            external_operations=self._external_operations(),
-        )
         environment = {
             "project_name": current_project.get("name") or "",
             "cwd": str(workspace_root) if workspace_root else "",
@@ -83,6 +79,27 @@ class RuntimeSupervisorService:
             "permission": current_project.get("ui_preferences", {}).get("permission_mode") or "",
             "mcp": self._mcp_summary(events),
         }
+        observability = build_runtime_observability_summary(
+            events,
+            workspace_root=workspace_root,
+            current_task=current_task,
+            thread_id=selected_thread_id,
+            external_operations=self._external_operations(),
+            configured_models=self._configured_models_for_observability(),
+            selected_profile=profile or {},
+        )
+        persist_runtime_observability_summary(observability, workspace_root=workspace_root)
+        support_bundle = build_runtime_support_bundle(
+            observability_summary=observability,
+            runtime_events=events,
+            workspace_root=workspace_root,
+            environment=environment,
+            thread_status=thread_status,
+            runtime_error=runtime_error,
+            guard=guard,
+            watchdog=watchdog,
+        )
+        support_bundle_paths = persist_runtime_support_bundle(support_bundle, workspace_root=workspace_root)
         return redact_sensitive(
             {
                 "thread_id": selected_thread_id,
@@ -97,6 +114,10 @@ class RuntimeSupervisorService:
                 "runtime_error": runtime_error,
                 "compaction": compaction,
                 "observability": observability,
+                "support_bundle": {
+                    **support_bundle,
+                    "artifact_paths": support_bundle_paths or {},
+                },
                 "environment": environment,
                 "browser": browser,
                 "dogfood": {
@@ -172,6 +193,18 @@ class RuntimeSupervisorService:
         except Exception:
             return []
         return load_external_operations_for_observability(getattr(store, "db_path", None))
+
+    def _configured_models_for_observability(self) -> list[dict[str, Any]]:
+        router_config = getattr(self._runtime, "_router_config", None)
+        if router_config is None:
+            return []
+        models = getattr(router_config, "models", None)
+        if not callable(models):
+            return []
+        try:
+            return [dict(item) for item in list(models() or []) if isinstance(item, dict)]
+        except Exception:
+            return []
 
     def _effective_thread_id_for_status(self, requested_thread_id: str, profile: dict[str, Any] | None) -> str:
         clean_requested = str(requested_thread_id or "")

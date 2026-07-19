@@ -823,6 +823,21 @@ export const PROTOCOL_SCHEMA = {
   ]
 } as const;
 
+export const RUN_EVENT_TYPES = ["run_created", "run_dry_run_started", "run_dry_run_completed", "node_queued", "node_started", "node_progress", "node_completed", "node_blocked", "node_failed", "node_cancelled", "artifact_created", "artifact_redacted", "approval_requested", "approval_resolved", "handoff_created", "handoff_acknowledged", "handoff_rejected", "handoff_retry_scheduled", "handoff_delivery_failed", "run_cancel_requested", "run_cancelled", "run_completed", "run_failed", "run_rolled_back"] as const;
+export const ARTIFACT_STATUSES = ["pending", "ready", "partial", "blocked", "redacted", "failed"] as const;
+export const CONTENT_PART_KINDS = ["text", "artifact", "json", "image", "audio", "video", "document", "code", "tool_result"] as const;
+export const PORT_TYPES = ["text", "structured_json", "image", "audio", "video", "document", "code_diff", "dataset", "tool_result", "agent_report", "approval_record"] as const;
+export const PORT_SHAPES = ["single", "list"] as const;
+export const CAPABILITY_OUTPUT_STATUSES = ["ok", "partial", "blocked", "failed"] as const;
+export const PROTOCOL_VOCABULARIES = {
+  runEventTypes: RUN_EVENT_TYPES,
+  artifactStatuses: ARTIFACT_STATUSES,
+  contentPartKinds: CONTENT_PART_KINDS,
+  portTypes: PORT_TYPES,
+  portShapes: PORT_SHAPES,
+  capabilityOutputStatuses: CAPABILITY_OUTPUT_STATUSES,
+} as const;
+
 export type Identifier = string;
 
 export type Timestamp = string;

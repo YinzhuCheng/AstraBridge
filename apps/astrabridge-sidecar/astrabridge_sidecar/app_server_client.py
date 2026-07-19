@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .release_identity import release_product_version
+
 
 DEFAULT_APP_SERVER_COMMAND = [
     "app-server",
@@ -126,7 +128,7 @@ class AppServerClient:
         self.request(
             "initialize",
             {
-                "clientInfo": {"name": "astrabridge-desktop", "version": "0.1.0"},
+                "clientInfo": {"name": "astrabridge-desktop", "version": release_product_version()},
                 "capabilities": {"experimentalApi": True, "requestAttestation": False},
             },
         )

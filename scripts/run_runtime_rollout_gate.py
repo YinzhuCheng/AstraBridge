@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -11,6 +10,7 @@ SIDECAR_ROOT = REPO_ROOT / "apps" / "astrabridge-sidecar"
 if str(SIDECAR_ROOT) not in sys.path:
     sys.path.insert(0, str(SIDECAR_ROOT))
 
+from astrabridge_sidecar.common import emit_json_stdout
 from astrabridge_sidecar.runtime_rollout_gate import run_runtime_rollout_gate
 
 
@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
         include_desktop_visual_qa=not args.skip_desktop_visual_qa,
         dogfood_source_workspace=args.dogfood_source_workspace,
     )
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    emit_json_stdout(summary)
     return 0 if str(summary.get("status") or "") == "pass" else 1
 
 

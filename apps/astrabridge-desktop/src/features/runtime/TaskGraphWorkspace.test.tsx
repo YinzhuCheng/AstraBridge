@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TaskGraphWorkspace } from "./TaskGraphWorkspace";
 import type {
   NodeTypeRegistrySnapshot,
+  TaskGraphCommandLogEntry,
   TaskGraphDefinition,
   TaskGraphDryRunResult,
   TaskGraphRunRef,
@@ -603,6 +604,16 @@ const latestRunRef: TaskGraphRunRef = {
     status: "within_budget",
     enforcement: "fail_fast_static_then_report_only_dynamic",
   },
+  policy_snapshot: {
+    mode: "live_run",
+    scheduler: "durable_task_graph",
+    template_id: "provider_update_smoke_gate",
+    execution_mode: "multi_agent",
+    compatibility_shim: false,
+    parallel_group_count: 2,
+    max_parallelism: 2,
+    parallel_group_ids: ["group_discover", "group_smoke"],
+  },
   worker_count: 1,
   worker_bindings: [
     {
@@ -728,6 +739,7 @@ const cancellableRunningRunRef: TaskGraphRunRef = {
       created_at: "2026-07-07T00:09:10+09:00",
       summary: "Branch A started its bounded research fixture run.",
       node_id: "node_smoke",
+      artifact_id: "graph-run-running-1-node-smoke-transcript",
       status: "in_progress",
     },
   ],
@@ -840,6 +852,7 @@ function buildWorkspaceProps(
     dryRunError: null,
     reportHref: null,
     latestRunRef: null,
+    commandLog: [],
     artifactHrefFor: (path: string) =>
       `/api/project/files/read?path=${encodeURIComponent(path)}`,
     onInspectArtifactPath: vi.fn(),
@@ -848,9 +861,14 @@ function buildWorkspaceProps(
     onInstantiateTemplate: vi.fn(),
     onCreateNode: vi.fn(),
     onMoveNode: vi.fn(),
+    onDeleteNode: vi.fn(),
     onSaveNode: vi.fn(),
     onSaveEdge: vi.fn(),
     onDeleteEdge: vi.fn(),
+    onUndoGraphEdit: vi.fn(),
+    onRedoGraphEdit: vi.fn(),
+    canUndoGraphEdit: false,
+    canRedoGraphEdit: false,
     onRunDryRun: vi.fn(),
     onRunLive: vi.fn(),
     onRunFixture: vi.fn(),
@@ -861,6 +879,7 @@ function buildWorkspaceProps(
     onRejectPendingRun: vi.fn(),
     onImportGraph: vi.fn(),
     onExportGraph: vi.fn(),
+    onDetachSourceOwnership: vi.fn(),
     snapshotRefs: [],
     selectedSnapshotId: null,
     onSelectSnapshot: vi.fn(),
@@ -979,6 +998,38 @@ describe("TaskGraphWorkspace", () => {
     ).toHaveValue("artifact_first");
   });
 
+  it("moves focus into the template browser and restores the trigger on close", () => {
+    renderWorkspace();
+    const trigger = screen.getByTestId("task-graph-open-template-browser");
+    trigger.focus();
+
+    openTemplateBrowser();
+
+    const closeButton = screen.getByTestId("task-graph-template-browser-close");
+    expect(closeButton).toHaveFocus();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(screen.queryByTestId("task-graph-template-browser")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("moves focus into the inspector dialog and restores the trigger on close", () => {
+    renderWorkspace();
+    const trigger = screen.getByTestId("task-graph-open-run-inspection");
+    trigger.focus();
+
+    fireEvent.click(trigger);
+
+    const closeButton = screen.getByTestId("task-graph-inspector-close");
+    expect(closeButton).toHaveFocus();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(screen.queryByTestId("task-graph-inspector")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
   it("lets the user resize task-graph sidebars and persists the widths", () => {
     renderWorkspace();
     expandSidebar();
@@ -1051,6 +1102,50 @@ describe("TaskGraphWorkspace", () => {
     expect(
       screen.getByTestId("task-graph-inspector-run-workspace"),
     ).toHaveTextContent("Run readiness");
+  });
+
+  it("renders a canvas command log in the run workspace", () => {
+    const commandLog: TaskGraphCommandLogEntry[] = [
+      {
+        entry_id: "cmd-1",
+        graph_id: graph.graph_id,
+        action: "move_node",
+        target_kind: "node",
+        target_id: "node_smoke",
+        summary: "Moved node Smoke gate",
+        detail: "(320, 180)",
+        status: "applied",
+        created_at: "2026-07-17T09:00:00+09:00",
+        updated_at: "2026-07-17T09:00:02+09:00",
+      },
+      {
+        entry_id: "cmd-2",
+        graph_id: graph.graph_id,
+        action: "save_edge",
+        target_kind: "edge",
+        target_id: "edge_smoke_validate",
+        summary: "Saved edge Smoke gate -> Validate matrix",
+        detail: "context_handoff",
+        status: "pending",
+        created_at: "2026-07-17T09:01:00+09:00",
+        updated_at: "2026-07-17T09:01:00+09:00",
+      },
+    ];
+
+    renderWorkspace({ commandLog, latestRunRef });
+    expandInspector();
+
+    expect(screen.getByTestId("task-graph-command-log")).toBeInTheDocument();
+    expect(screen.getByText("Canvas command log")).toBeInTheDocument();
+    expect(screen.getByTestId("task-graph-command-log")).toHaveTextContent(
+      "Moved node Smoke gate",
+    );
+    expect(screen.getByTestId("task-graph-command-log")).toHaveTextContent(
+      "Applied",
+    );
+    expect(screen.getByTestId("task-graph-command-log")).toHaveTextContent(
+      "Pending",
+    );
   });
 
   it("labels an old active run as stale instead of claiming it is still running", () => {
@@ -1772,6 +1867,16 @@ describe("TaskGraphWorkspace", () => {
     );
   });
 
+  it("deletes the selected node from the inspector", () => {
+    const onDeleteNode = vi.fn();
+    renderWorkspace({ onDeleteNode });
+    expandInspector();
+
+    fireEvent.click(screen.getByTestId("task-graph-inspector-delete-node"));
+
+    expect(onDeleteNode).toHaveBeenCalledWith("node_smoke");
+  });
+
   it("blocks unknown prompt variables before node save", () => {
     renderWorkspace();
     expandInspector();
@@ -1858,6 +1963,12 @@ describe("TaskGraphWorkspace", () => {
     expect(screen.getByTestId("task-graph-fit-view")).toHaveAccessibleName(
       "Fit view",
     );
+    expect(screen.getByTestId("task-graph-undo-edit")).toHaveAccessibleName(
+      "Undo",
+    );
+    expect(screen.getByTestId("task-graph-redo-edit")).toHaveAccessibleName(
+      "Redo",
+    );
     expect(screen.getByTestId("task-graph-reset-view")).toHaveAccessibleName(
       "Reset view",
     );
@@ -1885,6 +1996,23 @@ describe("TaskGraphWorkspace", () => {
     expect(supervisor).toHaveClass("task-graph-palette-item-hover");
   });
 
+  it("dispatches undo and redo actions from the canvas toolbar", () => {
+    const onUndoGraphEdit = vi.fn();
+    const onRedoGraphEdit = vi.fn();
+    renderWorkspace({
+      onUndoGraphEdit,
+      onRedoGraphEdit,
+      canUndoGraphEdit: true,
+      canRedoGraphEdit: true,
+    });
+
+    fireEvent.click(screen.getByTestId("task-graph-undo-edit"));
+    fireEvent.click(screen.getByTestId("task-graph-redo-edit"));
+
+    expect(onUndoGraphEdit).toHaveBeenCalledTimes(1);
+    expect(onRedoGraphEdit).toHaveBeenCalledTimes(1);
+  });
+
   it("dispatches import and export actions from visible toolbar controls", () => {
     const onImportGraph = vi.fn();
     const onExportGraph = vi.fn();
@@ -1895,6 +2023,68 @@ describe("TaskGraphWorkspace", () => {
 
     expect(onImportGraph).toHaveBeenCalledTimes(1);
     expect(onExportGraph).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows source-owned graph status and allows detaching for gui edits", () => {
+    const onDetachSourceOwnership = vi.fn();
+    renderWorkspace({
+      graph: {
+        ...graph,
+        graph_document: {
+          source_ownership: {
+            ownership_mode: "source_owned",
+            can_write_from_gui: false,
+            source_path: ".astrabridge/sdk/custom_blank_graph.json",
+            source_file: {
+              path: ".astrabridge/sdk/custom_blank_graph.json",
+              sha256: "abc123",
+            },
+            symbol_ref_count: 2,
+          },
+        },
+      },
+      onDetachSourceOwnership,
+    });
+
+    expect(
+      screen.getByTestId("task-graph-source-ownership-label"),
+    ).toHaveTextContent("Source-owned graph");
+    expect(
+      screen.getByTestId("task-graph-source-ownership-path"),
+    ).toHaveTextContent(".astrabridge/sdk/custom_blank_graph.json");
+
+    fireEvent.click(screen.getByTestId("task-graph-detach-source-ownership"));
+
+    expect(onDetachSourceOwnership).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows detached graph status without a detach action", () => {
+    renderWorkspace({
+      graph: {
+        ...graph,
+        graph_document: {
+          source_ownership: {
+            ownership_mode: "detached_gui_edit",
+            can_write_from_gui: true,
+            source_path: ".astrabridge/sdk/custom_blank_graph.json",
+            detached_at: "2026-07-17T12:00:00+09:00",
+            detached_from_path: ".astrabridge/sdk/custom_blank_graph.json",
+            source_file: {
+              path: ".astrabridge/sdk/custom_blank_graph.json",
+              sha256: "abc123",
+            },
+            symbol_ref_count: 2,
+          },
+        },
+      },
+    });
+
+    expect(
+      screen.getByTestId("task-graph-source-ownership-label"),
+    ).toHaveTextContent("Detached GUI copy");
+    expect(
+      screen.queryByTestId("task-graph-detach-source-ownership"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows import-export status after a round-trip action", () => {
@@ -3044,6 +3234,30 @@ describe("TaskGraphWorkspace", () => {
     expect(screen.getByTestId("task-graph-run-metric-cost")).toHaveTextContent(
       "USD 0.0042",
     );
+    expect(screen.getByTestId("task-graph-run-execution-profile")).toHaveTextContent(
+      "Execution profile",
+    );
+    expect(screen.getByTestId("task-graph-run-profile-mode")).toHaveTextContent(
+      "live_run",
+    );
+    expect(
+      screen.getByTestId("task-graph-run-profile-execution-mode"),
+    ).toHaveTextContent("multi_agent");
+    expect(
+      screen.getByTestId("task-graph-run-profile-scheduler"),
+    ).toHaveTextContent("durable_task_graph");
+    expect(
+      screen.getByTestId("task-graph-run-profile-template-id"),
+    ).toHaveTextContent("provider_update_smoke_gate");
+    expect(
+      screen.getByTestId("task-graph-run-profile-compatibility-shim"),
+    ).toHaveTextContent("Disabled");
+    expect(
+      screen.getByTestId("task-graph-run-profile-parallel-groups"),
+    ).toHaveTextContent("2");
+    expect(
+      screen.getByTestId("task-graph-run-profile-max-parallelism"),
+    ).toHaveTextContent("2");
   });
 
   it("surfaces recovery actions for cancelled and failed runs", () => {
@@ -3155,6 +3369,18 @@ describe("TaskGraphWorkspace", () => {
     expect(screen.getByTestId("task-graph-run-event-focus")).toHaveTextContent(
       "Generate Smoke Matrix",
     );
+    expect(screen.getByTestId("task-graph-run-event-details")).toHaveTextContent(
+      "Selected event",
+    );
+    expect(
+      screen.getByTestId("task-graph-run-event-detail-type"),
+    ).toHaveTextContent("node_started");
+    expect(
+      screen.getByTestId("task-graph-run-event-detail-status"),
+    ).toHaveTextContent("in_progress");
+    expect(
+      screen.getByTestId("task-graph-run-event-detail-artifact-id"),
+    ).toHaveTextContent("graph-run-running-1-node-smoke-transcript");
     expect(screen.getByTestId("task-graph-node-node_smoke")).toHaveAttribute(
       "data-trace-highlighted",
       "true",

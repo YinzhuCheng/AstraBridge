@@ -78,7 +78,7 @@ NODE_RUN_STATUSES = (
     "failed",
     "completed",
 )
-WORKER_ORIGINS = ("provider_lane", "codex_subagent", "manual", "automation", "fixture_runner")
+WORKER_ORIGINS = ("provider_lane", "codex_subagent", "manual", "automation", "fixture_runner", "deterministic_local")
 RUN_EVENT_TYPES = (
     "run_created",
     "run_dry_run_started",
@@ -96,6 +96,8 @@ RUN_EVENT_TYPES = (
     "approval_requested",
     "approval_resolved",
     "handoff_created",
+    "handoff_acknowledged",
+    "handoff_rejected",
     "run_cancel_requested",
     "run_cancelled",
     "run_completed",

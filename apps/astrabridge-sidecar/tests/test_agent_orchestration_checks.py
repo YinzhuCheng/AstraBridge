@@ -10,10 +10,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from astrabridge_sidecar.agent_orchestration_checks import (  # noqa: E402
+    AGENT_ORCHESTRATION_COMPILE_SCHEMA_VERSION,
     AGENT_ORCHESTRATION_DIFF_SCHEMA_VERSION,
     AGENT_ORCHESTRATION_DRY_RUN_SCHEMA_VERSION,
     AGENT_ORCHESTRATION_LINT_SCHEMA_VERSION,
     AGENT_ORCHESTRATION_MIGRATE_SCHEMA_VERSION,
+    compile_agent_orchestration_graph_file,
     diff_agent_orchestration_graph_files,
     dry_run_agent_orchestration_graph_file,
     lint_agent_orchestration_graph_file,
@@ -25,6 +27,11 @@ from astrabridge_sidecar.agent_orchestration_file_format import (  # noqa: E402
     write_agent_orchestration_graph_file,
 )
 from astrabridge_sidecar.task_graph_contract import load_task_graph_fixture  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+TYPESCRIPT_CUSTOM_BLANK_FIXTURE_PATH = (
+    REPO_ROOT / "apps" / "astrabridge-desktop" / "src" / "features" / "runtime" / "fixtures" / "customBlankGraph.fromTs.json"
+)
 
 
 class AgentOrchestrationChecksTests(unittest.TestCase):
@@ -53,6 +60,41 @@ class AgentOrchestrationChecksTests(unittest.TestCase):
             self.assertEqual(report["compiled_plan"]["graph_id"], "graph_fanout_research_synthesis_v1")
             self.assertEqual(report["compiled_plan"]["topology"]["parallel_group_count"], 3)
             self.assertIn("## Nodes", render_agent_orchestration_report_markdown(report))
+
+    def test_compile_reports_compiled_plan_and_lowering_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fanout_research_synthesis.json"
+            write_agent_orchestration_graph_file(path, load_agent_orchestration_example("fanout_research_synthesis"))
+
+            report = compile_agent_orchestration_graph_file(path)
+
+            self.assertEqual(report["schema_version"], AGENT_ORCHESTRATION_COMPILE_SCHEMA_VERSION)
+            self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["compiled_plan"]["graph_id"], "graph_fanout_research_synthesis_v1")
+            self.assertEqual(report["summary"]["parallel_group_count"], 3)
+            self.assertIn("## Lowering", render_agent_orchestration_report_markdown(report))
+
+    def test_compile_and_diff_accept_typescript_authored_fixture_without_adapters(self) -> None:
+        python_example_path = REPO_ROOT / "examples" / "agent-orchestration" / "custom_blank_graph.json"
+
+        compile_report = compile_agent_orchestration_graph_file(TYPESCRIPT_CUSTOM_BLANK_FIXTURE_PATH)
+        diff_report = diff_agent_orchestration_graph_files(TYPESCRIPT_CUSTOM_BLANK_FIXTURE_PATH, python_example_path)
+
+        self.assertEqual(compile_report["schema_version"], AGENT_ORCHESTRATION_COMPILE_SCHEMA_VERSION)
+        self.assertEqual(compile_report["status"], "pass")
+        self.assertEqual(compile_report["graph_id"], "graph_custom_blank_graph_v1")
+        self.assertEqual(diff_report["status"], "no_change")
+
+    def test_lint_and_dry_run_accept_typescript_authored_fixture_without_runtime_specific_adapters(self) -> None:
+        lint_report = lint_agent_orchestration_graph_file(TYPESCRIPT_CUSTOM_BLANK_FIXTURE_PATH)
+        dry_run_report = dry_run_agent_orchestration_graph_file(TYPESCRIPT_CUSTOM_BLANK_FIXTURE_PATH)
+
+        self.assertEqual(lint_report["schema_version"], AGENT_ORCHESTRATION_LINT_SCHEMA_VERSION)
+        self.assertEqual(lint_report["status"], "pass")
+        self.assertEqual(dry_run_report["schema_version"], AGENT_ORCHESTRATION_DRY_RUN_SCHEMA_VERSION)
+        self.assertEqual(dry_run_report["status"], "warning")
+        self.assertEqual(dry_run_report["graph_id"], "graph_custom_blank_graph_v1")
+        self.assertEqual(dry_run_report["summary"]["blocking_count"], 0)
 
     def test_dry_run_validates_multimodal_routes_against_configured_model_capabilities(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -105,6 +147,79 @@ class AgentOrchestrationChecksTests(unittest.TestCase):
             self.assertEqual(report["status"], "warning")
             self.assertTrue(report["warnings"])
 
+    def test_dry_run_compiles_external_a2a_gateway_snapshot_for_referenced_agent_cards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            graph = load_agent_orchestration_example("code_fix_review")
+            graph["nodes"][0]["card_ref"] = "a2a_card:geo_route"
+            public_card = {
+                "protocolVersion": "1.0",
+                "name": "Geo Route Agent",
+                "description": "Plans routes for external A2A handoffs.",
+                "url": "https://geo.example.com/a2a",
+                "version": "2026.07.17",
+                "supportedInterfaces": [
+                    {
+                        "url": "https://geo.example.com/a2a",
+                        "protocolBinding": "JSONRPC",
+                        "protocolVersion": "1.0",
+                    }
+                ],
+                "capabilities": {
+                    "streaming": True,
+                    "pushNotifications": False,
+                    "extendedAgentCard": False,
+                },
+                "defaultInputModes": ["text/plain", "application/json"],
+                "defaultOutputModes": ["text/plain", "application/json"],
+                "skills": [
+                    {
+                        "id": "route-plan",
+                        "name": "Route Planner",
+                        "description": "Returns structured route plans.",
+                    }
+                ],
+            }
+            digest = json.dumps(public_card, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            graph["external_agent_card_registry"] = {
+                "schema_version": "astrabridge-external-agent-card-registry-v1",
+                "supported_protocol_versions": ["1.0"],
+                "cards": [
+                    {
+                        "card_ref": "a2a_card:geo_route",
+                        "trust_level": "pinned",
+                        "discovery": {
+                            "mode": "well_known",
+                            "url": "https://geo.example.com/.well-known/agent-card.json",
+                        },
+                        "public_agent_card": public_card,
+                        "public_agent_card_digest": f"sha256:{__import__('hashlib').sha256(digest.encode('utf-8')).hexdigest()}",
+                    }
+                ],
+            }
+            path = Path(tmp) / "external-a2a.json"
+            write_agent_orchestration_graph_file(path, graph)
+
+            report = dry_run_agent_orchestration_graph_file(
+                path,
+                known_profile_ids={"profile-qwen-validator"},
+                known_provider_ids={"qwen"},
+                known_model_ids={"qwen3-coder-plus"},
+                configured_models=[
+                    {
+                        "id": "qwen/qwen3-coder-plus",
+                        "provider": "qwen",
+                        "native_model": "qwen3-coder-plus",
+                        "input_modalities": ["text"],
+                    }
+                ],
+            )
+
+            self.assertEqual(report["status"], "pass")
+            gateway = dict(report["compiled_plan"].get("external_a2a") or {})
+            self.assertEqual(gateway["schema_version"], "astrabridge-external-a2a-gateway-v1")
+            self.assertEqual(gateway["referenced_card_refs"], ["a2a_card:geo_route"])
+            self.assertEqual((gateway["registry_snapshot"] or [])[0]["trust_level"], "pinned")
+
     def test_diff_reports_semantic_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             old_path = Path(tmp) / "old.json"
@@ -150,6 +265,27 @@ class AgentOrchestrationChecksTests(unittest.TestCase):
             payload = json.loads(lint_result.stdout)
             self.assertEqual(payload["status"], "pass")
             self.assertTrue(markdown_path.exists())
+
+            compile_markdown_path = Path(tmp) / "compile.md"
+            compile_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "astrabridge_sidecar.agent_orchestration_cli",
+                    "compile",
+                    str(example_path),
+                    "--markdown-out",
+                    str(compile_markdown_path),
+                ],
+                cwd=sidecar_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            compile_payload = json.loads(compile_result.stdout)
+            self.assertEqual(compile_payload["schema_version"], AGENT_ORCHESTRATION_COMPILE_SCHEMA_VERSION)
+            self.assertEqual(compile_payload["status"], "pass")
+            self.assertTrue(compile_markdown_path.exists())
 
             diff_markdown_path = Path(tmp) / "diff.md"
             mutated = load_agent_orchestration_example("code_fix_review")

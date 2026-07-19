@@ -1,6 +1,6 @@
 # Verification Matrix
 
-Last updated: 2026-07-10
+Last updated: 2026-07-17
 
 ## Quick Gate
 
@@ -29,8 +29,13 @@ Examples:
 ```powershell
 python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_web_lane.py
 
+python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_protocol_schema.py
+python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_protocol_persistence.py
+python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_durable_run_store.py
+
 cd apps/astrabridge-desktop
 npm.cmd test -- src/features/i18n/catalog.test.ts
+npm.cmd test -- src/astrabridge_protocol/generated/v1.test.ts
 npm.cmd test -- src/features/ui/uiSystem.test.ts src/features/navigation/SetupLandingPanel.test.tsx
 ```
 
@@ -58,9 +63,29 @@ The desktop build may emit the existing Vite chunk-size warning. Treat new TypeS
 
 ## Release Gate
 
+Use the promotion gate for CI-bound PR, nightly, and release decisions:
+
+```powershell
+python scripts/run_promotion_gate.py --mode pr --expected-commit <sha>
+python scripts/run_promotion_gate.py --mode nightly --expected-commit <sha>
+python scripts/run_promotion_gate.py --mode release --expected-commit <sha>
+```
+
+Expected result: required checks cannot promote if the worktree is dirty, the evaluated commit differs from the expected commit, a required summary or report is missing, or any required status resolves to `skipped`, `missing`, `unknown`, or another unevaluated state.
+
+Use the release-readiness gate when package identity, staging contents, or release-bound source inventory changes:
+
+```powershell
+python scripts/run_release_readiness_gate.py --run-id local-readiness
+```
+
+Expected result: one canonical release identity matches Desktop, Sidecar, Tauri, MCP metadata, and protocol compatibility consumers; two clean staging runs produce identical inventories and hashes; and the staged workspace excludes forbidden local and development paths.
+
 Use `docs/RELEASE_CHECKLIST.md` for release-specific validation. Release validation should include:
 
 - full local gate
+- release promotion gate
+- release readiness gate
 - secret scan over staged or release-bound changes
 - browser UI screenshot QA for changed screens
 - provider-key smoke only when explicitly authorized

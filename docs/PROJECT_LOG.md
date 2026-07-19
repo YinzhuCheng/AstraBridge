@@ -427,3 +427,345 @@ Repair AstraBridge isolation before returning to the official Codex sidebar issu
 - Added `PRIVATE/app-hardening/reports/astrabridge-runtime-migration-20260712.md` with secret-safe migration and verification evidence.
 - No external asset was added, so `docs/ASSET_SOURCES.md` was unchanged.
 - No official Codex database, task record, config, provider secret, cookie, or authorization header was modified or persisted.
+
+## 2026-07-17
+
+### Request
+
+Audit the next stability phase for AstraBridge's multi-provider agent positioning,
+standards-based A2A interoperability, automatic upgrades, GUI orchestration, and
+code-authored orchestration, then land a durable multi-round handoff plan.
+
+### Changes Completed
+
+- Added `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md`
+  as a 24-step durable follow-on queue with one active work unit, per-step
+  acceptance criteria, adjustment rules, evidence-review triggers, and an
+  append-only progress log.
+- Preserved the completed 22-step
+  `PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md` as the
+  implementation baseline rather than restarting its completed work.
+- Activated the new plan in the machine-readable and human document registries;
+  updated README, handoff, project summary, repository governance, interface
+  governance, code ownership, and the conditional capability-runtime delegation
+  so they identify one current execution source.
+- Updated `scripts/contract_boundary_audit.py` to validate both the active
+  follow-on plan and the completed baseline plan.
+- Set the next execution entry to Step 1: make promotion gates non-skippable and
+  add canonical PR/nightly/release CI entry points.
+
+### Verification
+
+- `python scripts/run_local_gate.py --quick` passed in 34.3 seconds.
+- Repository governance: 0 errors, 0 warnings, 1,268 text files scanned.
+- Secret scan: 0 errors, 0 warnings, 181 text files scanned.
+- Contract boundary audit: 18/18 checks passed and now resolves the active and
+  baseline stability plans separately.
+- Focused governance and secret-scan unit suites passed 14/14 and 6/6.
+- The document registry contains 107 entries: 14 active, 26 complete, 46
+  reference, 20 superseded, and 1 archived.
+
+### Follow-Up Notes
+
+- Future general stability work starts at Step 1 of the new plan and completes
+  exactly one full numbered step per execution round.
+- `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md` remains conditionally active
+  only for explicit capability-runtime requests and must not create parallel
+  MCP, envelope, scheduler, A2A, executor, or updater contracts.
+- GitHub CLI authentication remains user-deferred. It is not required to author
+  and locally validate CI workflow files in Step 1.
+
+### Artifacts / Sources Added
+
+- Added one tracked execution-plan document and updated current governance and
+  project-memory documents.
+- No external assets, provider calls, credentials, raw provider records, or
+  private experiment artifacts were added or removed.
+
+## 2026-07-17
+
+### Request
+
+Continue the active product-stability plan by completing Step 1: make promotion
+gates non-skippable and add canonical CI entry points.
+
+### Changes Completed
+
+- Added `apps/astrabridge-sidecar/astrabridge_sidecar/promotion_gate.py` as the
+  fail-closed promotion owner and `scripts/run_promotion_gate.py` as the only
+  public wrapper for PR/nightly/release promotion verdicts.
+- Upgraded `scripts/run_local_gate.py` to emit machine-readable summary/report
+  artifacts without creating a second suite list.
+- Added `.github/workflows/pr-promotion-gate.yml`,
+  `.github/workflows/nightly-promotion-gate.yml`, and
+  `.github/workflows/release-promotion-gate.yml`; each installs from repository
+  lockfiles and invokes the canonical promotion wrapper instead of redefining
+  checks inline.
+- Extended `scripts/contract_boundary_audit.py` and code-ownership/governance
+  docs so the promotion gate and workflow entry points are now audited
+  contracts.
+- Added focused promotion-gate tests for machine-readable local-gate output,
+  fail-closed unknown status / commit mismatch behavior, and forged or
+  incomplete summary rejection.
+
+### Verification
+
+- `python -m py_compile scripts/run_local_gate.py scripts/run_promotion_gate.py apps/astrabridge-sidecar/astrabridge_sidecar/promotion_gate.py scripts/contract_boundary_audit.py` passed.
+- `python -m unittest apps.astrabridge-sidecar.tests.test_promotion_gate` passed 3/3.
+- `python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_contract_boundary_audit.py` passed 3/3.
+- `python scripts/contract_boundary_audit.py` passed 19/19 checks.
+- `python scripts/run_local_gate.py --quick` passed with 0 governance errors, 0 governance warnings, 0 secret-scan errors, and 0 secret-scan warnings.
+- A real `python scripts/run_promotion_gate.py --mode pr --expected-commit <HEAD>` run failed closed because the current worktree is dirty, preserving redacted summary/report/manifest evidence under `PRIVATE/promotion-gates/local-pr-dirty-check-2/`.
+- `git diff --check` reported only line-ending warnings and no content-format failures.
+
+### Follow-Up Notes
+
+- The active execution plan now advances to Step 2: establish one release
+  identity and clean packaging staging.
+- The local promotion gate intentionally refuses promotable status in a dirty
+  worktree; CI workflows are expected to run it from clean checkouts.
+- The local environment reports Python 3.11.15, Node v22.23.0, npm 10.9.8, and
+  Cargo 1.96.0 in the preserved dirty-tree promotion evidence.
+
+### Artifacts / Sources Added
+
+- Added one new Sidecar promotion-gate owner module, one wrapper script, three
+  GitHub workflow files, one focused test file, and preserved local promotion
+  evidence under `PRIVATE/promotion-gates/local-pr-dirty-check-2/`.
+- No external assets, provider calls, credentials, raw provider records, or
+  private experiment artifacts were deleted.
+
+## 2026-07-17
+
+### Request
+
+Continue the active product-stability plan by completing Step 2: establish one
+release identity and a clean packaging staging contract for Desktop, Sidecar,
+updater metadata, and release-readiness verification.
+
+### Changes Completed
+
+- Added one canonical tracked release manifest:
+  `release/astrabridge-release-identity.json`.
+- Added `apps/astrabridge-sidecar/astrabridge_sidecar/release_identity.py` as
+  the release-identity/readiness owner for version binding checks, staging,
+  inventory/hash generation, updater-manifest emission, SBOM input, provenance,
+  and deterministic stage comparison.
+- Added `scripts/run_release_readiness_gate.py` as the canonical release
+  readiness wrapper and `apps/astrabridge-sidecar/tests/test_release_identity.py`
+  as focused coverage for drift detection and deterministic staging.
+- Switched current Sidecar/MCP/runtime version consumers to the canonical
+  release identity rather than duplicating literal version strings.
+- Extended `scripts/contract_boundary_audit.py`,
+  `docs/CODE_OWNERSHIP_AND_CONTRACTS.md`, `docs/VERIFICATION_MATRIX.md`,
+  `docs/RELEASE_CHECKLIST.md`, and `README.md` so the release-identity and
+  clean-staging contract is now enforced and documented.
+
+### Verification
+
+- `python -m py_compile apps\astrabridge-sidecar\astrabridge_sidecar\release_identity.py scripts\run_release_readiness_gate.py apps\astrabridge-sidecar\astrabridge_sidecar\__init__.py apps\astrabridge-sidecar\astrabridge_sidecar\app_server_client.py apps\astrabridge-sidecar\astrabridge_sidecar\mcp_broker_service.py apps\astrabridge-sidecar\astrabridge_sidecar\server.py` passed.
+- `python -m unittest discover -s apps\astrabridge-sidecar\tests -p test_release_identity.py` passed 3/3.
+- `python -m unittest discover -s apps\astrabridge-sidecar\tests -p test_contract_boundary_audit.py` passed 3/3.
+- `python scripts\contract_boundary_audit.py` passed 20/20 checks.
+- `python scripts\run_release_readiness_gate.py --artifact-root PRIVATE\release-readiness --run-id local-step2-readiness` passed with zero binding mismatches and matching stage inventories/content hashes between Stage A and Stage B.
+- `python scripts\run_local_gate.py --quick` passed with 0 governance errors, 0 governance warnings, 0 secret-scan errors, and 0 secret-scan warnings.
+- `git diff --check` reported only line-ending warnings and no content-format failures.
+
+### Follow-Up Notes
+
+- Forward execution now starts at Step 3 of
+  `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md`:
+  enforce the canonical protocol at every durable write boundary.
+- The preserved readiness evidence under
+  `PRIVATE/release-readiness/local-step2-readiness/` is the current baseline for
+  release identity, clean staging, and deterministic package inventory.
+- GitHub CLI authentication remains intentionally deferred and is unrelated to
+  local release-readiness verification.
+
+### Artifacts / Sources Added
+
+- Added one tracked release manifest, one new Sidecar owner module, one wrapper
+  script, one focused test file, and preserved Step 2 release-readiness
+  artifacts under `PRIVATE/release-readiness/local-step2-readiness/`.
+- No external assets, provider calls, credentials, raw provider records, or
+  private experiment artifacts were deleted.
+
+## 2026-07-17
+
+### Request
+
+Continue the active product-stability plan by completing Step 3: enforce the
+canonical protocol at every durable write boundary so runtime and persistence
+cannot drift from the schema.
+
+### Changes Completed
+
+- Added `apps/astrabridge-sidecar/astrabridge_sidecar/protocol/persistence.py`
+  as the canonical protocol-persistence owner for run projections, events,
+  envelopes, content parts, and artifact references.
+- Updated the durable run store to canonicalize and validate protocol objects at
+  the innermost persistence boundary before SQLite writes.
+- Extended `scripts/generate_protocol_types.py` and regenerated the Python and
+  TypeScript protocol bindings so runtime vocabularies are schema-derived
+  instead of duplicated literals.
+- Replaced schema-external persisted runtime event names with canonical schema
+  events and added actionable compatibility failures for unsupported
+  run-projection schema versions.
+- Expanded the shared golden protocol fixture corpus and added focused
+  persistence coverage so Python, TypeScript, migration, and durable-store paths
+  reuse the same valid/invalid cases.
+- Extended `scripts/contract_boundary_audit.py`,
+  `docs/CODE_OWNERSHIP_AND_CONTRACTS.md`, and
+  `docs/VERIFICATION_MATRIX.md` so the protocol durable-write boundary is now an
+  explicit audited contract.
+
+### Verification
+
+- `python scripts\generate_protocol_types.py --write` passed.
+- `python -m unittest discover -s apps\astrabridge-sidecar\tests -p test_protocol_persistence.py` passed 5/5.
+- `python -m unittest discover -s apps\astrabridge-sidecar\tests -p test_protocol_schema.py` passed 9/9.
+- `python -m unittest discover -s apps\astrabridge-sidecar\tests -p test_durable_run_store.py` passed 9/9.
+- `python -m unittest discover -s apps\astrabridge-sidecar\tests -p test_contract_boundary_audit.py` passed 3/3.
+- `npm.cmd test -- src/astrabridge_protocol/generated/v1.test.ts` passed 4/4.
+- `python scripts\contract_boundary_audit.py` passed 21/21 checks with
+  canonical protocol fixture counts 10 valid / 7 invalid.
+- `python scripts\run_local_gate.py --quick` passed with 0 governance
+  errors/warnings and 0 secret-scan errors/warnings.
+- `git diff --check` reported only CRLF conversion warnings and no
+  content-format failures.
+
+### Follow-Up Notes
+
+- The next execution entry is Step 4, which owns durable delivery identity,
+  ordering, expiry, replay handling, and cancellation convergence.
+- Step 3 preserved current and documented N-1 run-projection read behavior by
+  upgrading supported legacy payloads at the persistence boundary and failing
+  unsupported schema versions with an actionable error instead of silent drift.
+
+### Artifacts / Sources Added
+
+- Added one new Sidecar protocol-persistence owner module and one focused test
+  file; updated generated protocol bindings, shared fixtures, and durable-store
+  tests in place.
+- No external assets, provider calls, credentials, raw provider records, or
+  private experiment artifacts were deleted.
+
+## 2026-07-17
+
+### Request
+
+Continue the active product-stability plan by completing Step 4: separate
+delivery identity from processing identity, enforce replay/expiry/audience
+policy before dispatch, and make cancellation converge under late-result races.
+
+### Changes Completed
+
+- Extended `apps/astrabridge-sidecar/astrabridge_sidecar/protocol/persistence.py`
+  so canonical agent envelopes now derive a normalized delivery contract from
+  message identity, delivery identity, target audience, sequence, not-before,
+  deadline, TTL, and replay-window policy.
+- Updated the durable run store so agent envelopes enforce immutable
+  `message_id` and delivery-id identity, per-edge sequence ordering, and
+  processing-key inbox admission. Duplicate inbox/outbox ids with the same
+  payload remain idempotent, while conflicting payload reuse now rejects.
+- Updated task-graph handoff construction so delivery sequence is monotonic per
+  attempt instead of always `0`, and tightened recipient-lane validation for
+  structured handoffs.
+- Updated live runtime handoff admission to reject early, expired, replayed,
+  and mismatched-audience delivery before provider dispatch by routing
+  processing admission through the durable store.
+- Updated live cancellation handling so late completed provider turns are
+  suppressed after cancellation, do not emit downstream worker output, and
+  converge the persisted cancellation record to a resolved terminal state.
+- Removed the remaining schema-external live terminal event emission
+  `run_needs_review`; live runs now preserve `needs_review` as run status while
+  using canonical terminal events.
+
+### Verification
+
+- `python -m unittest discover -s apps\astrabridge-sidecar\tests -p test_durable_run_store.py` passed 11/11.
+- `python -m unittest discover -s apps\astrabridge-sidecar\tests -p test_graph_scheduler.py` passed 20/20.
+- `python -m unittest discover -s apps\astrabridge-sidecar\tests -p test_protocol_persistence.py` passed 5/5.
+- `python scripts\contract_boundary_audit.py` passed 21/21 checks.
+- `python scripts\run_local_gate.py --quick` passed with 0 governance
+  errors/warnings and 0 secret-scan errors/warnings.
+- `git diff --check` reported only CRLF conversion warnings and no
+  content-format failures.
+
+### Follow-Up Notes
+
+- The next execution entry is Step 6, which owns the provider adapter ABI and
+  verified capability snapshots.
+- Step 4 now makes live duplicate suppression and cancellation race handling a
+  durable-store concern rather than an in-memory best effort.
+
+### Artifacts / Sources Added
+
+- No external assets were added.
+- No private evidence, logs, caches, provider records, credentials, or
+  preserved validation outputs were deleted.
+
+### 2026-07-17 - Step 5 Provider Admission / Backpressure / Retry / Breaker
+
+- Completed Step 5 of `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md`.
+- Added `apps/astrabridge-sidecar/astrabridge_sidecar/graph_dispatch_control.py`
+  to own per-run/provider/model retry budgets plus provider/model
+  circuit-breaker state for live graph dispatch.
+- Hardened `apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py`
+  so live graph parallel groups are structurally normalized into bounded
+  batches before provider dispatch, and runtime environment snapshots now
+  expose redacted graph-dispatch / breaker status.
+- Hardened `apps/astrabridge-sidecar/astrabridge_sidecar/graph_scheduler.py`
+  with queue capacity metadata and queued-cancel skip-dispatch handling so a
+  cancelled queued run never reaches the provider callback.
+- Added Step 5 regression coverage in
+  `apps/astrabridge-sidecar/tests/test_graph_scheduler.py` for queued
+  cancellation, bounded parallel-group dispatch, retry-budget storm
+  suppression, and observable circuit-open blocking.
+- Validation:
+  `python -m unittest tests.test_graph_scheduler` passed 24/24;
+  `python -m unittest tests.test_runtime_client_pool` passed 7/7 with
+  `ASTRABRIDGE_RUNTIME_ROOT` redirected into a writable local runtime root;
+  `python scripts\contract_boundary_audit.py` passed 21/21 checks; `python
+  scripts\run_local_gate.py --quick` passed; `git diff --check` reported only
+  CRLF conversion warnings.
+- Next entry: Step 6, provider adapter ABI plus verified capability snapshots.
+
+### 2026-07-17 - Step 6 Provider Adapter ABI / Verified Capability Snapshots
+
+- Completed Step 6 of `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md`.
+- Added `apps/astrabridge-sidecar/astrabridge_sidecar/provider_capability_snapshot.py`
+  to own versioned verified capability snapshots, current provider-adapter
+  contract fingerprints, snapshot aggregation, and graph-port capability
+  projection.
+- Updated `apps/astrabridge-sidecar/astrabridge_sidecar/router_config_service.py`
+  so provider compatibility-matrix evidence produces persisted per-model
+  verified capability snapshots and stale adapter/model revisions fail closed
+  as `stale` rather than silently reusing old capability claims.
+- Updated `apps/astrabridge-sidecar/astrabridge_sidecar/agent_orchestration_checks.py`
+  and `apps/astrabridge-sidecar/astrabridge_sidecar/runtime_service.py` so
+  live multimodal graph admission requires current verified capability
+  snapshots and queued/live run policy manifests preserve the approved
+  model-capability snapshot.
+- Updated `apps/astrabridge-sidecar/astrabridge_sidecar/providers/transports/base.py`
+  with shared structured error classification and cancellation-contract
+  reporting, and registered the new shared transport conformance suite in
+  `apps/astrabridge-sidecar/astrabridge_sidecar/provider_capability_verification_gate.py`.
+- Added focused Step 6 regression coverage in
+  `apps/astrabridge-sidecar/tests/test_provider_capability_snapshot.py` and
+  `apps/astrabridge-sidecar/tests/test_provider_transport_conformance.py`.
+- Validation:
+  `python -m unittest tests.test_provider_capability_snapshot
+  tests.test_provider_transport_conformance tests.test_router_transport_registry
+  tests.test_graph_scheduler tests.test_runtime_client_pool
+  tests.test_provider_capability_verification_gate` passed 44/44 with
+  `ASTRABRIDGE_RUNTIME_ROOT` redirected into a writable local runtime root;
+  `python scripts\contract_boundary_audit.py` passed 21/21 checks; `python
+  scripts\run_local_gate.py --quick` passed; `git diff --check` reported only
+  CRLF conversion warnings.
+- Follow-up: Step 7 is now the active entry point and will own cross-provider
+  context projection, neutral artifact continuity, and end-to-end handoff
+  lineage auditing.
+- No external assets were added.
+- No private evidence, logs, caches, provider records, credentials, or
+  preserved validation outputs were deleted.

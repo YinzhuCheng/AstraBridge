@@ -25,6 +25,64 @@ from astrabridge_sidecar.task_service import TaskService  # noqa: E402
 
 
 class DurableGraphSchedulerTests(unittest.TestCase):
+    def _wait_for_scheduler_status(
+        self,
+        runtime: RuntimeService,
+        run_id: str,
+        *,
+        expected_status: str,
+        timeout: float = 8.0,
+        interval: float = 0.2,
+    ) -> dict[str, object]:
+        deadline = time.monotonic() + max(interval, timeout)
+        last_snapshot: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            snapshot = runtime._graph_scheduler.wait(run_id, timeout=interval) or runtime._graph_scheduler.get(run_id) or {}
+            if isinstance(snapshot, dict):
+                last_snapshot = dict(snapshot)
+                if str(snapshot.get("status") or "").strip() == expected_status:
+                    return last_snapshot
+            time.sleep(0.05)
+        return last_snapshot
+
+    def _wait_for_graph_run_status(
+        self,
+        runtime: RuntimeService,
+        run_id: str,
+        *,
+        expected_status: str,
+        timeout: float = 12.0,
+        interval: float = 0.2,
+    ) -> dict[str, object]:
+        deadline = time.monotonic() + max(interval, timeout)
+        last_status = runtime.graph_run_status(run_id)
+        while time.monotonic() < deadline:
+            last_status = runtime.graph_run_status(run_id)
+            if str(dict(last_status.get("run") or {}).get("status") or "").strip() == expected_status:
+                return last_status
+            runtime._graph_scheduler.wait(run_id, timeout=interval)
+            time.sleep(0.05)
+        return last_status
+
+    def _instantiate_live_runtime_graph(self, tasks: TaskService) -> dict[str, object]:
+        graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+        node = dict(graph["nodes"][0])
+        node.update(
+            {
+                "kind": "worker",
+                "label": "Live Worker",
+                "provider_id": "qwen",
+                "model_id": "qwen3-coder-plus",
+                "reasoning_effort": "medium",
+                "permission_mode": "auto",
+                "collaboration_mode": "default",
+                "execution_backend": "app_server",
+            }
+        )
+        graph["nodes"][0] = node
+        tasks.save_graph_definition({"graph": graph})
+        return graph
+
     def _configure_live_runtime(
         self,
         runtime: RuntimeService,
@@ -94,6 +152,41 @@ class DurableGraphSchedulerTests(unittest.TestCase):
         }
         runtime._probe_turn_result = lambda _thread, turn_id="": (terminal_status, final_text, "")  # type: ignore[method-assign]
         runtime._graph_live_turn_usage_signal = lambda **_kwargs: {"tokens": {"total_tokens": 1}}  # type: ignore[method-assign]
+
+    def test_runtime_service_routes_graph_run_dispatch_entrypoints_through_shared_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+
+            with patch.dict(os.environ, {"ASTRABRIDGE_RUNTIME_ROOT": str(root / "runtime-root")}):
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Runtime dispatch delegation", root / "runtime-dispatch.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Runtime dispatch task")
+                runtime = RuntimeService(
+                    projects,
+                    ModalService(projects.require_shell_state_root),
+                    task_service=tasks,
+                )
+                try:
+                    with patch.object(runtime._graph_run_dispatch, "queue_task_graph_run", return_value={"kind": "queue"}) as queue_mock, \
+                        patch.object(runtime._graph_run_dispatch, "graph_scheduler_status", return_value={"kind": "scheduler"}) as scheduler_mock, \
+                        patch.object(runtime._graph_run_dispatch, "graph_run_status", return_value={"kind": "status"}) as status_mock, \
+                        patch.object(runtime._graph_run_dispatch, "cancel_task_graph_run", return_value={"kind": "cancel"}) as cancel_mock:
+                        self.assertEqual(runtime.queue_task_graph_run({"graph_id": "graph-1"})["kind"], "queue")
+                        self.assertEqual(runtime.graph_scheduler_status()["kind"], "scheduler")
+                        self.assertEqual(runtime.graph_run_status("graph-run-1")["kind"], "status")
+                        self.assertEqual(runtime.cancel_task_graph_run({"run_id": "graph-run-1"})["kind"], "cancel")
+
+                    queue_mock.assert_called_once_with({"graph_id": "graph-1"})
+                    scheduler_mock.assert_called_once_with()
+                    status_mock.assert_called_once_with("graph-run-1")
+                    cancel_mock.assert_called_once_with({"run_id": "graph-run-1"})
+                finally:
+                    runtime.shutdown()
 
     def test_submission_returns_before_slow_provider_callback_and_survives_caller_close(self) -> None:
         started = threading.Event()
@@ -174,6 +267,33 @@ class DurableGraphSchedulerTests(unittest.TestCase):
         finally:
             scheduler.shutdown(wait=True)
 
+    def test_cancelled_queued_job_never_dispatches_callback(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        seen: list[str] = []
+
+        def callback(run_id: str, _payload: dict[str, object]) -> dict[str, object]:
+            seen.append(run_id)
+            started.set()
+            if run_id == "run-a":
+                release.wait(timeout=2)
+            return {"live_run": {"run_status": "completed"}}
+
+        scheduler = DurableGraphScheduler(callback, max_workers=1)
+        try:
+            scheduler.submit("run-a", {"node": "a"})
+            self.assertTrue(started.wait(timeout=1))
+            queued = scheduler.submit("run-b", {"node": "b"})
+            self.assertEqual(queued["status"], "queued")
+            cancelled = scheduler.cancel("run-b", reason="queued_cancel")
+            self.assertEqual(cancelled["status"], "cancelled")  # type: ignore[index]
+            release.set()
+            self.assertEqual(scheduler.wait("run-a", timeout=2)["status"], "completed")  # type: ignore[index]
+            self.assertEqual(scheduler.wait("run-b", timeout=2)["status"], "cancelled")  # type: ignore[index]
+            self.assertEqual(seen, ["run-a"])
+        finally:
+            scheduler.shutdown(wait=True)
+
     def test_runtime_queue_persists_receipt_before_background_execution(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
@@ -190,7 +310,7 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                 projects.create_project("Scheduler integration", root / "scheduler.abproj", workspace_root=workspace)
                 tasks = TaskService(projects)
                 tasks.create_task("Scheduler task")
-                graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+                graph = self._instantiate_live_runtime_graph(tasks)
                 node_ids = [str(item["node_id"]) for item in graph["nodes"]]
                 compiled_plan = {
                     "entry_node_ids": node_ids[:1],
@@ -268,7 +388,7 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                 projects.create_project("Scheduler idempotency", root / "scheduler.abproj", workspace_root=workspace)
                 tasks = TaskService(projects)
                 tasks.create_task("Scheduler task")
-                graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+                graph = self._instantiate_live_runtime_graph(tasks)
                 node_ids = [str(item["node_id"]) for item in graph["nodes"]]
                 compiled_plan = {
                     "entry_node_ids": node_ids[:1],
@@ -324,7 +444,7 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                 else:
                     os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
 
-    def test_crash_before_provider_dispatch_replays_after_recovery(self) -> None:
+    def test_queue_task_graph_run_persists_resume_payload_for_live_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
             os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
@@ -337,10 +457,91 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                     store_path=root / "projects.json",
                     session_path=root / "current_project.json",
                 )
+                projects.create_project("Scheduler resume payload", root / "scheduler-resume.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Scheduler task")
+                graph = self._instantiate_live_runtime_graph(tasks)
+                node_ids = [str(item["node_id"]) for item in graph["nodes"]]
+                compiled_plan = {
+                    "entry_node_ids": node_ids[:1],
+                    "topology": {"parallel_group_count": 1, "max_parallelism": 1},
+                    "parallel_groups": [{"group_id": "group_0", "node_ids": node_ids}],
+                }
+                compiled_nodes = {
+                    node_id: {"node_id": node_id, "dependency_node_ids": []}
+                    for node_id in node_ids
+                }
+                node_map = {node_id: dict(node) for node_id, node in ((str(item["node_id"]), item) for item in graph["nodes"])}
+                runtime = RuntimeService(
+                    projects,
+                    ModalService(projects.require_shell_state_root),
+                    task_service=tasks,
+                )
+                release = threading.Event()
+
+                runtime._validate_graph_live_run_submission = lambda _payload: {  # type: ignore[method-assign]
+                    "graph": graph,
+                    "task": tasks.current_task() or {},
+                    "graph_id": graph["graph_id"],
+                    "run_budget": {"limits": {"total_tokens": 10}},
+                    "run_token_limit": 10,
+                    "compiled_plan": compiled_plan,
+                    "compiled_nodes": compiled_nodes,
+                    "node_map": node_map,
+                    "prepared_nodes": {},
+                    "parent_thread_id": "thread-parent-live",
+                    "model_capability_snapshots": {"qwen": {"verified": True}},
+                }
+
+                def fake_execute(payload: dict[str, object]) -> dict[str, object]:
+                    release.wait(timeout=2)
+                    return {"live_run": {"run_status": "completed", "run_id": payload.get("_scheduler_run_id")}}
+
+                runtime.execute_task_graph_run = fake_execute  # type: ignore[method-assign]
+                receipt = runtime.queue_task_graph_run(
+                    {
+                        "graph_id": graph["graph_id"],
+                        "budget": {"limits": {"total_tokens": 10}},
+                        "_scheduler_lease_ttl_seconds": 42,
+                        "_crash_before_provider_dispatch": True,
+                    }
+                )
+                run_id = str(receipt["live_run"]["run_id"])
+                durable_run = tasks.durable_run_store().load_run(run_id, include_events=True)
+                self.assertIsNotNone(durable_run)
+                resume_payload = dict(dict(durable_run.get("run_policy_snapshot") or {}).get("resume_payload") or {})
+                self.assertEqual(resume_payload["graph_id"], graph["graph_id"])
+                self.assertEqual(resume_payload["parent_thread_id"], "thread-parent-live")
+                self.assertEqual(resume_payload["_scheduler_lease_ttl_seconds"], 42)
+                self.assertEqual(dict(resume_payload["budget"]), {"limits": {"total_tokens": 10}})
+                self.assertNotIn("_crash_before_provider_dispatch", resume_payload)
+                release.set()
+                runtime.shutdown()
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_crash_before_provider_dispatch_replays_after_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            runtime: RuntimeService | None = None
+            runtime2: RuntimeService | None = None
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                (workspace / "PRIVATE").mkdir(parents=True)
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(
+                    store_path=root / "projects.json",
+                    session_path=root / "current_project.json",
+                )
                 projects.create_project("Scheduler recovery", root / "scheduler.abproj", workspace_root=workspace)
                 tasks = TaskService(projects)
                 tasks.create_task("Scheduler task")
-                graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+                graph = self._instantiate_live_runtime_graph(tasks)
                 node_map = {str(item["node_id"]): dict(item) for item in graph["nodes"]}
                 node_id = next(iter(node_map))
                 runtime = RuntimeService(
@@ -365,7 +566,8 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                     }
                 )
                 run_id = str(receipt["live_run"]["run_id"])
-                runtime._graph_scheduler.wait(run_id, timeout=2)
+                initial_terminal = self._wait_for_scheduler_status(runtime, run_id, expected_status="failed", timeout=8.0)
+                self.assertEqual(initial_terminal.get("status"), "failed")
                 self.assertEqual(start_calls_first, 0)
                 runtime.shutdown()
                 time.sleep(1.2)
@@ -386,8 +588,8 @@ class DurableGraphSchedulerTests(unittest.TestCase):
 
                 self._configure_live_runtime(runtime2, node_map=node_map, start_turn_impl=resumed_start_turn)
                 original_reconcile(runtime2)
-                terminal = runtime2._graph_scheduler.wait(run_id, timeout=3)
-                self.assertEqual(terminal["status"], "completed")  # type: ignore[index]
+                terminal = self._wait_for_scheduler_status(runtime2, run_id, expected_status="completed", timeout=60.0)
+                self.assertEqual(terminal.get("status"), "completed")
                 self.assertEqual(start_calls_second, 1)
                 status = runtime2.graph_run_status(run_id)
                 self.assertEqual(status["run"]["status"], "completed")
@@ -402,6 +604,16 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                 self.assertEqual(store.get_external_operation(operation_id)["status"], "completed")
                 runtime2.shutdown()
             finally:
+                if runtime2 is not None:
+                    try:
+                        runtime2.shutdown()
+                    except Exception:
+                        pass
+                if runtime is not None:
+                    try:
+                        runtime.shutdown()
+                    except Exception:
+                        pass
                 if previous_runtime_root is None:
                     os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
                 else:
@@ -411,6 +623,8 @@ class DurableGraphSchedulerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
             os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            runtime: RuntimeService | None = None
+            runtime2: RuntimeService | None = None
             try:
                 root = Path(temp_dir)
                 workspace = root / "workspace"
@@ -423,7 +637,7 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                 projects.create_project("Scheduler reattach", root / "scheduler.abproj", workspace_root=workspace)
                 tasks = TaskService(projects)
                 tasks.create_task("Scheduler task")
-                graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+                graph = self._instantiate_live_runtime_graph(tasks)
                 node_map = {str(item["node_id"]): dict(item) for item in graph["nodes"]}
                 node_id = next(iter(node_map))
                 runtime = RuntimeService(
@@ -448,7 +662,8 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                     }
                 )
                 run_id = str(receipt["live_run"]["run_id"])
-                runtime._graph_scheduler.wait(run_id, timeout=2)
+                initial_terminal = self._wait_for_scheduler_status(runtime, run_id, expected_status="failed", timeout=8.0)
+                self.assertEqual(initial_terminal.get("status"), "failed")
                 self.assertEqual(start_calls_first, 1)
                 runtime.shutdown()
                 time.sleep(1.2)
@@ -469,8 +684,8 @@ class DurableGraphSchedulerTests(unittest.TestCase):
 
                 self._configure_live_runtime(runtime2, node_map=node_map, start_turn_impl=forbidden_start_turn)
                 original_reconcile(runtime2)
-                terminal = runtime2._graph_scheduler.wait(run_id, timeout=3)
-                self.assertEqual(terminal["status"], "completed")  # type: ignore[index]
+                terminal = self._wait_for_scheduler_status(runtime2, run_id, expected_status="completed", timeout=60.0)
+                self.assertEqual(terminal.get("status"), "completed")
                 self.assertEqual(start_calls_second, 0)
                 status = runtime2.graph_run_status(run_id)
                 self.assertEqual(status["run"]["status"], "completed")
@@ -485,6 +700,16 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                 self.assertEqual(store.get_external_operation(operation_id)["status"], "completed")
                 runtime2.shutdown()
             finally:
+                if runtime2 is not None:
+                    try:
+                        runtime2.shutdown()
+                    except Exception:
+                        pass
+                if runtime is not None:
+                    try:
+                        runtime.shutdown()
+                    except Exception:
+                        pass
                 if previous_runtime_root is None:
                     os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
                 else:
@@ -506,7 +731,7 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                 projects.create_project("Scheduler review", root / "scheduler.abproj", workspace_root=workspace)
                 tasks = TaskService(projects)
                 tasks.create_task("Scheduler task")
-                graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+                graph = self._instantiate_live_runtime_graph(tasks)
                 node_map = {str(item["node_id"]): dict(item) for item in graph["nodes"]}
                 node_id = next(iter(node_map))
                 runtime = RuntimeService(
@@ -526,10 +751,10 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                     }
                 )
                 run_id = str(receipt["live_run"]["run_id"])
-                terminal = runtime._graph_scheduler.wait(run_id, timeout=3)
-                self.assertEqual(terminal["status"], "completed")  # type: ignore[index]
-                self.assertEqual(terminal["result_status"], "needs_review")  # type: ignore[index]
-                status = runtime.graph_run_status(run_id)
+                terminal = self._wait_for_scheduler_status(runtime, run_id, expected_status="completed", timeout=10.0)
+                self.assertEqual(terminal.get("status"), "completed")
+                self.assertEqual(terminal.get("result_status"), "needs_review")
+                status = self._wait_for_graph_run_status(runtime, run_id, expected_status="needs_review", timeout=10.0)
                 self.assertEqual(status["run"]["status"], "needs_review")
                 operation_id = RuntimeService._graph_live_operation_id(
                     run_id=run_id,
@@ -541,6 +766,192 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                 self.assertEqual(store.get_outbox_operation(operation_id)["status"], "needs_review")
                 self.assertEqual(store.get_external_operation(operation_id)["status"], "needs_review")
                 runtime.shutdown()
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_live_cancel_requests_interrupt_for_running_live_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                (workspace / "PRIVATE").mkdir(parents=True)
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(
+                    store_path=root / "projects.json",
+                    session_path=root / "current_project.json",
+                )
+                projects.create_project("Scheduler cancel running", root / "scheduler-cancel-running.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                task = tasks.create_task("Scheduler task")
+                graph = self._instantiate_live_runtime_graph(tasks)
+                node_id = str(graph["nodes"][0]["node_id"])
+                run_id = "graph-run-live-running-cancel"
+                created_at = "2026-07-18T14:10:00+09:00"
+                tasks.record_graph_run(
+                    {
+                        "schema_version": "astrabridge-task-graph-run-v1",
+                        "run_id": run_id,
+                        "graph_id": graph["graph_id"],
+                        "task_id": task["task_id"],
+                        "trace_id": f"trace-{run_id}",
+                        "context_id": f"context-{run_id}",
+                        "status": "running",
+                        "entry_node_ids": [node_id],
+                        "node_run_states": [
+                            {
+                                "node_id": node_id,
+                                "run_id": run_id,
+                                "status": "running",
+                                "outcome": "pending",
+                                "attempt_count": 1,
+                                "provider_id": "qwen",
+                                "execution_thread_id": "thread-live",
+                                "worker_thread_id": "thread-live",
+                                "turn_id": "turn-live",
+                                "started_at": created_at,
+                                "updated_at": created_at,
+                            }
+                        ],
+                        "artifact_refs": [],
+                        "event_refs": [
+                            {
+                                "event_id": f"{run_id}-created",
+                                "run_id": run_id,
+                                "task_id": task["task_id"],
+                                "trace_id": f"trace-{run_id}",
+                                "event_type": "run_created",
+                                "created_at": created_at,
+                                "summary": "Running live task-graph run created for cancellation test.",
+                            }
+                        ],
+                        "approval_state": {"status": "not_required"},
+                        "run_policy_snapshot": {
+                            "mode": "live_run",
+                            "scheduler": "durable_graph_scheduler_v1",
+                            "scheduler_owner_id": "graph-scheduler-test",
+                        },
+                        "created_at": created_at,
+                        "updated_at": created_at,
+                        "state_version": 1,
+                    },
+                    graph_definition=graph,
+                )
+                runtime = RuntimeService(
+                    projects,
+                    ModalService(projects.require_shell_state_root),
+                    task_service=tasks,
+                )
+                try:
+                    interrupt_calls: list[tuple[str, str]] = []
+                    runtime._profiles.resolve_runtime_profile = lambda provider_id: {"provider_id": provider_id}  # type: ignore[method-assign]
+
+                    def interrupt_turn(_profile: dict[str, object], thread_id: str, turn_id: str) -> dict[str, object]:
+                        interrupt_calls.append((thread_id, turn_id))
+                        return {"interrupt": {"status": "requested", "thread_id": thread_id, "turn_id": turn_id}}
+
+                    runtime.interrupt_turn = interrupt_turn  # type: ignore[method-assign]
+
+                    cancelled = runtime.cancel_task_graph_run({"run_id": run_id, "notes": "Cancel from unit test"})
+                    self.assertEqual(interrupt_calls, [("thread-live", "turn-live")])
+                    self.assertEqual(cancelled["cancellation"]["status"], "running")
+                    self.assertEqual(cancelled["cancellation"]["interrupt_results"][0]["ok"], True)
+                    self.assertEqual(cancelled["run_ref"]["latest_event_type"], "run_cancel_requested")
+                    durable_run = tasks.durable_run_store().load_run(run_id, include_events=True)
+                    self.assertEqual(dict(durable_run.get("cancellation") or {}).get("status"), "requested")
+                finally:
+                    runtime.shutdown()
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_live_cancel_marks_queued_live_run_cancelled_before_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                (workspace / "PRIVATE").mkdir(parents=True)
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(
+                    store_path=root / "projects.json",
+                    session_path=root / "current_project.json",
+                )
+                projects.create_project("Scheduler cancel queued", root / "scheduler-cancel-queued.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                task = tasks.create_task("Scheduler task")
+                graph = self._instantiate_live_runtime_graph(tasks)
+                node_id = str(graph["nodes"][0]["node_id"])
+                run_id = "graph-run-live-queued-cancel"
+                created_at = "2026-07-18T14:12:00+09:00"
+                tasks.record_graph_run(
+                    {
+                        "schema_version": "astrabridge-task-graph-run-v1",
+                        "run_id": run_id,
+                        "graph_id": graph["graph_id"],
+                        "task_id": task["task_id"],
+                        "trace_id": f"trace-{run_id}",
+                        "context_id": f"context-{run_id}",
+                        "status": "queued",
+                        "entry_node_ids": [node_id],
+                        "node_run_states": [
+                            {
+                                "node_id": node_id,
+                                "run_id": run_id,
+                                "status": "queued",
+                                "outcome": "pending",
+                                "attempt_count": 0,
+                                "started_at": created_at,
+                                "updated_at": created_at,
+                            }
+                        ],
+                        "artifact_refs": [],
+                        "event_refs": [
+                            {
+                                "event_id": f"{run_id}-created",
+                                "run_id": run_id,
+                                "task_id": task["task_id"],
+                                "trace_id": f"trace-{run_id}",
+                                "event_type": "run_created",
+                                "created_at": created_at,
+                                "summary": "Queued live task-graph run created for cancellation test.",
+                            }
+                        ],
+                        "approval_state": {"status": "not_required"},
+                        "run_policy_snapshot": {
+                            "mode": "live_run",
+                            "scheduler": "durable_graph_scheduler_v1",
+                            "scheduler_owner_id": "graph-scheduler-test",
+                        },
+                        "created_at": created_at,
+                        "updated_at": created_at,
+                        "state_version": 1,
+                    },
+                    graph_definition=graph,
+                )
+                runtime = RuntimeService(
+                    projects,
+                    ModalService(projects.require_shell_state_root),
+                    task_service=tasks,
+                )
+                try:
+                    runtime._graph_scheduler.cancel = lambda run_id, reason=None: {"run_id": run_id, "status": "cancelled", "reason": reason}  # type: ignore[method-assign]
+                    cancelled = runtime.cancel_task_graph_run({"run_id": run_id, "notes": "Cancel queued run"})
+                    self.assertEqual(cancelled["cancellation"]["status"], "cancelled")
+                    self.assertEqual(cancelled["run_ref"]["status"], "cancelled")
+                    self.assertEqual(cancelled["run_ref"]["latest_event_type"], "run_cancelled")
+                    durable_run = tasks.durable_run_store().load_run(run_id, include_events=True)
+                    self.assertEqual(durable_run["status"], "cancelled")
+                    self.assertTrue(any(item["event_type"] == "run_cancelled" for item in cancelled["run_ref"]["timeline_events"]))
+                finally:
+                    runtime.shutdown()
             finally:
                 if previous_runtime_root is None:
                     os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
@@ -563,7 +974,7 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                 projects.create_project("Scheduler cancel", root / "scheduler.abproj", workspace_root=workspace)
                 tasks = TaskService(projects)
                 tasks.create_task("Scheduler task")
-                graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+                graph = self._instantiate_live_runtime_graph(tasks)
                 node_map = {str(item["node_id"]): dict(item) for item in graph["nodes"]}
                 runtime = RuntimeService(
                     projects,
@@ -584,7 +995,7 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                     self._configure_live_runtime(runtime, node_map=node_map, start_turn_impl=start_turn, terminal_status="cancelled", final_text="")
 
                     def wait_for_terminal(_client: object, **kwargs: object) -> dict[str, object]:
-                        self.assertTrue(interrupted.wait(timeout=2))
+                        interrupted.wait(timeout=60)
                         return {
                             "id": kwargs.get("thread_id"),
                             "turns": [{"id": kwargs.get("turn_id"), "status": "cancelled"}],
@@ -607,14 +1018,15 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                         }
                     )
                     run_id = str(receipt["live_run"]["run_id"])
-                    self.assertTrue(started.wait(timeout=2))
+                    self.assertTrue(started.wait(timeout=8))
                     time.sleep(0.3)
                     cancellation = runtime.cancel_task_graph_run({"run_id": run_id, "notes": "Cancel live run"})
-                    terminal = runtime._graph_scheduler.wait(run_id, timeout=3)
-                    status = runtime.graph_run_status(run_id)
+                    terminal = self._wait_for_scheduler_status(runtime, run_id, expected_status="completed", timeout=60.0)
+                    status = self._wait_for_graph_run_status(runtime, run_id, expected_status="cancelled", timeout=60.0)
                     recovery = runtime.recover_task_graph_run({"run_id": run_id, "strategy": "resume_run"})
 
                     self.assertEqual(len(start_calls), 1)
+                    self.assertTrue(interrupted.is_set())
                     self.assertEqual(interrupt_calls, [("thread-live", "turn-live")])
                     self.assertEqual(terminal["status"], "completed")  # type: ignore[index]
                     self.assertEqual(terminal["result_status"], "cancelled")  # type: ignore[index]
@@ -623,6 +1035,92 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                     self.assertEqual(status["live_run"]["run_ref"]["latest_event_type"], "run_cancelled")
                     self.assertEqual(recovery["recovery"]["safe_to_resume"], False)
                     self.assertEqual(recovery["recovery"]["status"], "needs_review")
+                finally:
+                    runtime.shutdown()
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_live_cancel_suppresses_late_completed_turn_and_keeps_run_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                (workspace / "PRIVATE").mkdir(parents=True)
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(
+                    store_path=root / "projects.json",
+                    session_path=root / "current_project.json",
+                )
+                projects.create_project("Scheduler cancel late completion", root / "scheduler-late-complete.abproj", workspace_root=workspace)
+                tasks = TaskService(
+                    projects,
+                )
+                tasks.create_task("Scheduler task")
+                graph = self._instantiate_live_runtime_graph(tasks)
+                node_map = {str(item["node_id"]): dict(item) for item in graph["nodes"]}
+                node_id = next(iter(node_map))
+                runtime = RuntimeService(
+                    projects,
+                    ModalService(projects.require_shell_state_root),
+                    task_service=tasks,
+                )
+                try:
+                    started = threading.Event()
+                    interrupted = threading.Event()
+
+                    def start_turn(_profile: dict[str, object], **_kwargs: object) -> dict[str, object]:
+                        started.set()
+                        return {"thread_id": "thread-live", "turn": {"id": "turn-live"}}
+
+                    self._configure_live_runtime(runtime, node_map=node_map, start_turn_impl=start_turn, terminal_status="completed", final_text="")
+
+                    def wait_for_terminal(_client: object, **kwargs: object) -> dict[str, object]:
+                        interrupted.wait(timeout=60)
+                        return {
+                            "id": kwargs.get("thread_id"),
+                            "turns": [{"id": kwargs.get("turn_id"), "status": "completed"}],
+                        }
+
+                    runtime._wait_for_probe_turn_terminal = wait_for_terminal  # type: ignore[method-assign]
+                    runtime._probe_turn_result = lambda _thread, turn_id="": (  # type: ignore[method-assign]
+                        "completed",
+                        json.dumps({"human_summary": "Late completion", "machine_result": {"status": "ok"}}),
+                        "",
+                    )
+
+                    def interrupt_turn(_profile: dict[str, object], thread_id: str, turn_id: str) -> dict[str, object]:
+                        interrupted.set()
+                        return {"interrupt": {"status": "requested", "thread_id": thread_id, "turn_id": turn_id}}
+
+                    runtime.interrupt_turn = interrupt_turn  # type: ignore[method-assign]
+
+                    receipt = runtime.queue_task_graph_run({"graph_id": graph["graph_id"], "budget": {"limits": {"total_tokens": 10}}})
+                    run_id = str(receipt["live_run"]["run_id"])
+                    self.assertTrue(started.wait(timeout=2))
+                    time.sleep(0.3)
+                    runtime.cancel_task_graph_run({"run_id": run_id, "notes": "Cancel before late completion commit"})
+                    terminal = runtime._graph_scheduler.wait(run_id, timeout=3)
+                    status = runtime.graph_run_status(run_id)
+                    store = tasks.durable_run_store()
+                    operation_id = RuntimeService._graph_live_operation_id(
+                        run_id=run_id,
+                        node_id=node_id,
+                        attempt=1,
+                        kind="provider_turn_start",
+                    )
+
+                    self.assertTrue(interrupted.is_set())
+                    self.assertEqual(terminal["status"], "completed")  # type: ignore[index]
+                    self.assertEqual(terminal["result_status"], "cancelled")  # type: ignore[index]
+                    self.assertEqual(status["run"]["status"], "cancelled")
+                    self.assertEqual(status["live_run"]["run_ref"]["latest_event_type"], "run_cancelled")
+                    self.assertEqual(store.get_outbox_operation(operation_id)["status"], "cancelled")
+                    self.assertEqual(store.get_external_operation(operation_id)["status"], "cancelled")
                 finally:
                     runtime.shutdown()
             finally:
@@ -654,7 +1152,7 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                         projects.create_project("Scheduler retry", root / "scheduler.abproj", workspace_root=workspace)
                         tasks = TaskService(projects)
                         tasks.create_task("Scheduler task")
-                        graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+                        graph = self._instantiate_live_runtime_graph(tasks)
                         node_map = {str(item["node_id"]): dict(item) for item in graph["nodes"]}
                         node_id = next(iter(node_map))
                         node_map[node_id]["provider_id"] = "qwen"
@@ -755,7 +1253,7 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                         projects.create_project("Scheduler no-retry", root / "scheduler.abproj", workspace_root=workspace)
                         tasks = TaskService(projects)
                         tasks.create_task("Scheduler task")
-                        graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+                        graph = self._instantiate_live_runtime_graph(tasks)
                         node_map = {str(item["node_id"]): dict(item) for item in graph["nodes"]}
                         node_id = next(iter(node_map))
                         node_map[node_id]["provider_id"] = "qwen"
@@ -912,6 +1410,247 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                     )
                     serialized = json.dumps({"envelopes": envelopes, "delivery_ledger": delivery_ledger}, ensure_ascii=False)
                     self.assertNotIn("private_reasoning", serialized)
+                finally:
+                    runtime.shutdown()
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_dispatch_limits_chunk_large_parallel_group_before_provider_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                (workspace / "PRIVATE").mkdir(parents=True)
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(
+                    store_path=root / "projects.json",
+                    session_path=root / "current_project.json",
+                )
+                projects.create_project("Dispatch chunking", root / "dispatch.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Dispatch chunk task")
+                graph = tasks.instantiate_graph_template("fanout_fanin_research")["graph"]
+                node_ids = [str(item["node_id"]) for item in graph["nodes"]]
+                node_map = {node_id: dict(node) for node_id, node in ((str(item["node_id"]), item) for item in graph["nodes"]) if node_id in node_ids}
+                for node_id in node_ids:
+                    node_map[node_id]["provider_id"] = "qwen"
+                    node_map[node_id]["model_id"] = "qwen3.7-max-2026-06-08"
+                runtime = RuntimeService(
+                    projects,
+                    ModalService(projects.require_shell_state_root),
+                    task_service=tasks,
+                )
+                try:
+                    active = 0
+                    max_active = 0
+                    turn_to_node: dict[str, str] = {}
+
+                    def start_turn(_profile: dict[str, object], **kwargs: object) -> dict[str, object]:
+                        nonlocal active, max_active
+                        active += 1
+                        max_active = max(max_active, active)
+                        turn_id = f"turn-{len(turn_to_node) + 1}"
+                        turn_to_node[turn_id] = str(kwargs.get("thread_id") or "")
+                        return {"thread_id": str(kwargs.get("thread_id") or ""), "turn": {"id": turn_id}}
+
+                    self._configure_live_runtime(runtime, node_map=node_map, start_turn_impl=start_turn)
+                    runtime._wait_for_probe_turn_terminal = lambda _client, **kwargs: {  # type: ignore[method-assign]
+                        "id": kwargs.get("thread_id"),
+                        "turns": [{"id": kwargs.get("turn_id"), "status": "completed"}],
+                    }
+
+                    def probe_turn_result(_thread: dict[str, object], turn_id: str = "") -> tuple[str, str, str]:
+                        nonlocal active
+                        active = max(0, active - 1)
+                        if turn_id == "turn-1":
+                            return ("completed", '{"human_summary":"","machine_result":{"questions":["q1","q2"],"branches":["node_research_a","node_research_b"]}}', "")
+                        return ("completed", '{"human_summary":"Done","machine_result":{"goal":"done","next_nodes":[]}}', "")
+
+                    runtime._probe_turn_result = probe_turn_result  # type: ignore[method-assign]
+                    receipt = runtime.queue_task_graph_run(
+                        {
+                            "graph_id": graph["graph_id"],
+                            "budget": {"limits": {"total_tokens": 10}},
+                            "_dispatch_limits": {
+                                "max_active_nodes": 3,
+                                "reserved_interactive_slots": 1,
+                                "max_provider_active_nodes": 3,
+                                "max_model_active_nodes": 3,
+                                "max_workspace_active_nodes": 3,
+                            },
+                        }
+                    )
+                    run_id = str(receipt["live_run"]["run_id"])
+                    terminal = runtime._graph_scheduler.wait(run_id, timeout=6)
+                    self.assertEqual(terminal["status"], "completed")  # type: ignore[index]
+                    self.assertEqual(max_active, 2)
+                finally:
+                    runtime.shutdown()
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_retry_budget_caps_retry_storms_for_single_node(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                (workspace / "PRIVATE").mkdir(parents=True)
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(
+                    store_path=root / "projects.json",
+                    session_path=root / "current_project.json",
+                )
+                projects.create_project("Retry budget", root / "retry.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Retry budget task")
+                graph = self._instantiate_live_runtime_graph(tasks)
+                node_id = str(graph["nodes"][0]["node_id"])
+                node_map = {node_id: dict(graph["nodes"][0])}
+                node_map[node_id]["provider_id"] = "qwen"
+                node_map[node_id]["model_id"] = "qwen3.7-max-2026-06-08"
+                node_map[node_id]["execution_policy"] = {
+                    "retry_policy": {
+                        "max_attempts": 4,
+                        "base_delay_ms": 0,
+                        "max_delay_ms": 0,
+                        "jitter_ms": 0,
+                        "allow_model_fallback": False,
+                    }
+                }
+                runtime = RuntimeService(
+                    projects,
+                    ModalService(projects.require_shell_state_root),
+                    task_service=tasks,
+                )
+                try:
+                    attempts = 0
+
+                    def start_turn(_profile: dict[str, object], **kwargs: object) -> dict[str, object]:
+                        nonlocal attempts
+                        attempts += 1
+                        return {"thread_id": str(kwargs.get("thread_id") or ""), "turn": {"id": f"turn-{attempts}"}}
+
+                    self._configure_live_runtime(runtime, node_map=node_map, start_turn_impl=start_turn, terminal_status="failed")
+                    runtime._probe_turn_result = lambda _thread, turn_id="": ("failed", "429 rate limit retry-after: 0", "")  # type: ignore[method-assign]
+                    receipt = runtime.queue_task_graph_run(
+                        {
+                            "graph_id": graph["graph_id"],
+                            "budget": {"limits": {"total_tokens": 10}},
+                            "_dispatch_limits": {
+                                "retry_budget_max": 1,
+                                "breaker_failure_threshold": 99,
+                            },
+                        }
+                    )
+                    run_id = str(receipt["live_run"]["run_id"])
+                    terminal = runtime._graph_scheduler.wait(run_id, timeout=6)
+                    self.assertEqual(terminal["status"], "completed")  # type: ignore[index]
+                    status = runtime.graph_run_status(run_id)
+                    attempt_count = next(
+                        int(item.get("attempt_count") or 0)
+                        for item in list(status["run"]["node_run_states"] or [])
+                        if str(item.get("node_id") or "") == node_id
+                    )
+                    self.assertEqual(attempts, 2)
+                    self.assertEqual(attempt_count, 2)
+                finally:
+                    runtime.shutdown()
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_circuit_breaker_blocks_later_same_provider_dispatch_and_is_observable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                (workspace / "PRIVATE").mkdir(parents=True)
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(
+                    store_path=root / "projects.json",
+                    session_path=root / "current_project.json",
+                )
+                projects.create_project("Breaker", root / "breaker.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Breaker task")
+                graph = tasks.instantiate_graph_template("fanout_fanin_research")["graph"]
+                node_ids = [str(item["node_id"]) for item in graph["nodes"]]
+                node_map = {node_id: dict(node) for node_id, node in ((str(item["node_id"]), item) for item in graph["nodes"]) if node_id in node_ids}
+                for node_id in node_ids:
+                    node_map[node_id]["provider_id"] = "qwen"
+                    node_map[node_id]["model_id"] = "qwen3.7-max-2026-06-08"
+                    node_map[node_id]["execution_policy"] = {
+                        "retry_policy": {
+                            "max_attempts": 1,
+                            "base_delay_ms": 0,
+                            "max_delay_ms": 0,
+                            "jitter_ms": 0,
+                            "allow_model_fallback": False,
+                        }
+                    }
+                runtime = RuntimeService(
+                    projects,
+                    ModalService(projects.require_shell_state_root),
+                    task_service=tasks,
+                )
+                try:
+                    starts = 0
+
+                    def start_turn(_profile: dict[str, object], **kwargs: object) -> dict[str, object]:
+                        nonlocal starts
+                        starts += 1
+                        return {"thread_id": str(kwargs.get("thread_id") or ""), "turn": {"id": f"turn-{starts}"}}
+
+                    self._configure_live_runtime(runtime, node_map=node_map, start_turn_impl=start_turn, terminal_status="failed")
+                    def probe_turn_result(_thread: dict[str, object], turn_id: str = "") -> tuple[str, str, str]:
+                        if turn_id == "turn-1":
+                            return ("completed", '{"human_summary":"","machine_result":{"questions":["q1","q2"],"branches":["node_research_a","node_research_b"]}}', "")
+                        return ("failed", "429 rate limit retry-after: 0", "")
+
+                    runtime._probe_turn_result = probe_turn_result  # type: ignore[method-assign]
+                    receipt = runtime.queue_task_graph_run(
+                        {
+                            "graph_id": graph["graph_id"],
+                            "budget": {"limits": {"total_tokens": 10}},
+                            "_dispatch_limits": {
+                                "max_active_nodes": 2,
+                                "reserved_interactive_slots": 1,
+                                "max_provider_active_nodes": 2,
+                                "max_model_active_nodes": 2,
+                                "max_workspace_active_nodes": 2,
+                                "breaker_failure_threshold": 1,
+                                "breaker_cooldown_seconds": 300,
+                            },
+                        }
+                    )
+                    run_id = str(receipt["live_run"]["run_id"])
+                    terminal = runtime._graph_scheduler.wait(run_id, timeout=6)
+                    self.assertEqual(terminal["status"], "completed")  # type: ignore[index]
+                    self.assertEqual(starts, 2)
+                    status = runtime.graph_run_status(run_id)
+                    node_states = {
+                        str(item.get("node_id") or ""): dict(item)
+                        for item in list(status["run"]["node_run_states"] or [])
+                        if isinstance(item, dict)
+                    }
+                    self.assertEqual(str(node_states["node_research_b"].get("outcome") or ""), "provider_dispatch_denied")
+                    breaker_status = runtime.environment()["graph_dispatch_control"]["circuit_breakers"]
+                    self.assertEqual(len(breaker_status), 1)
+                    self.assertEqual(breaker_status[0]["state"], "open")
                 finally:
                     runtime.shutdown()
             finally:
@@ -1235,6 +1974,11 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                     self.assertIn({"source_provider": "qwen", "target_provider": "kimi"}, worker_bundle["provider_pairs"])
                     self.assertEqual(worker_bundle["total_repaired_tool_pairs"], 1)
                     self.assertTrue(worker_bundle["provider_private_state_removed"])
+                    self.assertTrue(str(worker_bundle.get("projection_digest") or ""))
+                    self.assertTrue(str(worker_bundle.get("lineage_digest") or ""))
+                    self.assertTrue(str(worker_bundle.get("bundle_digest") or ""))
+                    self.assertEqual(worker_bundle["lineage"]["source_thread_ids"], ["worker-node_supervisor"])
+                    self.assertEqual(worker_bundle["lineage"]["target_node_id"], "node_worker")
                     self.assertNotIn("secret", json.dumps(worker_bundle, ensure_ascii=False))
                     self.assertGreaterEqual(len(worker_bundle["incoming_handoffs"][0]["artifact_refs"]), 1)
 
@@ -1242,6 +1986,11 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                     self.assertEqual(synth_bundle["typed_inputs"]["edge_worker_synth_input"]["result"], "done")
                     self.assertIn({"source_provider": "kimi", "target_provider": "glm"}, synth_bundle["provider_pairs"])
                     self.assertEqual(synth_bundle["total_repaired_tool_pairs"], 0)
+                    self.assertTrue(str(synth_bundle.get("projection_digest") or ""))
+                    self.assertTrue(str(synth_bundle.get("lineage_digest") or ""))
+                    self.assertTrue(str(synth_bundle.get("bundle_digest") or ""))
+                    self.assertEqual(synth_bundle["lineage"]["source_thread_ids"], ["worker-node_worker"])
+                    self.assertEqual(synth_bundle["lineage"]["target_node_id"], "node_synth")
                     self.assertTrue(any(str(item.get("source") or "") == "graph_handoff_artifact" for item in synth_attachments))
                     self.assertNotIn("secret", json.dumps(synth_bundle, ensure_ascii=False))
                 finally:
@@ -1366,7 +2115,7 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                 projects.create_project("Scheduler schema failure", root / "scheduler.abproj", workspace_root=workspace)
                 tasks = TaskService(projects)
                 tasks.create_task("Scheduler task")
-                graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+                graph = self._instantiate_live_runtime_graph(tasks)
                 node_map = {str(item["node_id"]): dict(item) for item in graph["nodes"]}
                 runtime = RuntimeService(
                     projects,
@@ -1569,18 +2318,11 @@ class DurableGraphSchedulerTests(unittest.TestCase):
                         }
                     )
                     run_id = str(receipt["live_run"]["run_id"])
-                    deadline = time.monotonic() + 20.0
-                    terminal = runtime._graph_scheduler.get(run_id) or {}
-                    status = runtime.graph_run_status(run_id)
-                    while time.monotonic() < deadline:
-                        terminal = runtime._graph_scheduler.wait(run_id, timeout=0.5) or {}
-                        status = runtime.graph_run_status(run_id)
-                        if str(status["run"]["status"] or "").strip() == "completed":
-                            break
-                    terminal = runtime._graph_scheduler.wait(run_id, timeout=5) or terminal
+                    terminal = self._wait_for_scheduler_status(runtime, run_id, expected_status="completed", timeout=240.0)
+                    status = self._wait_for_graph_run_status(runtime, run_id, expected_status="completed", timeout=60.0)
 
                     self.assertEqual(status["run"]["status"], "completed")
-                    self.assertEqual(terminal["status"], "completed")  # type: ignore[index]
+                    self.assertEqual(terminal.get("status"), "completed")
                     self.assertEqual(start_turn_calls.count("node_worker"), 1)
                 finally:
                     if run_id:

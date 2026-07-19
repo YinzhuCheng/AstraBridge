@@ -77,7 +77,7 @@ Use this only when the task explicitly requires real provider connectivity or mo
 ## Current Entry Points
 
 - [Canonical Document Registry](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.md)
-- [Current Standardization, UI, And Live Dogfood Plan](/D:/AstraBridge/PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md)
+- [Current Product Stability And Interoperability Plan](/D:/AstraBridge/PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md)
 - [Project Summary](/D:/AstraBridge/docs/PROJECT_SUMMARY.md)
 - [Repository Governance](/D:/AstraBridge/docs/REPO_GOVERNANCE.md)
 - [Verification Matrix](/D:/AstraBridge/docs/VERIFICATION_MATRIX.md)
@@ -106,4 +106,20 @@ Use the full local gate before release preparation or broad cross-subsystem hand
 python scripts/run_local_gate.py --full
 ```
 
-The gate is local-first. This repository currently has no `.github/workflows` CI entry point.
+Use the fail-closed promotion gate when you need a machine-readable PR, nightly, or release verdict bound to one commit, clean-tree state, toolchain versions, and artifact digests:
+
+```powershell
+python scripts/run_promotion_gate.py --mode pr --expected-commit <sha>
+python scripts/run_promotion_gate.py --mode nightly --expected-commit <sha>
+python scripts/run_promotion_gate.py --mode release --expected-commit <sha>
+```
+
+The canonical CI entry points now live under `.github/workflows/` and call `scripts/run_promotion_gate.py` rather than duplicating suite lists in workflow YAML.
+
+Use the release-readiness gate when release identity, staged contents, or package provenance changes:
+
+```powershell
+python scripts/run_release_readiness_gate.py --run-id local-readiness
+```
+
+It verifies one canonical release identity, builds a clean staged workspace from an explicit allowlist, emits inventory/hash/SBOM-input evidence, and proves two staging runs are deterministic.

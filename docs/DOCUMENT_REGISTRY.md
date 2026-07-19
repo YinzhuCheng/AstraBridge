@@ -35,10 +35,10 @@ Do not use file modification time, filename wording, or an old progress paragrap
 
 | Path | Activation | Owner | Scope |
 | --- | --- | --- | --- |
-| [ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md) | Current default queue | `stability-protocol` | Provider isolation, MCP capability boundaries, agent envelopes, durable task-graph runtime, and cross-provider reliability gates. |
+| [ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md) | Current default queue | `product-stability-interoperability` | Multi-provider control, external A2A interoperability, GUI/code orchestration parity, signed updates, CI, and release closure. |
 | [CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md](/D:/AstraBridge/PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md) | Only when the user explicitly requests capability-runtime implementation or advancement | `capability-runtime` | Remaining capability-runtime implementation beginning at its recorded Step 2. |
 
-These activation conditions do not conflict: the capability-runtime queue is dormant unless the user explicitly invokes that scope. The prior UI/live-dogfood queue remains preserved as historical evidence and is superseded by the stability plan for remaining reliability work. All other execution plans are `complete` or `superseded` in the registry.
+These activation conditions do not conflict: the capability-runtime queue is dormant unless the user explicitly invokes that scope. The prior UI/live-dogfood queue and the completed stability/protocol/runtime plan remain preserved as historical implementation evidence. All other execution plans are `complete` or `superseded` in the registry.
 
 ## Active Policy And Memory
 
@@ -62,6 +62,7 @@ The following are finished records and must not be reopened as active queues:
 
 - Repository normalization: `PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md`
 - App hardening: `PLAN/ASTRABRIDGE_APP_HARDENING_EXECUTION_PLAN.md`
+- Stability, protocol, durable runtime, MCP broker, NodeType registry, and adapter baseline: `PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md`
 - Brand system round one: `PLAN/ASTRABRIDGE_BRAND_SYSTEM_EXECUTION_PLAN.md`
 - First agent benchmark dogfood: `PLAN/AGENT_BENCH_DOGFOOD_EXECUTION_PLAN.md`
 - Capability entry/Web validation and capability UI management
@@ -77,7 +78,7 @@ Use the exact file list and replacement paths in the JSON registry.
 
 ## Superseded Queues
 
-Nineteen older or duplicate queues are preserved but must not be resumed. The major replacement families are:
+Twenty older or duplicate queues are preserved but must not be resumed. The major replacement families are:
 
 | Earlier family | Replacement |
 | --- | --- |
@@ -141,12 +142,12 @@ When adding or changing a guiding document or execution plan:
 
 ## Current Counts
 
-As verified on 2026-07-17, the registry contains 106 entries:
+As verified on 2026-07-17, the registry contains 107 entries:
 
 | Status | Count |
 | --- | ---: |
 | `active` | 14 |
-| `complete` | 25 |
+| `complete` | 26 |
 | `reference` | 46 |
 | `superseded` | 20 |
 | `archived` | 1 |

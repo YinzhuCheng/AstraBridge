@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ...reasoning_policy import normalize_reasoning_effort
+from ..failures import classify_runtime_failure
 from ..ir import NormalizedResponse, ProviderWarning, RawProviderArtifactRef, ReasoningState, ToolCall, Usage
 from ..tooling import (
     enforce_tool_message_sequence,
@@ -143,6 +144,21 @@ class ProviderTransport(ABC):
 
     def supports_local_image_input(self) -> bool:
         return False
+
+    def classify_error(self, raw_message: str, *, model_id: str | None = None) -> dict[str, Any]:
+        return classify_runtime_failure(
+            raw_message,
+            current_provider=self._provider_id(),
+            current_model=str(model_id or self.profile.get("model") or "").strip(),
+        ).to_payload()
+
+    def cancellation_contract(self) -> dict[str, Any]:
+        return {
+            "owner": "runtime_turn",
+            "strategy": "interrupt_provider_thread",
+            "supports_explicit_provider_abort": False,
+            "transport_stateful_cancel": False,
+        }
 
     def _local_image_data_url(self, raw_path: str) -> str:
         path = self._local_image_path(raw_path)

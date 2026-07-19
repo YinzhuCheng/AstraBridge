@@ -8,6 +8,7 @@
                     "build":  "node ./node_modules/typescript/bin/tsc \u0026\u0026 node ./node_modules/vite/bin/vite.js build",
                     "preview":  "node ./node_modules/vite/bin/vite.js preview --host 127.0.0.1",
                     "test":  "node ./node_modules/vitest/vitest.mjs run",
+                    "test:e2e:task-graph":  "node ./node_modules/@playwright/test/cli.js test tests/task-graph-workspace.spec.ts --project=desktop",
                     "tauri":  "tauri"
                 },
     "dependencies":  {

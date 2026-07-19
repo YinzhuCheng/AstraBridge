@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -107,6 +108,13 @@ class PluginInstallApplyTests(unittest.TestCase):
         self.assertEqual(result["status"], "applied")
         self.assertTrue((target_root / ".codex-plugin" / "plugin.json").exists())
         self.assertTrue(Path(result["artifact_paths"]["result_path"]).exists())
+        self.assertTrue(Path(result["artifact_paths"]["apply_journal_path"]).exists())
+        self.assertTrue(Path(result["artifact_paths"]["rollback_manifest_path"]).exists())
+        journal = json.loads(Path(result["artifact_paths"]["apply_journal_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(journal["schema_version"], "astrabridge-agentic-update-apply-journal-v1")
+        self.assertEqual(journal["status"], "committed")
+        self.assertEqual(journal["tracks"][0]["track_id"], "plugin_skill_activation")
+        self.assertEqual(journal["tracks"][0]["health_verdict"], "pass")
         self.assertEqual(result["changes"]["written_file_count"], 2)
 
     def test_update_captures_rollback_snapshot_and_replaces_files(self) -> None:
@@ -138,6 +146,9 @@ class PluginInstallApplyTests(unittest.TestCase):
         self.assertEqual(result["rollback_snapshot"]["status"], "captured")
         self.assertEqual((target_root / "skills" / "demo" / "SKILL.md").read_text(encoding="utf-8"), "updated")
         self.assertTrue(Path(str(result["rollback_snapshot"]["snapshot_root"])) .exists())
+        rollback_manifest = json.loads(Path(result["artifact_paths"]["rollback_manifest_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(rollback_manifest["restore_status"], "available_for_manual_restore")
+        self.assertTrue(rollback_manifest["target_existed_before"])
 
     def test_noop_for_already_current_plugin(self) -> None:
         temp_root = Path(mkdtemp())
@@ -163,6 +174,9 @@ class PluginInstallApplyTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "noop")
         self.assertEqual(result["rollback_snapshot"]["status"], "not_needed")
+        journal = json.loads(Path(result["artifact_paths"]["apply_journal_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(journal["status"], "committed")
+        self.assertEqual(journal["tracks"][0]["changed_paths"], [])
 
     def test_malformed_plugin_plan_is_rejected_without_write(self) -> None:
         temp_root = Path(mkdtemp())
@@ -220,6 +234,11 @@ class PluginInstallApplyTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["rollback_snapshot"]["status"], "restored_after_failure")
         self.assertEqual((target_root / "skills" / "demo" / "SKILL.md").read_text(encoding="utf-8"), "old")
+        journal = json.loads(Path(result["artifact_paths"]["apply_journal_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(journal["status"], "rolled_back")
+        self.assertEqual(journal["tracks"][0]["health_verdict"], "fail")
+        rollback_manifest = json.loads(Path(result["artifact_paths"]["rollback_manifest_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(rollback_manifest["restore_status"], "restored_after_failure")
 
     def test_secret_scan_rejects_raw_secret_in_manifest(self) -> None:
         temp_root = Path(mkdtemp())

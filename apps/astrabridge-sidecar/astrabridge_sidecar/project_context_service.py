@@ -161,9 +161,33 @@ class ProjectContextService:
         except Exception:
             return []
         text = str(pack.get("text") or "").strip()
-        if not text:
-            return []
-        return [{"type": "text", "text": text, "text_elements": []}]
+        items: list[dict[str, Any]] = []
+        if text:
+            items.append({"type": "text", "text": text, "text_elements": []})
+        workspace_root = Path(str((pack.get("project") or {}).get("workspace_root") or "")).resolve() if str((pack.get("project") or {}).get("workspace_root") or "").strip() else None
+        for ref in list(pack.get("handoff_bundle_refs") or []):
+            if not isinstance(ref, dict):
+                continue
+            raw_path = str(ref.get("path") or "").strip()
+            if not raw_path:
+                continue
+            candidate = Path(raw_path)
+            if not candidate.is_absolute() and workspace_root is not None:
+                candidate = workspace_root / candidate
+            try:
+                candidate = candidate.resolve()
+            except Exception:
+                pass
+            if not candidate.exists() or not candidate.is_file():
+                continue
+            items.append(
+                {
+                    "type": "mention",
+                    "name": str(ref.get("name") or candidate.name),
+                    "path": candidate.as_posix(),
+                }
+            )
+        return items
 
     def record_runtime_notification(self, method: str, params: Any) -> None:
         if not isinstance(params, dict):
@@ -270,6 +294,7 @@ class ProjectContextService:
         dogfood = self._dogfood_summary(task=task)
         assets = self._asset_summary()
         file_map = self._project_file_map()
+        latest_handoff_bundle = self._latest_provider_handoff_bundle(task_full, selected_thread_id)
         target = self._target_context_model(
             profile_id=profile_id,
             provider_id=provider_id,
@@ -278,7 +303,18 @@ class ProjectContextService:
             task=task_full,
             thread_entry=thread_entry,
         )
-        sections = self._text_sections(project, selected_thread_id, thread_entry, recent_threads, task, task_conversation_digest, dogfood, assets, file_map)
+        sections = self._text_sections(
+            project,
+            selected_thread_id,
+            thread_entry,
+            recent_threads,
+            task,
+            task_conversation_digest,
+            dogfood,
+            assets,
+            file_map,
+            latest_handoff_bundle,
+        )
         text, budget_report = build_context_budget(
             sections=sections,
             provider_id=target.get("provider_id"),
@@ -309,6 +345,8 @@ class ProjectContextService:
             },
             "task": task,
             "task_conversation_digest": task_conversation_digest,
+            "latest_provider_handoff_bundle": latest_handoff_bundle,
+            "handoff_bundle_refs": self._handoff_bundle_refs(latest_handoff_bundle),
             "selected_thread": thread_entry,
             "recent_threads": recent_threads,
             "dogfood": dogfood,
@@ -340,6 +378,7 @@ class ProjectContextService:
         dogfood: dict[str, Any],
         assets: dict[str, Any],
         file_map: dict[str, Any],
+        latest_handoff_bundle: dict[str, Any] | None,
     ) -> list[ContextSection]:
         intro_lines = [
             "AstraBridge Project Context Pack (auto-injected, secret-free)",
@@ -430,6 +469,16 @@ class ProjectContextService:
                 task_lines.append(
                     f"Latest provider handoff: {latest.get('from_thread_id') or 'none'} -> {latest.get('to_thread_id') or ''} "
                     f"profile={latest.get('profile_id') or ''} model={latest.get('model') or ''} effort={latest.get('reasoning_effort') or ''}"
+                )
+            if isinstance(latest_handoff_bundle, dict) and latest_handoff_bundle:
+                task_lines.append(
+                    "Latest neutral handoff bundle: "
+                    f"path={latest_handoff_bundle.get('path') or ''} "
+                    f"projection_digest={latest_handoff_bundle.get('projection_digest') or ''} "
+                    f"lineage_digest={latest_handoff_bundle.get('lineage_digest') or ''}"
+                )
+                task_lines.append(
+                    "Handoff continuity rule: use the latest neutral handoff bundle as the authoritative cross-provider continuity record for this active lane."
                 )
         if task_lines:
             sections.append(ContextSection("task", "Task", 3, "\n".join(task_lines), essential=True))
@@ -523,6 +572,47 @@ class ProjectContextService:
         ]
         sections.append(ContextSection("rules", "Rules", 9, "\n".join(rules_lines), essential=True))
         return sections
+
+    def _latest_provider_handoff_bundle(self, task: dict[str, Any] | None, selected_thread_id: str) -> dict[str, Any] | None:
+        if not isinstance(task, dict):
+            return None
+        selected = str(selected_thread_id or "").strip()
+        for event in reversed(list(task.get("handoff_events") or [])):
+            if not isinstance(event, dict):
+                continue
+            if selected and str(event.get("to_thread_id") or "").strip() != selected:
+                continue
+            bundle = dict(event.get("neutral_handoff_bundle") or {})
+            if not str(bundle.get("path") or "").strip():
+                continue
+            return {
+                "path": str(bundle.get("path") or "").strip(),
+                "bundle_digest": str(bundle.get("bundle_digest") or "").strip(),
+                "projection_digest": str(bundle.get("projection_digest") or "").strip(),
+                "lineage_digest": str(bundle.get("lineage_digest") or "").strip(),
+                "source_thread_id": str(bundle.get("source_thread_id") or "").strip() or None,
+                "target_thread_id": str(bundle.get("target_thread_id") or "").strip() or None,
+                "source_provider_id": str(bundle.get("source_provider_id") or "").strip() or None,
+                "source_model_id": str(bundle.get("source_model_id") or "").strip() or None,
+                "target_provider_id": str(bundle.get("target_provider_id") or "").strip() or None,
+                "target_model_id": str(bundle.get("target_model_id") or "").strip() or None,
+                "projection_mode": str(bundle.get("projection_mode") or "").strip() or None,
+                "provider_private_state_removed": bool(bundle.get("provider_private_state_removed")),
+                "dropped_artifacts": int(bundle.get("dropped_artifacts") or 0),
+                "repaired_tool_pairs": int(bundle.get("repaired_tool_pairs") or 0),
+                "replayable_artifact_count": int(bundle.get("replayable_artifact_count") or 0),
+                "warning_count": int(bundle.get("warning_count") or 0),
+            }
+        return None
+
+    def _handoff_bundle_refs(self, latest_handoff_bundle: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(latest_handoff_bundle, dict):
+            return []
+        raw_path = str(latest_handoff_bundle.get("path") or "").strip()
+        if not raw_path:
+            return []
+        name = Path(raw_path).name or "provider-handoff-context.json"
+        return [{"path": raw_path, "name": name}]
 
     def _target_context_model(
         self,

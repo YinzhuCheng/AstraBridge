@@ -20,13 +20,15 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from astrabridge_sidecar.mcp_server_core import McpServerCore, McpStdioFramingState, read_stdio_message, run_stdio_mcp_server, write_stdio_message
     from astrabridge_sidecar.multimodal_result_envelope import enrich_web_result, typed_result_text_summary
+    from astrabridge_sidecar.release_identity import release_product_version
 else:
     from .mcp_server_core import McpServerCore, McpStdioFramingState, read_stdio_message, run_stdio_mcp_server, write_stdio_message
     from .multimodal_result_envelope import enrich_web_result, typed_result_text_summary
+    from .release_identity import release_product_version
 
 
 SERVER_NAME = "astrabridge-web-tools"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = release_product_version()
 DEFAULT_TIMEOUT_SEC = 20
 DEFAULT_MAX_CHARS = 6000
 DEFAULT_BATCH_MAX_QUERIES = 8

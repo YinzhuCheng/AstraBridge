@@ -42,11 +42,12 @@ import {
   type ReactNode,
 } from "react";
 import { RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
-import { Bot, Eye, Lock, Search, ShieldCheck, Wrench } from "lucide-react";
+import { Bot, Eye, Lock, Search, ShieldCheck, Unlock, Wrench } from "lucide-react";
 
 import type {
   LocaleCode,
   NodeTypeRegistrySnapshot,
+  TaskGraphCommandLogEntry,
   TaskGraphContextPolicy,
   TaskGraphDefinition,
   TaskGraphDryRunResult,
@@ -60,10 +61,16 @@ import type {
 } from "../../types";
 import { isTaskGraphRunRefStale } from "./taskGraphRunRefs";
 import { TaskGraphSchemaForm } from "./TaskGraphSchemaForm";
+import { TaskGraphInspectorModal } from "./TaskGraphInspectorModal";
 import {
   buildTaskGraphNodeRegistryUi,
   taskGraphPaletteMeta,
 } from "./taskGraphNodeRegistryUi";
+import {
+  collectVisibleTaskGraphElements,
+  resolveTaskGraphStageViewport,
+} from "./taskGraphViewportCulling";
+import { useTaskGraphWorkspaceChromeState, type TaskGraphWorkspacePanelResizeState } from "./useTaskGraphWorkspaceChromeState";
 
 type TaskGraphWorkspaceProps = {
   locale: LocaleCode;
@@ -80,6 +87,7 @@ type TaskGraphWorkspaceProps = {
   dryRunError: string | null;
   reportHref: string | null;
   latestRunRef: TaskGraphRunRef | null;
+  commandLog?: TaskGraphCommandLogEntry[];
   artifactHrefFor: (path: string) => string;
   onInspectArtifactPath?: (path: string) => void;
   onSelectNode: (nodeId: string) => void;
@@ -90,6 +98,7 @@ type TaskGraphWorkspaceProps = {
     position?: TaskGraphNodePosition | null;
   }) => void;
   onMoveNode: (nodeId: string, position: TaskGraphNodePosition) => void;
+  onDeleteNode: (nodeId: string) => void;
   onSaveNode: (
     nodeId: string,
     configuration: {
@@ -118,6 +127,10 @@ type TaskGraphWorkspaceProps = {
     status?: string;
   }) => void;
   onDeleteEdge: (edgeId: string) => void;
+  onUndoGraphEdit?: () => void;
+  onRedoGraphEdit?: () => void;
+  canUndoGraphEdit?: boolean;
+  canRedoGraphEdit?: boolean;
   onRunDryRun: (payload: { tokenBudget: number }) => void;
   onRunLive: (payload: { tokenBudget: number }) => void;
   onRunFixture: () => void;
@@ -135,6 +148,7 @@ type TaskGraphWorkspaceProps = {
   onRejectPendingRun: () => void;
   onImportGraph: () => void;
   onExportGraph: () => void;
+  onDetachSourceOwnership?: () => void;
   snapshotRefs: TaskGraphSnapshotRef[];
   selectedSnapshotId: string | null;
   onSelectSnapshot: (snapshotId: string) => void;
@@ -223,12 +237,6 @@ type DragState = {
   originY: number;
 };
 
-type PanelResizeState = {
-  side: "left";
-  startX: number;
-  startWidth: number;
-};
-
 type SidebarPaneId = "nodes" | "edges";
 
 type VariablePreviewEntry = {
@@ -296,14 +304,16 @@ const MIN_STAGE_HEIGHT = 512;
 const MIN_CANVAS_SCALE = 0.55;
 const MAX_CANVAS_SCALE = 1.6;
 const DEFAULT_CANVAS_SCALE = 1;
-const TASK_GRAPH_SIDEBAR_WIDTH_STORAGE_KEY =
-  "astrabridge.task_graph.sidebar_width";
-const TASK_GRAPH_WORKSPACE_STATE_STORAGE_KEY_PREFIX =
-  "astrabridge.task_graph.workspace_state";
-const DEFAULT_TASK_GRAPH_SIDEBAR_WIDTH = 60;
-const MIN_TASK_GRAPH_SIDEBAR_WIDTH = 52;
 const MAX_VISIBLE_PORT_PREVIEW = 3;
 const MAX_DISCLOSURE_PREVIEW_ITEMS = 3;
+const TASK_GRAPH_DIALOG_FOCUSABLE_SELECTOR = [
+  "button:not([disabled])",
+  "[href]",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(", ");
 
 function buildDisclosurePreview<T>(
   items: readonly T[],
@@ -374,14 +384,50 @@ function disclosurePreviewSummary(
     : `Showing ${visibleCount} of ${totalCount}`;
 }
 
-type TaskGraphWorkspaceStoredState = {
-  sidebarExpanded: boolean;
-  inspectorExpanded: boolean;
-  inspectorWorkspace: "selection" | "run";
-  readinessExpanded: boolean;
-  latestRunExpanded: boolean;
-  recoveryExpanded: boolean;
-};
+function dialogFocusableElements(container: HTMLElement | null) {
+  if (!container) return [];
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(TASK_GRAPH_DIALOG_FOCUSABLE_SELECTOR),
+  ).filter(
+    (element) =>
+      !element.hasAttribute("disabled") &&
+      element.getAttribute("aria-hidden") !== "true",
+  );
+}
+
+function focusDialogContainer(container: HTMLElement | null) {
+  const focusable = dialogFocusableElements(container);
+  if (focusable.length > 0) {
+    focusable[0]!.focus();
+    return;
+  }
+  container?.focus();
+}
+
+function trapDialogTabKey(
+  event: ReactKeyboardEvent<HTMLElement>,
+  container: HTMLElement | null,
+) {
+  if (event.key !== "Tab") return;
+  const focusable = dialogFocusableElements(container);
+  if (focusable.length === 0) {
+    event.preventDefault();
+    container?.focus();
+    return;
+  }
+  const first = focusable[0]!;
+  const last = focusable[focusable.length - 1]!;
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || active === container)) {
+    event.preventDefault();
+    last.focus();
+    return;
+  }
+  if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
 
 export function TaskGraphWorkspace({
   locale,
@@ -398,6 +444,7 @@ export function TaskGraphWorkspace({
   dryRunError,
   reportHref,
   latestRunRef,
+  commandLog = [],
   artifactHrefFor,
   onInspectArtifactPath,
   onSelectNode,
@@ -405,9 +452,14 @@ export function TaskGraphWorkspace({
   onInstantiateTemplate,
   onCreateNode,
   onMoveNode,
+  onDeleteNode,
   onSaveNode,
   onSaveEdge,
   onDeleteEdge,
+  onUndoGraphEdit,
+  onRedoGraphEdit,
+  canUndoGraphEdit = false,
+  canRedoGraphEdit = false,
   onRunDryRun,
   onRunLive,
   onRunFixture,
@@ -418,6 +470,7 @@ export function TaskGraphWorkspace({
   onRejectPendingRun,
   onImportGraph,
   onExportGraph,
+  onDetachSourceOwnership,
   snapshotRefs: rawSnapshotRefs,
   selectedSnapshotId,
   onSelectSnapshot,
@@ -596,6 +649,12 @@ export function TaskGraphWorkspace({
             "\u67e5\u770b dry-run\u3001\u6700\u8fd1\u8fd0\u884c\u3001\u5ba1\u6279\u548c worker \u4ea7\u7269\u3002",
           noRunInspection:
             "\u8fd8\u6ca1\u6709 dry-run \u6216\u8fd0\u884c\u8bb0\u5f55\u3002\u4ece\u753b\u5e03\u5de5\u5177\u680f\u542f\u52a8\u4e00\u6b21\u9a8c\u8bc1\u6216\u5939\u5177\u8fd0\u884c\u3002",
+          commandLog: "\u753b\u5e03\u64cd\u4f5c\u65e5\u5fd7",
+          noCommandLog:
+            "\u8fd8\u6ca1\u6709\u753b\u5e03\u5199\u5165\u64cd\u4f5c\u8bb0\u5f55\u3002",
+          commandPending: "\u5f85\u786e\u8ba4",
+          commandApplied: "\u5df2\u5e94\u7528",
+          commandFailed: "\u5931\u8d25",
           workers: "\u4e2a worker",
           artifacts: "\u4e2a\u4ea7\u7269",
           retryDryRun: "\u91cd\u8bd5 Dry-run",
@@ -612,6 +671,21 @@ export function TaskGraphWorkspace({
           recoveryManifest: "Manifest",
           recoveryReport: "Report",
           recoveringRun: "Recovering...",
+          executionProfile: "\u6267\u884c\u6982\u51b5",
+          runMode: "\u8fd0\u884c\u6a21\u5f0f",
+          executionMode: "\u6267\u884c\u65b9\u5f0f",
+          scheduler: "\u8c03\u5ea6\u5668",
+          templateId: "\u6a21\u677f",
+          compatibilityShim: "\u517c\u5bb9\u5c42",
+          parallelGroups: "\u5e76\u884c\u7ec4",
+          maxParallelism: "\u6700\u5927\u5e76\u884c\u5ea6",
+          enabled: "\u5df2\u542f\u7528",
+          disabled: "\u5df2\u5173\u95ed",
+          selectedEvent: "\u9009\u4e2d\u4e8b\u4ef6",
+          eventType: "\u4e8b\u4ef6\u7c7b\u578b",
+          eventStatus: "\u4e8b\u4ef6\u72b6\u6001",
+          occurredAt: "\u53d1\u751f\u65f6\u95f4",
+          artifactId: "\u4ea7\u7269 ID",
           eventTargetNode: "\u8282\u70b9",
           eventTargetEdge: "\u8fb9",
           cancelRun: "\u53d6\u6d88\u8fd0\u884c",
@@ -703,6 +777,9 @@ export function TaskGraphWorkspace({
           reset: "\u91cd\u7f6e",
           saving: "\u4fdd\u5b58\u4e2d...",
           saveNode: "\u4fdd\u5b58\u8282\u70b9",
+          deleteNode: "\u5220\u9664\u8282\u70b9",
+          undoEdit: "\u64a4\u9500",
+          redoEdit: "\u91cd\u505a",
           collapsePanel: "\u6536\u8d77\u9762\u677f",
           expandPanel: "\u5c55\u5f00\u9762\u677f",
           moreSettings: "\u66f4\u591a\u8bbe\u7f6e",
@@ -854,6 +931,11 @@ export function TaskGraphWorkspace({
             "Inspect dry-run state, the latest run, approvals, diagnostics, and worker artifacts.",
           noRunInspection:
             "No dry-run or run evidence is available yet. Start a dry-run or fixture run from the canvas toolbar.",
+          commandLog: "Canvas command log",
+          noCommandLog: "No canvas mutations have been recorded in this session yet.",
+          commandPending: "Pending",
+          commandApplied: "Applied",
+          commandFailed: "Failed",
           workers: "workers",
           artifacts: "artifacts",
           retryDryRun: "Retry dry-run",
@@ -870,6 +952,21 @@ export function TaskGraphWorkspace({
           recoveryManifest: "Manifest",
           recoveryReport: "Report",
           recoveringRun: "Recovering...",
+          executionProfile: "Execution profile",
+          runMode: "Run mode",
+          executionMode: "Execution mode",
+          scheduler: "Scheduler",
+          templateId: "Template",
+          compatibilityShim: "Compatibility shim",
+          parallelGroups: "Parallel groups",
+          maxParallelism: "Max parallelism",
+          enabled: "Enabled",
+          disabled: "Disabled",
+          selectedEvent: "Selected event",
+          eventType: "Event type",
+          eventStatus: "Event status",
+          occurredAt: "Occurred",
+          artifactId: "Artifact ID",
           eventTargetNode: "Node",
           eventTargetEdge: "Edge",
           cancelRun: "Cancel run",
@@ -958,6 +1055,9 @@ export function TaskGraphWorkspace({
           reset: "Reset",
           saving: "Saving...",
           saveNode: "Save node",
+          deleteNode: "Delete node",
+          undoEdit: "Undo",
+          redoEdit: "Redo",
           collapsePanel: "Collapse panel",
           expandPanel: "Expand panel",
           moreSettings: "More settings",
@@ -980,6 +1080,9 @@ export function TaskGraphWorkspace({
     graph?.nodes.find((node) => node.node_id === selectedNodeId) ??
     graph?.nodes[0] ??
     null;
+  const canDeleteSelectedNode = Boolean(
+    graph && selectedNode && graph.nodes.length > 1,
+  );
   const registryUi = useMemo(
     () =>
       buildTaskGraphNodeRegistryUi({
@@ -1004,19 +1107,54 @@ export function TaskGraphWorkspace({
   const stageRef = useRef<HTMLDivElement | null>(null);
   const promptTemplateRef = useRef<HTMLTextAreaElement | null>(null);
   const edgeMessageTemplateRef = useRef<HTMLTextAreaElement | null>(null);
-  const initialWorkspaceStateKey = taskGraphWorkspaceStateStorageKey(
-    graph?.task_id,
-    graph?.graph_id,
-  );
-  const initialPendingRunInspectorStorageKey = initialWorkspaceStateKey
-    ? `${initialWorkspaceStateKey}.pending_run_inspector`
-    : null;
-  const initialPendingRunInspectorReopen = consumePendingRunInspectorReopen(
-    initialPendingRunInspectorStorageKey,
-  );
-  const initialWorkspaceState = initialWorkspaceStateKey
-    ? readStoredTaskGraphWorkspaceState(initialWorkspaceStateKey)
-    : null;
+  const templateBrowserRef = useRef<HTMLDivElement | null>(null);
+  const inspectorDialogRef = useRef<HTMLDivElement | null>(null);
+  const {
+    readinessExpanded,
+    setReadinessExpanded,
+    latestRunExpanded,
+    setLatestRunExpanded,
+    recoveryExpanded,
+    setRecoveryExpanded,
+    inspectorWorkspace,
+    setInspectorWorkspace,
+    selectionInspectorRequested,
+    setSelectionInspectorRequested,
+    runInspectorRequested,
+    setRunInspectorRequested,
+    sidebarExpanded,
+    setSidebarExpanded,
+    inspectorExpanded,
+    setInspectorExpanded,
+    panelResizeState,
+    sidebarWidth,
+    setSidebarWidth,
+    selectedTemplateId,
+    selectedTemplateIdRef,
+    templateBrowserOpen,
+    modalReturnFocusRef,
+    workspaceStateStorageKey,
+    workspaceStateReady,
+    pendingRunInspectorStorageKey,
+    handleSelectTemplate,
+    handleInstantiateSelectedTemplate,
+    openTemplateBrowser,
+    closeTemplateBrowser,
+    openInspectorDialog,
+    closeInspectorDialog,
+    handleInspectorWorkspaceSelect,
+    startPanelResize,
+    handlePanelResizeKeyDown,
+  } = useTaskGraphWorkspaceChromeState({
+    taskId: graph?.task_id,
+    graphId: graph?.graph_id,
+    graphTemplateId: graph?.template_id,
+    templates,
+    dryRunBlocked: Boolean(dryRunError || dryRunResult?.overall_status === "blocked"),
+    latestRunStatus: latestRunRef?.status ?? null,
+    hasLatestRunRecovery: Boolean(latestRunRef?.policy_snapshot?.recovery),
+    onInstantiateTemplate,
+  });
   const [nodeDraft, setNodeDraft] = useState<NodeDraft | null>(null);
   const [nodeDraftBaseline, setNodeDraftBaseline] = useState<NodeDraft | null>(
     null,
@@ -1031,33 +1169,18 @@ export function TaskGraphWorkspace({
   const [previewPositions, setPreviewPositions] = useState<
     Record<string, TaskGraphNodePosition>
   >({});
-  const [readinessExpanded, setReadinessExpanded] = useState(
-    Boolean(initialWorkspaceState?.readinessExpanded),
-  );
-  const [latestRunExpanded, setLatestRunExpanded] = useState(
-    Boolean(initialWorkspaceState?.latestRunExpanded),
-  );
-  const [recoveryExpanded, setRecoveryExpanded] = useState(
-    Boolean(initialWorkspaceState?.recoveryExpanded),
-  );
   const [dryRunReasonsExpanded, setDryRunReasonsExpanded] = useState(false);
   const [snapshotsExpanded, setSnapshotsExpanded] = useState(false);
   const [selectedRunEventId, setSelectedRunEventId] = useState<string | null>(
     null,
   );
-  const [inspectorWorkspace, setInspectorWorkspace] = useState<
-    "selection" | "run"
-  >(
-    initialPendingRunInspectorReopen
-      ? "run"
-      : initialWorkspaceState?.inspectorWorkspace ?? "selection",
-  );
-  const [selectionInspectorRequested, setSelectionInspectorRequested] =
-    useState(false);
-  const [runInspectorRequested, setRunInspectorRequested] = useState(
-    initialPendingRunInspectorReopen,
-  );
   const [canvasScale, setCanvasScale] = useState(DEFAULT_CANVAS_SCALE);
+  const [canvasViewportSnapshot, setCanvasViewportSnapshot] = useState({
+    scrollLeft: 0,
+    scrollTop: 0,
+    clientWidth: 0,
+    clientHeight: 0,
+  });
   const [runTokenBudget, setRunTokenBudget] = useState(80_000);
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const [hoveredPaletteKind, setHoveredPaletteKind] = useState<string | null>(
@@ -1066,43 +1189,6 @@ export function TaskGraphWorkspace({
   const [edgeCreateSourceId, setEdgeCreateSourceId] = useState<string | null>(
     null,
   );
-  const [sidebarExpanded, setSidebarExpanded] = useState(
-    Boolean(initialWorkspaceState?.sidebarExpanded),
-  );
-  const [inspectorExpanded, setInspectorExpanded] = useState(
-    initialPendingRunInspectorReopen
-      ? true
-      : Boolean(initialWorkspaceState?.inspectorExpanded),
-  );
-  const [panelResizeState, setPanelResizeState] =
-    useState<PanelResizeState | null>(null);
-  const [sidebarWidth, setSidebarWidth] = useState(() =>
-    readStoredTaskGraphPanelWidth(
-      "left",
-      TASK_GRAPH_SIDEBAR_WIDTH_STORAGE_KEY,
-      DEFAULT_TASK_GRAPH_SIDEBAR_WIDTH,
-    ),
-  );
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(
-    templates[0]?.template_id ?? null,
-  );
-  const [templateBrowserOpen, setTemplateBrowserOpen] = useState(false);
-  const selectedTemplateIdRef = useRef<string | null>(
-    templates[0]?.template_id ?? null,
-  );
-  const workspaceStateStorageKey = useMemo(
-    () => taskGraphWorkspaceStateStorageKey(graph?.task_id, graph?.graph_id),
-    [graph?.graph_id, graph?.task_id],
-  );
-  const pendingRunInspectorStorageKey = useMemo(
-    () =>
-      workspaceStateStorageKey
-        ? `${workspaceStateStorageKey}.pending_run_inspector`
-        : null,
-    [workspaceStateStorageKey],
-  );
-  const workspaceStateKeyRef = useRef<string | null>(initialWorkspaceStateKey);
-  const [workspaceStateReady, setWorkspaceStateReady] = useState(true);
   const normalizedRunTokenBudget = Number.isFinite(runTokenBudget)
     ? Math.max(1, Math.floor(runTokenBudget))
     : 80_000;
@@ -1117,10 +1203,6 @@ export function TaskGraphWorkspace({
     () => availableEdgeMessageVariables({ draft: edgeDraft, nodeMap }),
     [edgeDraft, nodeMap],
   );
-
-  useEffect(() => {
-    selectedTemplateIdRef.current = selectedTemplateId;
-  }, [selectedTemplateId]);
 
   const insertPromptVariable = (token: string) => {
     setNodeDraft((current) =>
@@ -1156,68 +1238,6 @@ export function TaskGraphWorkspace({
     setPreviewPositions({});
     setCanvasScale(DEFAULT_CANVAS_SCALE);
   }, [graph?.graph_id, graph?.state_version]);
-
-  useEffect(() => {
-    if (!templates.length) {
-      setSelectedTemplateId(null);
-      selectedTemplateIdRef.current = null;
-      return;
-    }
-    if (
-      !selectedTemplateId ||
-      !templates.some((template) => template.template_id === selectedTemplateId)
-    ) {
-      if (
-        graph?.template_id &&
-        templates.some((template) => template.template_id === graph.template_id)
-      ) {
-        selectedTemplateIdRef.current = graph.template_id;
-        setSelectedTemplateId(graph.template_id);
-        return;
-      }
-      selectedTemplateIdRef.current = templates[0].template_id;
-      setSelectedTemplateId(templates[0].template_id);
-    }
-  }, [graph?.template_id, selectedTemplateId, templates]);
-
-  const handleSelectTemplate = (templateId: string) => {
-    selectedTemplateIdRef.current = templateId;
-    setSelectedTemplateId(templateId);
-  };
-
-  const handleInstantiateSelectedTemplate = () => {
-    const templateId =
-      selectedTemplateIdRef.current ||
-      selectedTemplate?.template_id ||
-      templates[0]?.template_id;
-    if (!templateId) return;
-    setTemplateBrowserOpen(false);
-    onInstantiateTemplate(templateId);
-  };
-
-  const openTemplateBrowser = () => {
-    setTemplateBrowserOpen(true);
-  };
-
-  const closeTemplateBrowser = () => {
-    setTemplateBrowserOpen(false);
-  };
-
-  useEffect(() => {
-    if (dryRunError || dryRunResult?.overall_status === "blocked") {
-      setReadinessExpanded(true);
-    }
-  }, [dryRunError, dryRunResult?.overall_status]);
-
-  useEffect(() => {
-    if (
-      latestRunRef?.status === "running" ||
-      latestRunRef?.status === "paused_for_review"
-    ) {
-      setLatestRunExpanded(true);
-      setInspectorWorkspace("run");
-    }
-  }, [latestRunRef?.run_id, latestRunRef?.status]);
 
   useEffect(() => {
     const nextNodeDraft = selectedNode ? buildNodeDraft(selectedNode) : null;
@@ -1287,124 +1307,14 @@ export function TaskGraphWorkspace({
   }, [dragState, onMoveNode]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return undefined;
-    const handleWindowResize = () => {
-      setSidebarWidth((current) =>
-        normalizeTaskGraphPanelWidth("left", current),
-      );
-    };
-    window.addEventListener("resize", handleWindowResize);
-    return () => window.removeEventListener("resize", handleWindowResize);
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(
-      TASK_GRAPH_SIDEBAR_WIDTH_STORAGE_KEY,
-      String(sidebarWidth),
-    );
-  }, [sidebarWidth]);
-
-  useEffect(() => {
-    if (workspaceStateKeyRef.current === workspaceStateStorageKey) {
+    if (templateBrowserOpen) {
+      focusDialogContainer(templateBrowserRef.current);
       return;
     }
-    workspaceStateKeyRef.current = workspaceStateStorageKey;
-    setWorkspaceStateReady(false);
-    if (!workspaceStateStorageKey) {
-      setSidebarExpanded(false);
-      setInspectorExpanded(false);
-      setInspectorWorkspace("selection");
-      setRunInspectorRequested(false);
-      setReadinessExpanded(false);
-      setLatestRunExpanded(false);
-      setRecoveryExpanded(false);
-      setWorkspaceStateReady(true);
-      return;
+    if (inspectorExpanded) {
+      focusDialogContainer(inspectorDialogRef.current);
     }
-    const storedState = readStoredTaskGraphWorkspaceState(
-      workspaceStateStorageKey,
-    );
-    const pendingRunInspectorReopen = consumePendingRunInspectorReopen(
-      pendingRunInspectorStorageKey,
-    );
-    setSidebarExpanded(Boolean(storedState?.sidebarExpanded));
-    setInspectorExpanded(pendingRunInspectorReopen);
-    setRunInspectorRequested(pendingRunInspectorReopen);
-    setInspectorWorkspace(
-      pendingRunInspectorReopen
-        ? "run"
-        : storedState?.inspectorWorkspace ?? "selection",
-    );
-    setReadinessExpanded(Boolean(storedState?.readinessExpanded));
-    setLatestRunExpanded(Boolean(storedState?.latestRunExpanded));
-    setRecoveryExpanded(Boolean(storedState?.recoveryExpanded));
-    setWorkspaceStateReady(true);
-  }, [pendingRunInspectorStorageKey, workspaceStateStorageKey]);
-
-  useEffect(() => {
-    if (!workspaceStateReady || !workspaceStateStorageKey) return;
-    if (typeof window === "undefined") return;
-    const nextState: TaskGraphWorkspaceStoredState = {
-      sidebarExpanded,
-      inspectorExpanded: false,
-      inspectorWorkspace,
-      readinessExpanded,
-      latestRunExpanded,
-      recoveryExpanded,
-    };
-    window.localStorage.setItem(
-      workspaceStateStorageKey,
-      JSON.stringify(nextState),
-    );
-  }, [
-    inspectorWorkspace,
-    latestRunExpanded,
-    readinessExpanded,
-    recoveryExpanded,
-    sidebarExpanded,
-    workspaceStateReady,
-    workspaceStateStorageKey,
-  ]);
-
-  useEffect(() => {
-    if (!inspectorExpanded && !templateBrowserOpen) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (templateBrowserOpen) {
-          setTemplateBrowserOpen(false);
-          return;
-        }
-        closeInspectorDialog();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
   }, [inspectorExpanded, templateBrowserOpen]);
-
-  useEffect(() => {
-    if (!panelResizeState) return undefined;
-    document.body.classList.add("resizing");
-    const handlePointerMove = (event: MouseEvent) => {
-      const delta = event.clientX - panelResizeState.startX;
-      setSidebarWidth(
-        normalizeTaskGraphPanelWidth(
-          "left",
-          panelResizeState.startWidth + delta,
-        ),
-      );
-    };
-    const stopResize = () => setPanelResizeState(null);
-    window.addEventListener("mousemove", handlePointerMove);
-    window.addEventListener("mouseup", stopResize, { once: true });
-    window.addEventListener("blur", stopResize, { once: true });
-    return () => {
-      document.body.classList.remove("resizing");
-      window.removeEventListener("mousemove", handlePointerMove);
-      window.removeEventListener("mouseup", stopResize);
-      window.removeEventListener("blur", stopResize);
-    };
-  }, [panelResizeState]);
 
   const providerChoices = providerOptions.length
     ? providerOptions
@@ -1454,6 +1364,37 @@ export function TaskGraphWorkspace({
   );
   const scaledStageWidth = Math.max(stageWidth * canvasScale, 0);
   const scaledStageHeight = Math.max(stageHeight * canvasScale, 0);
+  useEffect(() => {
+    const canvasElement = canvasRef.current;
+    if (!canvasElement) return;
+    const updateViewportSnapshot = () => {
+      setCanvasViewportSnapshot({
+        scrollLeft: canvasElement.scrollLeft,
+        scrollTop: canvasElement.scrollTop,
+        clientWidth: canvasElement.clientWidth,
+        clientHeight: canvasElement.clientHeight,
+      });
+    };
+    updateViewportSnapshot();
+    canvasElement.addEventListener("scroll", updateViewportSnapshot, {
+      passive: true,
+    });
+    window.addEventListener("resize", updateViewportSnapshot);
+    return () => {
+      canvasElement.removeEventListener("scroll", updateViewportSnapshot);
+      window.removeEventListener("resize", updateViewportSnapshot);
+    };
+  }, [canvasScale, graph?.graph_id, stageHeight, stageWidth]);
+  const visibleStageViewport = useMemo(
+    () =>
+      resolveTaskGraphStageViewport(
+        canvasViewportSnapshot,
+        canvasScale,
+        stageWidth,
+        stageHeight,
+      ),
+    [canvasScale, canvasViewportSnapshot, stageHeight, stageWidth],
+  );
   const edgeDraftDirty = useMemo(() => {
     if (!edgeDraft) return false;
     if (isCreatingEdge) return true;
@@ -1760,6 +1701,110 @@ export function TaskGraphWorkspace({
     nodeMap,
     selectedRunEvent,
   ]);
+  const latestRunPolicySnapshot = effectiveLatestRunRef?.policy_snapshot ?? null;
+  const latestRunParallelGroupCount =
+    typeof latestRunPolicySnapshot?.parallel_group_count === "number"
+      ? latestRunPolicySnapshot.parallel_group_count
+      : Array.isArray(latestRunPolicySnapshot?.parallel_group_ids)
+        ? latestRunPolicySnapshot.parallel_group_ids.filter((groupId) =>
+            String(groupId || "").trim(),
+          ).length
+        : null;
+  const latestRunMaxParallelism =
+    typeof latestRunPolicySnapshot?.max_parallelism === "number"
+      ? latestRunPolicySnapshot.max_parallelism
+      : typeof effectiveLatestRunRef?.metrics?.max_parallelism === "number"
+        ? effectiveLatestRunRef.metrics.max_parallelism
+        : null;
+  const latestRunExecutionProfileEntries: Array<{
+    label: string;
+    value: string;
+    testId: string;
+  }> = [];
+  const addLatestRunExecutionProfileEntry = (
+    testIdSuffix: string,
+    label: string,
+    value: string | number | null | undefined,
+  ) => {
+    if (value === null || value === undefined) return;
+    const normalizedValue =
+      typeof value === "string" ? value.trim() : String(value);
+    if (!normalizedValue) return;
+    latestRunExecutionProfileEntries.push({
+      label,
+      value: normalizedValue,
+      testId: `task-graph-run-profile-${testIdSuffix}`,
+    });
+  };
+  addLatestRunExecutionProfileEntry("mode", copy.runMode, latestRunPolicySnapshot?.mode);
+  addLatestRunExecutionProfileEntry(
+    "execution-mode",
+    copy.executionMode,
+    latestRunPolicySnapshot?.execution_mode,
+  );
+  addLatestRunExecutionProfileEntry(
+    "scheduler",
+    copy.scheduler,
+    latestRunPolicySnapshot?.scheduler,
+  );
+  addLatestRunExecutionProfileEntry(
+    "template-id",
+    copy.templateId,
+    latestRunPolicySnapshot?.template_id,
+  );
+  if (typeof latestRunPolicySnapshot?.compatibility_shim === "boolean") {
+    addLatestRunExecutionProfileEntry(
+      "compatibility-shim",
+      copy.compatibilityShim,
+      latestRunPolicySnapshot.compatibility_shim ? copy.enabled : copy.disabled,
+    );
+  }
+  addLatestRunExecutionProfileEntry(
+    "parallel-groups",
+    copy.parallelGroups,
+    latestRunParallelGroupCount,
+  );
+  addLatestRunExecutionProfileEntry(
+    "max-parallelism",
+    copy.maxParallelism,
+    latestRunMaxParallelism,
+  );
+  const selectedRunEventDetailEntries: Array<{
+    label: string;
+    value: string;
+    testId: string;
+  }> = [];
+  const addSelectedRunEventDetailEntry = (
+    testIdSuffix: string,
+    label: string,
+    value: string | null | undefined,
+  ) => {
+    const normalizedValue = String(value || "").trim();
+    if (!normalizedValue) return;
+    selectedRunEventDetailEntries.push({
+      label,
+      value: normalizedValue,
+      testId: `task-graph-run-event-detail-${testIdSuffix}`,
+    });
+  };
+  if (selectedRunEvent) {
+    addSelectedRunEventDetailEntry("type", copy.eventType, selectedRunEvent.event_type);
+    addSelectedRunEventDetailEntry(
+      "status",
+      copy.eventStatus,
+      selectedRunEvent.status ?? copy.unspecified,
+    );
+    addSelectedRunEventDetailEntry(
+      "occurred-at",
+      copy.occurredAt,
+      new Date(selectedRunEvent.created_at).toLocaleString(),
+    );
+    addSelectedRunEventDetailEntry(
+      "artifact-id",
+      copy.artifactId,
+      selectedRunEvent.artifact_id,
+    );
+  }
   const runtimeNodeStatusMap = useMemo(() => {
     const statuses = new Map<string, string>();
     for (const binding of effectiveLatestRunRef?.worker_bindings ?? []) {
@@ -1955,6 +2000,91 @@ export function TaskGraphWorkspace({
     }
   }, [latestRunExpanded]);
   const graphTitle = graph?.title?.trim() || copy.canvas;
+  const visibleCanvasElements = useMemo(
+    () =>
+      collectVisibleTaskGraphElements(
+        graph,
+        previewPositions,
+        visibleStageViewport,
+        {
+          selectedNodeId: selectedNode?.node_id ?? null,
+          selectedEdgeId: selectedEdge?.edge_id ?? null,
+          edgeCreateSourceId,
+          draggedNodeId: dragState?.nodeId ?? null,
+          hoveredEdgeId,
+          highlightedTarget: selectedRunEventTarget,
+        },
+      ),
+    [
+      dragState?.nodeId,
+      edgeCreateSourceId,
+      graph,
+      hoveredEdgeId,
+      previewPositions,
+      selectedEdge?.edge_id,
+      selectedNode?.node_id,
+      selectedRunEventTarget,
+      visibleStageViewport,
+    ],
+  );
+  const renderedEdges = useMemo(
+    () =>
+      (graph?.edges ?? []).filter((edge) =>
+        visibleCanvasElements.visibleEdgeIds.has(edge.edge_id),
+      ),
+    [graph?.edges, visibleCanvasElements.visibleEdgeIds],
+  );
+  const renderedNodes = useMemo(
+    () =>
+      (graph?.nodes ?? []).filter((node) =>
+        visibleCanvasElements.visibleNodeIds.has(node.node_id),
+      ),
+    [graph?.nodes, visibleCanvasElements.visibleNodeIds],
+  );
+  const sourceOwnershipState = useMemo(() => {
+    const ownership = graph?.graph_document?.source_ownership;
+    if (!ownership?.ownership_mode) return null;
+    const sourcePath =
+      String(
+        ownership.source_path ??
+          ownership.source_file?.path ??
+          ownership.detached_from_path ??
+          "",
+      ).trim() || "source file";
+    return {
+      ownershipMode: String(ownership.ownership_mode || "").trim(),
+      sourcePath,
+      detachedAt: String(ownership.detached_at || "").trim() || null,
+      canWriteFromGui: Boolean(ownership.can_write_from_gui),
+    };
+  }, [graph]);
+  const sourceOwnershipCopy =
+    locale === "zh-CN"
+      ? {
+          sourceOwnedGraph: "源文件拥有图",
+          detachedGraph: "已断开 GUI 副本",
+          detachForGuiEdits: "断开后在 GUI 中编辑",
+          sourceOwnedGraphHint:
+            "当前任务图来自 {path}，GUI 写入已被阻止，需要先断开才能编辑。",
+          detachedGraphHint:
+            "当前图已从 {path} 断开，GUI 编辑会写入本地断开副本。",
+        }
+      : {
+          sourceOwnedGraph: "Source-owned graph",
+          detachedGraph: "Detached GUI copy",
+          detachForGuiEdits: "Detach for GUI edits",
+          sourceOwnedGraphHint:
+            "This task graph comes from {path}. GUI writes are blocked until it is detached.",
+          detachedGraphHint:
+            "This graph was detached from {path}. GUI edits now write to the detached graph.",
+        };
+  const sourceOwnershipNotice = sourceOwnershipState
+    ? (
+        sourceOwnershipState.ownershipMode === "detached_gui_edit"
+          ? sourceOwnershipCopy.detachedGraphHint
+          : sourceOwnershipCopy.sourceOwnedGraphHint
+      ).replace("{path}", sourceOwnershipState.sourcePath)
+    : null;
   const selectedTemplate = useMemo(
     () =>
       templates.find(
@@ -2112,17 +2242,6 @@ export function TaskGraphWorkspace({
     copy.retryFailedNodes,
     latestRunRecovery?.strategy,
   ]);
-
-  useEffect(() => {
-    setRecoveryExpanded(Boolean(latestRunRecovery));
-  }, [effectiveLatestRunRef?.run_id, latestRunRecovery]);
-
-  useEffect(() => {
-    if (!latestRunRecovery) return;
-    setRecoveryExpanded(true);
-    setLatestRunExpanded(true);
-    setInspectorWorkspace("run");
-  }, [latestRunRecovery]);
 
   useEffect(() => {
     if (activeSidebarPane === "edges" && !graph) {
@@ -2309,6 +2428,18 @@ export function TaskGraphWorkspace({
     setNodeDraftBaseline(savedDraft);
     closeInspectorDialog();
   };
+  const deleteNode = () => {
+    if (
+      !selectedNode ||
+      !canDeleteSelectedNode ||
+      isSavingNode ||
+      isSavingEdge
+    ) {
+      return;
+    }
+    onDeleteNode(selectedNode.node_id);
+    closeInspectorDialog();
+  };
 
   const saveEdge = () => {
     if (!graph || !edgeDraft || edgeDraftError) return;
@@ -2365,25 +2496,55 @@ export function TaskGraphWorkspace({
     closeInspectorDialog();
   };
 
-  const openInspectorDialog = (workspace?: "selection" | "run") => {
-    if (workspace) {
-      setInspectorWorkspace(workspace);
-      setSelectionInspectorRequested(workspace === "selection");
-      setRunInspectorRequested(workspace === "run");
-      writePendingRunInspectorReopen(
-        pendingRunInspectorStorageKey,
-        workspace === "run",
-      );
-    }
-    setInspectorExpanded(true);
-  };
-
-  const closeInspectorDialog = () => {
-    writePendingRunInspectorReopen(pendingRunInspectorStorageKey, false);
-    setInspectorExpanded(false);
-    setSelectionInspectorRequested(false);
-    setRunInspectorRequested(false);
-  };
+  const inspectorSubtitle =
+    inspectorWorkspace === "run"
+      ? copy.runWorkspace
+      : inspectorMode === "edge"
+        ? copy.edgeMode
+        : copy.nodeMode;
+  const inspectorSelectionModeControls = graph
+    ? {
+        mode: inspectorMode as "node" | "edge",
+        nodeLabel: copy.nodeMode,
+        nodeTitle: copy.nodeModeTitle,
+        edgeLabel: copy.edgeMode,
+        edgeTitle: copy.edgeModeTitle,
+        edgeDisabled: !graph.nodes.length,
+        onSelectNode: () => {
+          setIsCreatingEdge(false);
+          if (selectedNode) onSelectNode(selectedNode.node_id);
+        },
+        onSelectEdge: () => {
+          if (!selectedEdge && !isCreatingEdge) {
+            startCreateEdge();
+            return;
+          }
+          if (selectedEdge) {
+            setIsCreatingEdge(false);
+            onSelectEdge(selectedEdge.edge_id);
+          }
+        },
+      }
+    : null;
+  useEffect(() => {
+    if (!inspectorExpanded && !templateBrowserOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (templateBrowserOpen) {
+          closeTemplateBrowser();
+          return;
+        }
+        closeInspectorDialog();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    closeInspectorDialog,
+    closeTemplateBrowser,
+    inspectorExpanded,
+    templateBrowserOpen,
+  ]);
 
   const beginCanvasEdgeDraft = (sourceNodeId: string) => {
     if (!graph || graph.nodes.length < 2) return;
@@ -2457,26 +2618,6 @@ export function TaskGraphWorkspace({
     );
     openInspectorDialog("selection");
     return true;
-  };
-
-  const startPanelResize = (side: "left", clientX: number) => {
-    setPanelResizeState({
-      side,
-      startX: clientX,
-      startWidth: sidebarWidth,
-    });
-  };
-
-  const handlePanelResizeKeyDown = (
-    side: "left",
-    event: ReactKeyboardEvent<HTMLDivElement>,
-  ) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    event.preventDefault();
-    const delta = event.key === "ArrowLeft" ? -18 : 18;
-    setSidebarWidth((current) =>
-      normalizeTaskGraphPanelWidth(side, current + delta),
-    );
   };
 
   function renderArtifactLink({
@@ -2901,7 +3042,7 @@ export function TaskGraphWorkspace({
               </strong>
             </div>
           ) : null}
-          <div className="task-graph-run-meta" data-testid="task-graph-run-meta">
+        <div className="task-graph-run-meta" data-testid="task-graph-run-meta">
             <span
               className="task-graph-run-metric task-graph-run-metric-id"
               data-testid="task-graph-run-id"
@@ -2983,6 +3124,36 @@ export function TaskGraphWorkspace({
             <strong>{latestRunCost}</strong>
           </span>
         </div>
+        {latestRunExecutionProfileEntries.length ? (
+          <details
+            className="task-graph-inline-section"
+            data-testid="task-graph-run-execution-profile"
+            open
+          >
+            <summary className="task-graph-inline-section-summary">
+              <strong>{copy.executionProfile}</strong>
+              <span className="task-graph-inline-section-meta">
+                {latestRunExecutionProfileEntries.length}
+              </span>
+            </summary>
+            <div className="task-graph-run-diagnostics">
+              <div className="task-graph-run-meta">
+                {latestRunExecutionProfileEntries.map((entry) => (
+                  <span
+                    key={entry.testId}
+                    className="task-graph-run-metric"
+                    data-testid={entry.testId}
+                  >
+                    <span className="task-graph-run-metric-label">
+                      {entry.label}
+                    </span>
+                    <strong>{entry.value}</strong>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </details>
+        ) : null}
         {effectiveLatestRunRef.diagnostic_refs?.length ? (
           <div
             className="task-graph-run-primary-artifacts"
@@ -3280,6 +3451,27 @@ export function TaskGraphWorkspace({
             <strong>{selectedRunEventTarget.label}</strong>
           </div>
         ) : null}
+        {selectedRunEvent ? (
+          <div
+            className="task-graph-selection-run-event task-graph-run-event-details"
+            data-testid="task-graph-run-event-details"
+          >
+            <span className="task-graph-variable-label">{copy.selectedEvent}</span>
+            <strong>{selectedRunEvent.summary || selectedRunEvent.event_type}</strong>
+            <div className="task-graph-run-meta">
+              {selectedRunEventDetailEntries.map((entry) => (
+                <span
+                  key={entry.testId}
+                  className="task-graph-run-metric"
+                  data-testid={entry.testId}
+                >
+                  <span className="task-graph-run-metric-label">{entry.label}</span>
+                  <strong>{entry.value}</strong>
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
         {effectiveLatestRunRef.timeline_events?.length ? (
           <details
             className="task-graph-inline-section"
@@ -3462,6 +3654,61 @@ export function TaskGraphWorkspace({
         .filter(Boolean)
         .join(" / ")
       : copy.noRunInspection;
+  const commandStatusLabel = (status: TaskGraphCommandLogEntry["status"]) => {
+    if (status === "failed") return copy.commandFailed;
+    if (status === "applied") return copy.commandApplied;
+    return copy.commandPending;
+  };
+  const commandLogPanel = (
+    <details
+      className="task-graph-inline-section"
+      open={Boolean(commandLog.length)}
+    >
+      <summary className="task-graph-inline-section-summary">
+        <strong>{copy.commandLog}</strong>
+        <span className="task-graph-inline-section-meta">
+          {commandLog.length}
+        </span>
+      </summary>
+      <div
+        className="task-graph-command-log"
+        data-testid="task-graph-command-log"
+      >
+        {commandLog.length ? (
+          commandLog.map((entry) => (
+            <article
+              key={entry.entry_id}
+              className="task-graph-command-log-entry"
+              data-testid={`task-graph-command-log-entry-${entry.entry_id}`}
+            >
+              <div className="task-graph-command-log-head">
+                <strong>{entry.summary}</strong>
+                <span
+                  className={`task-graph-command-log-status task-graph-command-log-status-${entry.status}`}
+                >
+                  {commandStatusLabel(entry.status)}
+                </span>
+              </div>
+              <small className="task-graph-command-log-meta">
+                {new Date(entry.created_at).toLocaleString()}
+                {entry.target_id ? ` / ${entry.target_id}` : ""}
+              </small>
+              {entry.detail ? (
+                <p className="task-graph-command-log-detail">{entry.detail}</p>
+              ) : null}
+            </article>
+          ))
+        ) : (
+          <p
+            className="task-graph-muted"
+            data-testid="task-graph-command-log-empty"
+          >
+            {copy.noCommandLog}
+          </p>
+        )}
+      </div>
+    </details>
+  );
 
   return (
     <section
@@ -3937,6 +4184,36 @@ export function TaskGraphWorkspace({
               <GitBranch size={15} aria-hidden="true" />
             </button>
             <div className="task-graph-canvas-head-actions">
+              {sourceOwnershipState && sourceOwnershipNotice ? (
+                <span
+                  className="task-graph-inline-status"
+                  data-testid="task-graph-source-ownership-status"
+                  title={sourceOwnershipNotice}
+                >
+                  <Lock size={13} aria-hidden="true" />
+                  <span data-testid="task-graph-source-ownership-label">
+                    {sourceOwnershipState.ownershipMode === "detached_gui_edit"
+                      ? sourceOwnershipCopy.detachedGraph
+                      : sourceOwnershipCopy.sourceOwnedGraph}
+                  </span>
+                  <span data-testid="task-graph-source-ownership-path">
+                    {sourceOwnershipState.sourcePath}
+                  </span>
+                  {sourceOwnershipState.ownershipMode === "source_owned" &&
+                  onDetachSourceOwnership ? (
+                    <button
+                      type="button"
+                      className="ghost-button task-graph-canvas-action-button"
+                      data-testid="task-graph-detach-source-ownership"
+                      onClick={onDetachSourceOwnership}
+                      disabled={isSavingEdge || isSavingNode}
+                    >
+                      <Unlock size={13} aria-hidden="true" />
+                      <span>{sourceOwnershipCopy.detachForGuiEdits}</span>
+                    </button>
+                  ) : null}
+                </span>
+              ) : null}
               {importExportError ? (
                 <span
                   className="task-graph-inline-status task-graph-validation"
@@ -4351,6 +4628,28 @@ export function TaskGraphWorkspace({
               <button
                 type="button"
                 className="task-graph-inline-action task-graph-canvas-icon-button"
+                data-testid="task-graph-undo-edit"
+                title={copy.undoEdit}
+                aria-label={copy.undoEdit}
+                onClick={onUndoGraphEdit}
+                disabled={!graph || !canUndoGraphEdit || isSavingNode || isSavingEdge}
+              >
+                <Undo2 size={14} />
+              </button>
+              <button
+                type="button"
+                className="task-graph-inline-action task-graph-canvas-icon-button"
+                data-testid="task-graph-redo-edit"
+                title={copy.redoEdit}
+                aria-label={copy.redoEdit}
+                onClick={onRedoGraphEdit}
+                disabled={!graph || !canRedoGraphEdit || isSavingNode || isSavingEdge}
+              >
+                <Repeat size={14} />
+              </button>
+              <button
+                type="button"
+                className="task-graph-inline-action task-graph-canvas-icon-button"
                 data-testid="task-graph-fit-view"
                 title={copy.fitViewTitle}
                 aria-label={copy.fitView}
@@ -4451,7 +4750,7 @@ export function TaskGraphWorkspace({
                         />
                       </marker>
                     </defs>
-                    {graph.edges.map((edge) => {
+                    {renderedEdges.map((edge) => {
                       const fromNode = nodeMap.get(edge.from_node_id);
                       const toNode = nodeMap.get(edge.to_node_id);
                       if (!fromNode || !toNode) return null;
@@ -4517,7 +4816,7 @@ export function TaskGraphWorkspace({
                       );
                     })}
                   </svg>
-                  {graph.edges.map((edge) => {
+                  {renderedEdges.map((edge) => {
                     const fromNode = nodeMap.get(edge.from_node_id);
                     const toNode = nodeMap.get(edge.to_node_id);
                     if (!fromNode || !toNode) return null;
@@ -4614,7 +4913,7 @@ export function TaskGraphWorkspace({
                       </button>
                     );
                   })}
-                  {graph.nodes.map((node) => {
+                  {renderedNodes.map((node) => {
                     const position =
                       previewPositions[node.node_id] ?? node.position;
                     const isDragging = dragState?.nodeId === node.node_id;
@@ -4810,7 +5109,12 @@ export function TaskGraphWorkspace({
             role="dialog"
             aria-modal="true"
             aria-label={copy.templates}
+            tabIndex={-1}
+            ref={templateBrowserRef}
             onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) =>
+              trapDialogTabKey(event, templateBrowserRef.current)
+            }
           >
             <div className="task-graph-template-browser-header">
               <div className="task-graph-template-browser-copy">
@@ -5060,127 +5364,25 @@ export function TaskGraphWorkspace({
         </div>
       ) : null}
       {inspectorExpanded ? (
-        <div
-          className="modal-scrim task-graph-inspector-scrim"
-          onClick={closeInspectorDialog}
+        <TaskGraphInspectorModal
+          dialogRef={inspectorDialogRef}
+          inspectorLabel={copy.inspector}
+          subtitle={inspectorSubtitle}
+          workspace={inspectorWorkspace}
+          selectionWorkspaceLabel={copy.selectionWorkspace}
+          selectionWorkspaceHint={copy.selectionWorkspaceHint}
+          runWorkspaceLabel={copy.runWorkspace}
+          runWorkspaceHint={copy.runWorkspaceHint}
+          collapseLabel={copy.collapsePanel}
+          onClose={closeInspectorDialog}
+          onKeyDown={(event) =>
+            trapDialogTabKey(event, inspectorDialogRef.current)
+          }
+          onSelectWorkspace={handleInspectorWorkspaceSelect}
+          selectionModeControls={inspectorSelectionModeControls}
         >
-          <div
-            className="modal-card task-graph-inspector task-graph-inspector-modal"
-            data-testid="task-graph-inspector"
-            role="dialog"
-            aria-modal="true"
-            aria-label={copy.inspector}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="task-graph-inspector-modal-header">
-              <div className="task-graph-inspector-modal-copy">
-                <div className="task-graph-panel-title">
-                  <span className="task-graph-sidebar-icon" aria-hidden="true">
-                    {inspectorWorkspace === "run" ? (
-                      <Compass size={15} />
-                    ) : (
-                      <ScanSearch size={15} />
-                    )}
-                  </span>
-                  <span className="task-graph-panel-title-copy">
-                    <strong>{copy.inspector}</strong>
-                    <span>
-                      {inspectorWorkspace === "run"
-                        ? copy.runWorkspace
-                        : inspectorMode === "edge"
-                          ? copy.edgeMode
-                          : copy.nodeMode}
-                    </span>
-                  </span>
-                </div>
-              </div>
-              <button
-                type="button"
-                className="task-graph-inline-action task-graph-canvas-icon-button"
-                data-testid="task-graph-inspector-close"
-                onClick={closeInspectorDialog}
-                title={copy.collapsePanel}
-                aria-label={copy.collapsePanel}
-              >
-                <X size={14} aria-hidden="true" />
-              </button>
-            </div>
-            <div className="task-graph-inspector-shell">
-                <div
-                  className="task-graph-inspector-overview"
-                  data-testid="task-graph-inspector-overview"
-                >
-                  <div
-                    className="task-graph-inspector-workspace-switch"
-                    role="tablist"
-                    aria-label={copy.inspector}
-                    data-testid="task-graph-inspector-workspace-switch"
-                  >
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={inspectorWorkspace === "selection"}
-                      className={`task-graph-mode-chip ${inspectorWorkspace === "selection" ? "task-graph-mode-chip-active" : ""}`}
-                      data-testid="task-graph-inspector-workspace-selection"
-                      title={copy.selectionWorkspaceHint}
-                      onClick={() => {
-                        setSelectionInspectorRequested(true);
-                        setInspectorWorkspace("selection");
-                      }}
-                    >
-                      {copy.selectionWorkspace}
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={inspectorWorkspace === "run"}
-                      className={`task-graph-mode-chip ${inspectorWorkspace === "run" ? "task-graph-mode-chip-active" : ""}`}
-                      data-testid="task-graph-inspector-workspace-run"
-                      title={copy.runWorkspaceHint}
-                      onClick={() => {
-                        setSelectionInspectorRequested(false);
-                        setInspectorWorkspace("run");
-                      }}
-                    >
-                      {copy.runWorkspace}
-                    </button>
-                  </div>
-                </div>
-                {inspectorWorkspace === "selection" ? (
-                  <div className="task-graph-inspector-editor">
-                  {graph ? (
-                    <div className="task-graph-inspector-modebar">
-                      <button
-                        type="button"
-                        className={`task-graph-mode-chip ${inspectorMode === "node" ? "task-graph-mode-chip-active" : ""}`}
-                        data-testid="task-graph-mode-node"
-                        title={copy.nodeModeTitle}
-                        onClick={() => {
-                          setIsCreatingEdge(false);
-                          if (selectedNode) onSelectNode(selectedNode.node_id);
-                        }}
-                      >
-                        {copy.nodeMode}
-                      </button>
-                      <button
-                        type="button"
-                        className={`task-graph-mode-chip ${inspectorMode === "edge" ? "task-graph-mode-chip-active" : ""}`}
-                        data-testid="task-graph-mode-edge"
-                        title={copy.edgeModeTitle}
-                        onClick={() => {
-                          if (!selectedEdge && !isCreatingEdge)
-                            startCreateEdge();
-                          else if (selectedEdge) {
-                            setIsCreatingEdge(false);
-                            onSelectEdge(selectedEdge.edge_id);
-                          }
-                        }}
-                        disabled={!graph.nodes.length}
-                      >
-                        {copy.edgeMode}
-                      </button>
-                    </div>
-                  ) : null}
+          {inspectorWorkspace === "selection" ? (
+            <>
                   {!graph ? (
                     <p className="task-graph-muted">{copy.selectNode}</p>
                   ) : null}
@@ -5855,6 +6057,15 @@ export function TaskGraphWorkspace({
                           disabled={!nodeDraftDirty || isSavingNode}
                         >
                           {copy.reset}
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button danger-button"
+                          data-testid="task-graph-inspector-delete-node"
+                          onClick={deleteNode}
+                          disabled={!canDeleteSelectedNode || isSavingNode || isSavingEdge}
+                        >
+                          {copy.deleteNode}
                         </button>
                         <button
                           type="button"
@@ -6607,9 +6818,9 @@ export function TaskGraphWorkspace({
                       </div>
                     </div>
                   ) : null}
-                  </div>
-                ) : null}
-                {inspectorWorkspace === "run" ? (
+            </>
+          ) : null}
+          {inspectorWorkspace === "run" ? (
                   <div className="task-graph-inspector-editor">
                     <section
                       className="task-graph-inspector-workspace"
@@ -6622,8 +6833,9 @@ export function TaskGraphWorkspace({
                         </span>
                       </div>
                       {runReadinessPanel}
+                      {commandLogPanel}
                       {latestRunPanel}
-                      {!runReadinessPanel && !latestRunPanel ? (
+                      {!runReadinessPanel && !latestRunPanel && !commandLog.length ? (
                         <p
                           className="task-graph-muted"
                           data-testid="task-graph-inspector-run-empty"
@@ -6633,10 +6845,8 @@ export function TaskGraphWorkspace({
                       ) : null}
                     </section>
                   </div>
-                ) : null}
-              </div>
-          </div>
-        </div>
+          ) : null}
+        </TaskGraphInspectorModal>
       ) : null}
     </section>
   );
@@ -8397,100 +8607,4 @@ function stringifyList(value: string[] | undefined) {
 function clamp(value: number, min: number, max: number) {
   if (max < min) return min;
   return Math.min(max, Math.max(min, value));
-}
-
-function taskGraphPanelWidthRange(side: "left") {
-  const viewportWidth =
-    typeof window === "undefined" ? 1440 : window.innerWidth;
-  return {
-    min: MIN_TASK_GRAPH_SIDEBAR_WIDTH,
-    max: Math.max(
-      MIN_TASK_GRAPH_SIDEBAR_WIDTH,
-      Math.min(80, Math.round(viewportWidth * 0.08)),
-    ),
-  };
-}
-
-function normalizeTaskGraphPanelWidth(side: "left", value: number) {
-  const { min, max } = taskGraphPanelWidthRange(side);
-  return clamp(Math.round(value), min, max);
-}
-
-function readStoredTaskGraphPanelWidth(
-  side: "left",
-  storageKey: string,
-  fallback: number,
-) {
-  if (typeof window === "undefined") return fallback;
-  const rawValue = Number.parseFloat(
-    window.localStorage.getItem(storageKey) || "",
-  );
-  if (!Number.isFinite(rawValue)) return fallback;
-  return normalizeTaskGraphPanelWidth(side, rawValue);
-}
-
-function taskGraphWorkspaceStateStorageKey(
-  taskId: string | undefined,
-  graphId: string | undefined,
-) {
-  const normalizedTaskId = String(taskId || "").trim();
-  const normalizedGraphId = String(graphId || "").trim();
-  if (!normalizedTaskId || !normalizedGraphId) return null;
-  return `${TASK_GRAPH_WORKSPACE_STATE_STORAGE_KEY_PREFIX}.${normalizedTaskId}.${normalizedGraphId}`;
-}
-
-function readStoredTaskGraphWorkspaceState(
-  storageKey: string,
-): TaskGraphWorkspaceStoredState | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const rawValue = window.localStorage.getItem(storageKey);
-    if (!rawValue) return null;
-    const parsed = JSON.parse(rawValue) as Partial<TaskGraphWorkspaceStoredState>;
-    if (
-      parsed.inspectorWorkspace !== "selection" &&
-      parsed.inspectorWorkspace !== "run"
-    ) {
-      return null;
-    }
-    return {
-      sidebarExpanded: Boolean(parsed.sidebarExpanded),
-      inspectorExpanded: Boolean(parsed.inspectorExpanded),
-      inspectorWorkspace: parsed.inspectorWorkspace,
-      readinessExpanded: Boolean(parsed.readinessExpanded),
-      latestRunExpanded: Boolean(parsed.latestRunExpanded),
-      recoveryExpanded: Boolean(parsed.recoveryExpanded),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function writePendingRunInspectorReopen(
-  storageKey: string | null,
-  value: boolean,
-) {
-  if (typeof window === "undefined" || !storageKey) return;
-  try {
-    if (value) {
-      window.localStorage.setItem(storageKey, "1");
-      return;
-    }
-    window.localStorage.removeItem(storageKey);
-  } catch {
-    // Ignore storage write failures; they only affect best-effort modal restore.
-  }
-}
-
-function consumePendingRunInspectorReopen(storageKey: string | null): boolean {
-  if (typeof window === "undefined" || !storageKey) return false;
-  try {
-    const pending = window.localStorage.getItem(storageKey) === "1";
-    if (pending) {
-      window.localStorage.removeItem(storageKey);
-    }
-    return pending;
-  } catch {
-    return false;
-  }
 }

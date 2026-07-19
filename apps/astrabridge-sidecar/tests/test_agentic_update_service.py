@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from astrabridge_sidecar.agentic_update_service import AgenticUpdateService
 from astrabridge_sidecar.agentic_updates import agentic_update_proposal_template
+from astrabridge_sidecar.common import read_json
 from astrabridge_sidecar.server import Handler
 
 
@@ -150,11 +151,15 @@ class AgenticUpdateServiceTests(unittest.TestCase):
             catalog_after_apply = json.loads(models_lock_path.read_text(encoding="utf-8"))
 
             self.assertEqual(applied["status"], "applied_metadata_only")
+            self.assertEqual(applied["track_ids"], ["provider_metadata"])
             self.assertEqual(applied["before_summary"]["router_model_count"], 0)
             self.assertEqual(applied["after_summary"]["router_model_count"], 1)
             self.assertTrue(any(item.get("id") == "qwen/qwen-next" for item in router_after_apply["models"]))
             self.assertTrue(any(item.get("id") == "qwen/qwen-next" for item in catalog_after_apply["models"]))
             self.assertTrue(Path(applied["rollback_manifest_path"]).exists())
+            self.assertTrue(Path(applied["journal_path"]).exists())
+            self.assertEqual(applied["tracks"][0]["track_id"], "provider_metadata")
+            self.assertEqual(applied["tracks"][0]["status"], "committed")
 
             rollback = service.rollback({"run_id": "apply-fixture"})
             router_after_rollback = json.loads(router_path.read_text(encoding="utf-8"))
@@ -163,6 +168,134 @@ class AgenticUpdateServiceTests(unittest.TestCase):
             self.assertEqual(rollback["status"], "rolled_back")
             self.assertEqual(router_after_rollback["models"], [])
             self.assertEqual(catalog_after_rollback["models"], [])
+
+    def test_apply_capability_route_fixture_and_rollback_restores_isolated_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            service = AgenticUpdateService(workspace_root=workspace, router_config=_ReadOnlyRouterConfig([_vision_model()]))
+
+            applied = service.apply(
+                {
+                    "proposal": _capability_route_proposal(run_id="apply-capability-route"),
+                    "approval": _approval(),
+                    "router_config_snapshot": _router_snapshot(models=[_vision_model()]),
+                    "generated_catalog_snapshot": _catalog_snapshot(models=[_vision_model()]),
+                }
+            )
+            router_path = Path(applied["touched"]["router_config"])
+            router_after_apply = json.loads(router_path.read_text(encoding="utf-8"))
+            route_after_apply = dict(router_after_apply["capability_routes"]["vision.analyze"])
+            journal = json.loads(Path(applied["journal_path"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(applied["status"], "applied_track_updates")
+            self.assertEqual(applied["track_ids"], ["capability_routes"])
+            self.assertEqual(route_after_apply["mode"], "pinned")
+            self.assertEqual(route_after_apply["provider_id"], "qwen")
+            self.assertEqual(route_after_apply["model"], "qwen/qwen3-vl-plus")
+            self.assertEqual(journal["status"], "committed")
+            self.assertEqual(journal["tracks"][0]["track_id"], "capability_routes")
+            self.assertEqual(journal["tracks"][0]["health_verdict"], "pass")
+            self.assertTrue(Path(applied["rollback_manifest_path"]).exists())
+
+            rollback = service.rollback({"run_id": "apply-capability-route"})
+            router_after_rollback = json.loads(router_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(rollback["status"], "rolled_back")
+            self.assertEqual(router_after_rollback["capability_routes"], {})
+
+    def test_apply_mixed_metadata_and_capability_route_tracks_record_distinct_journal_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            service = AgenticUpdateService(workspace_root=workspace, router_config=_ReadOnlyRouterConfig([_vision_model()]))
+
+            applied = service.apply(
+                {
+                    "proposal": _mixed_metadata_and_route_proposal(run_id="apply-mixed-tracks"),
+                    "approval": _approval(),
+                    "router_config_snapshot": _router_snapshot(models=[_vision_model()]),
+                    "generated_catalog_snapshot": _catalog_snapshot(models=[_vision_model()]),
+                }
+            )
+            journal = json.loads(Path(applied["journal_path"]).read_text(encoding="utf-8"))
+            track_ids = [track["track_id"] for track in journal["tracks"]]
+
+            self.assertEqual(applied["status"], "applied_track_updates")
+            self.assertEqual(applied["track_ids"], ["provider_metadata", "capability_routes"])
+            self.assertEqual(track_ids, ["provider_metadata", "capability_routes"])
+            self.assertTrue(all(track["status"] == "committed" for track in journal["tracks"]))
+            self.assertTrue(all(track["health_verdict"] == "pass" for track in journal["tracks"]))
+
+    def test_supervised_run_applies_supported_tracks_and_records_policy_health_and_recovery_points(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            service = AgenticUpdateService(workspace_root=workspace, router_config=_ReadOnlyRouterConfig([_vision_model()]))
+
+            result = service.supervised_run(
+                {
+                    "proposal": _mixed_metadata_and_route_proposal(run_id="supervised-pass"),
+                    "router_config_snapshot": _router_snapshot(models=[_vision_model()]),
+                    "generated_catalog_snapshot": _catalog_snapshot(models=[_vision_model()]),
+                }
+            )
+            summary = read_json(workspace / "PRIVATE" / "agentic-update-pipeline" / "runs" / "supervised-pass" / "summary.json", {})
+
+            self.assertEqual(result["status"], "applied")
+            self.assertEqual(result["committed_tracks"], ["provider_metadata", "capability_routes"])
+            self.assertEqual(result["track_results"][0]["status"], "committed")
+            self.assertEqual(result["track_results"][1]["status"], "committed")
+            self.assertEqual(result["track_results"][0]["health_verdicts"]["provider_metadata"], "pass")
+            self.assertEqual(result["track_results"][1]["health_verdicts"]["capability_routes"], "pass")
+            self.assertTrue(Path(result["artifact_paths"]["supervised_run_summary"]).exists())
+            self.assertTrue(Path(result["artifact_paths"]["supervised_run_markdown"]).exists())
+            self.assertEqual(summary["summary"]["supervised_status"], "applied")
+            self.assertEqual(summary["summary"]["supervised_committed_tracks"], ["provider_metadata", "capability_routes"])
+
+    def test_supervised_run_contains_rollout_after_unsupported_track_and_preserves_recovery_point(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            service = AgenticUpdateService(workspace_root=workspace, router_config=_ReadOnlyRouterConfig([]))
+
+            result = service.supervised_run(
+                {
+                    "proposal": _mixed_metadata_and_kernel_proposal(run_id="supervised-contained", version="0.138.0"),
+                    "router_config_snapshot": _router_snapshot(models=[]),
+                    "generated_catalog_snapshot": _catalog_snapshot(models=[]),
+                }
+            )
+
+            self.assertEqual(result["status"], "contained")
+            self.assertEqual(result["committed_tracks"], ["provider_metadata"])
+            self.assertEqual(result["stopped_after_track"], "codex_kernel")
+            self.assertTrue(result["containment"]["active"])
+            self.assertEqual(result["track_results"][1]["track_id"], "codex_kernel")
+            self.assertEqual(result["track_results"][1]["status"], "blocked")
+            self.assertIn("automation_mode_off", result["track_results"][1]["reasons"])
+            self.assertTrue(Path(result["containment"]["recovery_points"][0]["rollback_manifest_path"]).exists())
+
+    def test_supervised_run_respects_pause_switch_before_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            service = AgenticUpdateService(workspace_root=workspace, router_config=_ReadOnlyRouterConfig([]))
+
+            result = service.supervised_run(
+                {
+                    "proposal": _mixed_metadata_and_kernel_proposal(run_id="supervised-paused", version="0.138.0"),
+                    "policy": {
+                        "tracks": {
+                            "provider_metadata": {
+                                "paused": True,
+                            }
+                        }
+                    },
+                    "router_config_snapshot": _router_snapshot(models=[]),
+                    "generated_catalog_snapshot": _catalog_snapshot(models=[]),
+                }
+            )
+
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["committed_tracks"], [])
+            self.assertEqual(result["stopped_after_track"], "provider_metadata")
+            self.assertIn("track_paused", result["track_results"][0]["reasons"])
 
     def test_apply_refuses_high_risk_missing_approval_missing_rollback_and_unsafe_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -213,6 +346,23 @@ class AgenticUpdateServiceTests(unittest.TestCase):
                         "router_config_snapshot": _router_snapshot(models=[]),
                         "generated_catalog_snapshot": _catalog_snapshot(models=[]),
                         "isolated_state_root": "../escape",
+                    }
+                )
+
+    def test_apply_refuses_ambiguous_capability_route_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            service = AgenticUpdateService(workspace_root=workspace, router_config=_ReadOnlyRouterConfig([_vision_model()]))
+            proposal = _capability_route_proposal(run_id="apply-capability-route-refusal")
+            proposal["diff"]["changes"][0]["details"] = {}
+
+            with self.assertRaisesRegex(ValueError, "details.route_record"):
+                service.apply(
+                    {
+                        "proposal": proposal,
+                        "approval": _approval(),
+                        "router_config_snapshot": _router_snapshot(models=[_vision_model()]),
+                        "generated_catalog_snapshot": _catalog_snapshot(models=[_vision_model()]),
                     }
                 )
 
@@ -426,6 +576,14 @@ class AgenticUpdateServiceTests(unittest.TestCase):
             self.assertTrue(Path(report["artifact_paths"]["verification_report"]).exists())
             self.assertTrue(Path(report["artifact_paths"]["smoke_report"]).exists())
             self.assertTrue(Path(report["artifact_paths"]["kernel_probe_snapshot"]).exists())
+            self.assertTrue(Path(report["artifact_paths"]["apply_journal"]).exists())
+            self.assertEqual(report["activation"]["journal_status"], "committed")
+            summary = read_json(
+                workspace / "PRIVATE" / "agentic-update-pipeline" / "runs" / "kernel-verify-pass" / "summary.json",
+                {},
+            )
+            self.assertIn("apply_journal", dict(summary.get("artifact_paths") or {}))
+            self.assertEqual(dict(summary.get("summary") or {}).get("apply_tracks"), ["codex_kernel_candidate"])
             self.assertFalse((workspace / ".codex").exists())
             self.assertFalse((workspace / ".astrabridge").exists())
 
@@ -455,6 +613,8 @@ class AgenticUpdateServiceTests(unittest.TestCase):
             self.assertIn("kernel_probe_evidence_missing", report["reasons"])
             self.assertTrue(report["rollback"]["required"])
             self.assertTrue(Path(report["rollback"]["manifest_path"]).exists())
+            self.assertTrue(Path(report["artifact_paths"]["apply_journal"]).exists())
+            self.assertEqual(report["activation"]["journal_status"], "rolled_back")
             self.assertEqual(report["candidate"]["validation_state"]["probe_evidence_paths"], [])
 
     def test_validation_failure_blocks_promotion_and_records_next_fix_target(self) -> None:
@@ -543,6 +703,14 @@ class AgenticUpdateServiceTests(unittest.TestCase):
                         "fixture_smoke_report": _passing_kernel_smoke_report(version="0.138.0"),
                     },
                 )
+                supervised = _post_json(
+                    base_url + "/api/agentic-updates/supervised-run",
+                    {
+                        "proposal": _mixed_metadata_and_route_proposal(run_id="http-supervised"),
+                        "router_config_snapshot": _router_snapshot(models=[_vision_model()]),
+                        "generated_catalog_snapshot": _catalog_snapshot(models=[_vision_model()]),
+                    },
+                )
 
                 self.assertEqual(started["status"], "success")
                 self.assertEqual(status["status"], "success")
@@ -556,6 +724,7 @@ class AgenticUpdateServiceTests(unittest.TestCase):
                 self.assertEqual(code_change["mode"], "code_change_worktree_plan")
                 self.assertEqual(validation["status"], "pass")
                 self.assertEqual(kernel_verify["status"], "verified")
+                self.assertEqual(supervised["status"], "applied")
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
@@ -710,7 +879,7 @@ def _approval() -> dict[str, Any]:
     return {"approved": True, "approved_by": "unit-test", "approval_note": "metadata-only fixture"}
 
 
-def _router_snapshot(*, models: list[dict[str, Any]]) -> dict[str, Any]:
+def _router_snapshot(*, models: list[dict[str, Any]], capability_routes: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "providers": [
             {
@@ -737,7 +906,7 @@ def _router_snapshot(*, models: list[dict[str, Any]]) -> dict[str, Any]:
             "model_overrides": {},
             "native_parameter_overrides": {},
         },
-        "capability_routes": {},
+        "capability_routes": dict(capability_routes or {}),
     }
 
 
@@ -843,6 +1012,165 @@ def _provider_smoke_required_proposal(*, run_id: str, allow_provider_calls: bool
         "artifact_paths": {},
     }
     proposal["validation_result"]["status"] = "not_run"
+    return proposal
+
+
+def _capability_route_proposal(*, run_id: str) -> dict[str, Any]:
+    contract = {
+        "scope": "capability_routes",
+        "providers": ["qwen"],
+        "models": ["qwen/qwen3-vl-plus"],
+        "allow_network": False,
+        "apply_mode": "isolated_apply",
+    }
+    proposal = agentic_update_proposal_template(contract, run_id=run_id)
+    proposal["diff"] = {
+        "schema_version": "astrabridge-agentic-update-diff-v1",
+        "status": "changes_detected",
+        "risk_class": "metadata_only",
+        "summary": {
+            "change_count": 1,
+            "risk_counts": {"metadata_only": 1},
+            "provider_model_candidate_count": 0,
+            "kernel_candidate_count": 0,
+        },
+        "changes": [
+            {
+                "change_id": "set-capability-route-vision-analyze",
+                "change_type": "set_capability_route",
+                "risk_class": "metadata_only",
+                "target": "vision.analyze",
+                "capability_id": "vision.analyze",
+                "provider_id": "qwen",
+                "reasons": ["manual_route_pin"],
+                "details": {
+                    "route_record": {
+                        "mode": "pinned",
+                        "provider_id": "qwen",
+                        "model": "qwen/qwen3-vl-plus",
+                    }
+                },
+                "source_refs": [],
+                "current_state_refs": [],
+                "validation_requirements": ["schema_validation", "diff_check"],
+            }
+        ],
+        "warnings": [],
+        "artifact_paths": {},
+    }
+    proposal["validation_result"]["status"] = "not_run"
+    return proposal
+
+
+def _mixed_metadata_and_route_proposal(*, run_id: str) -> dict[str, Any]:
+    contract = {
+        "scope": ["provider_metadata", "capability_routes"],
+        "providers": ["qwen"],
+        "models": ["qwen/qwen-next", "qwen/qwen3-vl-plus"],
+        "allow_network": False,
+        "apply_mode": "isolated_apply",
+    }
+    proposal = agentic_update_proposal_template(contract, run_id=run_id)
+    proposal["discovery_result"]["findings"] = [
+        {
+            "model_id": "qwen/qwen-next",
+            "provider_id": "qwen",
+            "native_model": "qwen-next",
+            "display_name": "Qwen Next",
+            "candidate_metadata": {
+                "advertised_context_window": 128000,
+                "input_modalities": ["text"],
+                "supported_reasoning_levels": ["low", "medium"],
+                "default_reasoning_level": "medium",
+                "pricing": {"input_per_mtok": 0.2, "output_per_mtok": 0.8, "currency": "USD"},
+                "confidence": "high",
+            },
+            "source_refs": [
+                {
+                    "source_id": "qwen-fixture-source",
+                    "source_url": "https://example.test/qwen/models",
+                    "trust_level": "official",
+                    "content_hash": "fixture-qwen-next",
+                }
+            ],
+        }
+    ]
+    proposal["diff"] = {
+        "schema_version": "astrabridge-agentic-update-diff-v1",
+        "status": "changes_detected",
+        "risk_class": "metadata_only",
+        "summary": {
+            "change_count": 2,
+            "risk_counts": {"metadata_only": 2},
+            "provider_model_candidate_count": 1,
+            "kernel_candidate_count": 0,
+        },
+        "changes": [
+            {
+                "change_id": "add-qwen-next",
+                "change_type": "added_model",
+                "risk_class": "metadata_only",
+                "target": "qwen/qwen-next",
+                "model_id": "qwen/qwen-next",
+                "provider_id": "qwen",
+                "reasons": ["new_model_candidate"],
+                "details": {},
+                "source_refs": [],
+                "current_state_refs": [],
+                "validation_requirements": ["schema_validation", "metadata_tests", "diff_check"],
+            },
+            {
+                "change_id": "set-capability-route-vision-analyze",
+                "change_type": "set_capability_route",
+                "risk_class": "metadata_only",
+                "target": "vision.analyze",
+                "capability_id": "vision.analyze",
+                "provider_id": "qwen",
+                "reasons": ["manual_route_pin"],
+                "details": {
+                    "route_record": {
+                        "mode": "pinned",
+                        "provider_id": "qwen",
+                        "model": "qwen/qwen3-vl-plus",
+                    }
+                },
+                "source_refs": [],
+                "current_state_refs": [],
+                "validation_requirements": ["schema_validation", "diff_check"],
+            },
+        ],
+        "warnings": [],
+        "artifact_paths": {},
+    }
+    proposal["validation_result"]["status"] = "not_run"
+    return proposal
+
+
+def _mixed_metadata_and_kernel_proposal(*, run_id: str, version: str) -> dict[str, Any]:
+    proposal = _mixed_metadata_and_route_proposal(run_id=run_id)
+    proposal["run_contract"]["scope"] = ["provider_metadata", "codex_kernel"]
+    proposal["run_contract"]["version_policy"] = "pinned"
+    proposal["run_contract"]["target_version"] = version
+    proposal["diff"]["summary"]["change_count"] = 2
+    proposal["diff"]["summary"]["kernel_candidate_count"] = 1
+    proposal["diff"]["summary"]["risk_counts"] = {"metadata_only": 1, "requires_kernel_smoke": 1}
+    proposal["diff"]["risk_class"] = "metadata_only"
+    proposal["diff"]["changes"] = [
+        dict(proposal["diff"]["changes"][0]),
+        {
+            "change_id": f"codex-kernel-candidate-{version}",
+            "change_type": "codex_kernel_candidate",
+            "risk_class": "requires_kernel_smoke",
+            "target": version,
+            "model_id": None,
+            "provider_id": None,
+            "reasons": ["codex_kernel_candidates_require_probe_and_smoke"],
+            "details": {"candidate": _kernel_candidate(version=version)},
+            "source_refs": [],
+            "current_state_refs": [],
+            "validation_requirements": ["codex_kernel_probe", "codex_kernel_smoke"],
+        },
+    ]
     return proposal
 
 

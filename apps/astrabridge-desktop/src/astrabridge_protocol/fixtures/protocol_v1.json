@@ -183,6 +183,34 @@
         "created_at": "2026-07-16T12:00:00+09:00",
         "delivery": {"attempt": 1, "idempotency_key": "delivery-missing", "trace_id": "trace-missing"}
       }
+    },
+    "invalid_run_event_type": {
+      "kind": "RunEvent",
+      "payload": {
+        "event_id": "event-invalid-type",
+        "schema_version": "astrabridge-protocol-v1",
+        "run_id": "run-1",
+        "task_id": "task-1",
+        "trace_id": "trace-1",
+        "sequence": 7,
+        "event_type": "turn_reconciled",
+        "created_at": "2026-07-16T12:00:00+09:00",
+        "payload": {"status": "failed"}
+      }
+    },
+    "invalid_run_event_schema_version": {
+      "kind": "RunEvent",
+      "payload": {
+        "event_id": "event-invalid-schema",
+        "schema_version": "astrabridge-protocol-v0",
+        "run_id": "run-1",
+        "task_id": "task-1",
+        "trace_id": "trace-1",
+        "sequence": 8,
+        "event_type": "run_created",
+        "created_at": "2026-07-16T12:00:00+09:00",
+        "payload": {"status": "queued"}
+      }
     }
   }
 }

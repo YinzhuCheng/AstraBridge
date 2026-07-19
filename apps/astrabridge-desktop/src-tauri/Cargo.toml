@@ -15,3 +15,6 @@ serde_json = "1"
 tauri-plugin-dialog = "2.7.1"
 url = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
+tauri-plugin-updater = "2"

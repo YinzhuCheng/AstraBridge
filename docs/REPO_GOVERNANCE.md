@@ -1,6 +1,6 @@
 # Repository Governance
 
-Last updated: 2026-07-10
+Last updated: 2026-07-17
 
 ## Purpose
 
@@ -45,7 +45,7 @@ The registry owns document status, replacement, archive policy, and execution ac
 
 Only two execution plans are classified `active`:
 
-- `PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md` is the current default queue.
+- `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md` is the current default queue.
 - `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md` is conditional and activates only when the user explicitly asks to implement or advance capability runtime.
 
 ## Bootstrap Document Inventory
@@ -69,11 +69,13 @@ Only two execution plans are classified `active`:
 | `docs/archive/LEGACY_COMPATIBILITY_SHIMS.md` | archived | Compatibility shim inventory and do-not-revive list. |
 | `PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md` | complete | Completed normalization record. |
 | `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md` | active | Capability runtime follow-on plan when requested. |
-| `PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md` | active | Current default second-phase execution queue. |
+| `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md` | active | Current default multi-provider, A2A, orchestration, update, and release-stability queue. |
+| `PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md` | complete | Completed 22-step stability/protocol/runtime implementation baseline. |
+| `PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md` | superseded | Preserved prior UI/live-dogfood execution record. |
 | `PLAN/CAPABILITY_REAL_SCENARIO_DOGFOOD_PLAN.md` | complete | Completed 24-step dogfood record; preserved evidence. |
 | `PLAN/FIVE_CAPABILITY_REAL_SCENARIO_EXECUTION_PLAN.md` | superseded | Superseded by the completed 24-step dogfood record. |
 
-The full 102-entry inventory lives in the canonical registry. Do not infer status for an unlisted future file; add it to the registry before treating it as guidance or an execution queue.
+The full 107-entry inventory lives in the canonical registry. Do not infer status for an unlisted future file; add it to the registry before treating it as guidance or an execution queue.
 
 ## Local Governance Gate
 
@@ -83,6 +85,14 @@ Use the local gate before handoff, commit, or large follow-up work:
 python scripts/repo_governance_check.py --repo .
 python scripts/run_local_gate.py --quick
 ```
+
+Use the fail-closed promotion gate when a verdict must be promotable in CI:
+
+```powershell
+python scripts/run_promotion_gate.py --mode pr --expected-commit <sha>
+```
+
+Promotion summaries must stay bound to the tested commit, clean-tree state, toolchain versions, check manifest, and artifact digests. Required `skipped`, `missing`, `unknown`, or unevaluated checks are non-promotable.
 
 The governance check scans text files for:
 
@@ -103,6 +113,14 @@ Findings are graded:
 
 `--json-out <path>` writes a machine-readable report only when explicitly requested.
 Use `--verbose` when informational archive, shim, and negative-test findings need to be audited.
+
+Canonical CI entry points:
+
+- `.github/workflows/pr-promotion-gate.yml`
+- `.github/workflows/nightly-promotion-gate.yml`
+- `.github/workflows/release-promotion-gate.yml`
+
+These workflows may install dependencies and upload artifacts, but they must not redefine the check matrix inline. The source of truth is `scripts/run_promotion_gate.py`, which in turn delegates to the canonical gate scripts.
 
 ## Dirty Worktree Triage
 

@@ -1,5 +1,6 @@
 import type {
   LocaleCode,
+  NodeExecutorCapability,
   NodeTypeRegistryEntry,
   NodeTypeRegistrySnapshot,
   TaskGraphNode,
@@ -22,6 +23,8 @@ export type TaskGraphPaletteItem = {
   icon: string;
   sectionIds: string[];
   resolvedTypeId: string;
+  availabilitySummary: string;
+  executionAvailability: NodeExecutorCapability | null;
 };
 
 export type TaskGraphPaletteSection = {
@@ -40,7 +43,10 @@ export type TaskGraphNodeRegistryUi = {
   typeSpecForNode: (node: TaskGraphNode | null) => NodeTypeRegistryEntry | null;
 };
 
-type StaticPaletteMeta = Omit<TaskGraphPaletteItem, "resolvedTypeId">;
+type StaticPaletteMeta = Omit<
+  TaskGraphPaletteItem,
+  "resolvedTypeId" | "availabilitySummary" | "executionAvailability"
+>;
 
 const STATIC_PALETTE_META: Record<string, StaticPaletteMeta> = {
   supervisor: {
@@ -265,11 +271,35 @@ function defaultMetaForKind(kind: string): TaskGraphPaletteItem {
   return {
     ...fallback,
     resolvedTypeId: normalized,
+    availabilitySummary: "unknown",
+    executionAvailability: null,
   };
+}
+
+function availabilitySuffix(capability: NodeExecutorCapability | null) {
+  if (!capability) return "";
+  const live = capability.supported_modes?.live_run;
+  const fixture = capability.supported_modes?.fixture_run;
+  if (live?.available && fixture?.available) {
+    return " Availability: live + fixture.";
+  }
+  if (fixture?.available && !live?.available) {
+    const reason = normalizeText(live?.reason);
+    return ` Availability: fixture only.${reason ? ` Live blocked: ${reason}.` : ""}`;
+  }
+  if (live?.available && !fixture?.available) {
+    const reason = normalizeText(fixture?.reason);
+    return ` Availability: live only.${reason ? ` Fixture blocked: ${reason}.` : ""}`;
+  }
+  const liveReason = normalizeText(live?.reason);
+  const fixtureReason = normalizeText(fixture?.reason);
+  const reason = liveReason || fixtureReason;
+  return ` Availability: unavailable.${reason ? ` ${reason}.` : ""}`;
 }
 
 function paletteVariantsForSpec(spec: NodeTypeRegistryEntry): TaskGraphPaletteItem[] {
   const uiHints = asRecord(spec.ui_hints) ?? {};
+  const capability = spec.executor_capability ?? null;
   const rawVariants = Array.isArray(uiHints.palette_variants)
     ? (uiHints.palette_variants as RawPaletteVariant[])
     : [];
@@ -281,7 +311,9 @@ function paletteVariantsForSpec(spec: NodeTypeRegistryEntry): TaskGraphPaletteIt
       return {
         kind,
         label: normalizeText(variant.label) || fallback.label,
-        description: normalizeText(variant.description) || fallback.description,
+        description:
+          (normalizeText(variant.description) || fallback.description) +
+          availabilitySuffix(capability),
         tone: normalizeText(variant.tone) || fallback.tone,
         icon: normalizeText(variant.icon) || fallback.icon,
         sectionIds:
@@ -289,6 +321,8 @@ function paletteVariantsForSpec(spec: NodeTypeRegistryEntry): TaskGraphPaletteIt
             ? normalizeVariantSections(variant.palette_sections)
             : fallback.sectionIds,
         resolvedTypeId: spec.type_id,
+        availabilitySummary: capability?.availability_summary ?? "unknown",
+        executionAvailability: capability,
       } satisfies TaskGraphPaletteItem;
     })
     .filter((item): item is TaskGraphPaletteItem => Boolean(item));
@@ -306,11 +340,13 @@ function paletteVariantsForSpec(spec: NodeTypeRegistryEntry): TaskGraphPaletteIt
     {
       kind: defaultKind,
       label: spec.title || fallback.label,
-      description: spec.description || fallback.description,
+      description: (spec.description || fallback.description) + availabilitySuffix(capability),
       tone: normalizeText(uiHints.tone) || fallback.tone,
       icon: normalizeText(uiHints.icon) || fallback.icon,
       sectionIds: sectionIds.length ? sectionIds : fallback.sectionIds,
       resolvedTypeId: spec.type_id,
+      availabilitySummary: capability?.availability_summary ?? "unknown",
+      executionAvailability: capability,
     },
   ];
 }
@@ -337,7 +373,12 @@ export function buildTaskGraphNodeRegistryUi(args: {
 
   if (byKind.size === 0) {
     for (const item of Object.values(STATIC_PALETTE_META)) {
-      byKind.set(item.kind, { ...item, resolvedTypeId: item.kind });
+      byKind.set(item.kind, {
+        ...item,
+        resolvedTypeId: item.kind,
+        availabilitySummary: "unknown",
+        executionAvailability: null,
+      });
       preferredKindByTypeId.set(item.kind, item.kind);
     }
   }

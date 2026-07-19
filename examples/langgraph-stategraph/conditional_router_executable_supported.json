@@ -1,0 +1,218 @@
+{
+  "format": "langgraph_stategraph_manifest",
+  "version": "1.0",
+  "graph": {
+    "graph_id": "graph_langgraph_executable_subset",
+    "task_id": "task_langgraph_examples",
+    "title": "LangGraph Executable Router Subset",
+    "state_channels": {
+      "route": {
+        "value_type": "text",
+        "reducer": "replace"
+      },
+      "machine_result": {
+        "value_type": "structured_json",
+        "reducer": "replace"
+      }
+    },
+    "compile": {
+      "checkpointer": {
+        "mode": "disabled"
+      }
+    },
+    "nodes": [
+      {
+        "id": "node_route",
+        "type": "astrabridge/router_condition",
+        "label": "Route Decision",
+        "role": "custom",
+        "node_type_config": {
+          "condition": {
+            "mode": "state_field_literal",
+            "field": "route",
+            "branch_map": {
+              "persist": "persist",
+              "finish": "finish"
+            }
+          }
+        },
+        "ports": {
+          "inputs": [
+            {
+              "port_id": "task_context",
+              "label": "Task Context",
+              "port_type": "text",
+              "shape": "single",
+              "required": false
+            }
+          ],
+          "outputs": [
+            {
+              "port_id": "machine_result",
+              "label": "Machine Result",
+              "port_type": "structured_json",
+              "shape": "single",
+              "required": true,
+              "schema_ref": "schema.node_route.machine_result"
+            }
+          ]
+        },
+        "input_contract": {
+          "mode": "typed_ports",
+          "port_ids": [
+            "task_context"
+          ]
+        },
+        "output_contract": {
+          "mode": "structured_only",
+          "machine_result_schema_ref": "schema.node_route.machine_result",
+          "artifact_specs": [],
+          "human_summary_required": true
+        },
+        "execution": {
+          "spawn_mode": "inline_lane",
+          "timeout_ms": 120000,
+          "retry_policy": {
+            "max_attempts": 1
+          },
+          "execution_backend": "app_server",
+          "collaboration_mode": "default"
+        },
+        "safety": {
+          "risk_class": "low",
+          "allow_provider_calls": false,
+          "allow_code_changes": false,
+          "allow_install": false,
+          "requires_human_approval": false
+        },
+        "status": "ready",
+        "ui": {
+          "position": {
+            "x": 80,
+            "y": 180
+          },
+          "layout_mode": "canvas"
+        }
+      },
+      {
+        "id": "node_persist_result",
+        "type": "astrabridge/artifact_sink",
+        "label": "Persist Result",
+        "role": "custom",
+        "node_type_config": {
+          "target_kind": "validation_report"
+        },
+        "ports": {
+          "inputs": [
+            {
+              "port_id": "artifact_input",
+              "label": "Artifact Input",
+              "port_type": "structured_json",
+              "shape": "single",
+              "required": true
+            }
+          ],
+          "outputs": [
+            {
+              "port_id": "artifact_record",
+              "label": "Artifact Record",
+              "port_type": "structured_json",
+              "shape": "single",
+              "required": true,
+              "artifact_kind": "validation_report"
+            }
+          ]
+        },
+        "input_contract": {
+          "mode": "typed_ports",
+          "port_ids": [
+            "artifact_input"
+          ]
+        },
+        "output_contract": {
+          "mode": "artifact_only",
+          "artifact_specs": [
+            {
+              "kind": "validation_report",
+              "id": "artifact_record"
+            }
+          ],
+          "human_summary_required": true
+        },
+        "execution": {
+          "spawn_mode": "inline_lane",
+          "timeout_ms": 120000,
+          "retry_policy": {
+            "max_attempts": 1
+          },
+          "execution_backend": "app_server",
+          "collaboration_mode": "default"
+        },
+        "safety": {
+          "risk_class": "low",
+          "allow_provider_calls": false,
+          "allow_code_changes": false,
+          "allow_install": false,
+          "requires_human_approval": false
+        },
+        "status": "ready",
+        "ui": {
+          "position": {
+            "x": 380,
+            "y": 180
+          },
+          "layout_mode": "canvas"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_start_route",
+        "kind": "start",
+        "source": "__start__",
+        "target": "node_route"
+      },
+      {
+        "id": "edge_route_persist",
+        "kind": "conditional",
+        "source": "node_route",
+        "target": "node_persist_result",
+        "branch": "persist",
+        "source_port_id": "machine_result",
+        "target_port_id": "artifact_input"
+      },
+      {
+        "id": "edge_route_end",
+        "kind": "conditional",
+        "source": "node_route",
+        "target": "__end__",
+        "branch": "finish",
+        "source_port_id": "machine_result"
+      },
+      {
+        "id": "edge_persist_end",
+        "kind": "edge",
+        "source": "node_persist_result",
+        "target": "__end__",
+        "source_port_id": "artifact_record"
+      }
+    ],
+    "schema_registry": {
+      "schema.node_route.machine_result": {
+        "type": "object",
+        "properties": {
+          "route": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "graph_policy": {
+      "entry_node_ids": [
+        "node_route"
+      ],
+      "max_depth": 3
+    },
+    "state_version": 1
+  }
+}

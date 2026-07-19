@@ -102,6 +102,11 @@ import { mergeComposerCatalogModels } from "./features/runtime/composerModelCata
 import { imageAttachmentRouteState } from "./features/runtime/attachmentRoute";
 import { TaskGraphWorkspace } from "./features/runtime/TaskGraphWorkspace";
 import {
+  latestTaskGraphDefinition,
+  selectTaskGraphAppState,
+  taskGraphNodeOverrideKey,
+} from "./features/runtime/taskGraphAppState";
+import {
   hasTaskGraphLiveDispatchTimedOut,
   resolveTaskGraphRunPrecondition,
   shouldPromoteDryRunToLiveRun,
@@ -113,6 +118,7 @@ import {
   createFallbackTaskGraphNode,
   isFallbackTaskGraph,
   readFallbackTaskGraph,
+  removeFallbackTaskGraphNode,
   removeFallbackTaskGraphEdge,
   taskGraphNeedsServerPersistence,
   upsertFallbackTaskGraphEdge,
@@ -121,13 +127,25 @@ import {
   updateFallbackTaskGraphNodePosition,
 } from "./features/runtime/taskGraphFallbackState";
 import {
+  canRedoTaskGraphEditHistory,
+  canUndoTaskGraphEditHistory,
+  emptyTaskGraphEditHistoryState,
+  pushTaskGraphEditHistory,
+  redoTaskGraphEditHistory,
+  undoTaskGraphEditHistory,
+  type TaskGraphEditHistoryState,
+} from "./features/runtime/taskGraphEditHistory";
+import {
   createOptimisticTaskGraphLiveRunRef,
-  selectCurrentTaskGraphRunRef,
   selectLatestTaskGraphRunRef,
 } from "./features/runtime/taskGraphRunRefs";
-import { hasRenderableTaskGraphStructure, resolvePreferredTaskGraphId } from "./features/runtime/taskGraphSelection";
+import { resolvePreferredTaskGraphId } from "./features/runtime/taskGraphSelection";
 import { resolveTaskGraphRouteUnavailable } from "./features/runtime/taskGraphSelection";
 import { FALLBACK_TASK_GRAPH_TEMPLATES } from "./features/runtime/taskGraphTemplateFallbacks";
+import {
+  reconcileRuntimeEventBatch,
+  reconcileRuntimeEventFrame,
+} from "./features/runtime/runtimeEventCursor";
 import {
   fallbackThreadIdForEmptyTaskContext,
   resolveCurrentProjectTask,
@@ -138,6 +156,7 @@ import {
   shouldUseSelectedRuntimeThread,
 } from "./features/runtime/taskThreadRestore";
 import { AgenticUpdateReviewPanel } from "./features/updates/AgenticUpdateReviewPanel";
+import { DesktopUpdatePanel } from "./features/updates/DesktopUpdatePanel";
 import { evaluateLaunchIsolation } from "./features/runtime/launchIsolation";
 import { normalizeRuntimeActivity } from "./features/runtime/runtimeActivity";
 import { summarizeTaskInspectorEvidence } from "./features/runtime/taskInspectorEvidence";
@@ -193,6 +212,7 @@ import type {
   ProjectReviewDiff,
   ProjectReviewStatus,
   ProjectTasksResponse,
+  TaskGraphCommandLogEntry,
   TaskGraphDefinition,
   TaskGraphDryRunResult,
   TaskGraphRunRef,
@@ -636,61 +656,33 @@ function goalCanAutoContinue(status: string) {
   return status === "active";
 }
 
-function taskGraphNodeOverrideKey(_graphId: string, nodeId: string) {
-  return `${_graphId}::${nodeId}`;
+function taskGraphNodeLabel(
+  graph: TaskGraphDefinition | null | undefined,
+  nodeId: string,
+) {
+  const node = graph?.nodes.find((item) => item.node_id === nodeId);
+  return node?.label?.trim() || nodeId;
 }
 
-function applyTaskGraphNodeOverrides(
-  graph: TaskGraphDefinition | null,
-  overrides: Record<string, Partial<TaskGraphDefinition["nodes"][number]>>,
-): TaskGraphDefinition | null {
-  if (!graph) return null;
-  if (!Object.keys(overrides).length) return graph;
-  let changed = false;
-  const nodes = graph.nodes.map((node) => {
-    const override = overrides[taskGraphNodeOverrideKey(graph.graph_id, node.node_id)];
-    if (!override) return node;
-    changed = true;
-    return {
-      ...node,
-      ...override,
-      position: override.position ?? node.position,
-      ui_hints: override.ui_hints ?? node.ui_hints,
-    };
-  });
-  if (!changed) return graph;
+function taskGraphEdgeSummary(
+  graph: TaskGraphDefinition | null | undefined,
+  edgeId: string,
+) {
+  const edge = graph?.edges.find((item) => item.edge_id === edgeId);
+  if (!edge) return edgeId;
+  return `${taskGraphNodeLabel(graph, edge.from_node_id)} -> ${taskGraphNodeLabel(graph, edge.to_node_id)}`;
+}
+
+function createTaskGraphCommandLogEntry(
+  partial: Omit<TaskGraphCommandLogEntry, "entry_id" | "created_at" | "updated_at">,
+): TaskGraphCommandLogEntry {
+  const timestamp = new Date().toISOString();
   return {
-    ...graph,
-    nodes,
+    ...partial,
+    entry_id: `task-graph-command-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`,
+    created_at: timestamp,
+    updated_at: timestamp,
   };
-}
-
-function taskGraphTimestamp(value: string | null | undefined) {
-  if (!value) return 0;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function latestTaskGraphDefinition(graphs: TaskGraphDefinition[] | null | undefined) {
-  if (!graphs?.length) return null;
-  return graphs.reduce<TaskGraphDefinition | null>((latest, candidate) => {
-    if (!latest) return candidate;
-    const candidateTime = Math.max(taskGraphTimestamp(candidate.updated_at), taskGraphTimestamp(candidate.created_at));
-    const latestTime = Math.max(taskGraphTimestamp(latest.updated_at), taskGraphTimestamp(latest.created_at));
-    return candidateTime >= latestTime ? candidate : latest;
-  }, null);
-}
-
-function isTaskGraphNewer(candidate: TaskGraphDefinition | null | undefined, baseline: TaskGraphDefinition | null | undefined) {
-  if (!candidate) return false;
-  if (!baseline) return true;
-  if (candidate.graph_id !== baseline.graph_id) return false;
-  const candidateVersion = Number(candidate.state_version ?? 0);
-  const baselineVersion = Number(baseline.state_version ?? 0);
-  if (candidateVersion !== baselineVersion) return candidateVersion > baselineVersion;
-  const candidateTime = Math.max(taskGraphTimestamp(candidate.updated_at), taskGraphTimestamp(candidate.created_at));
-  const baselineTime = Math.max(taskGraphTimestamp(baseline.updated_at), taskGraphTimestamp(baseline.created_at));
-  return candidateTime > baselineTime;
 }
 
 const TASK_GRAPH_DEBUG_DATASET_KEY = "taskGraphDebug";
@@ -5487,10 +5479,17 @@ function RouterControlCenter({
       ) : null}
 
       {tab === "updates" ? (
-        <AgenticUpdateReviewPanel
-          locale={locale}
-          providers={routerConfig.data?.providers ?? []}
-        />
+        <div className="manager-stack">
+          <DesktopUpdatePanel
+            locale={locale}
+            project={project!}
+            onProjectUpdated={(nextProject) => setProject(nextProject)}
+          />
+          <AgenticUpdateReviewPanel
+            locale={locale}
+            providers={routerConfig.data?.providers ?? []}
+          />
+        </div>
       ) : null}
 
       {tab === "reports" ? (
@@ -6166,6 +6165,8 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
   const [taskGraphStatusRunId, setTaskGraphStatusRunId] = useState<string | null>(null);
   const [taskGraphOptimisticLiveRunRefs, setTaskGraphOptimisticLiveRunRefs] = useState<Record<string, TaskGraphRunRef>>({});
   const [taskGraphLiveRunRefs, setTaskGraphLiveRunRefs] = useState<Record<string, TaskGraphRunRef>>({});
+  const [taskGraphCommandLog, setTaskGraphCommandLog] = useState<TaskGraphCommandLogEntry[]>([]);
+  const [taskGraphEditHistoryByGraphId, setTaskGraphEditHistoryByGraphId] = useState<Record<string, TaskGraphEditHistoryState>>({});
   const [taskGraphImportExportError, setTaskGraphImportExportError] = useState<string | null>(null);
   const [taskGraphLastImportedPath, setTaskGraphLastImportedPath] = useState<string | null>(null);
   const [taskGraphLastExportedPath, setTaskGraphLastExportedPath] = useState<string | null>(null);
@@ -6662,6 +6663,12 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
     },
     onError: (error) => {
+      if (error instanceof ApiRequestError && error.data?.graph && typeof error.data.graph === "object") {
+        const graph = error.data.graph as TaskGraphDefinition;
+        setFallbackTaskGraph(graph);
+        persistFallbackTaskGraph(graph);
+        setSelectedTaskGraphId(graph.graph_id);
+      }
       setTaskGraphNodeSaveError(error instanceof Error ? error.message : "Failed to save the selected node.");
     },
   });
@@ -6686,6 +6693,12 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
     },
     onError: (error) => {
+      if (error instanceof ApiRequestError && error.data?.graph && typeof error.data.graph === "object") {
+        const graph = error.data.graph as TaskGraphDefinition;
+        setFallbackTaskGraph(graph);
+        persistFallbackTaskGraph(graph);
+        setSelectedTaskGraphId(graph.graph_id);
+      }
       setTaskGraphEdgeSaveError(error instanceof Error ? error.message : "Failed to save the selected edge.");
     },
   });
@@ -6719,6 +6732,12 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       queryClient.invalidateQueries({ queryKey: ["project-tasks"] });
     },
     onError: (error) => {
+      if (error instanceof ApiRequestError && error.data?.graph && typeof error.data.graph === "object") {
+        const graph = error.data.graph as TaskGraphDefinition;
+        setFallbackTaskGraph(graph);
+        persistFallbackTaskGraph(graph);
+        setSelectedTaskGraphId(graph.graph_id);
+      }
       setTaskGraphEdgeSaveError(error instanceof Error ? error.message : "Failed to save the task graph.");
     },
   });
@@ -7216,6 +7235,17 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
   }) => {
     if (!currentTaskGraph) return;
     const optimisticGraph = updateFallbackTaskGraphNodeConfiguration(currentTaskGraph, nodeId, configuration);
+    const commandLogEntryId = appendTaskGraphCommandLogEntry({
+      graph_id: optimisticGraph.graph_id,
+      action: "save_node",
+      target_kind: "node",
+      target_id: nodeId,
+      summary: `Saved node ${taskGraphNodeLabel(optimisticGraph, nodeId)}`,
+      detail: configuration.provider_id && configuration.model_id
+        ? `${configuration.provider_id} / ${configuration.model_id}`
+        : configuration.label || null,
+      status: isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable ? "applied" : "pending",
+    });
     persistFallbackTaskGraph(optimisticGraph);
     setTaskGraphNodeOverrides((current) => ({
       ...current,
@@ -7237,6 +7267,16 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       graph_id: currentTaskGraph.graph_id,
       node_id: nodeId,
       configuration,
+    }, {
+      onSuccess: () => {
+        updateTaskGraphCommandLogEntry(commandLogEntryId, { status: "applied" });
+      },
+      onError: (error) => {
+        updateTaskGraphCommandLogEntry(commandLogEntryId, {
+          status: "failed",
+          detail: error instanceof Error ? error.message : "Failed to save node.",
+        });
+      },
     });
   };
   const createTaskGraphNode = (payload: {
@@ -7263,6 +7303,17 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       position: payload.position,
       ui_hints: uiHints,
     });
+    const commandLogEntryId = appendTaskGraphCommandLogEntry({
+      graph_id: fallbackCreated.graph.graph_id,
+      action: "create_node",
+      target_kind: "node",
+      target_id: fallbackCreated.node.node_id,
+      summary: `Created node ${fallbackCreated.node.label}`,
+      detail: payload.position
+        ? `(${Math.round(payload.position.x)}, ${Math.round(payload.position.y)})`
+        : null,
+      status: isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable ? "applied" : "pending",
+    });
     persistFallbackTaskGraph(fallbackCreated.graph);
     setSelectedTaskGraphId(fallbackCreated.graph.graph_id);
     setSelectedTaskGraphNodeId(fallbackCreated.node.node_id);
@@ -7284,11 +7335,30 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       configuration: {
         ui_hints: uiHints,
       },
+    }, {
+      onSuccess: () => {
+        updateTaskGraphCommandLogEntry(commandLogEntryId, { status: "applied" });
+      },
+      onError: (error) => {
+        updateTaskGraphCommandLogEntry(commandLogEntryId, {
+          status: "failed",
+          detail: error instanceof Error ? error.message : "Failed to create node.",
+        });
+      },
     });
   };
   const moveTaskGraphNode = (nodeId: string, position: { x: number; y: number }) => {
     if (!currentTaskGraph) return;
     const optimisticGraph = updateFallbackTaskGraphNodePosition(currentTaskGraph, nodeId, position);
+    const commandLogEntryId = appendTaskGraphCommandLogEntry({
+      graph_id: optimisticGraph.graph_id,
+      action: "move_node",
+      target_kind: "node",
+      target_id: nodeId,
+      summary: `Moved node ${taskGraphNodeLabel(optimisticGraph, nodeId)}`,
+      detail: `(${Math.round(position.x)}, ${Math.round(position.y)})`,
+      status: isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable ? "applied" : "pending",
+    });
     persistFallbackTaskGraph(optimisticGraph);
     setTaskGraphNodeOverrides((current) => ({
       ...current,
@@ -7310,6 +7380,16 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       graph_id: currentTaskGraph.graph_id,
       node_id: nodeId,
       position,
+    }, {
+      onSuccess: () => {
+        updateTaskGraphCommandLogEntry(commandLogEntryId, { status: "applied" });
+      },
+      onError: (error) => {
+        updateTaskGraphCommandLogEntry(commandLogEntryId, {
+          status: "failed",
+          detail: error instanceof Error ? error.message : "Failed to move node.",
+        });
+      },
     });
   };
   const saveTaskGraphEdgeConfiguration = (payload: {
@@ -7336,6 +7416,16 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       optimisticGraph.edges.find((edge) => edge.edge_id === (payload.edge_id || "")) ??
       optimisticGraph.edges[optimisticGraph.edges.length - 1] ??
       null;
+    const edgeIdForLog = nextEdge?.edge_id ?? payload.edge_id ?? null;
+    const commandLogEntryId = appendTaskGraphCommandLogEntry({
+      graph_id: optimisticGraph.graph_id,
+      action: payload.edge_id ? "save_edge" : "create_edge",
+      target_kind: "edge",
+      target_id: edgeIdForLog,
+      summary: `${payload.edge_id ? "Saved" : "Created"} edge ${nextEdge ? taskGraphEdgeSummary(optimisticGraph, nextEdge.edge_id) : `${taskGraphNodeLabel(optimisticGraph, payload.from_node_id)} -> ${taskGraphNodeLabel(optimisticGraph, payload.to_node_id)}`}`,
+      detail: payload.edge_type,
+      status: isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable ? "applied" : "pending",
+    });
     if (nextEdge) {
       setSelectedTaskGraphEdgeId(nextEdge.edge_id);
     }
@@ -7360,17 +7450,133 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       handoff_contract: payload.handoff_contract,
       context_policy: payload.context_policy,
       status: payload.status,
+    }, {
+      onSuccess: () => {
+        updateTaskGraphCommandLogEntry(commandLogEntryId, { status: "applied" });
+      },
+      onError: (error) => {
+        updateTaskGraphCommandLogEntry(commandLogEntryId, {
+          status: "failed",
+          detail: error instanceof Error ? error.message : "Failed to save edge.",
+        });
+      },
     });
+  };
+  const deleteTaskGraphNode = (nodeId: string) => {
+    if (!currentTaskGraph) return;
+    const removed = removeFallbackTaskGraphNode(currentTaskGraph, nodeId);
+    if (!removed.node || removed.graph === currentTaskGraph) {
+      return;
+    }
+    const nextSelectedNodeId =
+      removed.graph.nodes.find((node) => node.node_id !== nodeId)?.node_id ??
+      removed.graph.nodes[0]?.node_id ??
+      null;
+    const nextSelectedEdgeId = removed.graph.edges[0]?.edge_id ?? null;
+    const commandLogEntryId = appendTaskGraphCommandLogEntry({
+      graph_id: removed.graph.graph_id,
+      action: "delete_node",
+      target_kind: "node",
+      target_id: nodeId,
+      summary: `Deleted node ${taskGraphNodeLabel(currentTaskGraph, nodeId)}`,
+      detail: removed.removedEdgeIds.length
+        ? `Removed ${removed.removedEdgeIds.length} connected edge${removed.removedEdgeIds.length === 1 ? "" : "s"}.`
+        : null,
+      status: isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable ? "applied" : "pending",
+    });
+    recordTaskGraphEditHistory(removed.graph.graph_id, (state) =>
+      pushTaskGraphEditHistory(state, {
+        entry_id: `history-delete-node-${Date.now().toString(36)}`,
+        graph_id: removed.graph.graph_id,
+        action: "delete_node",
+        summary: `Deleted node ${taskGraphNodeLabel(currentTaskGraph, nodeId)}`,
+        graph_before: currentTaskGraph,
+        graph_after: removed.graph,
+        selection_before: {
+          selectedNodeId: selectedTaskGraphNodeId ?? null,
+          selectedEdgeId: selectedTaskGraphEdgeId ?? null,
+        },
+        selection_after: {
+          selectedNodeId: nextSelectedNodeId,
+          selectedEdgeId: nextSelectedEdgeId,
+        },
+        created_at: new Date().toISOString(),
+      }),
+    );
+    persistFallbackTaskGraph(removed.graph);
+    setSelectedTaskGraphId(removed.graph.graph_id);
+    setSelectedTaskGraphNodeId(nextSelectedNodeId);
+    setSelectedTaskGraphEdgeId(nextSelectedEdgeId);
+    setTaskGraphNodeSaveError(null);
+    setTaskGraphEdgeSaveError(null);
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    if (isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable) {
+      return;
+    }
+    queryClient.setQueryData(["task-graph", project.project_id, currentTask?.task_id ?? null, removed.graph.graph_id], {
+      graph: removed.graph,
+      task: currentTask,
+    });
+    saveTaskGraphDefinition.mutate(
+      {
+        graph: removed.graph,
+      },
+      {
+        onSuccess: () => {
+          updateTaskGraphCommandLogEntry(commandLogEntryId, { status: "applied" });
+        },
+        onError: (error) => {
+          updateTaskGraphCommandLogEntry(commandLogEntryId, {
+            status: "failed",
+            detail: error instanceof Error ? error.message : "Failed to delete node.",
+          });
+          setSelectedTaskGraphNodeId(selectedTaskGraphNodeId ?? null);
+          setSelectedTaskGraphEdgeId(selectedTaskGraphEdgeId ?? null);
+        },
+      },
+    );
   };
   const deleteTaskGraphEdge = (edgeId: string) => {
     if (!currentTaskGraph) return;
+    const edgeSummary = taskGraphEdgeSummary(currentTaskGraph, edgeId);
     const optimisticGraph = removeFallbackTaskGraphEdge(currentTaskGraph, edgeId);
     if (optimisticGraph === currentTaskGraph) {
       return;
     }
+    const nextSelectedEdgeId = optimisticGraph.edges[0]?.edge_id ?? null;
+    const commandLogEntryId = appendTaskGraphCommandLogEntry({
+      graph_id: optimisticGraph.graph_id,
+      action: "delete_edge",
+      target_kind: "edge",
+      target_id: edgeId,
+      summary: `Deleted edge ${edgeSummary}`,
+      detail: null,
+      status: isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable ? "applied" : "pending",
+    });
+    recordTaskGraphEditHistory(optimisticGraph.graph_id, (state) =>
+      pushTaskGraphEditHistory(state, {
+        entry_id: `history-delete-edge-${Date.now().toString(36)}`,
+        graph_id: optimisticGraph.graph_id,
+        action: "delete_edge",
+        summary: `Deleted edge ${edgeSummary}`,
+        graph_before: currentTaskGraph,
+        graph_after: optimisticGraph,
+        selection_before: {
+          selectedNodeId: selectedTaskGraphNodeId ?? null,
+          selectedEdgeId: selectedTaskGraphEdgeId ?? null,
+        },
+        selection_after: {
+          selectedNodeId: selectedTaskGraphNodeId ?? null,
+          selectedEdgeId: nextSelectedEdgeId,
+        },
+        created_at: new Date().toISOString(),
+      }),
+    );
     persistFallbackTaskGraph(optimisticGraph);
     setSelectedTaskGraphId(optimisticGraph.graph_id);
-    setSelectedTaskGraphEdgeId(optimisticGraph.edges[0]?.edge_id ?? null);
+    setSelectedTaskGraphEdgeId(nextSelectedEdgeId);
     setTaskGraphEdgeSaveError(null);
     setTaskGraphDryRunResult(null);
     setTaskGraphDryRunError(null);
@@ -7384,7 +7590,154 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
     });
     saveTaskGraphDefinition.mutate({
       graph: optimisticGraph,
+    }, {
+      onSuccess: () => {
+        updateTaskGraphCommandLogEntry(commandLogEntryId, { status: "applied" });
+      },
+      onError: (error) => {
+        updateTaskGraphCommandLogEntry(commandLogEntryId, {
+          status: "failed",
+          detail: error instanceof Error ? error.message : "Failed to delete edge.",
+        });
+        setSelectedTaskGraphNodeId(selectedTaskGraphNodeId ?? null);
+        setSelectedTaskGraphEdgeId(selectedTaskGraphEdgeId ?? null);
+      },
     });
+  };
+  const undoTaskGraphEdit = () => {
+    if (!currentTaskGraph) return;
+    const transition = undoTaskGraphEditHistory(currentTaskGraphEditHistory);
+    if (!transition) return;
+    const commandLogEntryId = appendTaskGraphCommandLogEntry({
+      graph_id: transition.graph.graph_id,
+      action: "undo",
+      target_kind: "graph",
+      target_id: transition.graph.graph_id,
+      summary: `Undid ${transition.entry.summary.toLowerCase()}`,
+      detail: transition.entry.summary,
+      status: isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable ? "applied" : "pending",
+    });
+    const previousHistoryState = currentTaskGraphEditHistory;
+    setTaskGraphEditHistoryByGraphId((current) => ({
+      ...current,
+      [transition.graph.graph_id]: transition.state,
+    }));
+    persistFallbackTaskGraph(transition.graph);
+    setSelectedTaskGraphId(transition.graph.graph_id);
+    setSelectedTaskGraphNodeId(transition.selection.selectedNodeId);
+    setSelectedTaskGraphEdgeId(transition.selection.selectedEdgeId);
+    setTaskGraphNodeSaveError(null);
+    setTaskGraphEdgeSaveError(null);
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    if (isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable) {
+      return;
+    }
+    queryClient.setQueryData(["task-graph", project.project_id, currentTask?.task_id ?? null, transition.graph.graph_id], {
+      graph: transition.graph,
+      task: currentTask,
+    });
+    saveTaskGraphDefinition.mutate(
+      { graph: transition.graph },
+      {
+        onSuccess: () => {
+          updateTaskGraphCommandLogEntry(commandLogEntryId, { status: "applied" });
+        },
+        onError: (error) => {
+          updateTaskGraphCommandLogEntry(commandLogEntryId, {
+            status: "failed",
+            detail: error instanceof Error ? error.message : "Failed to undo graph edit.",
+          });
+          setTaskGraphEditHistoryByGraphId((current) => ({
+            ...current,
+            [transition.graph.graph_id]: previousHistoryState,
+          }));
+        },
+      },
+    );
+  };
+  const redoTaskGraphEdit = () => {
+    if (!currentTaskGraph) return;
+    const transition = redoTaskGraphEditHistory(currentTaskGraphEditHistory);
+    if (!transition) return;
+    const commandLogEntryId = appendTaskGraphCommandLogEntry({
+      graph_id: transition.graph.graph_id,
+      action: "redo",
+      target_kind: "graph",
+      target_id: transition.graph.graph_id,
+      summary: `Redid ${transition.entry.summary.toLowerCase()}`,
+      detail: transition.entry.summary,
+      status: isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable ? "applied" : "pending",
+    });
+    const previousHistoryState = currentTaskGraphEditHistory;
+    setTaskGraphEditHistoryByGraphId((current) => ({
+      ...current,
+      [transition.graph.graph_id]: transition.state,
+    }));
+    persistFallbackTaskGraph(transition.graph);
+    setSelectedTaskGraphId(transition.graph.graph_id);
+    setSelectedTaskGraphNodeId(transition.selection.selectedNodeId);
+    setSelectedTaskGraphEdgeId(transition.selection.selectedEdgeId);
+    setTaskGraphNodeSaveError(null);
+    setTaskGraphEdgeSaveError(null);
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    setTaskGraphFixtureRunError(null);
+    if (isFallbackTaskGraph(currentTaskGraph) || taskGraphRouteUnavailable) {
+      return;
+    }
+    queryClient.setQueryData(["task-graph", project.project_id, currentTask?.task_id ?? null, transition.graph.graph_id], {
+      graph: transition.graph,
+      task: currentTask,
+    });
+    saveTaskGraphDefinition.mutate(
+      { graph: transition.graph },
+      {
+        onSuccess: () => {
+          updateTaskGraphCommandLogEntry(commandLogEntryId, { status: "applied" });
+        },
+        onError: (error) => {
+          updateTaskGraphCommandLogEntry(commandLogEntryId, {
+            status: "failed",
+            detail: error instanceof Error ? error.message : "Failed to redo graph edit.",
+          });
+          setTaskGraphEditHistoryByGraphId((current) => ({
+            ...current,
+            [transition.graph.graph_id]: previousHistoryState,
+          }));
+        },
+      },
+    );
+  };
+  const detachTaskGraphSourceOwnership = async () => {
+    if (!currentTaskGraph || taskGraphRouteUnavailable) return;
+    setTaskGraphNodeSaveError(null);
+    setTaskGraphEdgeSaveError(null);
+    setTaskGraphDryRunResult(null);
+    setTaskGraphDryRunError(null);
+    const commandLogEntryId = appendTaskGraphCommandLogEntry({
+      graph_id: currentTaskGraph.graph_id,
+      action: "detach_source_ownership",
+      target_kind: "graph",
+      target_id: currentTaskGraph.graph_id,
+      summary: `Detached source-owned graph ${currentTaskGraph.title}`,
+      detail: currentTaskGraph.graph_document?.source_ownership?.source_path ?? null,
+      status: "pending",
+    });
+    try {
+      await saveTaskGraphDefinition.mutateAsync({
+        graph: currentTaskGraph,
+        source_owner_action: "detach",
+      });
+      updateTaskGraphCommandLogEntry(commandLogEntryId, { status: "applied" });
+    } catch (error) {
+      updateTaskGraphCommandLogEntry(commandLogEntryId, {
+        status: "failed",
+        detail: error instanceof Error ? error.message : "Failed to detach source-owned graph.",
+      });
+      setTaskGraphEdgeSaveError(error instanceof Error ? error.message : "Failed to detach the source-owned task graph.");
+    }
   };
   const openTaskGraphTemplate = (templateId: string) => {
     if (typeof window !== "undefined") {
@@ -8572,13 +8925,22 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
     let cancelled = false;
     const timeout = window.setTimeout(async function tick() {
       if (!project) return;
+      const requestedAfter = eventCursorRef.current;
       try {
-        const payload = await api.runtimeEvents(eventCursor);
+        const payload = await api.runtimeEvents(requestedAfter);
         if (cancelled) return;
-        if (payload.events.length > 0) {
-          handleEvents(payload.events);
+        const reconciled = reconcileRuntimeEventBatch(
+          eventCursorRef.current,
+          requestedAfter,
+          payload,
+        );
+        if (reconciled.acceptedEvents.length > 0) {
+          handleEvents(reconciled.acceptedEvents);
         }
-        setEventCursor(payload.cursor);
+        if (reconciled.nextCursor !== eventCursorRef.current) {
+          eventCursorRef.current = reconciled.nextCursor;
+          setEventCursor(reconciled.nextCursor);
+        }
       } catch (error) {
         console.warn("AstraBridge runtime event polling failed", error);
       } finally {
@@ -8591,7 +8953,7 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       cancelled = true;
       window.clearTimeout(timeout);
     };
-  }, [eventCursor, eventStreamActive, project, setEventCursor, smokeMode]);
+  }, [eventStreamActive, project, setEventCursor, smokeMode]);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -8843,9 +9205,13 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
           try {
             if (!rawData) return;
             const payload = JSON.parse(rawData) as { cursor?: number };
-            if (typeof payload.cursor === "number") {
-              eventCursorRef.current = payload.cursor;
-              setEventCursor(payload.cursor);
+            const reconciled = reconcileRuntimeEventFrame(
+              eventCursorRef.current,
+              payload,
+            );
+            if (reconciled.nextCursor !== eventCursorRef.current) {
+              eventCursorRef.current = reconciled.nextCursor;
+              setEventCursor(reconciled.nextCursor);
             }
           } catch {
             return;
@@ -8855,14 +9221,17 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
           try {
             if (!rawData) return;
             const payload = JSON.parse(rawData) as { cursor?: number; event?: RuntimeEvent };
-            const event = payload.event;
-            if (event) {
+            const reconciled = reconcileRuntimeEventFrame(
+              eventCursorRef.current,
+              payload,
+            );
+            for (const event of reconciled.acceptedEvents) {
               handleEventsRef.current([event]);
               refreshSharedStateQueries(event);
             }
-            if (typeof payload.cursor === "number") {
-              eventCursorRef.current = payload.cursor;
-              setEventCursor(payload.cursor);
+            if (reconciled.nextCursor !== eventCursorRef.current) {
+              eventCursorRef.current = reconciled.nextCursor;
+              setEventCursor(reconciled.nextCursor);
             }
           } catch {
             return;
@@ -9639,49 +10008,59 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       ? taskConversationThread ?? selectedRuntimeThread
       : selectedRuntimeThread;
   const activeExecutionThread = selectedThread.data?.thread;
-  const currentTaskGraphBase = useMemo(() => {
-    if (taskGraphRouteUnavailable) {
-      return fallbackTaskGraph ?? null;
-    }
-    const latestSelectedGraph = latestTaskGraphDefinition(currentTask?.graph_definitions);
-    const latestRenderableGraph = hasRenderableTaskGraphStructure(latestSelectedGraph)
-      ? latestSelectedGraph
-      : null;
-    const selectedTaskGraph = activeTaskGraphId
-      ? currentTask?.graph_definitions?.find((graph) => graph.graph_id === activeTaskGraphId) ?? null
-      : latestSelectedGraph ?? null;
-    const selectedRenderableGraph = hasRenderableTaskGraphStructure(selectedTaskGraph)
-      ? selectedTaskGraph
-      : null;
-    const routeGraph =
-      activeTaskGraphId == null
-        ? taskGraph.data?.graph ?? null
-        : taskGraph.data?.graph?.graph_id === activeTaskGraphId
-          ? taskGraph.data.graph
-          : null;
-    const preferredServerGraph =
-      routeGraph ?? selectedRenderableGraph ?? latestRenderableGraph ?? null;
-    if (isTaskGraphNewer(fallbackTaskGraph, preferredServerGraph)) {
-      return fallbackTaskGraph;
-    }
-    if (activeTaskGraphId) {
-      if (routeGraph?.graph_id === activeTaskGraphId) {
-        return routeGraph;
-      }
-      if (selectedRenderableGraph) {
-        return selectedRenderableGraph;
-      }
-      if (fallbackTaskGraph?.graph_id === activeTaskGraphId) {
-        return fallbackTaskGraph;
-      }
-      return preferredServerGraph ?? null;
-    }
-    return preferredServerGraph ?? fallbackTaskGraph ?? null;
-  }, [activeTaskGraphId, currentTask?.graph_definitions, fallbackTaskGraph, taskGraph.data?.graph, taskGraphRouteUnavailable]);
-  const currentTaskGraph = useMemo(
-    () => applyTaskGraphNodeOverrides(currentTaskGraphBase, taskGraphNodeOverrides),
-    [currentTaskGraphBase, taskGraphNodeOverrides],
+  const taskGraphAppState = useMemo(
+    () =>
+      selectTaskGraphAppState({
+        activeTaskGraphId,
+        selectedTaskGraphId,
+        currentTask,
+        routeGraph: taskGraph.data?.graph ?? null,
+        routeTaskGraphDefinitions: taskGraph.data?.task?.graph_definitions,
+        routeTaskRunRefs: taskGraph.data?.task?.graph_run_refs,
+        fallbackTaskGraph,
+        taskGraphRouteUnavailable,
+        taskGraphNodeOverrides,
+        taskGraphEditHistoryByGraphId,
+        taskGraphCommandLog,
+        selectedTaskGraphSnapshotId,
+        taskGraphOptimisticLiveRunRefs,
+        taskGraphLiveRunRefs,
+        taskGraphDryRunRunRef: taskGraphDryRunResult?.run_ref ?? null,
+        runTaskGraphPending: runTaskGraph.isPending,
+        taskGraphLiveDispatchStarted,
+        graphWorkspaceOpen,
+      }),
+    [
+      activeTaskGraphId,
+      currentTask,
+      fallbackTaskGraph,
+      graphWorkspaceOpen,
+      runTaskGraph.isPending,
+      selectedTaskGraphId,
+      selectedTaskGraphSnapshotId,
+      taskGraph.data?.graph,
+      taskGraph.data?.task?.graph_definitions,
+      taskGraph.data?.task?.graph_run_refs,
+      taskGraphCommandLog,
+      taskGraphDryRunResult?.run_ref,
+      taskGraphEditHistoryByGraphId,
+      taskGraphLiveDispatchStarted,
+      taskGraphLiveRunRefs,
+      taskGraphNodeOverrides,
+      taskGraphOptimisticLiveRunRefs,
+      taskGraphRouteUnavailable,
+    ],
   );
+  const {
+    currentTaskGraphBase,
+    currentTaskGraph,
+    currentTaskGraphSnapshotRefs,
+    currentTaskGraphEditHistory,
+    currentTaskGraphCommandLog,
+    selectedTaskGraphSnapshot,
+    currentTaskGraphRunRef,
+    authoritativeActiveTaskGraphRunRef,
+  } = taskGraphAppState;
   const taskGraphRunActionBlockedReason = useMemo(
     () =>
       resolveTaskGraphRunPrecondition({
@@ -9692,92 +10071,54 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
       }),
     [activeTaskGraphId, currentTaskGraph, taskGraphRouteUnavailable],
   );
-  const currentTaskGraphSnapshotRefs = useMemo(() => {
-    const graphId = currentTaskGraph?.graph_id ?? activeTaskGraphId;
-    if (!graphId) return [];
-    return (currentTask?.graph_snapshot_refs ?? []).filter((item) => item.graph_id === graphId);
-  }, [activeTaskGraphId, currentTask?.graph_snapshot_refs, currentTaskGraph?.graph_id]);
-  const selectedTaskGraphSnapshot = useMemo(
-    () => currentTaskGraphSnapshotRefs.find((item) => item.snapshot_id === selectedTaskGraphSnapshotId) ?? currentTaskGraphSnapshotRefs[0] ?? null,
-    [currentTaskGraphSnapshotRefs, selectedTaskGraphSnapshotId],
+  const canUndoCurrentTaskGraphEdit = useMemo(
+    () => canUndoTaskGraphEditHistory(currentTaskGraphEditHistory),
+    [currentTaskGraphEditHistory],
   );
+  const canRedoCurrentTaskGraphEdit = useMemo(
+    () => canRedoTaskGraphEditHistory(currentTaskGraphEditHistory),
+    [currentTaskGraphEditHistory],
+  );
+  const appendTaskGraphCommandLogEntry = (
+    partial: Omit<TaskGraphCommandLogEntry, "entry_id" | "created_at" | "updated_at">,
+  ) => {
+    const entry = createTaskGraphCommandLogEntry(partial);
+    setTaskGraphCommandLog((current) => [entry, ...current].slice(0, 40));
+    return entry.entry_id;
+  };
+  const recordTaskGraphEditHistory = (graphId: string, updater: (current: TaskGraphEditHistoryState) => TaskGraphEditHistoryState) => {
+    setTaskGraphEditHistoryByGraphId((current) => ({
+      ...current,
+      [graphId]: updater(current[graphId] ?? emptyTaskGraphEditHistoryState()),
+    }));
+  };
+  const updateTaskGraphCommandLogEntry = (
+    entryId: string,
+    update: {
+      status: TaskGraphCommandLogEntry["status"];
+      detail?: string | null;
+    },
+  ) => {
+    setTaskGraphCommandLog((current) =>
+      current.map((entry) =>
+        entry.entry_id !== entryId
+          ? entry
+          : {
+              ...entry,
+              status: update.status,
+              detail: update.detail ?? entry.detail ?? null,
+              updated_at: new Date().toISOString(),
+            },
+      ),
+    );
+  };
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const latestCurrentTaskGraph = latestTaskGraphDefinition(currentTask?.graph_definitions);
-    const routeGraphId = taskGraph.data?.graph?.graph_id ?? null;
-    const routeTaskGraphIds = (taskGraph.data?.task?.graph_definitions ?? []).map((graph) => graph.graph_id);
-    const currentTaskGraphIds = (currentTask?.graph_definitions ?? []).map((graph) => graph.graph_id);
-    document.documentElement.dataset[TASK_GRAPH_STATE_DATASET_KEY] = JSON.stringify({
-      at: Date.now(),
-      graphWorkspaceOpen,
-      selectedTaskGraphId,
-      activeTaskGraphId,
-      fallbackGraphId: fallbackTaskGraph?.graph_id ?? null,
-      routeGraphId,
-      routeTaskGraphIds,
-      currentTaskGraphIds,
-      latestCurrentTaskGraphId: latestCurrentTaskGraph?.graph_id ?? null,
-      currentTaskGraphBaseId: currentTaskGraphBase?.graph_id ?? null,
-      currentTaskGraphId: currentTaskGraph?.graph_id ?? null,
-      currentTaskGraphTemplateId: currentTaskGraph?.template_id ?? null,
-    });
+    document.documentElement.dataset[TASK_GRAPH_STATE_DATASET_KEY] = JSON.stringify(
+      taskGraphAppState.datasetState,
+    );
   }, [
-    activeTaskGraphId,
-    currentTask?.graph_definitions,
-    currentTaskGraph?.graph_id,
-    currentTaskGraph?.template_id,
-    currentTaskGraphBase?.graph_id,
-    fallbackTaskGraph?.graph_id,
-    graphWorkspaceOpen,
-    selectedTaskGraphId,
-    taskGraph.data?.graph?.graph_id,
-    taskGraph.data?.task?.graph_definitions,
-  ]);
-  const currentTaskGraphRunRef = useMemo(() => {
-    const graphId = currentTaskGraph?.graph_id ?? activeTaskGraphId;
-    return selectCurrentTaskGraphRunRef({
-      graphId,
-      optimisticRunRefs: Object.values(taskGraphOptimisticLiveRunRefs),
-      liveRunRefs: Object.values(taskGraphLiveRunRefs),
-      routeTaskRunRefs: taskGraph.data?.task?.graph_run_refs,
-      currentTaskRunRefs: currentTask?.graph_run_refs,
-      dryRunRunRef: taskGraphDryRunResult?.run_ref ?? null,
-      allowCachedActiveRunRef:
-        runTaskGraph.isPending && taskGraphLiveDispatchStarted,
-      allowOptimisticActiveRunRef: taskGraphLiveDispatchStarted,
-    });
-  }, [
-    activeTaskGraphId,
-    currentTask?.graph_run_refs,
-    currentTaskGraph?.graph_id,
-    runTaskGraph.isPending,
-    taskGraphLiveDispatchStarted,
-    taskGraphOptimisticLiveRunRefs,
-    taskGraph.data?.task?.graph_run_refs,
-    taskGraphDryRunResult?.run_ref,
-    taskGraphLiveRunRefs,
-  ]);
-  const authoritativeActiveTaskGraphRunRef = useMemo(() => {
-    const graphId = currentTaskGraph?.graph_id ?? activeTaskGraphId;
-    return selectLatestTaskGraphRunRef(graphId, [
-      (taskGraph.data?.task?.graph_run_refs ?? []).filter(
-        (item) =>
-          item &&
-          String(item.status ?? "").trim() !== "" &&
-          ["queued", "running", "paused_for_review"].includes(String(item.status ?? "").trim()),
-      ),
-      (currentTask?.graph_run_refs ?? []).filter(
-        (item) =>
-          item &&
-          String(item.status ?? "").trim() !== "" &&
-          ["queued", "running", "paused_for_review"].includes(String(item.status ?? "").trim()),
-      ),
-    ]);
-  }, [
-    activeTaskGraphId,
-    currentTask?.graph_run_refs,
-    currentTaskGraph?.graph_id,
-    taskGraph.data?.task?.graph_run_refs,
+    taskGraphAppState.datasetState,
   ]);
   useEffect(() => {
     if (!taskGraphLiveDispatchStarted) {
@@ -10711,6 +11052,7 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
             dryRunError={taskGraphFixtureRunError || taskGraphDryRunError}
             reportHref={taskGraphDryRunReportHref}
             latestRunRef={currentTaskGraphRunRef}
+            commandLog={currentTaskGraphCommandLog}
             artifactHrefFor={projectFileReadHref}
             onInspectArtifactPath={inspectTaskGraphArtifactPath}
             onSelectNode={(nodeId) => {
@@ -10718,12 +11060,17 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
               setSelectedTaskGraphEdgeId(null);
             }}
             onSelectEdge={setSelectedTaskGraphEdgeId}
-              onInstantiateTemplate={openTaskGraphTemplate}
+            onInstantiateTemplate={openTaskGraphTemplate}
             onCreateNode={createTaskGraphNode}
             onMoveNode={moveTaskGraphNode}
+            onDeleteNode={deleteTaskGraphNode}
             onSaveNode={saveTaskGraphNodeConfiguration}
             onSaveEdge={saveTaskGraphEdgeConfiguration}
             onDeleteEdge={deleteTaskGraphEdge}
+            onUndoGraphEdit={undoTaskGraphEdit}
+            onRedoGraphEdit={redoTaskGraphEdit}
+            canUndoGraphEdit={canUndoCurrentTaskGraphEdit}
+            canRedoGraphEdit={canRedoCurrentTaskGraphEdit}
             onRunDryRun={runTaskGraphDryRun}
             onRunLive={runTaskGraphLive}
             onRunFixture={runTaskGraphFixture}
@@ -10734,6 +11081,7 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
             onRejectPendingRun={rejectTaskGraphPendingRun}
             onImportGraph={importTaskGraphThroughWorkspace}
             onExportGraph={exportTaskGraphThroughWorkspace}
+            onDetachSourceOwnership={detachTaskGraphSourceOwnership}
             snapshotRefs={currentTaskGraphSnapshotRefs}
             selectedSnapshotId={selectedTaskGraphSnapshot?.snapshot_id ?? null}
             onSelectSnapshot={setSelectedTaskGraphSnapshotId}

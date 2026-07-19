@@ -11,6 +11,10 @@ from .node_type_registry import (
     project_task_graph_kind,
     resolve_node_type,
 )
+from .external_a2a_gateway import (
+    EXTERNAL_A2A_CARD_REF_PREFIX,
+    validate_external_a2a_agent_card_registry,
+)
 from .security import DESKTOP_KEY_PATH_RE, SECRET_RE, SecurityError
 from .task_graph_contract import (
     ARTIFACT_KINDS,
@@ -30,7 +34,7 @@ GRAPH_POLICY_PERMISSION_MODES = ("ask", "allow", "deny", "manual")
 COLLABORATION_MODES = ("default", "plan")
 EXECUTION_BACKENDS = ("app_server", "human_review", "local_only")
 SELECTION_MODES = ("none", "explicit", "profile")
-PROMPT_TEMPLATE_MODES = ("inline", "reference", "migration_stub")
+PROMPT_TEMPLATE_MODES = ("inline", "reference")
 TOOL_APPROVAL_MODES = ("ask", "allow", "deny", "manual")
 OUTPUT_MODES = ("artifact_only", "structured_only", "structured_and_artifacts")
 RISK_CLASSES = ("low", "moderate", "high", "critical")
@@ -44,7 +48,11 @@ SOURCE_KINDS = ("native_authoring", "legacy_task_graph", "imported_file")
 
 _DEFAULT_CREATED_AT = "2026-07-07T00:00:00+09:00"
 _DEFAULT_UPDATED_AT = "2026-07-07T00:05:00+09:00"
-_DEFAULT_PROMPT = "TODO: replace migration stub with a canonical prompt template."
+_LEGACY_MIGRATION_STUB_PROMPT = "TODO: replace migration stub with a canonical prompt template."
+_LEGACY_COMPATIBILITY_PROMPT = (
+    "Execute the legacy node contract, produce the required machine result, "
+    "and preserve any declared artifacts for downstream consumers."
+)
 
 
 def validate_agent_orchestration_graph(
@@ -93,6 +101,7 @@ def validate_agent_orchestration_graph(
     _validate_metadata(normalized["metadata"])
     _validate_migration(normalized["migration"])
     _validate_graph_policy(normalized["graph_policy"])
+    external_registry = validate_external_a2a_agent_card_registry(normalized.get("external_agent_card_registry"))
 
     node_ids: set[str] = set()
     node_schema_refs: dict[str, str] = {}
@@ -125,6 +134,18 @@ def validate_agent_orchestration_graph(
         }
         validated_nodes.append(validated_node)
     normalized["nodes"] = validated_nodes
+    referenced_external_card_refs = {
+        str(node.get("card_ref") or "").strip()
+        for node in validated_nodes
+        if str(node.get("card_ref") or "").strip().startswith(EXTERNAL_A2A_CARD_REF_PREFIX)
+    }
+    if referenced_external_card_refs:
+        normalized["external_agent_card_registry"] = validate_external_a2a_agent_card_registry(
+            external_registry,
+            referenced_card_refs=referenced_external_card_refs,
+        )
+    elif external_registry:
+        normalized["external_agent_card_registry"] = external_registry
 
     edge_ids: set[str] = set()
     adjacency: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
@@ -185,8 +206,10 @@ def lift_task_graph_to_agent_orchestration_graph(task_graph: dict[str, Any]) -> 
             has_machine_schema=bool(schema_ref),
             warnings=warnings,
         )
-        prompt_template = str(node.get("human_summary_template") or "").strip() or _DEFAULT_PROMPT
-        warnings.append(f"node:{node['node_id']}: lifted legacy graph without first-class prompt definition")
+        prompt_template = _legacy_prompt_template(node)
+        warnings.append(
+            f"node:{node['node_id']}: lifted legacy graph with an inline compatibility prompt template"
+        )
         if not isinstance(node.get("tools"), dict):
             warnings.append(f"node:{node['node_id']}: lifted legacy graph without explicit tool policy")
         positions[str(node["node_id"])] = deepcopy(node["position"])
@@ -212,7 +235,7 @@ def lift_task_graph_to_agent_orchestration_graph(task_graph: dict[str, Any]) -> 
                 "card_ref": node["agent_card_ref"],
                 "routing": {"selection_mode": "none"},
                 "prompt": {
-                    "template_mode": "migration_stub",
+                    "template_mode": "inline",
                     "template": prompt_template,
                 },
                 "tools": lifted_tools,
@@ -325,7 +348,7 @@ def lift_task_graph_to_agent_orchestration_graph(task_graph: dict[str, Any]) -> 
                 "lowering_mode": "lossy_legacy_task_graph",
                 "preserves_unknown_fields": False,
                 "notes": [
-                    "Legacy task graphs are upgraded into typed ports with migration stubs.",
+                    "Legacy task graphs are upgraded into typed ports with inline compatibility prompts.",
                     "Lowering back to task graph preserves execution, safety, context, and artifact semantics, but not all canonical typed-port metadata.",
                 ],
             },
@@ -447,6 +470,11 @@ def _validate_migration(value: Any) -> None:
         _require_bool(compat["preserves_unknown_fields"], field="migration.compatibility.preserves_unknown_fields")
         if not isinstance(compat["notes"], list) or not all(isinstance(item, str) and item.strip() for item in compat["notes"]):
             raise ValueError("migration.compatibility.notes must be a list of non-empty strings.")
+        if "reviewed_for_live_execution" in compat:
+            _require_bool(
+                compat.get("reviewed_for_live_execution"),
+                field="migration.compatibility.reviewed_for_live_execution",
+            )
 
 
 def _validate_graph_policy(value: Any) -> None:
@@ -510,7 +538,11 @@ def _validate_node(
         raise ValueError(f"agent_orchestration_node.role {validated['role']} is incompatible with kind {validated['kind']}.")
     validated["resolved_node_type_id"] = str(resolved_node_type.get("resolved_type_id") or "")
     validated["resolved_node_type_version"] = int(dict(resolved_node_type.get("spec") or {}).get("version") or 1)
-    validated["node_type_registry_fingerprint"] = str(resolved_node_type.get("registry_fingerprint") or "")
+    validated["node_type_registry_fingerprint"] = str(
+        validated.get("node_type_registry_fingerprint")
+        or resolved_node_type.get("registry_fingerprint")
+        or ""
+    )
     diagnostics = [deepcopy(item) for item in list(resolved_node_type.get("diagnostics") or []) if isinstance(item, dict)]
     if diagnostics:
         validated["status"] = "disabled"
@@ -636,13 +668,35 @@ def _validate_routing(
 def _validate_prompt(value: Any, *, node_id: str, prompt_registry: dict[str, Any]) -> None:
     data = _ensure_dict(value, f"prompt[{node_id}]")
     _require_fields(data, f"prompt[{node_id}]", ("template_mode",))
+    if str(data.get("template_mode") or "").strip() == "migration_stub":
+        raise ValueError(
+            f"prompt[{node_id}].template_mode `migration_stub` is no longer supported. "
+            "Replace it with `inline` or `reference` before compile, dry-run, or export."
+        )
     template_mode = _require_enum(data["template_mode"], field=f"prompt[{node_id}].template_mode", allowed=PROMPT_TEMPLATE_MODES)
     if template_mode == "reference":
         template_ref = _require_non_empty_string(data.get("template_ref"), field=f"prompt[{node_id}].template_ref")
         if prompt_registry and template_ref not in prompt_registry:
             raise ValueError(f"prompt[{node_id}].template_ref references unknown prompt template: {template_ref}")
         return
-    _require_non_empty_string(data.get("template"), field=f"prompt[{node_id}].template")
+    template = _require_non_empty_string(data.get("template"), field=f"prompt[{node_id}].template")
+    if template == _LEGACY_MIGRATION_STUB_PROMPT:
+        raise ValueError(
+            f"prompt[{node_id}].template still uses the retired migration-stub placeholder. "
+            "Replace it with a concrete inline template or a prompt registry reference."
+        )
+
+
+def _legacy_prompt_template(node: dict[str, Any]) -> str:
+    prompt_template = str(node.get("human_summary_template") or "").strip()
+    if prompt_template and prompt_template != _LEGACY_MIGRATION_STUB_PROMPT:
+        return prompt_template
+    label = str(node.get("label") or node.get("node_id") or "legacy node").strip()
+    kind = str(node.get("kind") or "node").strip()
+    return (
+        f"{_LEGACY_COMPATIBILITY_PROMPT} "
+        f"Treat `{label}` as the active legacy {kind} node."
+    )
 
 
 def _validate_tools(value: Any, *, node_id: str) -> None:

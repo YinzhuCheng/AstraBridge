@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .agent_orchestration_checks import (
+    compile_agent_orchestration_graph_file,
     diff_agent_orchestration_graph_files,
     dry_run_agent_orchestration_graph_file,
     lint_agent_orchestration_graph_file,
@@ -21,6 +22,10 @@ def build_parser() -> argparse.ArgumentParser:
     lint_parser = subparsers.add_parser("lint", help="Lint an agent orchestration graph file.")
     lint_parser.add_argument("graph_file")
     lint_parser.add_argument("--markdown-out", dest="markdown_out")
+
+    compile_parser = subparsers.add_parser("compile", help="Compile an agent orchestration graph file into a canonical execution plan.")
+    compile_parser.add_argument("graph_file")
+    compile_parser.add_argument("--markdown-out", dest="markdown_out")
 
     dry_run_parser = subparsers.add_parser("dry-run", help="Dry-run an agent orchestration graph file without live provider calls.")
     dry_run_parser.add_argument("graph_file")
@@ -45,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "lint":
         report = lint_agent_orchestration_graph_file(args.graph_file)
+        _maybe_write_markdown(report, args.markdown_out)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "compile":
+        report = compile_agent_orchestration_graph_file(args.graph_file)
         _maybe_write_markdown(report, args.markdown_out)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0

@@ -1,0 +1,60 @@
+name: promotion-gate-nightly
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  promotion-gate-nightly:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Sync sidecar dependencies
+        run: uv sync --locked --project apps/astrabridge-sidecar --all-groups
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/astrabridge-desktop/package-lock.json
+
+      - name: Install desktop dependencies
+        working-directory: apps/astrabridge-desktop
+        run: npm ci
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run nightly promotion gate
+        shell: pwsh
+        run: >
+          python scripts/run_promotion_gate.py
+          --mode nightly
+          --expected-commit "${{ github.sha }}"
+          --artifact-root "PRIVATE/promotion-gates"
+          --run-id "ci-nightly-${{ github.sha }}"
+
+      - name: Upload promotion gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: promotion-gate-nightly
+          path: PRIVATE/promotion-gates/
+          if-no-files-found: error

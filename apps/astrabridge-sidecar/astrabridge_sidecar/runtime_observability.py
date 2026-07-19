@@ -1,24 +1,66 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import re
 import sqlite3
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .common import WORKSPACE_STATE_DIRNAME, now_iso
-from .security import redact_sensitive
+from .common import PROJECT_SCHEMA_VERSION, WORKSPACE_STATE_DIRNAME, now_iso, write_json
+from .durable_run_store import DURABLE_RUN_STORE_SCHEMA_VERSION
+from .providers import classify_runtime_failure
+from .release_identity import release_product_version
+from .security import DESKTOP_KEY_PATH_RE, SECRET_QUERY_RE, redact_sensitive
 
 
 RUNTIME_OBSERVABILITY_SCHEMA_VERSION = "astrabridge-runtime-observability-v1"
 RUNTIME_TRACE_SCHEMA_VERSION = "astrabridge-runtime-trace-lineage-v1"
 RUNTIME_DIAGNOSTIC_SCHEMA_VERSION = "astrabridge-runtime-diagnostic-v1"
 HOST_LINEAGE_EVENT_SCHEMA_VERSION = "astrabridge-runtime-host-lineage-v1"
+RUNTIME_SUPPORT_BUNDLE_SCHEMA_VERSION = "astrabridge-runtime-support-bundle-v1"
+RUNTIME_SUPPORT_BUNDLE_SECRET_SCAN_SCHEMA_VERSION = "astrabridge-runtime-support-bundle-secret-scan-v1"
 HOST_LINEAGE_RELATIVE_PATH = Path(WORKSPACE_STATE_DIRNAME) / "desktop-sidecar" / "logs" / "sidecar-host.jsonl"
+RUNTIME_OBSERVABILITY_SNAPSHOT_RELATIVE_PATH = Path(WORKSPACE_STATE_DIRNAME) / "desktop-sidecar" / "observability" / "runtime-observability-summary.json"
+RUNTIME_SUPPORT_BUNDLE_RELATIVE_PATH = Path(WORKSPACE_STATE_DIRNAME) / "desktop-sidecar" / "support" / "runtime-support-bundle.json"
+RUNTIME_SUPPORT_BUNDLE_REPORT_RELATIVE_PATH = Path(WORKSPACE_STATE_DIRNAME) / "desktop-sidecar" / "support" / "runtime-support-bundle.md"
+RUNTIME_SUPPORT_BUNDLE_SECRET_SCAN_RELATIVE_PATH = Path(WORKSPACE_STATE_DIRNAME) / "desktop-sidecar" / "support" / "runtime-support-bundle-secret-scan.json"
 HOST_LINEAGE_TAIL_LIMIT = 400
 RECENT_DIAGNOSTIC_LIMIT = 12
 TRACE_LINEAGE_STEP_LIMIT = 24
+SUPPORT_BUNDLE_EVENT_LIMIT = 16
+RUNTIME_OBSERVABILITY_WINDOWS = (
+    ("5m", 5 * 60),
+    ("1h", 60 * 60),
+    ("24h", 24 * 60 * 60),
+)
+
+_TEXT_SUFFIXES = {
+    ".json",
+    ".jsonl",
+    ".md",
+    ".py",
+    ".txt",
+    ".toml",
+    ".yaml",
+    ".yml",
+}
+
+_SECRET_CONTENT_REGEXES = [
+    re.compile(r"Authorization\s*:\s*Bearer\s+(?!\[?REDACTED\]?|<|xxx|example)[A-Za-z0-9._~+/=-]{12,}", re.I),
+    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{20,}\b"),
+    re.compile(
+        r"\b(api[_-]?key|token|secret|password|cookie|authorization)\b\s*[:=]\s*[\"']?"
+        r"(?!\[?REDACTED\]?|<|xxx|example|dummy|fixture|unit|test|not_available|source|status|reason)"
+        r"[A-Za-z0-9._~+/=-]{12,}[\"']?",
+        re.I,
+    ),
+]
 
 RUNTIME_OBSERVABILITY_METRICS = {
     "handoff_success_rate": {
@@ -26,6 +68,7 @@ RUNTIME_OBSERVABILITY_METRICS = {
         "unit": "ratio",
         "good_threshold": 0.95,
         "warn_threshold": 0.80,
+        "minimum_sample_size": 3,
         "otel_mapping": {
             "instrument": "gauge",
             "kind": "reliability_rate",
@@ -38,6 +81,7 @@ RUNTIME_OBSERVABILITY_METRICS = {
         "unit": "ratio",
         "good_threshold": 0.05,
         "warn_threshold": 0.15,
+        "minimum_sample_size": 3,
         "otel_mapping": {
             "instrument": "gauge",
             "kind": "recovery_rate_inverse",
@@ -50,6 +94,7 @@ RUNTIME_OBSERVABILITY_METRICS = {
         "unit": "ratio",
         "good_threshold": 0.90,
         "warn_threshold": 0.70,
+        "minimum_sample_size": 2,
         "otel_mapping": {
             "instrument": "gauge",
             "kind": "recovery_success",
@@ -62,6 +107,7 @@ RUNTIME_OBSERVABILITY_METRICS = {
         "unit": "count",
         "good_threshold": 0.0,
         "warn_threshold": 1.0,
+        "minimum_sample_size": 1,
         "otel_mapping": {
             "instrument": "counter",
             "kind": "duplicate_effect",
@@ -74,6 +120,7 @@ RUNTIME_OBSERVABILITY_METRICS = {
         "unit": "ms",
         "good_threshold": 5000.0,
         "warn_threshold": 15000.0,
+        "minimum_sample_size": 2,
         "otel_mapping": {
             "instrument": "histogram",
             "kind": "latency",
@@ -86,6 +133,7 @@ RUNTIME_OBSERVABILITY_METRICS = {
         "unit": "ratio",
         "good_threshold": 0.95,
         "warn_threshold": 0.80,
+        "minimum_sample_size": 2,
         "otel_mapping": {
             "instrument": "gauge",
             "kind": "conformance_rate",
@@ -98,6 +146,7 @@ RUNTIME_OBSERVABILITY_METRICS = {
         "unit": "ms",
         "good_threshold": 120000.0,
         "warn_threshold": 300000.0,
+        "minimum_sample_size": 2,
         "otel_mapping": {
             "instrument": "histogram",
             "kind": "latency",
@@ -110,6 +159,7 @@ RUNTIME_OBSERVABILITY_METRICS = {
         "unit": "ms",
         "good_threshold": 15000.0,
         "warn_threshold": 30000.0,
+        "minimum_sample_size": 2,
         "otel_mapping": {
             "instrument": "histogram",
             "kind": "latency",
@@ -175,6 +225,8 @@ def build_runtime_observability_summary(
     current_task: dict[str, Any] | None = None,
     thread_id: str | None = None,
     external_operations: list[dict[str, Any]] | None = None,
+    configured_models: list[dict[str, Any]] | None = None,
+    selected_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     merged_events = [enrich_runtime_event(item) for item in list(events or []) if isinstance(item, dict)]
     host_events = load_host_lineage_events(workspace_root)
@@ -187,6 +239,21 @@ def build_runtime_observability_summary(
         graph_events,
         external_operations=external_operations or [],
         selected_thread_id=str(thread_id or "").strip(),
+    )
+    degraded_authority = _degraded_authority_signals(
+        all_events,
+        configured_models=configured_models or [],
+        selected_thread_id=str(thread_id or "").strip(),
+        selected_profile=selected_profile or {},
+    )
+    multimodal_quality = _multimodal_quality_signals(all_events)
+    windows = _windowed_observability(
+        all_events,
+        graph_events,
+        external_operations=external_operations or [],
+        selected_thread_id=str(thread_id or "").strip(),
+        configured_models=configured_models or [],
+        selected_profile=selected_profile or {},
     )
     return redact_sensitive(
         {
@@ -204,10 +271,120 @@ def build_runtime_observability_summary(
             "trace_lineage": latest_trace,
             "metrics": metrics,
             "slos": [_metric_slo(metric) for metric in metrics],
+            "degraded_authority": degraded_authority,
+            "multimodal_quality": multimodal_quality,
+            "windows": windows,
             "domain_counts": _diagnostic_domain_counts(diagnostics),
             "recent_diagnostics": diagnostics,
         }
     )
+
+
+def persist_runtime_observability_summary(summary: dict[str, Any], *, workspace_root: Path | None) -> str | None:
+    if workspace_root is None:
+        return None
+    target = Path(workspace_root).expanduser().resolve() / RUNTIME_OBSERVABILITY_SNAPSHOT_RELATIVE_PATH
+    write_json(target, redact_sensitive(summary))
+    return str(target)
+
+
+def build_runtime_support_bundle(
+    *,
+    observability_summary: dict[str, Any],
+    runtime_events: list[dict[str, Any]],
+    workspace_root: Path | None,
+    environment: dict[str, Any],
+    thread_status: dict[str, Any],
+    runtime_error: dict[str, Any] | None,
+    guard: dict[str, Any],
+    watchdog: dict[str, Any],
+) -> dict[str, Any]:
+    clean_events = [redact_sensitive(dict(item)) for item in list(runtime_events or []) if isinstance(item, dict)]
+    host_process_events = _support_bundle_host_process_events(clean_events)
+    bundle = {
+        "schema_version": RUNTIME_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        "generated_at": now_iso(),
+        "versions": {
+            "product_version": release_product_version(),
+            "python_version": sys.version.split()[0],
+            "observability_schema_version": RUNTIME_OBSERVABILITY_SCHEMA_VERSION,
+            "support_bundle_schema_version": RUNTIME_SUPPORT_BUNDLE_SCHEMA_VERSION,
+            "durable_run_store_schema_version": DURABLE_RUN_STORE_SCHEMA_VERSION,
+            "project_schema_version": PROJECT_SCHEMA_VERSION,
+        },
+        "paths": {
+            "workspace_root": str(Path(workspace_root).expanduser().resolve()) if workspace_root is not None else None,
+            "host_lineage": str(HOST_LINEAGE_RELATIVE_PATH).replace("\\", "/"),
+            "observability_snapshot": str(RUNTIME_OBSERVABILITY_SNAPSHOT_RELATIVE_PATH).replace("\\", "/"),
+        },
+        "fingerprints": {
+            "observability_sha256": _sha256_json(observability_summary),
+            "recent_events_sha256": _sha256_json(clean_events[-SUPPORT_BUNDLE_EVENT_LIMIT:]),
+            "trace_id": str(dict(observability_summary.get("trace_lineage") or {}).get("trace_id") or "").strip() or None,
+            "git_branch": str(dict(environment.get("git") or {}).get("branch") or "").strip() or None,
+            "git_changed_files": int(dict(environment.get("git") or {}).get("changed_files") or 0),
+        },
+        "environment": {
+            "project_name": str(environment.get("project_name") or "").strip() or None,
+            "cwd": str(environment.get("cwd") or "").strip() or None,
+            "provider": str(environment.get("provider") or "").strip() or None,
+            "model": str(environment.get("model") or "").strip() or None,
+            "effort": str(environment.get("effort") or "").strip() or None,
+            "permission": str(environment.get("permission") or "").strip() or None,
+            "git": redact_sensitive(dict(environment.get("git") or {})),
+            "mcp": redact_sensitive(dict(environment.get("mcp") or {})),
+        },
+        "health": {
+            "thread_status": redact_sensitive(dict(thread_status or {})),
+            "runtime_error": redact_sensitive(dict(runtime_error or {})) if isinstance(runtime_error, dict) else None,
+            "guard": redact_sensitive(dict(guard or {})),
+            "watchdog": redact_sensitive(dict(watchdog or {})),
+            "release_gate": {
+                "overall": all(bool(item.get("release_gate")) for item in list(observability_summary.get("slos") or [])),
+                "current_window_5m": _window_release_gate(observability_summary, "5m"),
+                "unknown_required_slos_5m": _window_unknown_required_slos(observability_summary, "5m"),
+            },
+        },
+        "capability_visibility": {
+            "degraded_authority": redact_sensitive(dict(observability_summary.get("degraded_authority") or {})),
+            "multimodal_quality": redact_sensitive(dict(observability_summary.get("multimodal_quality") or {})),
+        },
+        "events": {
+            "recent_runtime_events": [_support_bundle_event_excerpt(item) for item in clean_events[-SUPPORT_BUNDLE_EVENT_LIMIT:]],
+            "recent_diagnostics": redact_sensitive(list(observability_summary.get("recent_diagnostics") or [])),
+            "trace_lineage": redact_sensitive(dict(observability_summary.get("trace_lineage") or {})),
+        },
+        "process_ownership": {
+            "host_event_count": sum(1 for item in clean_events if str(item.get("type") or "").strip() == "host_event"),
+            "recent_host_process_events": host_process_events,
+        },
+        "recovery_guidance": _support_bundle_recovery_guidance(
+            observability_summary=observability_summary,
+            runtime_error=runtime_error,
+            guard=guard,
+            watchdog=watchdog,
+        ),
+    }
+    return redact_sensitive(bundle)
+
+
+def persist_runtime_support_bundle(bundle: dict[str, Any], *, workspace_root: Path | None) -> dict[str, Any] | None:
+    if workspace_root is None:
+        return None
+    root = Path(workspace_root).expanduser().resolve()
+    bundle_path = root / RUNTIME_SUPPORT_BUNDLE_RELATIVE_PATH
+    report_path = root / RUNTIME_SUPPORT_BUNDLE_REPORT_RELATIVE_PATH
+    scan_path = root / RUNTIME_SUPPORT_BUNDLE_SECRET_SCAN_RELATIVE_PATH
+    write_json(bundle_path, redact_sensitive(bundle))
+    report_path.write_text(render_runtime_support_bundle_report(bundle), encoding="utf-8")
+    secret_scan = scan_runtime_support_bundle_artifacts(scan_path.parent)
+    write_json(scan_path, secret_scan)
+    return {
+        "bundle_path": str(bundle_path),
+        "report_path": str(report_path),
+        "redaction_scan_path": str(scan_path),
+        "redaction_scan": secret_scan,
+    }
 
 
 def extract_trace_context(event: dict[str, Any]) -> dict[str, Any] | None:
@@ -498,6 +675,56 @@ def _build_metrics(
     return metrics
 
 
+def _windowed_observability(
+    runtime_events: list[dict[str, Any]],
+    graph_events: list[dict[str, Any]],
+    *,
+    external_operations: list[dict[str, Any]],
+    selected_thread_id: str,
+    configured_models: list[dict[str, Any]],
+    selected_profile: dict[str, Any],
+) -> list[dict[str, Any]]:
+    latest_timestamp = _latest_event_timestamp([*runtime_events, *graph_events])
+    windows: list[dict[str, Any]] = []
+    for window_id, duration_sec in RUNTIME_OBSERVABILITY_WINDOWS:
+        runtime_window = _filter_events_for_window(runtime_events, latest_timestamp=latest_timestamp, duration_sec=duration_sec)
+        graph_window = _filter_events_for_window(graph_events, latest_timestamp=latest_timestamp, duration_sec=duration_sec)
+        metrics = _build_metrics(
+            runtime_window,
+            graph_window,
+            external_operations=external_operations,
+            selected_thread_id=selected_thread_id,
+        )
+        slos = [_metric_slo(metric) for metric in metrics]
+        window_events = [*runtime_window, *graph_window]
+        windows.append(
+            {
+                "window_id": window_id,
+                "duration_sec": duration_sec,
+                "event_count": len(runtime_window) + len(graph_window),
+                "metrics": metrics,
+                "slos": slos,
+                "signals": {
+                    "degraded_authority": _degraded_authority_signals(
+                        window_events,
+                        configured_models=configured_models,
+                        selected_thread_id=selected_thread_id,
+                        selected_profile=selected_profile,
+                        recent_limit=4,
+                    ),
+                    "multimodal_quality": _multimodal_quality_signals(window_events, recent_limit=4),
+                },
+                "release_gate": all(bool(item.get("release_gate")) for item in slos),
+                "unknown_required_slos": [
+                    str(item.get("metric_id") or "")
+                    for item in slos
+                    if str(item.get("status") or "") == "unknown"
+                ],
+            }
+        )
+    return windows
+
+
 def _recent_diagnostics(
     runtime_events: list[dict[str, Any]],
     graph_events: list[dict[str, Any]],
@@ -596,14 +823,49 @@ def _metric_status(*, value: float | None, metric_id: str) -> str:
 
 def _metric_slo(metric: dict[str, Any]) -> dict[str, Any]:
     metadata = RUNTIME_OBSERVABILITY_METRICS[str(metric.get("metric_id") or "")]
+    minimum_sample_size = int(metadata.get("minimum_sample_size") or 1)
+    sample_size = int(metric.get("sample_size") or 0)
+    sample_status = "sufficient" if sample_size >= minimum_sample_size else "insufficient"
+    status = str(metric.get("status") or "unknown")
+    effective_status = status if sample_status == "sufficient" else "unknown"
     return {
         "metric_id": metric.get("metric_id"),
-        "status": metric.get("status"),
+        "status": effective_status,
+        "observed_status": status,
         "good_threshold": metadata["good_threshold"],
         "warn_threshold": metadata["warn_threshold"],
         "unit": metadata["unit"],
-        "release_gate": metric.get("status") != "fail",
+        "minimum_sample_size": minimum_sample_size,
+        "sample_size": sample_size,
+        "sample_status": sample_status,
+        "burn_rate_alert": _burn_rate_alert(metric_id=str(metric.get("metric_id") or ""), value=metric.get("value"), status=effective_status),
+        "release_gate": effective_status not in {"fail", "unknown"},
     }
+
+
+def _burn_rate_alert(*, metric_id: str, value: Any, status: str) -> dict[str, Any]:
+    if status == "unknown":
+        return {"status": "unknown", "level": "insufficient_samples", "ratio": None}
+    numeric_value = _as_float(value)
+    if numeric_value is None:
+        return {"status": "unknown", "level": "no_value", "ratio": None}
+    metadata = RUNTIME_OBSERVABILITY_METRICS[metric_id]
+    good = float(metadata["good_threshold"])
+    warn = float(metadata["warn_threshold"])
+    inverse = metric_id in {"stale_run_rate", "duplicate_effect_count", "terminal_projection_lag_p95_ms", "node_latency_p95_ms", "first_token_latency_p95_ms"}
+    if inverse:
+        span = max(warn - good, 1e-9)
+        ratio = max(0.0, (numeric_value - good) / span)
+    else:
+        span = max(good - warn, 1e-9)
+        ratio = max(0.0, (good - numeric_value) / span)
+    if ratio >= 1.0:
+        level = "page"
+    elif ratio >= 0.5:
+        level = "ticket"
+    else:
+        level = "none"
+    return {"status": "evaluated", "level": level, "ratio": round(ratio, 3)}
 
 
 def _node_latency_samples(graph_events: list[dict[str, Any]]) -> list[float]:
@@ -671,6 +933,33 @@ def _parse_iso(value: str) -> datetime | None:
         return None
 
 
+def _latest_event_timestamp(events: list[dict[str, Any]]) -> datetime | None:
+    timestamps = [_parse_iso(str(item.get("timestamp") or "")) for item in events]
+    valid = [item for item in timestamps if item is not None]
+    if not valid:
+        return None
+    return max(valid)
+
+
+def _filter_events_for_window(
+    events: list[dict[str, Any]],
+    *,
+    latest_timestamp: datetime | None,
+    duration_sec: int,
+) -> list[dict[str, Any]]:
+    if latest_timestamp is None:
+        return []
+    cutoff = latest_timestamp.timestamp() - float(duration_sec)
+    filtered: list[dict[str, Any]] = []
+    for item in events:
+        timestamp = _parse_iso(str(item.get("timestamp") or ""))
+        if timestamp is None:
+            continue
+        if timestamp.timestamp() >= cutoff:
+            filtered.append(item)
+    return filtered
+
+
 def _event_domain_guess(event: dict[str, Any]) -> str:
     diagnostic = dict(event.get("diagnostic") or {})
     if diagnostic:
@@ -678,6 +967,520 @@ def _event_domain_guess(event: dict[str, Any]) -> str:
     if str(event.get("type") or "") == "host_event":
         return "host"
     return "scheduler"
+
+
+def scan_runtime_support_bundle_artifacts(run_dir: str | Path) -> dict[str, Any]:
+    root = Path(run_dir).expanduser().resolve()
+    findings: list[dict[str, Any]] = []
+    scanned_files = 0
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in _TEXT_SUFFIXES:
+            continue
+        scanned_files += 1
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            findings.append(
+                {
+                    "severity": "error",
+                    "code": "artifact-read-failed",
+                    "path": str(path.relative_to(root)),
+                    "line": 0,
+                    "message": f"Could not read artifact for secret scan: {type(exc).__name__}",
+                    "excerpt": "",
+                }
+            )
+            continue
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            excerpt = str(redact_sensitive(line)).strip()[:180]
+            if DESKTOP_KEY_PATH_RE.search(line):
+                findings.append(
+                    {
+                        "severity": "error",
+                        "code": "desktop-key-path",
+                        "path": str(path.relative_to(root)),
+                        "line": line_number,
+                        "message": "Desktop key-file path leaked into runtime support-bundle evidence.",
+                        "excerpt": excerpt,
+                    }
+                )
+                continue
+            secret_match = False
+            for pattern in _SECRET_CONTENT_REGEXES:
+                if pattern.search(line):
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "secret-like",
+                            "path": str(path.relative_to(root)),
+                            "line": line_number,
+                            "message": "Secret-like content found in runtime support-bundle evidence.",
+                            "excerpt": excerpt,
+                        }
+                    )
+                    secret_match = True
+                    break
+            if secret_match:
+                continue
+            for match in SECRET_QUERY_RE.finditer(line):
+                value = str(match.group(2) or "")
+                if not _is_redacted_or_placeholder(value):
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "secret-query",
+                            "path": str(path.relative_to(root)),
+                            "line": line_number,
+                            "message": "Secret-like query parameter found in runtime support-bundle evidence.",
+                            "excerpt": excerpt,
+                        }
+                    )
+    return {
+        "schema_version": RUNTIME_SUPPORT_BUNDLE_SECRET_SCAN_SCHEMA_VERSION,
+        "status": "pass" if not findings else "fail",
+        "scanned_root": str(root),
+        "scanned_files": scanned_files,
+        "finding_count": len(findings),
+        "findings": findings,
+    }
+
+
+def render_runtime_support_bundle_report(bundle: dict[str, Any]) -> str:
+    lines = [
+        "# Runtime Support Bundle",
+        "",
+        f"- Generated: `{bundle.get('generated_at')}`",
+        f"- Product version: `{dict(bundle.get('versions') or {}).get('product_version')}`",
+        f"- Provider/model: `{dict(bundle.get('environment') or {}).get('provider')}` / `{dict(bundle.get('environment') or {}).get('model')}`",
+        f"- Git branch: `{dict(dict(bundle.get('environment') or {}).get('git') or {}).get('branch')}`",
+        "",
+        "## Health",
+        "",
+        f"- Thread status: `{dict(dict(bundle.get('health') or {}).get('thread_status') or {}).get('type')}`",
+        f"- Guard level: `{dict(dict(bundle.get('health') or {}).get('guard') or {}).get('level')}`",
+        f"- Watchdog level: `{dict(dict(bundle.get('health') or {}).get('watchdog') or {}).get('level')}`",
+        f"- Release gate 5m: `{dict(dict(bundle.get('health') or {}).get('release_gate') or {}).get('current_window_5m')}`",
+        "",
+        "## Capability Visibility",
+        "",
+        f"- Structured tool status: `{dict(dict(dict(bundle.get('capability_visibility') or {}).get('degraded_authority') or {}).get('selected_route') or {}).get('structured_tool_status')}`",
+        f"- MCP tool status: `{dict(dict(dict(bundle.get('capability_visibility') or {}).get('degraded_authority') or {}).get('selected_route') or {}).get('mcp_tool_status')}`",
+        f"- Multimodal no-final-answer incidents: `{dict(dict(bundle.get('capability_visibility') or {}).get('multimodal_quality') or {}).get('no_final_answer_incident_count')}`",
+        "",
+        "## Recovery Guidance",
+        "",
+    ]
+    for item in list(bundle.get("recovery_guidance") or []):
+        lines.append(f"- {item}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _degraded_authority_signals(
+    events: list[dict[str, Any]],
+    *,
+    configured_models: list[dict[str, Any]],
+    selected_thread_id: str,
+    selected_profile: dict[str, Any],
+    recent_limit: int = 6,
+) -> dict[str, Any]:
+    model_index = _configured_model_index(configured_models)
+    turn_events = [item for item in events if str(item.get("type") or "").strip() == "turn_started_request"]
+    route_checks: list[dict[str, Any]] = []
+    for event in turn_events:
+        route_state = _route_authority_state_for_event(event, model_index)
+        route_checks.append(
+            {
+                "timestamp": str(event.get("timestamp") or ""),
+                "thread_id": str(event.get("thread_id") or "").strip() or None,
+                "turn_id": str(event.get("turn_id") or "").strip() or None,
+                **route_state,
+            }
+        )
+    degraded_turns = [item for item in route_checks if bool(item.get("downgraded"))]
+    structured_warning_turns = [item for item in route_checks if str(item.get("structured_tool_status") or "") == "warning_gated"]
+    mcp_warning_turns = [item for item in route_checks if str(item.get("mcp_tool_status") or "") == "warning_gated"]
+    unknown_turns = [item for item in route_checks if str(item.get("route_state") or "") == "unknown"]
+    selected_route = _selected_route_authority_state(
+        route_checks,
+        model_index=model_index,
+        selected_thread_id=selected_thread_id,
+        selected_profile=selected_profile,
+    )
+    return {
+        "turns_evaluated": len(route_checks),
+        "degraded_turns": len(degraded_turns),
+        "warning_gated_structured_turns": len(structured_warning_turns),
+        "warning_gated_mcp_turns": len(mcp_warning_turns),
+        "unknown_turns": len(unknown_turns),
+        "route_downgrade_rate": _ratio_or_none(len(degraded_turns), len(route_checks)),
+        "selected_route": selected_route,
+        "recent_exposures": sorted(
+            [
+                {
+                    "timestamp": item.get("timestamp"),
+                    "thread_id": item.get("thread_id"),
+                    "turn_id": item.get("turn_id"),
+                    "provider_id": item.get("provider_id"),
+                    "model_id": item.get("model_id"),
+                    "authority_tier": item.get("authority_tier"),
+                    "structured_tool_status": item.get("structured_tool_status"),
+                    "mcp_tool_status": item.get("mcp_tool_status"),
+                    "parallel_tool_call_status": item.get("parallel_tool_call_status"),
+                    "command_execution_status": item.get("command_execution_status"),
+                    "ui_warnings": item.get("ui_warnings"),
+                }
+                for item in degraded_turns
+            ],
+            key=lambda item: str(item.get("timestamp") or ""),
+            reverse=True,
+        )[:recent_limit],
+    }
+
+
+def _multimodal_quality_signals(
+    events: list[dict[str, Any]],
+    *,
+    recent_limit: int = 6,
+) -> dict[str, Any]:
+    multimodal_turns: dict[tuple[str, str], dict[str, Any]] = {}
+    for event in events:
+        if str(event.get("type") or "").strip() != "turn_started_request":
+            continue
+        thread_id = str(event.get("thread_id") or "").strip()
+        turn_id = str(event.get("turn_id") or "").strip()
+        diagnostics = dict(event.get("attachment_diagnostics") or {})
+        if not thread_id or not turn_id:
+            continue
+        image_count = int(diagnostics.get("image_count") or 0)
+        route = dict(diagnostics.get("route") or {})
+        if image_count <= 0 and int(route.get("local_image_items") or 0) <= 0:
+            continue
+        runtime = dict(event.get("runtime") or {})
+        multimodal_turns[(thread_id, turn_id)] = {
+            "timestamp": str(event.get("timestamp") or ""),
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "provider_id": str(runtime.get("provider_id") or route.get("provider_id") or "").strip() or None,
+            "model_id": str(runtime.get("model") or route.get("model_id") or "").strip() or None,
+            "image_count": image_count,
+            "local_image_items": int(route.get("local_image_items") or 0),
+            "context_mode": str(route.get("context_mode") or "").strip() or None,
+        }
+    incidents: list[dict[str, Any]] = []
+    seen_incidents: set[tuple[str, str, str]] = set()
+    for event in events:
+        incident = _multimodal_incident_from_event(event)
+        if incident is None:
+            continue
+        key = (str(incident.get("thread_id") or ""), str(incident.get("turn_id") or ""))
+        if key not in multimodal_turns:
+            continue
+        dedupe_key = (
+            key[0],
+            key[1],
+            str(incident.get("category") or ""),
+        )
+        if dedupe_key in seen_incidents:
+            continue
+        seen_incidents.add(dedupe_key)
+        incidents.append({**multimodal_turns[key], **incident})
+    no_final_answer = [item for item in incidents if str(item.get("category") or "") == "semantic_no_output"]
+    timeout_incidents = [
+        item
+        for item in incidents
+        if str(item.get("category") or "") in {"provider_timeout", "transport_failure"}
+    ]
+    return {
+        "multimodal_turns": len(multimodal_turns),
+        "incident_turns": len(incidents),
+        "no_final_answer_incident_count": len(no_final_answer),
+        "timeout_incident_count": len(timeout_incidents),
+        "incident_rate": _ratio_or_none(len(incidents), len(multimodal_turns)),
+        "recent_incidents": sorted(incidents, key=lambda item: str(item.get("timestamp") or ""), reverse=True)[:recent_limit],
+    }
+
+
+def _multimodal_incident_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    if str(event.get("type") or "").strip() != "notification":
+        return None
+    method = str(event.get("method") or "").strip()
+    params = dict(event.get("params") or {})
+    thread_id = str(params.get("threadId") or "").strip()
+    turn_id = str(params.get("turnId") or "").strip()
+    message = ""
+    provider_id = ""
+    model_id = ""
+    if method == "error":
+        error = params.get("error") or {}
+        message = str(error.get("message") or error).strip()
+    elif method == "turn/completed":
+        turn = dict(params.get("turn") or {})
+        if str(turn.get("status") or "").strip().lower() != "failed":
+            return None
+        turn_id = str(turn.get("id") or turn_id).strip()
+        error = turn.get("error") or {}
+        message = str(error.get("message") or error).strip()
+        provider_id = str(turn.get("provider_id") or turn.get("providerId") or "").strip()
+        model_id = str(turn.get("model") or "").strip()
+    else:
+        return None
+    if not thread_id or not turn_id or not message:
+        return None
+    notice = classify_runtime_failure(message, current_provider=provider_id or None, current_model=model_id or None).to_payload()
+    category = str(notice.get("category") or "").strip()
+    if category not in {"semantic_no_output", "provider_timeout", "transport_failure"}:
+        return None
+    return {
+        "timestamp": str(event.get("timestamp") or ""),
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "category": category,
+        "summary": str(notice.get("summary") or "").strip(),
+        "recommended_action": str(notice.get("recommended_action") or "").strip() or None,
+        "provider_id": provider_id or None,
+        "model_id": model_id or None,
+    }
+
+
+def _selected_route_authority_state(
+    route_checks: list[dict[str, Any]],
+    *,
+    model_index: dict[tuple[str, str], dict[str, Any]],
+    selected_thread_id: str,
+    selected_profile: dict[str, Any],
+) -> dict[str, Any] | None:
+    if selected_thread_id:
+        for item in sorted(route_checks, key=lambda entry: str(entry.get("timestamp") or ""), reverse=True):
+            if str(item.get("thread_id") or "") == selected_thread_id:
+                return _selected_route_projection(item)
+    if route_checks:
+        latest = sorted(route_checks, key=lambda entry: str(entry.get("timestamp") or ""), reverse=True)[0]
+        return _selected_route_projection(latest)
+    provider_id = str(selected_profile.get("provider_id") or "").strip()
+    model_id = str(selected_profile.get("model") or "").strip()
+    if not provider_id and not model_id:
+        return None
+    event = {"runtime": {"provider_id": provider_id, "model": model_id}}
+    return _selected_route_projection(_route_authority_state_for_event(event, model_index))
+
+
+def _selected_route_projection(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider_id": item.get("provider_id"),
+        "model_id": item.get("model_id"),
+        "authority_tier": item.get("authority_tier"),
+        "authority_reason": item.get("authority_reason"),
+        "structured_tool_status": item.get("structured_tool_status"),
+        "mcp_tool_status": item.get("mcp_tool_status"),
+        "parallel_tool_call_status": item.get("parallel_tool_call_status"),
+        "command_execution_status": item.get("command_execution_status"),
+        "route_state": item.get("route_state"),
+        "downgraded": bool(item.get("downgraded")),
+        "ui_warnings": list(item.get("ui_warnings") or []),
+    }
+
+
+def _route_authority_state_for_event(
+    event: dict[str, Any],
+    model_index: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    runtime = dict(event.get("runtime") or {})
+    provider_id = str(runtime.get("provider_id") or event.get("provider_id") or "").strip()
+    model_id = str(runtime.get("model") or event.get("model") or "").strip()
+    record = _lookup_model_record(model_index, provider_id=provider_id, model_id=model_id)
+    if record is None:
+        return {
+            "provider_id": provider_id or None,
+            "model_id": model_id or None,
+            "authority_tier": None,
+            "authority_reason": None,
+            "structured_tool_status": "unknown",
+            "mcp_tool_status": "unknown",
+            "parallel_tool_call_status": "unknown",
+            "command_execution_status": "unknown",
+            "route_state": "unknown",
+            "downgraded": False,
+            "ui_warnings": [],
+        }
+    authority_tier = str(record.get("authority_tier") or "").strip().upper() or None
+    structured_tool_status = "verified" if authority_tier == "A" else "warning_gated"
+    supports_mcp_tools = bool(record.get("supports_mcp_tools", False))
+    mcp_policy = str(record.get("mcp_tool_call_policy") or "").strip().lower()
+    mcp_smoke_status = str(record.get("mcp_smoke_status") or "").strip().lower()
+    if not supports_mcp_tools:
+        mcp_tool_status = "unsupported"
+    elif mcp_policy == "verified" and (mcp_smoke_status == "verified" or mcp_smoke_status.startswith("pass")):
+        mcp_tool_status = "verified"
+    else:
+        mcp_tool_status = "warning_gated"
+    parallel_tool_call_status = str(record.get("parallel_tool_call_status") or "").strip() or "unknown"
+    command_execution_status = str(record.get("command_execution_status") or "").strip() or "unknown"
+    downgraded = (
+        structured_tool_status == "warning_gated"
+        or mcp_tool_status == "warning_gated"
+        or parallel_tool_call_status in {"serial_only", "disabled"}
+        or command_execution_status in {"partial_no_command_execution", "completed_without_command_execution"}
+    )
+    return {
+        "provider_id": provider_id or None,
+        "model_id": model_id or None,
+        "authority_tier": authority_tier,
+        "authority_reason": str(record.get("authority_reason") or "").strip() or None,
+        "structured_tool_status": structured_tool_status,
+        "mcp_tool_status": mcp_tool_status,
+        "parallel_tool_call_status": parallel_tool_call_status,
+        "command_execution_status": command_execution_status,
+        "route_state": "known",
+        "downgraded": downgraded,
+        "ui_warnings": list(record.get("ui_warnings") or record.get("authority_ui_warnings") or []),
+    }
+
+
+def _configured_model_index(configured_models: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in list(configured_models or []):
+        if not isinstance(item, dict):
+            continue
+        provider_id = str(item.get("provider_id") or "").strip()
+        model_id = str(item.get("model") or "").strip()
+        combined_id = str(item.get("id") or "").strip()
+        if combined_id and (not provider_id or not model_id) and "/" in combined_id:
+            provider_part, model_part = combined_id.split("/", 1)
+            provider_id = provider_id or provider_part.strip()
+            model_id = model_id or model_part.strip()
+        if not provider_id or not model_id:
+            continue
+        index[(provider_id, model_id)] = dict(item)
+    return index
+
+
+def _lookup_model_record(
+    model_index: dict[tuple[str, str], dict[str, Any]],
+    *,
+    provider_id: str,
+    model_id: str,
+) -> dict[str, Any] | None:
+    if not provider_id or not model_id:
+        return None
+    return dict(model_index.get((provider_id, model_id)) or {}) or None
+
+
+def _ratio_or_none(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(float(numerator) / float(denominator), 4)
+
+
+def _support_bundle_host_process_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    process_events: list[dict[str, Any]] = []
+    for item in sorted(events, key=lambda event: str(event.get("timestamp") or ""), reverse=True):
+        if str(item.get("type") or "").strip() != "host_event":
+            continue
+        process_events.append(
+            {
+                "timestamp": str(item.get("timestamp") or ""),
+                "instance_id": str(item.get("instance_id") or "").strip() or None,
+                "boot_id": str(item.get("boot_id") or item.get("host_boot_id") or "").strip() or None,
+                "pid": _as_int(item.get("pid")),
+                "host_event_type": str(item.get("host_event_type") or "").strip() or None,
+                "status": str(item.get("status") or "").strip() or None,
+            }
+        )
+        if len(process_events) >= 6:
+            break
+    return process_events
+
+
+def _support_bundle_recovery_guidance(
+    *,
+    observability_summary: dict[str, Any],
+    runtime_error: dict[str, Any] | None,
+    guard: dict[str, Any],
+    watchdog: dict[str, Any],
+) -> list[str]:
+    guidance: list[str] = []
+    if isinstance(runtime_error, dict) and runtime_error:
+        guidance.append(
+            f"Runtime error category `{runtime_error.get('category')}` recommends `{runtime_error.get('recommended_action')}`."
+        )
+        for item in list(runtime_error.get("recommended_actions") or [])[:3]:
+            if isinstance(item, dict) and str(item.get("label") or "").strip():
+                guidance.append(f"{item.get('label')}: {str(item.get('reason') or '').strip()}")
+    selected_route = dict(dict(observability_summary.get("degraded_authority") or {}).get("selected_route") or {})
+    if bool(selected_route.get("downgraded")):
+        guidance.append(
+            "Selected route is downgraded or warning-gated; keep approvals and verification enabled until a verified capability lane is available."
+        )
+    multimodal = dict(observability_summary.get("multimodal_quality") or {})
+    if int(multimodal.get("no_final_answer_incident_count") or 0) > 0:
+        guidance.append(
+            "Multimodal attachment turns have produced no-visible-final-answer incidents; retry with simpler fixtures or switch to a verified image-capable route."
+        )
+    if str(guard.get("level") or "") in {"warning", "danger", "pause"}:
+        guidance.append(f"Context guard is `{guard.get('level')}`; follow `{guard.get('recommended_action')}` before the next long turn.")
+    if str(watchdog.get("level") or "") in {"warning", "danger", "pause"}:
+        guidance.append(f"Watchdog is `{watchdog.get('level')}` after `{watchdog.get('idle_seconds')}` idle seconds; use `{watchdog.get('recommended_action')}` if the lane remains stalled.")
+    if not guidance:
+        guidance.append("No immediate recovery action is required; use this bundle as the redacted baseline before escalation or release-gate triage.")
+    return guidance
+
+
+def _support_bundle_event_excerpt(event: dict[str, Any]) -> dict[str, Any]:
+    trace = dict(event.get("trace") or {})
+    diagnostic = dict(event.get("diagnostic") or {})
+    params = dict(event.get("params") or {}) if isinstance(event.get("params"), dict) else {}
+    item = params.get("item") if isinstance(params, dict) else None
+    return redact_sensitive(
+        {
+            "timestamp": str(event.get("timestamp") or ""),
+            "type": str(event.get("type") or "").strip() or None,
+            "method": str(event.get("method") or "").strip() or None,
+            "event_type": str(event.get("event_type") or "").strip() or None,
+            "thread_id": str(event.get("thread_id") or params.get("threadId") or "").strip() or None,
+            "turn_id": str(event.get("turn_id") or params.get("turnId") or "").strip() or None,
+            "host_event_type": str(event.get("host_event_type") or "").strip() or None,
+            "summary": str(event.get("summary") or event.get("message") or event.get("error") or diagnostic.get("summary") or "")[:220] or None,
+            "trace_id": str(trace.get("trace_id") or "").strip() or None,
+            "run_id": str(trace.get("run_id") or "").strip() or None,
+            "node_id": str(trace.get("node_id") or "").strip() or None,
+            "item_type": str(dict(item or {}).get("type") or "").strip() or None if isinstance(item, dict) else None,
+            "diagnostic_domain": str(diagnostic.get("domain") or "").strip() or None,
+            "diagnostic_severity": str(diagnostic.get("severity") or "").strip() or None,
+        }
+    )
+
+
+def _window_release_gate(summary: dict[str, Any], window_id: str) -> bool | None:
+    for item in list(summary.get("windows") or []):
+        if str(dict(item).get("window_id") or "") == window_id:
+            return bool(dict(item).get("release_gate"))
+    return None
+
+
+def _window_unknown_required_slos(summary: dict[str, Any], window_id: str) -> list[str]:
+    for item in list(summary.get("windows") or []):
+        if str(dict(item).get("window_id") or "") == window_id:
+            return [str(value) for value in list(dict(item).get("unknown_required_slos") or []) if str(value).strip()]
+    return []
+
+
+def _sha256_json(payload: Any) -> str:
+    rendered = json.dumps(redact_sensitive(payload), ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _is_redacted_or_placeholder(value: str) -> bool:
+    normalized = value.strip().strip("\"'").lower()
+    return normalized in {
+        "[redacted]",
+        "<redacted>",
+        "example",
+        "dummy",
+        "fixture",
+        "test",
+        "unit",
+        "not_available",
+    }
 
 
 def _as_int(value: Any) -> int | None:

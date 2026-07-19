@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 import socket
@@ -9,6 +10,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from ..common import now_iso, write_json
 from ..model_catalog import default_catalog_sources, normalize_provider_source_record
@@ -23,6 +25,21 @@ DEFAULT_DISCOVERY_TIMEOUT_SEC = 6
 DEFAULT_DISCOVERY_MAX_BYTES_PER_SOURCE = 120_000
 DEFAULT_DISCOVERY_MAX_EXCERPT_CHARS = 1_200
 DEFAULT_DISCOVERY_MAX_PARSER_EXCERPT_CHARS = 20_000
+ALLOWED_DISCOVERY_SCHEMES = frozenset({"http", "https"})
+ALLOWED_DISCOVERY_TEXT_CONTENT_TYPES = (
+    "text/",
+    "application/json",
+    "application/problem+json",
+    "application/ld+json",
+    "application/xhtml+xml",
+    "application/xml",
+    "text/xml",
+    "application/yaml",
+    "text/yaml",
+    "application/x-yaml",
+    "application/openapi+json",
+    "application/openapi+xml",
+)
 FetchResult = dict[str, Any]
 FetchFunction = Callable[[str, int, int], FetchResult]
 
@@ -61,14 +78,18 @@ def run_agentic_update_discovery(
     if limit_warning:
         warnings.append(limit_warning)
     seen_urls: set[str] = set()
+    seen_source_identity_hashes: set[str] = set()
     active_fetcher = fetcher or _default_fetch
     for source in source_records:
         url = str(source.get("url") or "").strip()
-        source_id = str(source.get("source_id") or "").strip()
         if url in seen_urls:
             pack_records.append(_discovery_skip_record(source, classification="duplicate", reason="Duplicate source URL in run."))
             continue
         seen_urls.add(url)
+        blocked = _blocked_source_url_record(source)
+        if blocked is not None:
+            pack_records.append(blocked)
+            continue
         if str(source.get("trust_level") or "") != "official":
             pack_records.append(
                 _discovery_skip_record(
@@ -83,18 +104,18 @@ def run_agentic_update_discovery(
             if fixture is None:
                 pack_records.append(_discovery_skip_record(source, classification="fixture_missing", reason="No fixture was provided for this source."))
                 continue
-            pack_records.append(
-                _result_record_from_fetch(
-                    source,
-                    _coerce_fixture_fetch_result(fixture, source),
-                    mode=mode,
-                    limits=limits,
-                )
+            record = _result_record_from_fetch(
+                source,
+                _coerce_fixture_fetch_result(fixture, source),
+                mode=mode,
+                limits=limits,
             )
+            pack_records.append(_dedupe_source_identity(record, seen_source_identity_hashes))
             continue
         try:
             fetched = active_fetcher(url, limits["timeout_sec"], limits["max_bytes_per_source"])
-            pack_records.append(_result_record_from_fetch(source, fetched, mode=mode, limits=limits))
+            record = _result_record_from_fetch(source, fetched, mode=mode, limits=limits)
+            pack_records.append(_dedupe_source_identity(record, seen_source_identity_hashes))
         except Exception as exc:  # noqa: BLE001
             pack_records.append(_discovery_error_record(source, exc))
     summary = _discovery_summary(pack_records)
@@ -175,6 +196,8 @@ def _default_fetch(url: str, timeout_sec: int, max_bytes: int) -> FetchResult:
                 "url": str(getattr(response, "url", url) or url),
                 "status_code": getattr(response, "status", None),
                 "content_type": str(response.headers.get("Content-Type") or ""),
+                "content_encoding": str(response.headers.get("Content-Encoding") or ""),
+                "content_length": _optional_int(response.headers.get("Content-Length")),
                 "body": body[:max_bytes],
                 "body_truncated": len(body) > max_bytes,
                 "started_at": started,
@@ -188,6 +211,8 @@ def _default_fetch(url: str, timeout_sec: int, max_bytes: int) -> FetchResult:
             "url": url,
             "status_code": exc.code,
             "content_type": str(exc.headers.get("Content-Type") if exc.headers else ""),
+            "content_encoding": str(exc.headers.get("Content-Encoding") if exc.headers else ""),
+            "content_length": _optional_int(exc.headers.get("Content-Length")) if exc.headers else None,
             "body": body[:max_bytes],
             "body_truncated": len(body) > max_bytes,
             "started_at": started,
@@ -218,7 +243,10 @@ def _result_record_from_fetch(source: dict[str, Any], fetched: FetchResult, *, m
         "status_label": classification,
         "status_code": status_code,
         "content_type": str(fetched.get("content_type") or ""),
+        "content_encoding": str(fetched.get("content_encoding") or ""),
+        "content_length": _optional_int(fetched.get("content_length")),
         "content_hash": f"sha256:{hashlib.sha256(body).hexdigest()}",
+        "source_identity_hash": _source_identity_hash(source, fetched, body),
         "content_bytes": len(body),
         "body_truncated": bool(fetched.get("body_truncated", False)),
         "excerpt": excerpt,
@@ -238,7 +266,11 @@ def _result_record_from_fetch(source: dict[str, Any], fetched: FetchResult, *, m
     }
     if fetched.get("error_summary"):
         record["warnings"].append(str(fetched.get("error_summary"))[:240])
-    return record
+    boundary_issue = _boundary_issue(source, fetched, record, limits=limits)
+    if boundary_issue is None:
+        return record
+    classification, reason = boundary_issue
+    return _mark_record_blocked(record, classification=classification, reason=reason)
 
 
 def _discovery_skip_record(source: dict[str, Any], *, classification: str, reason: str) -> dict[str, Any]:
@@ -255,7 +287,10 @@ def _discovery_skip_record(source: dict[str, Any], *, classification: str, reaso
         "status_label": classification,
         "status_code": None,
         "content_type": None,
+        "content_encoding": None,
+        "content_length": None,
         "content_hash": None,
+        "source_identity_hash": None,
         "content_bytes": 0,
         "body_truncated": False,
         "excerpt": "",
@@ -283,6 +318,84 @@ def _discovery_error_record(source: dict[str, Any], exc: Exception) -> dict[str,
     return record
 
 
+def _blocked_source_url_record(source: dict[str, Any]) -> dict[str, Any] | None:
+    url = str(source.get("url") or "").strip()
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return _discovery_skip_record(source, classification="invalid_source_url", reason="Source URL could not be parsed.")
+    if parsed.scheme.lower() not in ALLOWED_DISCOVERY_SCHEMES:
+        return _discovery_skip_record(source, classification="unsupported_scheme", reason="Discovery sources must use http or https URLs.")
+    host = str(parsed.hostname or "").strip()
+    if not host:
+        return _discovery_skip_record(source, classification="invalid_source_url", reason="Source URL must include a hostname.")
+    if _is_private_or_local_host(host):
+        return _discovery_skip_record(source, classification="private_address_blocked", reason="Discovery source resolves to a private or local address.")
+    return None
+
+
+def _boundary_issue(
+    source: dict[str, Any],
+    fetched: FetchResult,
+    record: dict[str, Any],
+    *,
+    limits: dict[str, int],
+) -> tuple[str, str] | None:
+    if not bool(record.get("ok")):
+        return None
+    requested_url = str(source.get("url") or "").strip()
+    final_url = str(fetched.get("url") or requested_url or "").strip()
+    try:
+        requested = urlsplit(requested_url)
+        final = urlsplit(final_url)
+    except ValueError:
+        return ("invalid_final_url", "Fetched response returned an invalid final URL.")
+    requested_host = str(requested.hostname or "").strip()
+    final_host = str(final.hostname or "").strip()
+    if final_host and _is_private_or_local_host(final_host):
+        return ("private_address_blocked", "Discovery response resolved to a private or local final address.")
+    if requested_host and final_host and requested_host.lower() != final_host.lower():
+        return ("wrong_host_response", "Discovery response host does not match the requested official source host.")
+    if final_url and requested_url and _normalized_url_identity(final_url) != _normalized_url_identity(requested_url):
+        return ("redirect_blocked", "Discovery responses must not redirect away from the requested source URL.")
+    content_encoding = str(fetched.get("content_encoding") or "").strip().lower()
+    if content_encoding and content_encoding not in {"identity", "none"}:
+        return ("decompression_blocked", "Compressed discovery responses are rejected to avoid decompression abuse.")
+    content_length = _optional_int(fetched.get("content_length"))
+    if bool(fetched.get("body_truncated")) or (content_length is not None and content_length > limits["max_bytes_per_source"]):
+        return ("oversized_response", "Discovery response exceeded the configured byte limit.")
+    if not _content_type_allowed(str(record.get("content_type") or "")):
+        return ("wrong_content_type", "Discovery response content type is not an allowed textual update source.")
+    return None
+
+
+def _mark_record_blocked(record: dict[str, Any], *, classification: str, reason: str) -> dict[str, Any]:
+    blocked = dict(record)
+    blocked["ok"] = False
+    blocked["classification"] = classification
+    blocked["status_label"] = classification
+    blocked["promotable"] = False
+    blocked["requires_manual_review"] = True
+    warnings = list(blocked.get("warnings") or [])
+    warnings.append(reason)
+    blocked["warnings"] = warnings
+    return blocked
+
+
+def _dedupe_source_identity(record: dict[str, Any], seen_identities: set[str]) -> dict[str, Any]:
+    identity_hash = str(record.get("source_identity_hash") or "").strip()
+    if not bool(record.get("ok")) or not identity_hash:
+        return record
+    if identity_hash in seen_identities:
+        return _mark_record_blocked(
+            record,
+            classification="replayed_source",
+            reason="Source identity was already observed earlier in this discovery run.",
+        )
+    seen_identities.add(identity_hash)
+    return record
+
+
 def _classify_fetch_exception(exc: Exception) -> str:
     text = str(exc).lower()
     if isinstance(exc, (TimeoutError, socket.timeout)) or "timed out" in text or "timeout" in text:
@@ -307,6 +420,8 @@ def _coerce_fixture_fetch_result(fixture: Any, source: dict[str, Any]) -> FetchR
             "url": payload.get("url") or source.get("url"),
             "status_code": payload.get("status_code", 200),
             "content_type": payload.get("content_type") or "text/plain; charset=utf-8",
+            "content_encoding": payload.get("content_encoding") or "",
+            "content_length": payload.get("content_length"),
             "body": body,
             "body_truncated": bool(payload.get("body_truncated", False)),
             "started_at": payload.get("started_at") or now_iso(),
@@ -317,6 +432,8 @@ def _coerce_fixture_fetch_result(fixture: Any, source: dict[str, Any]) -> FetchR
         "url": source.get("url"),
         "status_code": 200,
         "content_type": "text/plain; charset=utf-8",
+        "content_encoding": "",
+        "content_length": None,
         "body": fixture,
         "body_truncated": False,
         "started_at": now_iso(),
@@ -393,6 +510,56 @@ def _safe_url(url: str) -> str:
     return SECRET_QUERY_RE.sub(r"\1[REDACTED]", url)
 
 
+def _content_type_allowed(content_type: str) -> bool:
+    base = str(content_type or "").split(";", 1)[0].strip().lower()
+    if not base:
+        return False
+    return any(base == allowed or base.startswith(allowed) for allowed in ALLOWED_DISCOVERY_TEXT_CONTENT_TYPES)
+
+
+def _source_identity_hash(source: dict[str, Any], fetched: FetchResult, body: bytes) -> str:
+    digest = hashlib.sha256(body).hexdigest()
+    provider_id = str(source.get("provider_id") or "").strip().lower()
+    source_type = str(source.get("source_type") or "").strip().lower()
+    return hashlib.sha256(f"{provider_id}|{source_type}|{digest}".encode("utf-8")).hexdigest()
+
+
+def _normalized_url_identity(url: str) -> str:
+    try:
+        parsed = urlsplit(url.strip())
+    except ValueError:
+        return str(url or "").strip()
+    scheme = parsed.scheme.lower()
+    host = str(parsed.hostname or "").lower()
+    port = parsed.port
+    netloc = host if port is None else f"{host}:{port}"
+    path = parsed.path or "/"
+    query = parsed.query or ""
+    return f"{scheme}://{netloc}{path}?{query}"
+
+
+def _is_private_or_local_host(host: str) -> bool:
+    lowered = str(host or "").strip().lower()
+    if not lowered:
+        return True
+    if lowered in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(lowered)
+    except ValueError:
+        return lowered.endswith(".local")
+    return any(
+        (
+            ip.is_private,
+            ip.is_loopback,
+            ip.is_link_local,
+            ip.is_multicast,
+            ip.is_reserved,
+            ip.is_unspecified,
+        )
+    )
+
+
 def _index_record(record: dict[str, Any]) -> dict[str, Any]:
     return {
         key: record.get(key)
@@ -406,7 +573,10 @@ def _index_record(record: dict[str, Any]) -> dict[str, Any]:
             "classification",
             "status_code",
             "content_type",
+            "content_encoding",
+            "content_length",
             "content_hash",
+            "source_identity_hash",
             "content_bytes",
             "body_truncated",
             "excerpt_chars",

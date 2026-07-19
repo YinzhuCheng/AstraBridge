@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import time
@@ -378,6 +379,2238 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
                 )
 
             self.assertEqual(calls, {"worker": 0, "turn": 0})
+
+    def test_live_graph_local_executor_runs_without_provider_turn_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Graph executor preflight", root / "graph-executor-preflight.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Graph executor preflight task", thread_id="thread-parent")
+                graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+                graph["nodes"][0]["kind"] = "artifact_source"
+                graph["nodes"][0]["role"] = "custom"
+                graph["nodes"][0].setdefault("ui_hints", {}).setdefault("node_type_config", {})["artifact_uri"] = "workspace://PRIVATE/input.json"
+                graph["nodes"][0]["ui_hints"]["node_type_config"]["artifact_kind"] = "structured_json"
+                graph["nodes"][0]["provider_id"] = None
+                graph["nodes"][0]["model_id"] = None
+                graph["nodes"][0]["human_summary_template"] = ""
+                graph["nodes"][0]["execution_policy"]["allow_provider_calls"] = False
+                graph["nodes"][0]["output_contract"]["machine_result_schema"] = {"type": "object"}
+                (workspace / "PRIVATE" / "input.json").write_text('{"message":"hello"}', encoding="utf-8")
+                tasks.save_graph_definition({"graph": graph})
+                runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+                tasks.dry_run_graph = lambda payload, profiles_snapshot=None, configured_models=None: {  # type: ignore[method-assign]  # noqa: ARG005
+                    "dry_run": {"overall_status": "pass", "graph_result": {"reasons": []}}
+                }
+                calls = {"turn": 0}
+                runtime.start_turn = lambda profile, **payload: calls.__setitem__("turn", calls["turn"] + 1)  # type: ignore[method-assign]  # noqa: ARG005
+
+                result = runtime.execute_task_graph_run(
+                    {"graph_id": graph["graph_id"], "budget": {"limits": {"total_tokens": 80000}}}
+                )
+
+                run_ref = result["live_run"]["run_ref"]
+                self.assertEqual(
+                    result["live_run"]["run_status"],
+                    "completed",
+                    msg=json.dumps(run_ref, ensure_ascii=False, indent=2),
+                )
+                self.assertEqual(run_ref["node_status_counts"]["completed"], 1)
+                self.assertEqual(calls["turn"], 0)
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_live_graph_mcp_resource_executor_runs_without_provider_turn_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Graph mcp resource executor", root / "graph-mcp-resource-executor.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Graph mcp resource executor task", thread_id="thread-parent")
+                graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+                graph["nodes"][0]["kind"] = "mcp_resource"
+                graph["nodes"][0]["role"] = "custom"
+                graph["nodes"][0]["provider_id"] = None
+                graph["nodes"][0]["model_id"] = None
+                graph["nodes"][0]["human_summary_template"] = ""
+                graph["nodes"][0]["execution_policy"]["allow_provider_calls"] = False
+                graph["nodes"][0]["output_contract"]["machine_result_schema"] = {
+                    "type": "object",
+                    "required": ["resource", "contents"],
+                    "properties": {
+                        "resource": {"type": "string"},
+                        "contents": {"type": "array"},
+                    },
+                }
+                graph["nodes"][0].setdefault("ui_hints", {}).setdefault("node_type_config", {})["server"] = "astrabridge_probe_fixture"
+                graph["nodes"][0]["ui_hints"]["node_type_config"]["resource"] = "memory://fixture/readme"
+                graph["nodes"][0]["tools"] = {
+                    "supports_mcp": True,
+                    "allowed_tool_classes": ["read_file"],
+                    "approval_mode": "allow",
+                }
+                tasks.save_graph_definition({"graph": graph})
+                runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+                tasks.dry_run_graph = lambda payload, profiles_snapshot=None, configured_models=None: {  # type: ignore[method-assign]  # noqa: ARG005
+                    "dry_run": {"overall_status": "pass", "graph_result": {"reasons": []}}
+                }
+                calls = {"turn": 0}
+                runtime.start_turn = lambda profile, **payload: calls.__setitem__("turn", calls["turn"] + 1)  # type: ignore[method-assign]  # noqa: ARG005
+
+                class _FakeBroker:
+                    @staticmethod
+                    def read_resource(server: str, resource_uri: str, **kwargs: object) -> dict[str, object]:  # noqa: ARG004
+                        return {
+                            "resource": resource_uri,
+                            "contents": [{"uri": resource_uri, "mimeType": "text/plain", "text": "fixture"}],
+                            "mcp": {"server": server},
+                        }
+
+                runtime._mcp_broker = _FakeBroker()  # type: ignore[assignment]
+
+                result = runtime.execute_task_graph_run(
+                    {"graph_id": graph["graph_id"], "budget": {"limits": {"total_tokens": 80000}}}
+                )
+
+                run_ref = result["live_run"]["run_ref"]
+                self.assertEqual(
+                    result["live_run"]["run_status"],
+                    "completed",
+                    msg=json.dumps(run_ref, ensure_ascii=False, indent=2),
+                )
+                self.assertEqual(run_ref["node_status_counts"]["completed"], 1)
+                self.assertEqual(calls["turn"], 0)
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_live_graph_executes_agent_mcp_transform_router_and_selected_sink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Live mixed branch", root / "live-mixed-branch.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task(
+                    "Live mixed branch task",
+                    thread_id="thread-parent",
+                    settings={
+                        "profile_id": "qwen-default",
+                        "provider_id": "qwen",
+                        "model": "qwen3-coder-plus",
+                        "reasoning_effort": "high",
+                        "permission_mode": "auto",
+                    },
+                )
+
+                schema_registry = {
+                    "schema.agent_brief": {
+                        "type": "object",
+                        "required": ["brief"],
+                        "properties": {"brief": {"type": "string"}},
+                    },
+                    "schema.tool_result": {
+                        "type": "object",
+                        "required": ["route"],
+                        "properties": {"route": {"type": "string"}},
+                    },
+                    "schema.transformed_result": {
+                        "type": "object",
+                        "required": ["route", "artifact_path"],
+                        "properties": {
+                            "route": {"type": "string"},
+                            "artifact_path": {"type": "string"},
+                        },
+                    },
+                    "schema.route_decision": {
+                        "type": "object",
+                        "required": ["selected_edge_ids"],
+                        "properties": {
+                            "selected_edge_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            }
+                        },
+                    },
+                    "schema.artifact_record": {
+                        "type": "object",
+                        "required": ["target_kind", "stored_path"],
+                        "properties": {
+                            "target_kind": {"type": "string"},
+                            "stored_path": {"type": "string"},
+                        },
+                    },
+                }
+
+                nodes = [
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_agent",
+                        kind="agent_model",
+                        role="worker",
+                        label="Agent Brief",
+                        card_ref="agent_card_live_agent",
+                        provider_id="qwen",
+                        model_id="qwen3-coder-plus",
+                        prompt="Return a bounded machine_result brief for the downstream MCP node.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.agent_brief",
+                        artifact_specs=[],
+                        spawn_mode="isolated_lane",
+                        timeout_ms=120000,
+                        risk_class="low",
+                        allow_provider_calls=True,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=80,
+                        y=120,
+                        output_ports=[
+                            {
+                                "port_id": "machine_result",
+                                "label": "Machine Result",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.agent_brief",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_mcp",
+                        kind="mcp_tool",
+                        role="custom",
+                        label="Query MCP Tool",
+                        card_ref="agent_card_live_mcp",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Read one MCP tool result using the upstream task brief.",
+                        tool_classes=["web"],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.tool_result",
+                        artifact_specs=[],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=300,
+                        y=120,
+                        input_ports=[
+                            {
+                                "port_id": "task_context",
+                                "label": "Task Context",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        output_ports=[
+                            {
+                                "port_id": "tool_result",
+                                "label": "Tool Result",
+                                "port_type": "tool_result",
+                                "schema_ref": "schema.tool_result",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_transform",
+                        kind="transform",
+                        role="custom",
+                        label="Normalize Result",
+                        card_ref="agent_card_live_transform",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Normalize the MCP result into a compact routing decision.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.transformed_result",
+                        artifact_specs=[],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=520,
+                        y=120,
+                        input_ports=[
+                            {
+                                "port_id": "tool_result",
+                                "label": "Tool Result",
+                                "port_type": "tool_result",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        output_ports=[
+                            {
+                                "port_id": "machine_result",
+                                "label": "Machine Result",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.transformed_result",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_router",
+                        kind="router_condition",
+                        role="custom",
+                        label="Route Decision",
+                        card_ref="agent_card_live_router",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Select the matching branch from the transformed result.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.route_decision",
+                        artifact_specs=[],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=740,
+                        y=120,
+                        input_ports=[
+                            {
+                                "port_id": "machine_result",
+                                "label": "Machine Result",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        output_ports=[
+                            {
+                                "port_id": "route_decision",
+                                "label": "Route Decision",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.route_decision",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_sink_keep",
+                        kind="artifact_sink",
+                        role="custom",
+                        label="Selected Sink",
+                        card_ref="agent_card_live_sink_keep",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Persist the selected branch artifact record.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.artifact_record",
+                        artifact_specs=[],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=980,
+                        y=60,
+                        input_ports=[
+                            {
+                                "port_id": "artifact_input",
+                                "label": "Artifact Input",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        output_ports=[
+                            {
+                                "port_id": "artifact_record",
+                                "label": "Artifact Record",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.artifact_record",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_sink_skip",
+                        kind="artifact_sink",
+                        role="custom",
+                        label="Skipped Sink",
+                        card_ref="agent_card_live_sink_skip",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="This sink should not run when the router selects the keep branch.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.artifact_record",
+                        artifact_specs=[],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=980,
+                        y=180,
+                        input_ports=[
+                            {
+                                "port_id": "artifact_input",
+                                "label": "Artifact Input",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        output_ports=[
+                            {
+                                "port_id": "artifact_record",
+                                "label": "Artifact Record",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.artifact_record",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                ]
+                edges = [
+                    orchestration_file_format_module._edge(  # noqa: SLF001
+                        edge_id="edge_agent_mcp",
+                        from_node_id="node_agent",
+                        to_node_id="node_mcp",
+                        edge_type="context_handoff",
+                        schema_ref="schema.agent_brief",
+                        message_template="Hand the agent brief to the MCP node.",
+                        x=200,
+                        y=120,
+                        port_bindings=[{"from_port_id": "machine_result", "to_port_id": "task_context"}],
+                    ),
+                    orchestration_file_format_module._edge(  # noqa: SLF001
+                        edge_id="edge_mcp_transform",
+                        from_node_id="node_mcp",
+                        to_node_id="node_transform",
+                        edge_type="artifact_handoff",
+                        schema_ref="schema.tool_result",
+                        message_template="Normalize the MCP tool result.",
+                        x=420,
+                        y=120,
+                        port_bindings=[{"from_port_id": "tool_result", "to_port_id": "tool_result"}],
+                    ),
+                    orchestration_file_format_module._edge(  # noqa: SLF001
+                    edge_id="edge_transform_router",
+                    from_node_id="node_transform",
+                    to_node_id="node_router",
+                    edge_type="control_dependency",
+                    schema_ref="schema.transformed_result",
+                    message_template="Route the transformed result.",
+                    x=640,
+                    y=120,
+                        port_bindings=[{"from_port_id": "machine_result", "to_port_id": "machine_result"}],
+                    ),
+                    orchestration_file_format_module._edge(  # noqa: SLF001
+                        edge_id="edge_router_keep",
+                        from_node_id="node_router",
+                        to_node_id="node_sink_keep",
+                        edge_type="artifact_handoff",
+                        schema_ref="schema.route_decision",
+                        message_template="Persist the selected branch output.",
+                        x=860,
+                        y=60,
+                        port_bindings=[{"from_port_id": "route_decision", "to_port_id": "artifact_input"}],
+                    ),
+                    orchestration_file_format_module._edge(  # noqa: SLF001
+                        edge_id="edge_router_skip",
+                        from_node_id="node_router",
+                        to_node_id="node_sink_skip",
+                        edge_type="artifact_handoff",
+                        schema_ref="schema.route_decision",
+                        message_template="This branch should remain unselected.",
+                        x=860,
+                        y=180,
+                        port_bindings=[{"from_port_id": "route_decision", "to_port_id": "artifact_input"}],
+                    ),
+                ]
+                orchestration_graph = orchestration_file_format_module._base_graph(  # noqa: SLF001
+                    graph_id="graph_live_mixed_branch_v1",
+                    title="Live Mixed Branch",
+                    template_id="custom_blank_graph",
+                    tags=["registry", "mcp", "router", "live"],
+                    entry_node_ids=["node_agent"],
+                    nodes=nodes,
+                    edges=edges,
+                    schema_registry=schema_registry,
+                )
+                orchestration_graph["graph_policy"]["max_depth"] = 6
+                validated = validate_agent_orchestration_graph(orchestration_graph)
+                task_graph = lower_agent_orchestration_graph_to_task_graph(validated)
+                task_graph["task_id"] = str(tasks.current_task()["task_id"])
+                task_graph["graph_policy"]["max_depth"] = 6
+                task_graph["status"] = "ready"
+                task_graph["updated_at"] = now_iso()
+                stable_ports = {
+                    "node_agent": {
+                        "inputs": [],
+                        "outputs": [
+                            {
+                                "port_id": "machine_result",
+                                "label": "Machine Result",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.agent_brief",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    },
+                    "node_mcp": {
+                        "inputs": [
+                            {
+                                "port_id": "task_context",
+                                "label": "Task Context",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "port_id": "tool_result",
+                                "label": "Tool Result",
+                                "port_type": "tool_result",
+                                "schema_ref": "schema.tool_result",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    },
+                    "node_transform": {
+                        "inputs": [
+                            {
+                                "port_id": "tool_result",
+                                "label": "Tool Result",
+                                "port_type": "tool_result",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "port_id": "machine_result",
+                                "label": "Machine Result",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.transformed_result",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    },
+                    "node_router": {
+                        "inputs": [
+                            {
+                                "port_id": "machine_result",
+                                "label": "Machine Result",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "port_id": "route_decision",
+                                "label": "Route Decision",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.route_decision",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    },
+                    "node_sink_keep": {
+                        "inputs": [
+                            {
+                                "port_id": "artifact_input",
+                                "label": "Artifact Input",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "port_id": "artifact_record",
+                                "label": "Artifact Record",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.artifact_record",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    },
+                    "node_sink_skip": {
+                        "inputs": [
+                            {
+                                "port_id": "artifact_input",
+                                "label": "Artifact Input",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "port_id": "artifact_record",
+                                "label": "Artifact Record",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.artifact_record",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    },
+                }
+                stable_edge_bindings = {
+                    "edge_agent_mcp": [{"from_port_id": "machine_result", "to_port_id": "task_context"}],
+                    "edge_mcp_transform": [{"from_port_id": "tool_result", "to_port_id": "tool_result"}],
+                    "edge_transform_router": [{"from_port_id": "machine_result", "to_port_id": "machine_result"}],
+                    "edge_router_keep": [{"from_port_id": "route_decision", "to_port_id": "artifact_input"}],
+                    "edge_router_skip": [{"from_port_id": "route_decision", "to_port_id": "artifact_input"}],
+                }
+                for node in task_graph["nodes"]:
+                    node_id = str(node.get("node_id") or "").strip()
+                    if node_id in stable_ports:
+                        node["input_ports"] = stable_ports[node_id]["inputs"]
+                        node["output_ports"] = stable_ports[node_id]["outputs"]
+                        node["ports"] = {
+                            "inputs": stable_ports[node_id]["inputs"],
+                            "outputs": stable_ports[node_id]["outputs"],
+                        }
+                    if node_id == "node_agent":
+                        node["provider_id"] = "qwen"
+                        node["model_id"] = "qwen3-coder-plus"
+                        node["human_summary_template"] = "Return a bounded result for the MCP node."
+                        node["execution_policy"]["allow_provider_calls"] = True
+                    elif node_id == "node_mcp":
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["server"] = "astrabridge_web"
+                        node["ui_hints"]["node_type_config"]["tool"] = "astrabridge_web_fetch"
+                        node["tools"] = {
+                            "supports_mcp": True,
+                            "allowed_tool_classes": ["web"],
+                            "approval_mode": "allow",
+                        }
+                    elif node_id == "node_transform":
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["transform_id"] = "extract_tool_result"
+                    elif node_id == "node_router":
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["condition"] = {
+                            "field": "route",
+                            "routes": {"keep": ["edge_router_keep"]},
+                        }
+                    elif node_id.startswith("node_sink"):
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["target_kind"] = "artifact_record"
+                for edge in task_graph["edges"]:
+                    edge_id = str(edge.get("edge_id") or "").strip()
+                    if edge_id in stable_edge_bindings:
+                        edge.setdefault("handoff_contract", {})["port_bindings"] = stable_edge_bindings[edge_id]
+                        edge["handoff_contract"]["required_output_schema_refs"] = []
+                for node in validated["nodes"]:
+                    node_id = str(node.get("node_id") or "").strip()
+                    if node_id in {"node_mcp", "node_transform", "node_router", "node_sink_keep", "node_sink_skip"}:
+                        node["ports"] = {
+                            "inputs": [dict(item) for item in stable_ports[node_id]["inputs"]],
+                            "outputs": [dict(item) for item in stable_ports[node_id]["outputs"]],
+                        }
+                for edge in validated["edges"]:
+                    edge_id = str(edge.get("edge_id") or "").strip()
+                    if edge_id in stable_edge_bindings:
+                        edge.setdefault("handoff_contract", {})["port_bindings"] = [
+                            dict(item) for item in stable_edge_bindings[edge_id]
+                        ]
+                tasks._orchestration_graph_for_task_graph = lambda _graph: validated  # type: ignore[method-assign]
+                tasks._record_graph_snapshot = lambda *args, **kwargs: {"snapshot_id": "snap-test"}  # type: ignore[method-assign]  # noqa: ARG005
+                saved_graph = tasks.save_graph_definition({"graph": task_graph})["graph"]
+                runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+                tasks.dry_run_graph = lambda payload, profiles_snapshot=None, configured_models=None: {  # type: ignore[method-assign]  # noqa: ARG005
+                    "dry_run": {"overall_status": "pass", "graph_result": {"reasons": []}}
+                }
+                runtime._profiles.resolve_runtime_profile = lambda provider_id: {  # type: ignore[method-assign]
+                    "profile_id": f"{provider_id}-default",
+                    "provider_id": provider_id,
+                    "model": "qwen3-coder-plus",
+                    "reasoning_effort": "high",
+                }
+                runtime._prepare_runtime = lambda profile, require_secret=False: {}  # type: ignore[method-assign]  # noqa: ARG005
+                runtime._ensure_client = lambda runtime_status: object()  # type: ignore[method-assign]  # noqa: ARG005
+                runtime._graph_live_turn_usage_signal = lambda **kwargs: {"tokens": {"total_tokens": 1}}  # type: ignore[method-assign]  # noqa: ARG005
+                worker_calls: list[str] = []
+                turn_calls: list[str] = []
+
+                def fake_start_worker(profile: dict[str, str], **payload: object) -> dict[str, object]:
+                    node_id = str(payload["node_id"])
+                    worker_calls.append(node_id)
+                    tasks.record_graph_worker(
+                        {
+                            "graph_id": str(payload["graph_id"]),
+                            "run_id": str(payload["run_id"]),
+                            "node_id": node_id,
+                            "worker_thread_id": f"worker-{node_id}",
+                            "parent_thread_id": str(payload.get("parent_thread_id") or ""),
+                            "spawn_mode": "isolated_lane",
+                            "worker_origin": "provider_lane",
+                            "agent_role": "worker",
+                            "agent_nickname": node_id,
+                            "status": "ready",
+                            "runtime_contract": {
+                                "provider_id": profile["provider_id"],
+                                "model": "qwen3-coder-plus",
+                                "turn_execution_policy": "standard",
+                            },
+                        },
+                        graph_definition=saved_graph,
+                    )
+                    return {
+                        "worker": {
+                            "thread_id": f"worker-{node_id}",
+                            "parent_thread_id": str(payload.get("parent_thread_id") or ""),
+                            "worker_origin": "provider_lane",
+                            "spawn_mode": "isolated_lane",
+                            "settings": {"execution_backend": "app_server"},
+                        }
+                    }
+
+                runtime.start_graph_worker = fake_start_worker  # type: ignore[method-assign]
+
+                def fake_start_turn(profile: dict[str, str], **payload: object) -> dict[str, object]:  # noqa: ARG001
+                    node_id = str(payload.get("thread_id") or "").removeprefix("worker-")
+                    turn_calls.append(node_id)
+                    return {
+                        "thread_id": f"provider-{node_id}",
+                        "turn": {"id": f"turn-{node_id}"},
+                    }
+
+                runtime.start_turn = fake_start_turn  # type: ignore[method-assign]
+                runtime._wait_for_probe_turn_terminal = lambda client, **payload: {  # type: ignore[method-assign]  # noqa: ARG005
+                    "id": payload["thread_id"],
+                    "turns": [{"id": payload["turn_id"], "status": "completed"}],
+                }
+                runtime._probe_turn_result = lambda _thread, turn_id="": (  # type: ignore[method-assign]
+                    "completed",
+                    '{"human_summary":"Agent brief ready","machine_result":{"brief":"fetch the route payload","route":"keep"}}',
+                    "",
+                )
+                runtime._graph_dispatch_control.try_acquire = lambda request, limits=None: ("dispatch-token", {"reason": "allowed"})  # type: ignore[method-assign]  # noqa: ARG005
+                runtime._graph_dispatch_control.release = lambda token: None  # type: ignore[method-assign]  # noqa: ARG005
+                class _FakeBroker:
+                    @staticmethod
+                    def invoke_tool(server: str, tool: str, arguments: dict[str, object], **kwargs: object) -> dict[str, object]:  # noqa: ARG004
+                        return {
+                            "result": {"route": "keep", "artifact_path": "PRIVATE/generated/report.json"},
+                            "mcp": {"server": server, "tool": tool},
+                        }
+
+                runtime._mcp_broker = _FakeBroker()  # type: ignore[assignment]
+
+                result = runtime.execute_task_graph_run(
+                    {"graph_id": saved_graph["graph_id"], "budget": {"limits": {"total_tokens": 80000}}}
+                )
+
+                run_ref = result["live_run"]["run_ref"]
+                self.assertEqual(
+                    result["live_run"]["run_status"],
+                    "completed",
+                    msg=json.dumps(run_ref, ensure_ascii=False, indent=2),
+                )
+                self.assertEqual(worker_calls, ["node_agent"])
+                self.assertEqual(turn_calls, ["node_agent"])
+                binding_by_node = {
+                    str(item["node_id"]): dict(item)
+                    for item in run_ref["worker_bindings"]
+                }
+                self.assertIn("node_sink_keep", binding_by_node)
+                self.assertNotIn("node_sink_skip", binding_by_node)
+                self.assertEqual(binding_by_node["node_sink_keep"]["status"], "completed")
+                self.assertEqual(run_ref["node_status_counts"]["completed"], 6)
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_live_artifact_source_fails_closed_on_digest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Artifact digest mismatch", root / "artifact-digest-mismatch.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Artifact digest mismatch task", thread_id="thread-parent")
+                graph = tasks.instantiate_graph_template("custom_blank_graph")["graph"]
+                graph["nodes"][0]["kind"] = "artifact_source"
+                graph["nodes"][0]["role"] = "custom"
+                graph["nodes"][0]["provider_id"] = None
+                graph["nodes"][0]["model_id"] = None
+                graph["nodes"][0]["human_summary_template"] = ""
+                graph["nodes"][0]["execution_policy"]["allow_provider_calls"] = False
+                graph["nodes"][0]["output_contract"]["machine_result_schema"] = {"type": "object"}
+                graph["nodes"][0].setdefault("ui_hints", {}).setdefault("node_type_config", {})["artifact_uri"] = "workspace://PRIVATE/input.json"
+                graph["nodes"][0]["ui_hints"]["node_type_config"]["artifact_kind"] = "structured_json"
+                graph["nodes"][0]["ui_hints"]["node_type_config"]["expected_digest_sha256"] = "0" * 64
+                (workspace / "PRIVATE" / "input.json").write_text('{"message":"hello"}', encoding="utf-8")
+                tasks.save_graph_definition({"graph": graph})
+                runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+                tasks.dry_run_graph = lambda payload, profiles_snapshot=None, configured_models=None: {  # type: ignore[method-assign]  # noqa: ARG005
+                    "dry_run": {"overall_status": "pass", "graph_result": {"reasons": []}}
+                }
+                turn_calls = {"count": 0}
+                runtime.start_turn = lambda profile, **payload: turn_calls.__setitem__("count", turn_calls["count"] + 1)  # type: ignore[method-assign]  # noqa: ARG005
+
+                result = runtime.execute_task_graph_run(
+                    {"graph_id": graph["graph_id"], "budget": {"limits": {"total_tokens": 80000}}}
+                )
+
+                run_ref = result["live_run"]["run_ref"]
+                self.assertEqual(result["live_run"]["run_status"], "failed")
+                self.assertEqual(run_ref["node_status_counts"]["failed"], 1)
+                self.assertEqual(turn_calls["count"], 0)
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_live_graph_human_approval_pauses_and_resolution_persists_after_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Live approval graph", root / "live-approval.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Live approval task", thread_id="thread-parent")
+                (workspace / "PRIVATE" / "input.json").write_text('{"message":"hello"}', encoding="utf-8")
+
+                schema_registry = {
+                    "schema.artifact_payload": {
+                        "type": "object",
+                        "required": ["artifact_uri"],
+                        "properties": {"artifact_uri": {"type": "string"}},
+                    },
+                    "schema.approval_record": {
+                        "type": "object",
+                        "required": ["decision"],
+                        "properties": {"decision": {"type": "string"}},
+                    },
+                }
+                nodes = [
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_source",
+                        kind="artifact_source",
+                        role="custom",
+                        label="Artifact Source",
+                        card_ref="agent_card_live_approval_source",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Load the preserved artifact.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.artifact_payload",
+                        artifact_specs=[{"kind": "structured_json", "id": "artifact_source"}],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=120,
+                        y=120,
+                        output_ports=[
+                            {
+                                "port_id": "artifact_output",
+                                "label": "Artifact Output",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.artifact_payload",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_gate",
+                        kind="human_approval",
+                        role="gate",
+                        label="Human Approval",
+                        card_ref="agent_card_live_approval_gate",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Require human approval before closing the run.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.approval_record",
+                        artifact_specs=[{"kind": "structured_json", "id": "approval_record"}],
+                        spawn_mode="manual_only",
+                        timeout_ms=90000,
+                        risk_class="moderate",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=True,
+                        x=360,
+                        y=120,
+                        approval_kind="human_gate",
+                        input_ports=[
+                            {
+                                "port_id": "approval_input",
+                                "label": "Approval Input",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        output_ports=[
+                            {
+                                "port_id": "approval_record",
+                                "label": "Approval Record",
+                                "port_type": "approval_record",
+                                "schema_ref": "schema.approval_record",
+                                "artifact_kind": "approval_record",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                ]
+                edges = [
+                    orchestration_file_format_module._edge(  # noqa: SLF001
+                        edge_id="edge_source_gate",
+                        from_node_id="node_source",
+                        to_node_id="node_gate",
+                        edge_type="approval_dependency",
+                        schema_ref="schema.artifact_payload",
+                        message_template="Review the loaded artifact before continuing.",
+                        x=240,
+                        y=120,
+                        port_bindings=[{"from_port_id": "artifact_output", "to_port_id": "approval_input"}],
+                    ),
+                ]
+                orchestration_graph = orchestration_file_format_module._base_graph(  # noqa: SLF001
+                    graph_id="graph_live_human_approval_v1",
+                    title="Live Human Approval",
+                    template_id="custom_blank_graph",
+                    tags=["approval", "live"],
+                    entry_node_ids=["node_source"],
+                    nodes=nodes,
+                    edges=edges,
+                    schema_registry=schema_registry,
+                )
+                validated = validate_agent_orchestration_graph(orchestration_graph)
+                task_graph = lower_agent_orchestration_graph_to_task_graph(validated)
+                task_graph["task_id"] = str(tasks.current_task()["task_id"])
+                task_graph["status"] = "ready"
+                task_graph["updated_at"] = now_iso()
+                for node in task_graph["nodes"]:
+                    node_id = str(node.get("node_id") or "").strip()
+                    if node_id == "node_source":
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["artifact_uri"] = "workspace://PRIVATE/input.json"
+                        node["ui_hints"]["node_type_config"]["artifact_kind"] = "structured_json"
+                        node["provider_id"] = None
+                        node["model_id"] = None
+                        node["human_summary_template"] = ""
+                        node["execution_policy"]["allow_provider_calls"] = False
+                    elif node_id == "node_gate":
+                        node["provider_id"] = None
+                        node["model_id"] = None
+                        node["human_summary_template"] = ""
+                        node["execution_policy"]["allow_provider_calls"] = False
+                saved_graph = tasks.save_graph_definition({"graph": task_graph})["graph"]
+
+                runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+                tasks.dry_run_graph = lambda payload, profiles_snapshot=None, configured_models=None: {  # type: ignore[method-assign]  # noqa: ARG005
+                    "dry_run": {"overall_status": "pass", "graph_result": {"reasons": []}}
+                }
+                turn_calls = {"count": 0}
+                runtime.start_turn = lambda profile, **payload: turn_calls.__setitem__("count", turn_calls["count"] + 1)  # type: ignore[method-assign]  # noqa: ARG005
+
+                result = runtime.execute_task_graph_run(
+                    {"graph_id": saved_graph["graph_id"], "budget": {"limits": {"total_tokens": 80000}}}
+                )
+
+                pending_run = result["live_run"]["run_ref"]
+                self.assertEqual(result["live_run"]["run_status"], "paused_for_review", msg=json.dumps(pending_run, ensure_ascii=False, indent=2))
+                self.assertEqual(pending_run["status"], "paused_for_review")
+                self.assertEqual(pending_run["approval_state"], "pending")
+                self.assertEqual(pending_run["approval_details"]["review_kind"], "human_gate")
+                self.assertEqual(pending_run["node_status_counts"]["waiting_on_approval"], 1)
+                self.assertEqual(turn_calls["count"], 0)
+
+                reloaded_tasks = TaskService(projects)
+                restored_pending = reloaded_tasks.graph_run_ref(result["live_run"]["run_id"])
+                self.assertEqual(restored_pending["status"], "paused_for_review")
+                self.assertEqual(restored_pending["approval_details"]["status"], "pending")
+
+                approved = reloaded_tasks.resolve_graph_run_approval(
+                    {
+                        "run_id": result["live_run"]["run_id"],
+                        "decision": "approve",
+                        "notes": "Approved after bounded review.",
+                    }
+                )
+                approved_run = approved["run_ref"]
+                self.assertEqual(approved_run["status"], "completed")
+                self.assertEqual(approved_run["approval_state"], "approved")
+                self.assertEqual(approved_run["approval_details"]["decision"], "approve")
+
+                confirmed_tasks = TaskService(projects)
+                restored_approved = confirmed_tasks.graph_run_ref(result["live_run"]["run_id"])
+                self.assertEqual(restored_approved["status"], "completed")
+                self.assertEqual(restored_approved["approval_details"]["status"], "approved")
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_live_graph_loop_persists_checkpointed_iteration_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Live loop graph", root / "live-loop.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Live loop task", thread_id="thread-parent")
+                (workspace / "PRIVATE" / "input.json").write_text(
+                    json.dumps({"items": [{"value": 1}, {"value": 2}, {"value": 3}]}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
+                schema_registry = {
+                    "schema.artifact_payload": {
+                        "type": "object",
+                        "required": ["artifact_uri"],
+                        "properties": {"artifact_uri": {"type": "string"}},
+                    },
+                    "schema.loop_result": {
+                        "type": "object",
+                        "required": ["iteration_count", "max_iterations", "stopped_reason", "checkpoint"],
+                        "properties": {
+                            "iteration_count": {"type": "integer"},
+                            "max_iterations": {"type": "integer"},
+                            "stopped_reason": {"type": "string"},
+                            "checkpoint": {"type": "object"},
+                        },
+                    },
+                }
+                nodes = [
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_source",
+                        kind="artifact_source",
+                        role="custom",
+                        label="Artifact Source",
+                        card_ref="agent_card_live_loop_source",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Load the preserved loop input artifact.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.artifact_payload",
+                        artifact_specs=[{"kind": "structured_json", "id": "artifact_source"}],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=120,
+                        y=120,
+                        output_ports=[
+                            {
+                                "port_id": "artifact_output",
+                                "label": "Artifact Output",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.artifact_payload",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_loop",
+                        kind="loop",
+                        role="custom",
+                        label="Bounded Loop",
+                        card_ref="agent_card_live_loop",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Run a bounded deterministic loop over the declared items.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.loop_result",
+                        artifact_specs=[],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=360,
+                        y=120,
+                        input_ports=[
+                            {
+                                "port_id": "loop_input",
+                                "label": "Loop Input",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        output_ports=[
+                            {
+                                "port_id": "loop_result",
+                                "label": "Loop Result",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.loop_result",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                ]
+                edges = [
+                    orchestration_file_format_module._edge(  # noqa: SLF001
+                        edge_id="edge_source_loop",
+                        from_node_id="node_source",
+                        to_node_id="node_loop",
+                        edge_type="context_handoff",
+                        schema_ref="schema.artifact_payload",
+                        message_template="Feed the loaded structured artifact into the bounded loop.",
+                        x=240,
+                        y=120,
+                        port_bindings=[{"from_port_id": "artifact_output", "to_port_id": "loop_input"}],
+                    ),
+                ]
+                orchestration_graph = orchestration_file_format_module._base_graph(  # noqa: SLF001
+                    graph_id="graph_live_loop_v1",
+                    title="Live Loop",
+                    template_id="custom_blank_graph",
+                    tags=["loop", "live"],
+                    entry_node_ids=["node_source"],
+                    nodes=nodes,
+                    edges=edges,
+                    schema_registry=schema_registry,
+                )
+                validated = validate_agent_orchestration_graph(orchestration_graph)
+                task_graph = lower_agent_orchestration_graph_to_task_graph(validated)
+                task_graph["task_id"] = str(tasks.current_task()["task_id"])
+                task_graph["status"] = "ready"
+                task_graph["updated_at"] = now_iso()
+                for node in task_graph["nodes"]:
+                    node_id = str(node.get("node_id") or "").strip()
+                    node["provider_id"] = None
+                    node["model_id"] = None
+                    node["human_summary_template"] = ""
+                    node["execution_policy"]["allow_provider_calls"] = False
+                    if node_id == "node_source":
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["artifact_uri"] = "workspace://PRIVATE/input.json"
+                        node["ui_hints"]["node_type_config"]["artifact_kind"] = "structured_json"
+                    elif node_id == "node_loop":
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["max_iterations"] = 2
+                saved_graph = tasks.save_graph_definition({"graph": task_graph})["graph"]
+
+                runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+                tasks.dry_run_graph = lambda payload, profiles_snapshot=None, configured_models=None: {  # type: ignore[method-assign]  # noqa: ARG005
+                    "dry_run": {"overall_status": "pass", "graph_result": {"reasons": []}}
+                }
+                turn_calls = {"count": 0}
+                runtime.start_turn = lambda profile, **payload: turn_calls.__setitem__("count", turn_calls["count"] + 1)  # type: ignore[method-assign]  # noqa: ARG005
+
+                result = runtime.execute_task_graph_run(
+                    {"graph_id": saved_graph["graph_id"], "budget": {"limits": {"total_tokens": 80000}}}
+                )
+
+                run_ref = result["live_run"]["run_ref"]
+                self.assertEqual(result["live_run"]["run_status"], "completed", msg=json.dumps(run_ref, ensure_ascii=False, indent=2))
+                self.assertEqual(run_ref["node_status_counts"]["completed"], 2)
+                self.assertEqual(turn_calls["count"], 0)
+
+                full_run = tasks._load_full_graph_run(run_ref)  # noqa: SLF001
+                self.assertIsNotNone(full_run)
+                loop_state = next(
+                    dict(item).get("loop_state")
+                    for item in list(full_run.get("node_run_states") or [])
+                    if isinstance(item, dict) and str(item.get("node_id") or "").strip() == "node_loop"
+                )
+                self.assertEqual(loop_state["iteration_count"], 2)
+                self.assertEqual(loop_state["max_iterations"], 2)
+                self.assertEqual(loop_state["remaining_item_count"], 1)
+                self.assertEqual(loop_state["stopped_reason"], "max_iterations_reached")
+
+                loop_output = json.loads(
+                    (workspace / "PRIVATE" / "task-graph" / "workers" / result["live_run"]["run_id"] / "node_loop" / "output.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(loop_output["typed_output_values"]["loop_result"]["iteration_count"], 2)
+                self.assertEqual(loop_output["typed_output_values"]["loop_result"]["checkpoint"]["remaining_item_count"], 1)
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_live_graph_subgraph_executes_child_run_with_seeded_typed_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Live subgraph graph", root / "live-subgraph.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Live subgraph task", thread_id="thread-parent")
+                (workspace / "PRIVATE" / "input.json").write_text(
+                    json.dumps({"message": "hello subgraph", "items": [{"value": 1}]}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
+                schema_registry = {
+                    "schema.artifact_payload": {
+                        "type": "object",
+                        "required": ["artifact_uri"],
+                        "properties": {"artifact_uri": {"type": "string"}},
+                    },
+                    "schema.child_terminal": {
+                        "type": "object",
+                        "required": ["value"],
+                        "properties": {
+                            "value": {"type": "string"},
+                        },
+                    },
+                    "schema.subgraph_result": {
+                        "type": "object",
+                        "required": ["child_run_id", "child_graph_id", "child_status", "terminal_outputs"],
+                        "properties": {
+                            "child_run_id": {"type": "string"},
+                            "child_graph_id": {"type": "string"},
+                            "child_status": {"type": "string"},
+                            "terminal_outputs": {"type": "object"},
+                        },
+                    },
+                }
+
+                child_nodes = [
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="child_transform",
+                        kind="transform",
+                        role="custom",
+                        label="Child Transform",
+                        card_ref="agent_card_live_subgraph_child_transform",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Return the seeded typed input unchanged.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.child_terminal",
+                        artifact_specs=[],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=120,
+                        y=120,
+                        input_ports=[
+                            {
+                                "port_id": "input_payload",
+                                "label": "Input Payload",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        output_ports=[
+                            {
+                                "port_id": "machine_result",
+                                "label": "Machine Result",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.child_terminal",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    )
+                ]
+                child_graph = orchestration_file_format_module._base_graph(  # noqa: SLF001
+                    graph_id="graph_live_child_subgraph_v1",
+                    title="Child Subgraph",
+                    template_id="custom_blank_graph",
+                    tags=["subgraph", "child"],
+                    entry_node_ids=["child_transform"],
+                    nodes=child_nodes,
+                    edges=[],
+                    schema_registry=schema_registry,
+                )
+                child_validated = validate_agent_orchestration_graph(child_graph)
+                child_task_graph = lower_agent_orchestration_graph_to_task_graph(child_validated)
+                child_task_graph["task_id"] = str(tasks.current_task()["task_id"])
+                child_task_graph["status"] = "ready"
+                child_task_graph["updated_at"] = now_iso()
+                for node in child_task_graph["nodes"]:
+                    node["provider_id"] = None
+                    node["model_id"] = None
+                    node["human_summary_template"] = ""
+                    node["execution_policy"]["allow_provider_calls"] = False
+                    node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["transform_id"] = "identity"
+                saved_child = tasks.save_graph_definition({"graph": child_task_graph})["graph"]
+
+                parent_nodes = [
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_source",
+                        kind="artifact_source",
+                        role="custom",
+                        label="Artifact Source",
+                        card_ref="agent_card_live_subgraph_source",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Load the preserved parent artifact.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.artifact_payload",
+                        artifact_specs=[{"kind": "structured_json", "id": "artifact_source"}],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=120,
+                        y=120,
+                        output_ports=[
+                            {
+                                "port_id": "artifact_output",
+                                "label": "Artifact Output",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.artifact_payload",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_subgraph",
+                        kind="subgraph",
+                        role="custom",
+                        label="Child Subgraph",
+                        card_ref="agent_card_live_subgraph_parent",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Invoke the child subgraph through the live durable executor.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.subgraph_result",
+                        artifact_specs=[],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=360,
+                        y=120,
+                        input_ports=[
+                            {
+                                "port_id": "subgraph_input",
+                                "label": "Subgraph Input",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        output_ports=[
+                            {
+                                "port_id": "subgraph_result",
+                                "label": "Subgraph Result",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.subgraph_result",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                ]
+                parent_edges = [
+                    orchestration_file_format_module._edge(  # noqa: SLF001
+                        edge_id="edge_source_subgraph",
+                        from_node_id="node_source",
+                        to_node_id="node_subgraph",
+                        edge_type="context_handoff",
+                        schema_ref="schema.artifact_payload",
+                        message_template="Feed the loaded structured artifact into the child subgraph.",
+                        x=240,
+                        y=120,
+                        port_bindings=[{"from_port_id": "artifact_output", "to_port_id": "subgraph_input"}],
+                    ),
+                ]
+                parent_graph = orchestration_file_format_module._base_graph(  # noqa: SLF001
+                    graph_id="graph_live_parent_subgraph_v1",
+                    title="Parent Subgraph",
+                    template_id="custom_blank_graph",
+                    tags=["subgraph", "parent"],
+                    entry_node_ids=["node_source"],
+                    nodes=parent_nodes,
+                    edges=parent_edges,
+                    schema_registry=schema_registry,
+                )
+                parent_validated = validate_agent_orchestration_graph(parent_graph)
+                parent_task_graph = lower_agent_orchestration_graph_to_task_graph(parent_validated)
+                parent_task_graph["task_id"] = str(tasks.current_task()["task_id"])
+                parent_task_graph["status"] = "ready"
+                parent_task_graph["updated_at"] = now_iso()
+                for node in parent_task_graph["nodes"]:
+                    node_id = str(node.get("node_id") or "").strip()
+                    node["provider_id"] = None
+                    node["model_id"] = None
+                    node["human_summary_template"] = ""
+                    node["execution_policy"]["allow_provider_calls"] = False
+                    if node_id == "node_source":
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["artifact_uri"] = "workspace://PRIVATE/input.json"
+                        node["ui_hints"]["node_type_config"]["artifact_kind"] = "structured_json"
+                    elif node_id == "node_subgraph":
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["graph_ref"] = saved_child["graph_id"]
+                saved_parent = tasks.save_graph_definition({"graph": parent_task_graph})["graph"]
+
+                runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+                tasks.dry_run_graph = lambda payload, profiles_snapshot=None, configured_models=None: {  # type: ignore[method-assign]  # noqa: ARG005
+                    "dry_run": {"overall_status": "pass", "graph_result": {"reasons": []}}
+                }
+                turn_calls = {"count": 0}
+                runtime.start_turn = lambda profile, **payload: turn_calls.__setitem__("count", turn_calls["count"] + 1)  # type: ignore[method-assign]  # noqa: ARG005
+
+                result = runtime.execute_task_graph_run(
+                    {"graph_id": saved_parent["graph_id"], "budget": {"limits": {"total_tokens": 80000}}}
+                )
+
+                run_ref = result["live_run"]["run_ref"]
+                self.assertEqual(result["live_run"]["run_status"], "completed", msg=json.dumps(run_ref, ensure_ascii=False, indent=2))
+                self.assertEqual(run_ref["node_status_counts"]["completed"], 2)
+                self.assertEqual(turn_calls["count"], 0)
+
+                parent_output = json.loads(
+                    (workspace / "PRIVATE" / "task-graph" / "workers" / result["live_run"]["run_id"] / "node_subgraph" / "output.json").read_text(encoding="utf-8")
+                )
+                subgraph_result = parent_output["typed_output_values"]["subgraph_result"]
+                self.assertEqual(subgraph_result["child_graph_id"], saved_child["graph_id"])
+                self.assertEqual(subgraph_result["child_status"], "completed")
+                child_run_id = subgraph_result["child_run_id"]
+                self.assertTrue(child_run_id)
+                self.assertEqual(
+                    json.loads(
+                        subgraph_result["terminal_outputs"]["child_transform"]["typed_output_values"]["machine_result"]["value"]
+                    )["message"],
+                    "hello subgraph",
+                )
+
+                full_parent_run = tasks._load_full_graph_run(run_ref)  # noqa: SLF001
+                self.assertIsNotNone(full_parent_run)
+                parent_subgraph_state = next(
+                    dict(item).get("subgraph_state")
+                    for item in list(full_parent_run.get("node_run_states") or [])
+                    if isinstance(item, dict) and str(item.get("node_id") or "").strip() == "node_subgraph"
+                )
+                self.assertEqual(parent_subgraph_state["status"], "completed")
+                self.assertEqual(parent_subgraph_state["child_run_id"], child_run_id)
+
+                child_run_ref = tasks.graph_run_ref(child_run_id)
+                self.assertIsNotNone(child_run_ref)
+                full_child_run = tasks._load_full_graph_run(child_run_ref)  # noqa: SLF001
+                self.assertIsNotNone(full_child_run)
+                created_event = next(
+                    dict(item)
+                    for item in list(full_child_run.get("event_refs") or [])
+                    if isinstance(item, dict) and str(item.get("event_type") or "").strip() == "run_created"
+                )
+                self.assertEqual(
+                    dict(dict(created_event.get("payload") or {}).get("parent_run_context") or {}).get("parent_run_id"),
+                    result["live_run"]["run_id"],
+                )
+                self.assertEqual(
+                    dict(dict(created_event.get("payload") or {}).get("parent_run_context") or {}).get("parent_node_id"),
+                    "node_subgraph",
+                )
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_live_graph_resume_run_continues_after_approval_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Live approval resume graph", root / "live-approval-resume.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Live approval resume task", thread_id="thread-parent")
+                (workspace / "PRIVATE" / "input.json").write_text('{"message":"resume after approval"}', encoding="utf-8")
+
+                schema_registry = {
+                    "schema.artifact_payload": {
+                        "type": "object",
+                        "required": ["artifact_uri"],
+                        "properties": {"artifact_uri": {"type": "string"}},
+                    },
+                    "schema.approval_record": {
+                        "type": "object",
+                        "required": ["decision"],
+                        "properties": {
+                            "decision": {"type": "string"},
+                            "review_kind": {"type": "string"},
+                        },
+                    },
+                }
+                nodes = [
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_source",
+                        kind="artifact_source",
+                        role="custom",
+                        label="Artifact Source",
+                        card_ref="agent_card_live_approval_resume_source",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Load the preserved artifact.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.artifact_payload",
+                        artifact_specs=[{"kind": "structured_json", "id": "artifact_source"}],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=120,
+                        y=120,
+                        output_ports=[
+                            {
+                                "port_id": "artifact_output",
+                                "label": "Artifact Output",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.artifact_payload",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_gate",
+                        kind="human_approval",
+                        role="gate",
+                        label="Human Approval",
+                        card_ref="agent_card_live_approval_resume_gate",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Require human approval before continuing.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.approval_record",
+                        artifact_specs=[{"kind": "approval_record", "id": "approval_record"}],
+                        spawn_mode="manual_only",
+                        timeout_ms=90000,
+                        risk_class="moderate",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=True,
+                        x=360,
+                        y=120,
+                        approval_kind="human_gate",
+                        input_ports=[
+                            {
+                                "port_id": "approval_input",
+                                "label": "Approval Input",
+                                "port_type": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        output_ports=[
+                            {
+                                "port_id": "approval_record",
+                                "label": "Approval Record",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.approval_record",
+                                "artifact_kind": "approval_record",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                    orchestration_file_format_module._node(  # noqa: SLF001
+                        node_id="node_after_gate",
+                        kind="transform",
+                        role="custom",
+                        label="After Gate Transform",
+                        card_ref="agent_card_live_approval_resume_transform",
+                        provider_id=None,
+                        model_id=None,
+                        prompt="Return the approved record unchanged.",
+                        tool_classes=[],
+                        output_mode="structured_and_artifacts",
+                        machine_result_schema_ref="schema.approval_record",
+                        artifact_specs=[],
+                        spawn_mode="inline_lane",
+                        timeout_ms=90000,
+                        risk_class="low",
+                        allow_provider_calls=False,
+                        allow_code_changes=False,
+                        allow_install=False,
+                        requires_human_approval=False,
+                        x=620,
+                        y=120,
+                        input_ports=[
+                            {
+                                "port_id": "approval_payload",
+                                "label": "Approval Payload",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.approval_record",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                        output_ports=[
+                            {
+                                "port_id": "machine_result",
+                                "label": "Machine Result",
+                                "port_type": "structured_json",
+                                "schema_ref": "schema.approval_record",
+                                "artifact_kind": "structured_json",
+                                "shape": "single",
+                                "required": True,
+                            }
+                        ],
+                    ),
+                ]
+                edges = [
+                    orchestration_file_format_module._edge(  # noqa: SLF001
+                        edge_id="edge_source_gate",
+                        from_node_id="node_source",
+                        to_node_id="node_gate",
+                        edge_type="approval_dependency",
+                        schema_ref="schema.artifact_payload",
+                        message_template="Review the loaded artifact before continuing.",
+                        x=240,
+                        y=120,
+                        port_bindings=[{"from_port_id": "artifact_output", "to_port_id": "approval_input"}],
+                    ),
+                    orchestration_file_format_module._edge(  # noqa: SLF001
+                        edge_id="edge_gate_transform",
+                        from_node_id="node_gate",
+                        to_node_id="node_after_gate",
+                        edge_type="context_handoff",
+                        schema_ref="schema.approval_record",
+                        message_template="Continue only after approval has been granted.",
+                        x=500,
+                        y=120,
+                        port_bindings=[{"from_port_id": "approval_record", "to_port_id": "approval_payload"}],
+                    ),
+                ]
+                orchestration_graph = orchestration_file_format_module._base_graph(  # noqa: SLF001
+                    graph_id="graph_live_approval_resume_v1",
+                    title="Live Approval Resume",
+                    template_id="custom_blank_graph",
+                    tags=["approval", "resume", "live"],
+                    entry_node_ids=["node_source"],
+                    nodes=nodes,
+                    edges=edges,
+                    schema_registry=schema_registry,
+                )
+                task_graph = lower_agent_orchestration_graph_to_task_graph(
+                    validate_agent_orchestration_graph(orchestration_graph)
+                )
+                task_graph["task_id"] = str(tasks.current_task()["task_id"])
+                task_graph["status"] = "ready"
+                task_graph["updated_at"] = now_iso()
+                for node in task_graph["nodes"]:
+                    node_id = str(node.get("node_id") or "").strip()
+                    node["provider_id"] = None
+                    node["model_id"] = None
+                    node["human_summary_template"] = ""
+                    node["execution_policy"]["allow_provider_calls"] = False
+                    if node_id == "node_source":
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["artifact_uri"] = "workspace://PRIVATE/input.json"
+                        node["ui_hints"]["node_type_config"]["artifact_kind"] = "structured_json"
+                    elif node_id == "node_after_gate":
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["transform_id"] = "identity"
+                saved_graph = tasks.save_graph_definition({"graph": task_graph})["graph"]
+
+                runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+                tasks.dry_run_graph = lambda payload, profiles_snapshot=None, configured_models=None: {  # type: ignore[method-assign]  # noqa: ARG005
+                    "dry_run": {"overall_status": "pass", "graph_result": {"reasons": []}}
+                }
+                turn_calls = {"count": 0}
+                runtime.start_turn = lambda profile, **payload: turn_calls.__setitem__("count", turn_calls["count"] + 1)  # type: ignore[method-assign]  # noqa: ARG005
+
+                pending = runtime.execute_task_graph_run(
+                    {"graph_id": saved_graph["graph_id"], "budget": {"limits": {"total_tokens": 80000}}}
+                )
+                pending_run = pending["live_run"]["run_ref"]
+                self.assertEqual(pending["live_run"]["run_status"], "paused_for_review", msg=json.dumps(pending_run, ensure_ascii=False, indent=2))
+                self.assertEqual(turn_calls["count"], 0)
+                self.assertFalse(
+                    (workspace / "PRIVATE" / "task-graph" / "workers" / pending["live_run"]["run_id"] / "node_after_gate" / "output.json").exists()
+                )
+
+                approved = tasks.resolve_graph_run_approval(
+                    {
+                        "run_id": pending["live_run"]["run_id"],
+                        "decision": "approve",
+                        "notes": "Approved after restart-safe review.",
+                    }
+                )
+                self.assertEqual(approved["run_ref"]["status"], "queued")
+                self.assertEqual(approved["run_ref"]["approval_state"], "approved")
+
+                reloaded_tasks = TaskService(projects)
+                reloaded_runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=reloaded_tasks)
+                reloaded_tasks.dry_run_graph = tasks.dry_run_graph  # type: ignore[attr-defined]
+                reloaded_runtime.start_turn = lambda profile, **payload: turn_calls.__setitem__("count", turn_calls["count"] + 1)  # type: ignore[method-assign]  # noqa: ARG005
+                resumed = reloaded_runtime.recover_task_graph_run(
+                    {"run_id": pending["live_run"]["run_id"], "strategy": "resume_run"}
+                )
+                self.assertEqual(resumed["recovery"]["status"], "resumed_in_place")
+                self.assertEqual(resumed["live_run"]["run_status"], "completed")
+                self.assertEqual(resumed["live_run"]["run_id"], pending["live_run"]["run_id"])
+                self.assertEqual(turn_calls["count"], 0)
+
+                output = json.loads(
+                    (
+                        workspace
+                        / "PRIVATE"
+                        / "task-graph"
+                        / "workers"
+                        / pending["live_run"]["run_id"]
+                        / "node_after_gate"
+                        / "output.json"
+                    ).read_text(encoding="utf-8")
+                )
+                self.assertEqual(output["typed_output_values"]["machine_result"]["decision"], "approve")
+
+                full_run = reloaded_tasks._load_full_graph_run(resumed["live_run"]["run_ref"])  # noqa: SLF001
+                self.assertIsNotNone(full_run)
+                source_state = next(item for item in full_run["node_run_states"] if item["node_id"] == "node_source")
+                gate_state = next(item for item in full_run["node_run_states"] if item["node_id"] == "node_gate")
+                after_state = next(item for item in full_run["node_run_states"] if item["node_id"] == "node_after_gate")
+                self.assertEqual(source_state["attempt_count"], 1)
+                self.assertEqual(gate_state["status"], "completed")
+                self.assertEqual(after_state["status"], "completed")
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_live_graph_rerun_selected_nodes_reuses_safe_completed_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Live selected rerun graph", root / "live-selected-rerun.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Live selected rerun task", thread_id="thread-parent")
+                (workspace / "PRIVATE" / "input.json").write_text('{"artifact_uri":"workspace://PRIVATE/input.json"}', encoding="utf-8")
+
+                schema_registry = {
+                    "schema.artifact_payload": {
+                        "type": "object",
+                        "required": ["artifact_uri"],
+                        "properties": {"artifact_uri": {"type": "string"}},
+                    }
+                }
+                nodes = [
+                orchestration_file_format_module._node(  # noqa: SLF001
+                    node_id="node_source",
+                    kind="artifact_source",
+                    role="custom",
+                    label="Artifact Source",
+                    card_ref="agent_card_live_selected_rerun_source",
+                    provider_id=None,
+                    model_id=None,
+                    prompt="Load the preserved artifact.",
+                    tool_classes=[],
+                    output_mode="structured_and_artifacts",
+                    machine_result_schema_ref="schema.artifact_payload",
+                    artifact_specs=[{"kind": "structured_json", "id": "artifact_source"}],
+                    spawn_mode="inline_lane",
+                    timeout_ms=90000,
+                    risk_class="low",
+                    allow_provider_calls=False,
+                    allow_code_changes=False,
+                    allow_install=False,
+                    requires_human_approval=False,
+                    x=120,
+                    y=120,
+                    output_ports=[
+                        {
+                            "port_id": "artifact_output",
+                            "label": "Artifact Output",
+                            "port_type": "structured_json",
+                            "schema_ref": "schema.artifact_payload",
+                            "artifact_kind": "structured_json",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                ),
+                orchestration_file_format_module._node(  # noqa: SLF001
+                    node_id="node_transform_a",
+                    kind="transform",
+                    role="custom",
+                    label="Transform A",
+                    card_ref="agent_card_live_selected_rerun_transform_a",
+                    provider_id=None,
+                    model_id=None,
+                    prompt="Pass the structured payload through unchanged.",
+                    tool_classes=[],
+                    output_mode="structured_and_artifacts",
+                    machine_result_schema_ref="schema.artifact_payload",
+                    artifact_specs=[],
+                    spawn_mode="inline_lane",
+                    timeout_ms=90000,
+                    risk_class="low",
+                    allow_provider_calls=False,
+                    allow_code_changes=False,
+                    allow_install=False,
+                    requires_human_approval=False,
+                    x=380,
+                    y=120,
+                    input_ports=[
+                        {
+                            "port_id": "artifact_input",
+                            "label": "Artifact Input",
+                            "port_type": "structured_json",
+                            "schema_ref": "schema.artifact_payload",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                    output_ports=[
+                        {
+                            "port_id": "machine_result",
+                            "label": "Machine Result",
+                            "port_type": "structured_json",
+                            "schema_ref": "schema.artifact_payload",
+                            "artifact_kind": "structured_json",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                ),
+                orchestration_file_format_module._node(  # noqa: SLF001
+                    node_id="node_transform_b",
+                    kind="transform",
+                    role="custom",
+                    label="Transform B",
+                    card_ref="agent_card_live_selected_rerun_transform_b",
+                    provider_id=None,
+                    model_id=None,
+                    prompt="Pass the structured payload through unchanged again.",
+                    tool_classes=[],
+                    output_mode="structured_and_artifacts",
+                    machine_result_schema_ref="schema.artifact_payload",
+                    artifact_specs=[],
+                    spawn_mode="inline_lane",
+                    timeout_ms=90000,
+                    risk_class="low",
+                    allow_provider_calls=False,
+                    allow_code_changes=False,
+                    allow_install=False,
+                    requires_human_approval=False,
+                    x=640,
+                    y=120,
+                    input_ports=[
+                        {
+                            "port_id": "artifact_input",
+                            "label": "Artifact Input",
+                            "port_type": "structured_json",
+                            "schema_ref": "schema.artifact_payload",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                    output_ports=[
+                        {
+                            "port_id": "machine_result",
+                            "label": "Machine Result",
+                            "port_type": "structured_json",
+                            "schema_ref": "schema.artifact_payload",
+                            "artifact_kind": "structured_json",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                ),
+                ]
+                edges = [
+                orchestration_file_format_module._edge(  # noqa: SLF001
+                    edge_id="edge_source_transform_a",
+                    from_node_id="node_source",
+                    to_node_id="node_transform_a",
+                    edge_type="context_handoff",
+                    schema_ref="schema.artifact_payload",
+                    message_template="Pass the loaded artifact into Transform A.",
+                    x=250,
+                    y=120,
+                    port_bindings=[{"from_port_id": "artifact_output", "to_port_id": "artifact_input"}],
+                ),
+                orchestration_file_format_module._edge(  # noqa: SLF001
+                    edge_id="edge_transform_a_transform_b",
+                    from_node_id="node_transform_a",
+                    to_node_id="node_transform_b",
+                    edge_type="context_handoff",
+                    schema_ref="schema.artifact_payload",
+                    message_template="Pass the normalized artifact into Transform B.",
+                    x=510,
+                    y=120,
+                    port_bindings=[{"from_port_id": "machine_result", "to_port_id": "artifact_input"}],
+                ),
+                ]
+                orchestration_graph = orchestration_file_format_module._base_graph(  # noqa: SLF001
+                graph_id="graph_live_selected_rerun_v1",
+                title="Live Selected Rerun",
+                template_id="custom_blank_graph",
+                tags=["rerun", "live", "recovery"],
+                entry_node_ids=["node_source"],
+                nodes=nodes,
+                edges=edges,
+                schema_registry=schema_registry,
+                )
+                task_graph = lower_agent_orchestration_graph_to_task_graph(
+                    validate_agent_orchestration_graph(orchestration_graph)
+                )
+                task_graph["task_id"] = str(tasks.current_task()["task_id"])
+                task_graph["status"] = "ready"
+                task_graph["updated_at"] = now_iso()
+                for node in task_graph["nodes"]:
+                    node_id = str(node.get("node_id") or "").strip()
+                    node["provider_id"] = None
+                    node["model_id"] = None
+                    node["human_summary_template"] = ""
+                    node["execution_policy"]["allow_provider_calls"] = False
+                    if node_id == "node_source":
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["artifact_uri"] = "workspace://PRIVATE/input.json"
+                        node["ui_hints"]["node_type_config"]["artifact_kind"] = "structured_json"
+                    elif node_id in {"node_transform_a", "node_transform_b"}:
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["transform_id"] = "identity"
+                saved_graph = tasks.save_graph_definition({"graph": task_graph})["graph"]
+
+                runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+                tasks.dry_run_graph = lambda payload, profiles_snapshot=None, configured_models=None: {  # type: ignore[method-assign]  # noqa: ARG005
+                    "dry_run": {"overall_status": "pass", "graph_result": {"reasons": []}}
+                }
+                runtime.start_turn = lambda profile, **payload: None  # type: ignore[method-assign]  # noqa: ARG005
+
+                completed = runtime.execute_task_graph_run(
+                    {"graph_id": saved_graph["graph_id"], "budget": {"limits": {"total_tokens": 80000}}}
+                )
+                baseline_run_id = completed["live_run"]["run_id"]
+                self.assertEqual(completed["live_run"]["run_status"], "completed")
+
+                rerun = runtime.recover_task_graph_run(
+                    {
+                        "run_id": baseline_run_id,
+                        "strategy": "rerun_selected_nodes",
+                        "selected_node_ids": ["node_transform_a"],
+                    }
+                )
+                self.assertEqual(rerun["live_run"]["run_status"], "completed")
+                self.assertNotEqual(rerun["live_run"]["run_id"], baseline_run_id)
+                self.assertIn("node_source", rerun["recovery"]["reused_node_ids"])
+                self.assertEqual(rerun["recovery"]["rerun_node_ids"], ["node_transform_a", "node_transform_b"])
+                self.assertTrue((workspace / rerun["recovery"]["artifact_paths"]["manifest_json"]).exists())
+                self.assertTrue((workspace / rerun["recovery"]["artifact_paths"]["report_md"]).exists())
+
+                recovered_full_run = tasks._load_full_graph_run(rerun["live_run"]["run_ref"])  # noqa: SLF001
+                self.assertIsNotNone(recovered_full_run)
+                source_state = next(item for item in recovered_full_run["node_run_states"] if item["node_id"] == "node_source")
+                transform_a_state = next(item for item in recovered_full_run["node_run_states"] if item["node_id"] == "node_transform_a")
+                transform_b_state = next(item for item in recovered_full_run["node_run_states"] if item["node_id"] == "node_transform_b")
+                self.assertTrue(source_state["reused_existing_output"])
+                self.assertEqual(source_state["reused_from_run_id"], baseline_run_id)
+                self.assertNotIn("reused_existing_output", transform_a_state)
+                self.assertNotIn("reused_existing_output", transform_b_state)
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
+
+    def test_live_graph_selected_rerun_marks_artifact_sink_replay_needs_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_runtime_root = os.environ.get("ASTRABRIDGE_RUNTIME_ROOT")
+            os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = temp_dir
+            try:
+                root = Path(temp_dir)
+                workspace = root / "workspace"
+                workspace.mkdir()
+                (workspace / "PRIVATE").mkdir()
+                (workspace / ".astrabridge").mkdir()
+                projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+                projects.create_project("Live ambiguous rerun graph", root / "live-ambiguous-rerun.abproj", workspace_root=workspace)
+                tasks = TaskService(projects)
+                tasks.create_task("Live ambiguous rerun task", thread_id="thread-parent")
+                (workspace / "PRIVATE" / "input.json").write_text('{"artifact_uri":"workspace://PRIVATE/input.json"}', encoding="utf-8")
+
+                schema_registry = {
+                    "schema.artifact_payload": {
+                        "type": "object",
+                        "required": ["artifact_uri"],
+                        "properties": {"artifact_uri": {"type": "string"}},
+                    },
+                    "schema.artifact_record": {
+                        "type": "object",
+                        "required": ["artifact_path"],
+                        "properties": {"artifact_path": {"type": "string"}},
+                    },
+                }
+                nodes = [
+                orchestration_file_format_module._node(  # noqa: SLF001
+                    node_id="node_source",
+                    kind="artifact_source",
+                    role="custom",
+                    label="Artifact Source",
+                    card_ref="agent_card_live_ambiguous_rerun_source",
+                    provider_id=None,
+                    model_id=None,
+                    prompt="Load the preserved artifact.",
+                    tool_classes=[],
+                    output_mode="structured_and_artifacts",
+                    machine_result_schema_ref="schema.artifact_payload",
+                    artifact_specs=[{"kind": "structured_json", "id": "artifact_source"}],
+                    spawn_mode="inline_lane",
+                    timeout_ms=90000,
+                    risk_class="low",
+                    allow_provider_calls=False,
+                    allow_code_changes=False,
+                    allow_install=False,
+                    requires_human_approval=False,
+                    x=120,
+                    y=120,
+                    output_ports=[
+                        {
+                            "port_id": "artifact_output",
+                            "label": "Artifact Output",
+                            "port_type": "structured_json",
+                            "schema_ref": "schema.artifact_payload",
+                            "artifact_kind": "structured_json",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                ),
+                orchestration_file_format_module._node(  # noqa: SLF001
+                    node_id="node_sink",
+                    kind="artifact_sink",
+                    role="custom",
+                    label="Artifact Sink",
+                    card_ref="agent_card_live_ambiguous_rerun_sink",
+                    provider_id=None,
+                    model_id=None,
+                    prompt="Persist the structured artifact to a durable sink path.",
+                    tool_classes=[],
+                    output_mode="structured_and_artifacts",
+                    machine_result_schema_ref="schema.artifact_record",
+                    artifact_specs=[],
+                    spawn_mode="inline_lane",
+                    timeout_ms=90000,
+                    risk_class="low",
+                    allow_provider_calls=False,
+                    allow_code_changes=False,
+                    allow_install=False,
+                    requires_human_approval=False,
+                    x=420,
+                    y=120,
+                    input_ports=[
+                        {
+                            "port_id": "artifact_input",
+                            "label": "Artifact Input",
+                            "port_type": "structured_json",
+                            "schema_ref": "schema.artifact_payload",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                    output_ports=[
+                        {
+                            "port_id": "artifact_record",
+                            "label": "Artifact Record",
+                            "port_type": "structured_json",
+                            "schema_ref": "schema.artifact_record",
+                            "artifact_kind": "structured_json",
+                            "shape": "single",
+                            "required": True,
+                        }
+                    ],
+                ),
+                ]
+                edges = [
+                orchestration_file_format_module._edge(  # noqa: SLF001
+                    edge_id="edge_source_sink",
+                    from_node_id="node_source",
+                    to_node_id="node_sink",
+                    edge_type="artifact_handoff",
+                    schema_ref="schema.artifact_payload",
+                    message_template="Persist the loaded artifact into the sink.",
+                    x=270,
+                    y=120,
+                    port_bindings=[{"from_port_id": "artifact_output", "to_port_id": "artifact_input"}],
+                )
+                ]
+                orchestration_graph = orchestration_file_format_module._base_graph(  # noqa: SLF001
+                graph_id="graph_live_ambiguous_rerun_v1",
+                title="Live Ambiguous Rerun",
+                template_id="custom_blank_graph",
+                tags=["rerun", "live", "artifact_sink"],
+                entry_node_ids=["node_source"],
+                nodes=nodes,
+                edges=edges,
+                schema_registry=schema_registry,
+                )
+                task_graph = lower_agent_orchestration_graph_to_task_graph(
+                    validate_agent_orchestration_graph(orchestration_graph)
+                )
+                task_graph["task_id"] = str(tasks.current_task()["task_id"])
+                task_graph["status"] = "ready"
+                task_graph["updated_at"] = now_iso()
+                for node in task_graph["nodes"]:
+                    node_id = str(node.get("node_id") or "").strip()
+                    node["provider_id"] = None
+                    node["model_id"] = None
+                    node["human_summary_template"] = ""
+                    node["execution_policy"]["allow_provider_calls"] = False
+                    if node_id == "node_source":
+                        node.setdefault("ui_hints", {}).setdefault("node_type_config", {})["artifact_uri"] = "workspace://PRIVATE/input.json"
+                        node["ui_hints"]["node_type_config"]["artifact_kind"] = "structured_json"
+                saved_graph = tasks.save_graph_definition({"graph": task_graph})["graph"]
+
+                runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+                tasks.dry_run_graph = lambda payload, profiles_snapshot=None, configured_models=None: {  # type: ignore[method-assign]  # noqa: ARG005
+                    "dry_run": {"overall_status": "pass", "graph_result": {"reasons": []}}
+                }
+                runtime.start_turn = lambda profile, **payload: None  # type: ignore[method-assign]  # noqa: ARG005
+
+                completed = runtime.execute_task_graph_run(
+                    {"graph_id": saved_graph["graph_id"], "budget": {"limits": {"total_tokens": 80000}}}
+                )
+                self.assertEqual(completed["live_run"]["run_status"], "completed")
+
+                review = runtime.recover_task_graph_run(
+                    {
+                        "run_id": completed["live_run"]["run_id"],
+                        "strategy": "rerun_selected_nodes",
+                        "selected_node_ids": ["node_sink"],
+                    }
+                )
+                self.assertEqual(review["recovery"]["status"], "needs_review")
+                self.assertIn("node_sink", review["recovery"]["reason"])
+                self.assertEqual(review["live_run"]["run_id"], completed["live_run"]["run_id"])
+            finally:
+                if previous_runtime_root is None:
+                    os.environ.pop("ASTRABRIDGE_RUNTIME_ROOT", None)
+                else:
+                    os.environ["ASTRABRIDGE_RUNTIME_ROOT"] = previous_runtime_root
 
     def test_live_graph_marks_completed_turn_failed_when_no_tools_policy_is_violated(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2153,6 +4386,29 @@ class TaskGraphWorkerRuntimeTests(unittest.TestCase):
             self.assertTrue((workspace / dry_run["artifact_paths"]["compiled_plan_json"]).exists())
             artifact_paths = {str(item["path"]) for item in dry_run["artifact_refs"]}
             self.assertEqual(artifact_paths, set(dry_run["artifact_paths"].values()))
+
+    def test_dry_run_graph_blocks_stale_node_type_registry_fingerprint_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "PRIVATE").mkdir()
+            (workspace / ".astrabridge").mkdir()
+            projects = ProjectService(store_path=root / "projects.json", session_path=root / "current_project.json")
+            projects.create_project("Graph stale registry", root / "graph-stale-registry.abproj", workspace_root=workspace)
+            tasks = TaskService(projects)
+            tasks.create_task("Graph stale registry task")
+            graph = tasks.instantiate_graph_template("fanout_fanin_research")["graph"]
+            for node in graph["nodes"]:
+                ui_hints = dict(node.get("ui_hints") or {})
+                ui_hints["node_type_registry_fingerprint"] = "stale-registry"
+                node["ui_hints"] = ui_hints
+            tasks.save_graph_definition({"graph": graph})
+
+            dry_run = tasks.dry_run_graph({"graph_id": graph["graph_id"]})["dry_run"]
+
+            self.assertEqual(dry_run["overall_status"], "blocked")
+            self.assertIn("stale registry fingerprint", " ".join(dry_run["graph_result"]["reasons"]).lower())
 
     def test_dry_run_graph_blocks_static_budget_overrun_and_exports_budget_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

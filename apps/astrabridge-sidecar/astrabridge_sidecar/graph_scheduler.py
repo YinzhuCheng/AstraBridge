@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import queue
+from collections import deque
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -20,6 +20,7 @@ class _SchedulerJob:
     updated_at: str
     requested_parallelism: int = 1
     owner_id: str = ""
+    cancel_reason: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
     error: str | None = None
@@ -36,6 +37,7 @@ class _SchedulerJob:
             "finished_at": self.finished_at,
             "requested_parallelism": self.requested_parallelism,
             "owner_id": self.owner_id,
+            "cancel_reason": self.cancel_reason,
             "error": self.error,
             "result_status": self.result_status,
         }
@@ -55,14 +57,17 @@ class DurableGraphScheduler:
         callback: GraphExecutionCallback,
         *,
         max_workers: int = 4,
+        max_queue_size: int = 128,
         owner_id: str | None = None,
     ) -> None:
         if not callable(callback):
             raise TypeError("A graph execution callback is required.")
         self._callback = callback
         self._max_workers = max(1, int(max_workers))
+        self._max_queue_size = max(1, int(max_queue_size))
         self._owner_id = str(owner_id or new_id("graph-scheduler")).strip()
-        self._queue: queue.Queue[tuple[str, dict[str, Any]] | None] = queue.Queue()
+        self._queue: deque[tuple[str, dict[str, Any]] | None] = deque()
+        self._queue_condition = threading.Condition()
         self._jobs: dict[str, _SchedulerJob] = {}
         self._lock = threading.RLock()
         self._accepting = True
@@ -91,6 +96,9 @@ class DurableGraphScheduler:
                 return existing.snapshot()
             if not self._accepting:
                 raise RuntimeError("Graph scheduler is shutting down.")
+            queued_jobs = sum(1 for item in self._jobs.values() if item.status == "queued")
+            if queued_jobs >= self._max_queue_size:
+                raise RuntimeError("graph_scheduler_queue_full")
             created_at = now_iso()
             job = _SchedulerJob(
                 run_id=clean_run_id,
@@ -102,9 +110,11 @@ class DurableGraphScheduler:
             )
             self._ensure_workers_locked()
             self._jobs[clean_run_id] = job
-            # Queue entries contain the in-memory callback payload only.  It is
-            # never copied into job metadata or returned by status().
-            self._queue.put((clean_run_id, dict(payload)))
+            with self._queue_condition:
+                # Queue entries contain the in-memory callback payload only.  It is
+                # never copied into job metadata or returned by status().
+                self._queue.append((clean_run_id, dict(payload)))
+                self._queue_condition.notify()
             return job.snapshot()
 
     def get(self, run_id: str) -> dict[str, Any] | None:
@@ -137,19 +147,41 @@ class DurableGraphScheduler:
                 "owner_id": self._owner_id,
                 "started_at": self._started_at,
                 "max_workers": self._max_workers,
+                "max_queue_size": self._max_queue_size,
                 "active_job_count": len(active),
                 "queued_job_ids": [str(item["run_id"]) for item in active if item.get("status") == "queued"],
                 "running_job_ids": [str(item["run_id"]) for item in active if item.get("status") == "running"],
                 "jobs": jobs[:100],
             }
 
+    def cancel(self, run_id: str, *, reason: str = "cancelled") -> dict[str, Any] | None:
+        clean_run_id = str(run_id or "").strip()
+        if not clean_run_id:
+            return None
+        with self._lock:
+            job = self._jobs.get(clean_run_id)
+            if job is None:
+                return None
+            if job.status != "queued":
+                return job.snapshot()
+            finished_at = now_iso()
+            job.status = "cancelled"
+            job.result_status = "cancelled"
+            job.cancel_reason = str(reason or "cancelled")[:120]
+            job.finished_at = finished_at
+            job.updated_at = finished_at
+            job.done.set()
+            return job.snapshot()
+
     def shutdown(self, *, wait: bool = False) -> None:
         with self._lock:
             if not self._accepting:
                 return
             self._accepting = False
-        for _ in self._workers:
-            self._queue.put(None)
+        with self._queue_condition:
+            for _ in self._workers:
+                self._queue.append(None)
+            self._queue_condition.notify_all()
         if wait:
             for worker in self._workers:
                 worker.join(timeout=5.0)
@@ -168,15 +200,18 @@ class DurableGraphScheduler:
 
     def _worker_loop(self) -> None:
         while True:
-            item = self._queue.get()
+            with self._queue_condition:
+                while not self._queue:
+                    self._queue_condition.wait()
+                item = self._queue.popleft()
             if item is None:
-                self._queue.task_done()
                 return
             run_id, payload = item
             with self._lock:
                 job = self._jobs.get(run_id)
                 if job is None:
-                    self._queue.task_done()
+                    continue
+                if job.status == "cancelled":
                     continue
                 started_at = now_iso()
                 job.status = "running"
@@ -209,5 +244,3 @@ class DurableGraphScheduler:
                         job.updated_at = finished_at
                         job.result_status = result_status
                         job.done.set()
-            finally:
-                self._queue.task_done()

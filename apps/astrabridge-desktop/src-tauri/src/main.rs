@@ -1,7 +1,7 @@
 mod sidecar_supervision;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -11,6 +11,7 @@ use sidecar_supervision::{
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::webview::{NewWindowResponse, WebviewWindowBuilder};
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl};
+use tauri_plugin_updater::Builder as UpdaterPluginBuilder;
 use url::Url;
 
 const BROWSER_LABEL_PREFIX: &str = "ab-browser-";
@@ -49,26 +50,97 @@ fn repo_root_from_manifest() -> Option<PathBuf> {
     manifest.parent()?.parent()?.parent().map(PathBuf::from)
 }
 
-fn sidecar_locations(app: &tauri::App) -> Option<(PathBuf, PathBuf)> {
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        let bundled_dir = resource_dir.join("astrabridge-sidecar");
-        let bundled_exe = bundled_dir.join("astrabridge-sidecar.exe");
-        if bundled_exe.exists() {
-            return Some((bundled_exe, resource_dir));
-        }
-        let bundled_script = bundled_dir.join("sidecar_server.py");
-        if bundled_script.exists() {
-            return Some((bundled_script, resource_dir));
-        }
+#[derive(Debug, Clone)]
+struct SidecarResolution {
+    sidecar_path: PathBuf,
+    seed_root: PathBuf,
+    launch_arguments: Vec<String>,
+    extra_env: HashMap<String, String>,
+}
+
+fn bundled_sidecar_resource_dir(resource_dir: &Path) -> PathBuf {
+    resource_dir.join("astrabridge-sidecar")
+}
+
+fn bundled_sidecar_python(resource_dir: &Path) -> PathBuf {
+    bundled_sidecar_resource_dir(resource_dir)
+        .join("python-runtime")
+        .join("python.exe")
+}
+
+fn bundled_sidecar_manifest(resource_dir: &Path) -> PathBuf {
+    bundled_sidecar_resource_dir(resource_dir).join("bundle-manifest.json")
+}
+
+fn resolve_bundled_sidecar(resource_dir: &Path) -> Result<Option<SidecarResolution>, String> {
+    let bundled_dir = bundled_sidecar_resource_dir(resource_dir);
+    if !bundled_dir.exists() {
+        return Ok(None);
     }
-    let repo_root = repo_root_from_manifest()?;
-    Some((
-        repo_root
+
+    let bundled_python = bundled_sidecar_python(resource_dir);
+    let bundled_manifest = bundled_sidecar_manifest(resource_dir);
+    if bundled_python.exists() && bundled_manifest.exists() {
+        let mut env = sidecar_environment_overrides();
+        env.insert(
+            "ASTRABRIDGE_SIDECAR_ORIGIN".to_string(),
+            "app-managed".to_string(),
+        );
+        env.insert(
+            "ASTRABRIDGE_LAUNCHER_MODE".to_string(),
+            "desktop-app-managed".to_string(),
+        );
+        env.insert("PYTHONPATH".to_string(), bundled_dir.display().to_string());
+        return Ok(Some(SidecarResolution {
+            sidecar_path: bundled_python,
+            seed_root: resource_dir.to_path_buf(),
+            launch_arguments: vec![
+                "-m".to_string(),
+                "astrabridge_sidecar.server".to_string(),
+            ],
+            extra_env: env,
+        }));
+    }
+
+    let legacy_bundled_script = bundled_dir.join("sidecar_server.py");
+    let legacy_bundled_source = bundled_dir.join("astrabridge_sidecar");
+    if legacy_bundled_script.exists() || legacy_bundled_source.exists() || bundled_manifest.exists() {
+        return Err(format!(
+            "Formal packages require a bundled AstraBridge sidecar runtime with {} and {}. Refused legacy bundled script/source fallback in {}.",
+            bundled_sidecar_python(resource_dir).display(),
+            bundled_sidecar_manifest(resource_dir).display(),
+            bundled_dir.display()
+        ));
+    }
+
+    Err(format!(
+        "Formal package sidecar bundle was present but incomplete in {}. Missing {}.",
+        bundled_dir.display(),
+        bundled_sidecar_python(resource_dir).display()
+    ))
+}
+
+fn resolve_current_source_sidecar(repo_root: &Path) -> SidecarResolution {
+    SidecarResolution {
+        sidecar_path: repo_root
             .join("apps")
             .join("astrabridge-sidecar")
             .join("sidecar_server.py"),
-        repo_root,
-    ))
+        seed_root: repo_root.to_path_buf(),
+        launch_arguments: Vec::new(),
+        extra_env: sidecar_environment_overrides(),
+    }
+}
+
+fn sidecar_locations(app: &tauri::App) -> Result<SidecarResolution, String> {
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        if let Some(resolution) = resolve_bundled_sidecar(&resource_dir)? {
+            return Ok(resolution);
+        }
+    }
+    let repo_root =
+        repo_root_from_manifest().ok_or_else(|| "Could not resolve the AstraBridge repository root.".to_string())?;
+    Ok(resolve_current_source_sidecar(&repo_root))
 }
 
 fn sidecar_environment_overrides() -> HashMap<String, String> {
@@ -95,8 +167,9 @@ fn sidecar_state_root(app: &tauri::App, seed_root: &PathBuf) -> PathBuf {
 }
 
 fn sidecar_supervisor(app: &tauri::App) -> Result<SidecarSupervisor, String> {
-    let (sidecar_path, seed_root) = sidecar_locations(app)
-        .ok_or_else(|| "Could not resolve the AstraBridge sidecar launch path.".to_string())?;
+    let resolution = sidecar_locations(app)?;
+    let sidecar_path = resolution.sidecar_path;
+    let seed_root = resolution.seed_root;
     if !sidecar_path.exists() {
         return Err(format!(
             "AstraBridge sidecar was not found: {}",
@@ -115,7 +188,8 @@ fn sidecar_supervisor(app: &tauri::App) -> Result<SidecarSupervisor, String> {
         state_root: sidecar_state_root(app, &seed_root),
         build_version: env!("CARGO_PKG_VERSION").to_string(),
         python_candidates,
-        extra_env: sidecar_environment_overrides(),
+        launch_arguments: resolution.launch_arguments,
+        extra_env: resolution.extra_env,
         tuning: Default::default(),
     };
     SidecarSupervisor::new(config)
@@ -597,6 +671,7 @@ fn sidecar_url(supervisor: State<'_, SidecarSupervisor>) -> Result<String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn desktop_sidecar_does_not_inherit_codex_home_overrides() {
@@ -613,10 +688,69 @@ mod tests {
             Some(&None)
         );
     }
+
+    #[test]
+    fn bundled_sidecar_requires_manifest_and_python_runtime() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "astrabridge-sidecar-bundle-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp_root);
+        let resource_dir = temp_root.join("resources");
+        let bundled_dir = bundled_sidecar_resource_dir(&resource_dir);
+        fs::create_dir_all(bundled_dir.join("astrabridge_sidecar")).unwrap();
+
+        let error = resolve_bundled_sidecar(&resource_dir).unwrap_err();
+        assert!(error.contains("Refused legacy bundled script/source fallback"));
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn bundled_sidecar_uses_python_runtime_module_launch() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "astrabridge-sidecar-runtime-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp_root);
+        let resource_dir = temp_root.join("resources");
+        let bundled_dir = bundled_sidecar_resource_dir(&resource_dir);
+        fs::create_dir_all(bundled_dir.join("python-runtime")).unwrap();
+        fs::write(bundled_sidecar_python(&resource_dir), b"python").unwrap();
+        fs::write(
+            bundled_sidecar_manifest(&resource_dir),
+            "{\"schema_version\":\"astrabridge-sidecar-formal-bundle-v1\"}\n",
+        )
+        .unwrap();
+
+        let resolution = resolve_bundled_sidecar(&resource_dir)
+            .unwrap()
+            .expect("expected bundled sidecar resolution");
+        assert_eq!(resolution.sidecar_path, bundled_sidecar_python(&resource_dir));
+        assert_eq!(
+            resolution.launch_arguments,
+            vec!["-m".to_string(), "astrabridge_sidecar.server".to_string()]
+        );
+        assert_eq!(
+            resolution.extra_env.get("ASTRABRIDGE_SIDECAR_ORIGIN"),
+            Some(&"app-managed".to_string())
+        );
+        assert_eq!(
+            resolution.extra_env.get("ASTRABRIDGE_LAUNCHER_MODE"),
+            Some(&"desktop-app-managed".to_string())
+        );
+        assert_eq!(
+            resolution.extra_env.get("PYTHONPATH"),
+            Some(&bundled_dir.display().to_string())
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
 }
 
 fn main() {
     tauri::Builder::default()
+        .plugin(UpdaterPluginBuilder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .menu(build_menu)
         .setup(|app| {

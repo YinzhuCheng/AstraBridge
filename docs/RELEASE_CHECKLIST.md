@@ -72,8 +72,17 @@ http://127.0.0.1:<port>/?astrabridge_launch=dogfood&sidecar=http://127.0.0.1:882
 - Desktop unit tests pass.
 - Desktop typecheck passes as part of `npm run build`.
 - Desktop build passes.
+- `python scripts/run_release_readiness_gate.py --run-id local-readiness` passes.
+- `python scripts/run_windows_update_rehearsal.py --run-id local-windows-update-rehearsal` passes for the selected update channel.
 - Preview server serves the current build instead of a stale bundle.
 - If Tauri packaging is attempted, record the exact command and result in the release evidence note.
+
+Release-readiness expectations:
+
+- `release/astrabridge-release-identity.json` is the only release identity source.
+- Desktop `package.json`, Sidecar `pyproject.toml`, Tauri `Cargo.toml` / `tauri.conf.json`, MCP metadata, and protocol compatibility all match that identity.
+- Two staged release workspace runs produce identical inventories and file hashes.
+- Staged contents exclude `PRIVATE`, `.astrabridge`, `.venv`, `node_modules`, tests, caches, and other unapproved development paths.
 
 ## Functional Smoke Gate
 
@@ -123,6 +132,7 @@ http://127.0.0.1:<port>/?astrabridge_launch=dogfood&sidecar=http://127.0.0.1:882
 - Preview or dev URL opens in the in-app browser without connection refusal.
 - No stale bundle confusion is present after rebuilding.
 - `/api/dogfood/browser-smoke` returns pass/fail with a screenshot path and sanitized status.
+- Setup -> Updates shows explicit stable/beta/canary channel selection, kill-switch state, formal bundle status, and the latest isolated Windows rehearsal result.
 - Captures are written only under:
   - `<workspace>\.astrabridge\captures\`
   - `PRIVATE\demo-runs\<timestamp>\`
@@ -212,7 +222,17 @@ For release candidates that touch the desktop update review panel:
 ```powershell
 cd D:\AstraBridge\apps\astrabridge-desktop
 cmd /c npm run test -- AgenticUpdateReviewPanel.test.tsx
+cmd /c npm run test -- DesktopUpdatePanel.test.tsx
 cmd /c npm run build
+```
+
+For release candidates that touch the product desktop updater surface or Windows rehearsal owner:
+
+```powershell
+cd D:\AstraBridge\apps\astrabridge-sidecar
+.\.venv\Scripts\python.exe -m unittest tests.test_release_identity tests.test_sidecar_services
+cd D:\AstraBridge
+python scripts/run_windows_update_rehearsal.py --run-id release-checklist-rehearsal
 ```
 
 For release candidates that touch automation update checks:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+import hashlib
 import json
 import re
 import shutil
@@ -7,12 +9,15 @@ import tomllib
 from pathlib import Path
 from typing import Any, Callable
 
+from .agentic_updates.apply import AGENTIC_UPDATE_APPLY_JOURNAL_SCHEMA_VERSION
 from .common import append_jsonl, new_id, now_iso, write_json
 from .codex_plugin_install_plan import build_plugin_install_plan
 from .security import SecurityError, SECRET_QUERY_RE, redact_sensitive, resolve_under
 
 
 PLUGIN_INSTALL_EXECUTION_SCHEMA_VERSION = "astrabridge-plugin-install-execution-v1"
+PLUGIN_INSTALL_ROLLBACK_MANIFEST_SCHEMA_VERSION = "astrabridge-plugin-install-rollback-manifest-v1"
+PLUGIN_INSTALL_TRACK_ID = "plugin_skill_activation"
 _SENSITIVE_FIELD_MARKERS = ("api_key", "apikey", "authorization", "cookie", "password", "secret", "token")
 _VALUE_SECRET_RE = re.compile(
     r"(?i)(bearer\s+[a-z0-9._-]{12,}|authorization\s*:|cookie\s*:|ssh-rsa|BEGIN\s+(RSA|OPENSSH|EC|DSA)\s+PRIVATE\s+KEY|sk-[a-z0-9_-]{12,})"
@@ -45,6 +50,8 @@ def execute_plugin_install(
     events_path = report_root / "events.jsonl"
     plan_path = report_root / "plan.json"
     result_path = report_root / "result.json"
+    apply_journal_path = report_root / "apply-journal.json"
+    rollback_manifest_path = report_root / "rollback-manifest.json"
 
     plan = build_plugin_install_plan(
         registry_snapshot=registry_snapshot,
@@ -77,6 +84,8 @@ def execute_plugin_install(
             "plan_path": str(plan_path),
             "events_path": str(events_path),
             "result_path": str(result_path),
+            "apply_journal_path": str(apply_journal_path),
+            "rollback_manifest_path": str(rollback_manifest_path),
         },
         "source": dict(plan.get("source") or {}),
         "target_root": str(target_root),
@@ -97,9 +106,50 @@ def execute_plugin_install(
 
     plan_errors = [dict(item) for item in list(plan.get("errors") or []) if isinstance(item, dict)]
     if result["action"] == "noop":
+        target_state_before = _plugin_tree_state(target_root)
+        source_state = _plugin_tree_state(Path(source_root_text).expanduser().resolve()) if source_root_text else {"exists": False, "files": [], "digest": _tree_digest([])}
+        journal = _initialize_plugin_apply_journal(
+            execution_id=execution_id,
+            executed_at=executed_at,
+            plugin=plan.get("plugin") or {},
+            source=plan.get("source") or {},
+            action="noop",
+            source_state=source_state,
+            target_state_before=target_state_before,
+        )
         result["status"] = "noop"
         result["notes"].append("already_current")
         result["rollback_snapshot"]["status"] = "not_needed"
+        result["rollback_manifest"] = _write_plugin_rollback_manifest(
+            rollback_manifest_path=rollback_manifest_path,
+            execution_id=execution_id,
+            executed_at=executed_at,
+            plugin=plan.get("plugin") or {},
+            action="noop",
+            target_root=target_root,
+            snapshot_root=snapshot_root,
+            target_state_before=target_state_before,
+            target_state_after=target_state_before,
+            restored_state=target_state_before,
+            restore_status="not_needed",
+            target_existed_before=target_root.exists(),
+        )
+        _finalize_plugin_apply_journal(
+            journal,
+            apply_journal_path,
+            terminal_status="committed",
+            staged_state=source_state,
+            health_verdict="pass",
+            changed_paths=[],
+            rollback_target=_plugin_rollback_target(
+                rollback_manifest_path=rollback_manifest_path,
+                snapshot_root=snapshot_root,
+                restore_status="not_needed",
+                target_state_before=target_state_before,
+                target_state_after=target_state_before,
+                target_existed_before=target_root.exists(),
+            ),
+        )
         _append_event(events_path, {"event": "noop", "reason": plan.get("reason")})
         return _write_result(result_path, result)
     if str(plan.get("status") or "") != "ready" or result["action"] not in {"install", "update"}:
@@ -112,9 +162,30 @@ def execute_plugin_install(
         _append_event(events_path, {"event": "source_missing", "source_root": source_root_text or None})
         return _write_result(result_path, result)
 
+    source_state = _plugin_tree_state(source_root)
+    target_state_before = _plugin_tree_state(target_root)
+    journal = _initialize_plugin_apply_journal(
+        execution_id=execution_id,
+        executed_at=executed_at,
+        plugin=plan.get("plugin") or {},
+        source=plan.get("source") or {},
+        action=result["action"],
+        source_state=source_state,
+        target_state_before=target_state_before,
+    )
+    _write_plugin_apply_journal(apply_journal_path, journal)
+    _append_plugin_apply_stage(
+        journal,
+        apply_journal_path,
+        stage="baseline_captured",
+        target_digest=target_state_before["digest"],
+        target_exists=target_state_before["exists"],
+    )
+
     try:
         scanned_files = _scan_plugin_source_for_raw_secrets(source_root)
         result["notes"].append(f"secret_scan_files:{len(scanned_files)}")
+        _append_plugin_apply_stage(journal, apply_journal_path, stage="source_scanned", file_count=len(scanned_files))
         _append_event(events_path, {"event": "source_scanned", "file_count": len(scanned_files)})
     except SecurityError as exc:
         result["errors"] = [_error("plugin-secret-scan-failed", str(exc), field="source_root")]
@@ -128,7 +199,15 @@ def execute_plugin_install(
         stage_root.parent.mkdir(parents=True, exist_ok=True)
         copytree_fn(source_root, stage_root)
         staged_files = _list_relative_files(stage_root)
+        staged_state = _plugin_tree_state(stage_root)
         result["notes"].append(f"staged_files:{len(staged_files)}")
+        _append_plugin_apply_stage(
+            journal,
+            apply_journal_path,
+            stage="staged",
+            staged_digest=staged_state["digest"],
+            staged_file_count=len(staged_files),
+        )
         _append_event(events_path, {"event": "source_staged", "file_count": len(staged_files), "stage_root": str(stage_root)})
     except Exception as exc:  # noqa: BLE001
         result["errors"] = [_error("plugin-stage-copy-failed", f"Failed to stage plugin source: {str(exc)[:300]}", field="source_root")]
@@ -149,6 +228,13 @@ def execute_plugin_install(
                 "captured_file_count": len(snapshot_files),
                 "captured_files": snapshot_files[:24],
             }
+            _append_plugin_apply_stage(
+                journal,
+                apply_journal_path,
+                stage="rollback_snapshot_captured",
+                snapshot_digest=_plugin_tree_state(snapshot_root)["digest"],
+                snapshot_file_count=len(snapshot_files),
+            )
             _append_event(events_path, {"event": "snapshot_captured", "file_count": len(snapshot_files), "snapshot_root": str(snapshot_root)})
         except Exception as exc:  # noqa: BLE001
             result["errors"] = [_error("plugin-rollback-snapshot-failed", f"Failed to snapshot current plugin state: {str(exc)[:300]}", field="target_root")]
@@ -162,6 +248,7 @@ def execute_plugin_install(
             "captured_file_count": 0,
             "captured_files": [],
         }
+        _append_plugin_apply_stage(journal, apply_journal_path, stage="rollback_snapshot_skipped", reason="target_missing")
         _append_event(events_path, {"event": "snapshot_skipped", "reason": "target_missing"})
 
     target_removed = False
@@ -172,12 +259,46 @@ def execute_plugin_install(
             target_removed = True
         move_fn(stage_root, target_root)
         target_files = _list_relative_files(target_root)
+        target_state_after = _plugin_tree_state(target_root)
+        health_verdict = "pass" if target_state_after["digest"] == staged_state["digest"] else "fail"
+        if health_verdict != "pass":
+            raise RuntimeError("target plugin state digest does not match staged plugin state")
         result["status"] = "applied"
         result["changes"] = {
             "written_file_count": len(target_files),
             "target_file_count": len(target_files),
         }
         result["notes"].append("apply_succeeded")
+        result["rollback_manifest"] = _write_plugin_rollback_manifest(
+            rollback_manifest_path=rollback_manifest_path,
+            execution_id=execution_id,
+            executed_at=executed_at,
+            plugin=plan.get("plugin") or {},
+            action=result["action"],
+            target_root=target_root,
+            snapshot_root=snapshot_root,
+            target_state_before=target_state_before,
+            target_state_after=target_state_after,
+            restored_state=target_state_after,
+            restore_status="available_for_manual_restore",
+            target_existed_before=target_state_before["exists"],
+        )
+        _finalize_plugin_apply_journal(
+            journal,
+            apply_journal_path,
+            terminal_status="committed",
+            staged_state=staged_state,
+            health_verdict=health_verdict,
+            changed_paths=_plugin_changed_paths(codex_home=codex_home, target_root=target_root),
+            rollback_target=_plugin_rollback_target(
+                rollback_manifest_path=rollback_manifest_path,
+                snapshot_root=snapshot_root,
+                restore_status="available_for_manual_restore",
+                target_state_before=target_state_before,
+                target_state_after=target_state_after,
+                target_existed_before=target_state_before["exists"],
+            ),
+        )
         _append_event(events_path, {"event": "apply_succeeded", "file_count": len(target_files), "target_root": str(target_root)})
     except Exception as exc:  # noqa: BLE001
         rollback_status = _restore_from_snapshot(
@@ -186,6 +307,7 @@ def execute_plugin_install(
             copytree_fn=copytree_fn,
             rmtree_fn=rmtree_fn,
         )
+        restored_state = _plugin_tree_state(target_root)
         result["rollback_snapshot"] = {
             **result["rollback_snapshot"],
             "status": rollback_status,
@@ -194,6 +316,36 @@ def execute_plugin_install(
         result["notes"].append("apply_failed")
         if target_removed:
             result["notes"].append("target_removed_before_failure")
+        result["rollback_manifest"] = _write_plugin_rollback_manifest(
+            rollback_manifest_path=rollback_manifest_path,
+            execution_id=execution_id,
+            executed_at=executed_at,
+            plugin=plan.get("plugin") or {},
+            action=result["action"],
+            target_root=target_root,
+            snapshot_root=snapshot_root,
+            target_state_before=target_state_before,
+            target_state_after=_plugin_tree_state(stage_root if stage_root.exists() else target_root),
+            restored_state=restored_state,
+            restore_status=rollback_status,
+            target_existed_before=target_state_before["exists"],
+        )
+        _finalize_plugin_apply_journal(
+            journal,
+            apply_journal_path,
+            terminal_status="rolled_back",
+            staged_state=staged_state if 'staged_state' in locals() else source_state,
+            health_verdict="fail",
+            changed_paths=_plugin_changed_paths(codex_home=codex_home, target_root=target_root),
+            rollback_target=_plugin_rollback_target(
+                rollback_manifest_path=rollback_manifest_path,
+                snapshot_root=snapshot_root,
+                restore_status=rollback_status,
+                target_state_before=target_state_before,
+                target_state_after=restored_state,
+                target_existed_before=target_state_before["exists"],
+            ),
+        )
         _append_event(events_path, {"event": "apply_failed", "error": str(exc)[:300], "rollback_status": rollback_status})
         return _write_result(result_path, result)
     finally:
@@ -208,6 +360,215 @@ def execute_plugin_install(
 
 def _required_under(root: Path, candidate: Path) -> Path:
     return resolve_under(root, candidate).resolve()
+
+
+def _write_plugin_apply_journal(path: Path, journal: dict[str, Any]) -> None:
+    write_json(path, redact_sensitive(journal))
+
+
+def _initialize_plugin_apply_journal(
+    *,
+    execution_id: str,
+    executed_at: str,
+    plugin: dict[str, Any],
+    source: dict[str, Any],
+    action: str,
+    source_state: dict[str, Any],
+    target_state_before: dict[str, Any],
+) -> dict[str, Any]:
+    plugin_id = str(plugin.get("plugin_id") or "unknown-plugin")
+    source_catalog_id = str(plugin.get("source_catalog_id") or source.get("source_catalog_id") or "").strip()
+    return {
+        "schema_version": AGENTIC_UPDATE_APPLY_JOURNAL_SCHEMA_VERSION,
+        "apply_id": execution_id,
+        "run_id": execution_id,
+        "status": "running",
+        "mode": "plugin_skill_activation",
+        "started_at": executed_at,
+        "completed_at": None,
+        "risk_class": "plugin_skill_install",
+        "approval": {
+            "approved": True,
+            "approved_by": "runtime_plugin_install_apply",
+            "approved_at": executed_at,
+            "approval_note": action,
+        },
+        "tracks": [
+            {
+                "track_id": PLUGIN_INSTALL_TRACK_ID,
+                "status": "running",
+                "source_digest": str(source_state.get("digest") or ""),
+                "staged_digest": None,
+                "trust_decision": f"plugin_source_catalog:{source_catalog_id or 'unspecified'}",
+                "health_verdict": "not_run",
+                "changed_paths": [],
+                "change_ids": [plugin_id],
+                "rollback_target": {
+                    "target_state_before_digest": str(target_state_before.get("digest") or ""),
+                    "target_existed_before": bool(target_state_before.get("exists")),
+                },
+                "history": [
+                    {
+                        "stage": "initialized",
+                        "at": executed_at,
+                        "plugin_id": plugin_id,
+                        "action": action,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _append_plugin_apply_stage(
+    journal: dict[str, Any],
+    journal_path: Path,
+    *,
+    stage: str,
+    **details: Any,
+) -> None:
+    track = _plugin_apply_track(journal)
+    history = list(track.get("history") or [])
+    entry = {"stage": stage, "at": now_iso()}
+    for key, value in details.items():
+        if value is not None:
+            entry[key] = value
+    history.append(entry)
+    track["history"] = history
+    _write_plugin_apply_journal(journal_path, journal)
+
+
+def _finalize_plugin_apply_journal(
+    journal: dict[str, Any],
+    journal_path: Path,
+    *,
+    terminal_status: str,
+    staged_state: dict[str, Any],
+    health_verdict: str,
+    changed_paths: list[str],
+    rollback_target: dict[str, Any],
+) -> None:
+    journal["status"] = terminal_status
+    journal["completed_at"] = now_iso()
+    track = _plugin_apply_track(journal)
+    track["status"] = terminal_status
+    track["staged_digest"] = str(staged_state.get("digest") or "")
+    track["health_verdict"] = health_verdict
+    track["changed_paths"] = list(changed_paths)
+    track["rollback_target"] = dict(rollback_target)
+    history = list(track.get("history") or [])
+    history.append({"stage": "healthcheck_completed", "at": now_iso(), "verdict": health_verdict})
+    history.append({"stage": terminal_status, "at": now_iso()})
+    track["history"] = history
+    _write_plugin_apply_journal(journal_path, journal)
+
+
+def _plugin_apply_track(journal: dict[str, Any]) -> dict[str, Any]:
+    for track in list(journal.get("tracks") or []):
+        if str(track.get("track_id") or "") == PLUGIN_INSTALL_TRACK_ID:
+            return track
+    raise ValueError("Missing plugin install apply journal track.")
+
+
+def _write_plugin_rollback_manifest(
+    *,
+    rollback_manifest_path: Path,
+    execution_id: str,
+    executed_at: str,
+    plugin: dict[str, Any],
+    action: str,
+    target_root: Path,
+    snapshot_root: Path,
+    target_state_before: dict[str, Any],
+    target_state_after: dict[str, Any],
+    restored_state: dict[str, Any],
+    restore_status: str,
+    target_existed_before: bool,
+) -> dict[str, Any]:
+    manifest = {
+        "schema_version": PLUGIN_INSTALL_ROLLBACK_MANIFEST_SCHEMA_VERSION,
+        "execution_id": execution_id,
+        "generated_at": executed_at,
+        "plugin_id": str(plugin.get("plugin_id") or ""),
+        "action": action,
+        "target_root": str(target_root),
+        "snapshot_root": str(snapshot_root),
+        "restore_status": restore_status,
+        "target_existed_before": target_existed_before,
+        "target_state_before": deepcopy(target_state_before),
+        "target_state_after": deepcopy(target_state_after),
+        "restored_state": deepcopy(restored_state),
+        "steps": [
+            {
+                "step_id": "plugin_runtime_restore",
+                "status": "ready" if restore_status == "available_for_manual_restore" else restore_status,
+                "target_root": str(target_root),
+                "snapshot_root": str(snapshot_root),
+                "target_existed_before": target_existed_before,
+                "restore_mode": "restore_snapshot" if target_existed_before else "remove_target_if_no_prior_state",
+            }
+        ],
+    }
+    write_json(rollback_manifest_path, redact_sensitive(manifest))
+    return redact_sensitive(manifest)
+
+
+def _plugin_rollback_target(
+    *,
+    rollback_manifest_path: Path,
+    snapshot_root: Path,
+    restore_status: str,
+    target_state_before: dict[str, Any],
+    target_state_after: dict[str, Any],
+    target_existed_before: bool,
+) -> dict[str, Any]:
+    return {
+        "rollback_manifest_path": str(rollback_manifest_path),
+        "snapshot_root": str(snapshot_root),
+        "restore_status": restore_status,
+        "target_existed_before": target_existed_before,
+        "target_state_before_digest": str(target_state_before.get("digest") or ""),
+        "target_state_after_digest": str(target_state_after.get("digest") or ""),
+    }
+
+
+def _plugin_tree_state(root: Path) -> dict[str, Any]:
+    files = _list_relative_files(root)
+    return {
+        "exists": bool(root.exists() and root.is_dir()),
+        "root": str(root),
+        "files": [{"relative_path": item["relative_path"], "bytes": item["bytes"]} for item in files],
+        "digest": _tree_digest(files),
+    }
+
+
+def _tree_digest(files: list[dict[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for item in files:
+        digest.update(str(item.get("relative_path") or "").encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(item.get("bytes") or 0).encode("utf-8"))
+        digest.update(b"\0")
+        path_text = str(item.get("path") or "").strip()
+        if path_text:
+            try:
+                digest.update(Path(path_text).read_bytes())
+            except Exception:
+                pass
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _plugin_changed_paths(*, codex_home: Path, target_root: Path) -> list[str]:
+    paths: list[str] = []
+    for item in _list_relative_files(target_root):
+        file_path = Path(str(item.get("path") or ""))
+        try:
+            relative = file_path.resolve().relative_to(codex_home.resolve()).as_posix()
+        except Exception:
+            relative = str(file_path)
+        paths.append(relative)
+    return paths
 
 
 def _write_result(path: Path, result: dict[str, Any]) -> dict[str, Any]:

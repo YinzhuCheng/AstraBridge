@@ -76,6 +76,12 @@ TYPE_ID_TO_LANGGRAPH_NODE_TYPE = {
 LANGGRAPH_SUPPORTED_EDGE_KINDS = {"start", "edge", "conditional"}
 LANGGRAPH_SUPPORTED_CHECKPOINTER_MODES = {"disabled", "memory", "inherit_parent"}
 LANGGRAPH_SUPPORTED_REDUCERS = {"replace", "list_append"}
+LANGGRAPH_GENERATED_PYTHON_EXECUTABLE_NODE_TYPES = {
+    "astrabridge/artifact_source",
+    "astrabridge/artifact_sink",
+    "astrabridge/router_condition",
+}
+LANGGRAPH_GENERATED_PYTHON_EXECUTABLE_ROUTE_MODES = {"state_field_literal"}
 
 CANONICAL_PORT_TYPES = {
     "text",
@@ -678,6 +684,21 @@ def generate_langgraph_stategraph_python(
         source_name="langgraph-stategraph-manifest",
     )
     graph = _as_dict(parsed.get("graph")) or {}
+    adapter_manifest = langgraph_stategraph_adapter_manifest()
+    source_version = _clean_text(parsed.get("version")) or LANGGRAPH_STATEGRAPH_DEFAULT_VERSION
+    generated_python_issues = _collect_generated_python_support_issues(parsed)
+    generated_python_loss_report = _build_loss_report(
+        source_version=source_version,
+        issues=generated_python_issues,
+        preserved_extensions={"generated_python": {"requested": True}},
+    )
+    if generated_python_loss_report["status"] == "blocked":
+        raise LangGraphStateGraphLossError(
+            "LangGraph generated Python export is blocked because the manifest requires runtime bindings or node families outside the executable subset.",
+            source_version=source_version,
+            loss_report=generated_python_loss_report,
+            adapter_manifest=adapter_manifest,
+        )
     clean_module_name = _clean_identifier(module_name) or f"generated_{_clean_identifier(graph.get('graph_id')) or 'langgraph_stategraph'}"
     state_channels = _as_dict(graph.get("state_channels")) or {}
     compile_config = _as_dict(graph.get("compile")) or {}
@@ -747,13 +768,13 @@ def generate_langgraph_stategraph_python(
             lines.extend(
                 [
                     f"def {fn_name}(state: State) -> dict[str, Any]:",
-                    f"    raise NotImplementedError('Bind AstraBridge node `{node_id}` before running the generated LangGraph integration.')",
+                    "    return {}",
                     "",
                     f"def {route_name}(state: State):",
                     f"    condition = {json.dumps(node_type_config.get('condition') or {}, ensure_ascii=False, sort_keys=True)}",
                     "    mode = str(condition.get(\"mode\") or \"state_field_literal\").strip() or \"state_field_literal\"",
                     "    if mode != \"state_field_literal\":",
-                    "        raise NotImplementedError(f\"Unsupported generated router condition mode: {mode}\")",
+                    "        raise ValueError(f\"Unsupported generated router condition mode: {mode}\")",
                     "    field = str(condition.get(\"field\") or \"route\").strip() or \"route\"",
                     "    branch_map = dict(condition.get(\"branch_map\") or {})",
                     "    value = state.get(field)",
@@ -764,19 +785,10 @@ def generate_langgraph_stategraph_python(
                 ]
             )
             continue
-        if node_type == "astrabridge/subgraph":
-            lines.extend(
-                [
-                    f"def {fn_name}(state: State) -> dict[str, Any]:",
-                    f"    raise NotImplementedError('Replace `{node_id}` with a compiled LangGraph subgraph for graph_ref={json.dumps(str(node_type_config.get('graph_ref') or ''))}.')",
-                    "",
-                ]
-            )
-            continue
         lines.extend(
             [
                 f"def {fn_name}(state: State) -> dict[str, Any]:",
-                f"    raise NotImplementedError('Bind AstraBridge node `{node_id}` before running the generated LangGraph integration.')",
+                "    return {}",
                 "",
             ]
         )
@@ -903,6 +915,91 @@ def _validate_compile_config(value: dict[str, Any], *, issues: list[dict[str, An
                 "action": "block_import",
             }
         )
+
+
+def _collect_generated_python_support_issues(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    graph = _as_dict(manifest.get("graph")) or {}
+    nodes = [dict(item) for item in list(graph.get("nodes") or []) if isinstance(item, dict)]
+    edges = [dict(item) for item in list(graph.get("edges") or []) if isinstance(item, dict)]
+    node_types = {
+        _clean_identifier(node.get("id")): _clean_text(node.get("type"))
+        for node in nodes
+        if _clean_identifier(node.get("id"))
+    }
+    issues: list[dict[str, Any]] = []
+    for node in nodes:
+        node_id = _clean_identifier(node.get("id"))
+        node_type = _clean_text(node.get("type"))
+        if node_type not in LANGGRAPH_GENERATED_PYTHON_EXECUTABLE_NODE_TYPES:
+            issues.append(
+                {
+                    "code": "generated_python_unsupported_node_type",
+                    "severity": "blocked",
+                    "node_id": node_id,
+                    "node_type": node_type,
+                    "message": (
+                        f"Generated Python export only supports executable node types "
+                        f"{', '.join(sorted(LANGGRAPH_GENERATED_PYTHON_EXECUTABLE_NODE_TYPES))}; "
+                        f"node `{node_id}` uses `{node_type}`."
+                    ),
+                    "action": "block_export",
+                }
+            )
+            continue
+        if node_type == "astrabridge/router_condition":
+            condition = _as_dict(_as_dict(node.get("node_type_config")) or {}).get("condition")
+            mode = _clean_text(_as_dict(condition or {}).get("mode")) or "state_field_literal"
+            if mode not in LANGGRAPH_GENERATED_PYTHON_EXECUTABLE_ROUTE_MODES:
+                issues.append(
+                    {
+                        "code": "generated_python_unsupported_router_mode",
+                        "severity": "blocked",
+                        "node_id": node_id,
+                        "node_type": node_type,
+                        "message": (
+                            f"Generated Python export supports router condition modes "
+                            f"{', '.join(sorted(LANGGRAPH_GENERATED_PYTHON_EXECUTABLE_ROUTE_MODES))}; "
+                            f"node `{node_id}` uses `{mode}`."
+                        ),
+                        "action": "block_export",
+                    }
+                )
+        prompt = _as_dict(node.get("prompt")) or {}
+        if _clean_text(prompt.get("template_mode")) == "migration_stub":
+            issues.append(
+                {
+                    "code": "generated_python_migration_stub_prompt",
+                    "severity": "blocked",
+                    "node_id": node_id,
+                    "node_type": node_type,
+                    "message": (
+                        f"Node `{node_id}` still uses the retired `migration_stub` prompt mode. "
+                        "Replace it with an inline or referenced prompt before export."
+                    ),
+                    "action": "block_export",
+                }
+            )
+    conditional_sources = {
+        _clean_identifier(edge.get("source"))
+        for edge in edges
+        if (_clean_text(edge.get("kind")) or "edge") == "conditional"
+    }
+    for source in sorted(item for item in conditional_sources if item):
+        if node_types.get(source) != "astrabridge/router_condition":
+            issues.append(
+                {
+                    "code": "generated_python_unsupported_conditional_source",
+                    "severity": "blocked",
+                    "node_id": source,
+                    "node_type": node_types.get(source) or "",
+                    "message": (
+                        f"Generated Python conditional routing requires a router_condition source node; "
+                        f"`{source}` is `{node_types.get(source) or 'unknown'}`."
+                    ),
+                    "action": "block_export",
+                }
+            )
+    return issues
 
 
 def _import_supported_node(

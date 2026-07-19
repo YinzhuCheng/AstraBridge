@@ -1,6 +1,6 @@
 # AstraBridge Project Summary
 
-Last updated: 2026-07-10
+Last updated: 2026-07-17
 
 ## Current Product State
 
@@ -26,7 +26,7 @@ Current product facts:
 ## Current Entry Points
 
 - Canonical document registry: [DOCUMENT_REGISTRY.md](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.md)
-- Current execution plan: [ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md) (`active`)
+- Current execution plan: [ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md) (`active`)
 - Repository normalization record: [ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md](/D:/AstraBridge/PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md) (`complete`)
 - Repository rules: [AGENTS.md](/D:/AstraBridge/AGENTS.md)
 - Repository governance: [REPO_GOVERNANCE.md](/D:/AstraBridge/docs/REPO_GOVERNANCE.md)
@@ -41,7 +41,7 @@ Current product facts:
 
 ## Validation Baseline
 
-Current second-phase baseline from 2026-07-10:
+Historical second-phase baseline from 2026-07-10:
 
 - Evidence: `PRIVATE/app-standardization-ui-dogfood/baseline/step1-baseline.md`
 - Desktop tests: `296` passed, `4` failed. The failures are preserved as current baseline facts, not a green claim.
@@ -64,23 +64,52 @@ Repository governance gate:
 - `python scripts/repo_governance_check.py --repo .`
 - `python scripts/run_local_gate.py --quick`
 
-Current documentation and interface hygiene after Step 4 on 2026-07-10:
+Current documentation, protocol, and gate status after the 2026-07-17 stability audit plus Steps 1-4 of the active product-stability plan:
 
-- canonical document registry coverage: 102/102 entries
-- current guidance: 14 active and 44 reference entries
+- canonical document registry coverage: 107/107 entries
+- current guidance: 14 active and 46 reference entries
 - active/reference mojibake: 0
 - active/reference missing local links: 0
 - interface registry: 251 entries across HTTP, SSE, runtime payload, provider metadata, MCP, CLI/launcher, and compatibility shims
 - non-test Desktop HTTP paths: 179, all mapped to server definitions
 - cleanup candidates: 31, including 12 `unknown`; every remaining candidate stays `safe_to_remove=false`
 - one high-confidence historical Router adapter block was removed from current runtime source and preserved as private Step 5 evidence; a governance check prevents its symbols from returning to current code
-- contract boundary audit validates 4 registered provider-family transports, 7 persisted task-graph fixtures, and 6 canonical orchestration examples through conversion and compilation in the quick gate
+- contract boundary audit passes its current 21/21 ownership and boundary checks
 - quick gate: passed with 0 governance errors/warnings and 0 secret-scan errors/warnings
+- canonical fail-closed promotion gate: `scripts/run_promotion_gate.py`
+- canonical CI entry points: `.github/workflows/pr-promotion-gate.yml`,
+  `.github/workflows/nightly-promotion-gate.yml`,
+  `.github/workflows/release-promotion-gate.yml`
+- dirty-tree promotion proof preserved at
+  `PRIVATE/promotion-gates/local-pr-dirty-check-2/`
+- canonical release identity owner: `release/astrabridge-release-identity.json`
+- canonical release-readiness gate: `scripts/run_release_readiness_gate.py`
+- preserved Step 2 release-readiness evidence:
+  `PRIVATE/release-readiness/local-step2-readiness/`
+- canonical protocol persistence owner:
+  `apps/astrabridge-sidecar/astrabridge_sidecar/protocol/persistence.py`
+- runtime event and artifact vocabularies are now schema-derived in generated
+  Python and TypeScript protocol bindings rather than duplicated runtime-owned
+  literals
+- durable persistence rejects schema-external protocol events, invalid schema
+  versions, missing required protocol fields, and unsupported run-projection
+  versions before database writes
+- shared canonical protocol fixture corpus currently covers 10 valid and 7
+  invalid cases across Python, TypeScript, migration, and persistence tests
+- durable delivery semantics now separate immutable `message_id`, delivery
+  `idempotency_key`, and processing-key inbox admission for live handoffs and
+  late-result deduplication
+- inbox and outbox ids deduplicate identical payloads but reject conflicting
+  payload reuse on the same identity
+- incoming live handoffs reject early, expired, replayed, out-of-order, and
+  mismatched-audience delivery before provider dispatch
+- live cancellation suppresses late completed provider turns and converges the
+  cancellation record to a resolved terminal state instead of reviving the run
 - historical corruption remains preserved as informational audit evidence and cannot act as current guidance
 
 ## Current Mainline
 
-The active second-phase mainline is `PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md`. It preserves the completed normalization, hardening, provider-compatibility, automation, brand, Agent Graph, and dogfood records while advancing documentation/API normalization, UI renewal, and bounded live dogfood.
+The active mainline is `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md`. It preserves the completed normalization, hardening, provider-compatibility, automation, brand, Agent Graph, dogfood, and 22-step stability/protocol/runtime records while advancing multi-provider control, standards-based external A2A, GUI/code orchestration parity, signed updates, CI enforcement, and final release closure.
 
 The shared Desktop UI system is defined in `apps/astrabridge-desktop/src/features/ui/uiSystem.ts` and `styles.css`. It fixes the compact spacing, typography, control geometry, surface radius, focus, tooltip, dialog, and status-row contract; `uiSystem.test.ts` is the focused regression entry.
 
@@ -91,4 +120,23 @@ The completed repository normalization pass still defines the product boundary:
 - web, capability, automation, kernel, plugin, and skill surfaces use AstraBridge-owned APIs and isolated runtime roots
 - demo artifacts, validation outputs, and private operator material are preserved by default
 
-Current forward work starts from the canonical registry. `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md` is a separate conditional active queue only when the user explicitly asks for capability-runtime implementation; otherwise the current second-phase plan remains the execution entry.
+Current forward work starts from Step 7 of the canonical product-stability plan.
+`PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md` is a separate conditional active
+queue only when the user explicitly asks for capability-runtime implementation;
+otherwise the product-stability and interoperability plan remains the execution
+entry.
+
+Latest completed execution slice:
+
+- Step 6 standardized the built-in provider transport ABI and tied multimodal
+  live graph admission to current verified capability snapshots instead of
+  static model booleans.
+- Validation on 2026-07-17: `python -m unittest
+  tests.test_provider_capability_snapshot
+  tests.test_provider_transport_conformance
+  tests.test_router_transport_registry tests.test_graph_scheduler
+  tests.test_runtime_client_pool
+  tests.test_provider_capability_verification_gate` passed 44/44 with a
+  writable local runtime root; `python scripts\contract_boundary_audit.py`
+  passed 21/21 checks; `python scripts\run_local_gate.py --quick` passed; `git
+  diff --check` reported only CRLF warnings.

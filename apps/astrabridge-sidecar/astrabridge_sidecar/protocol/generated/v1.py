@@ -15,6 +15,21 @@ FORBIDDEN_PROPERTIES = frozenset(str(item).lower() for item in SCHEMA.get('x-for
 class ProtocolValidationError(ValueError):
     pass
 
+RUN_EVENT_TYPES = ('run_created', 'run_dry_run_started', 'run_dry_run_completed', 'node_queued', 'node_started', 'node_progress', 'node_completed', 'node_blocked', 'node_failed', 'node_cancelled', 'artifact_created', 'artifact_redacted', 'approval_requested', 'approval_resolved', 'handoff_created', 'handoff_acknowledged', 'handoff_rejected', 'handoff_retry_scheduled', 'handoff_delivery_failed', 'run_cancel_requested', 'run_cancelled', 'run_completed', 'run_failed', 'run_rolled_back',)
+ARTIFACT_STATUSES = ('pending', 'ready', 'partial', 'blocked', 'redacted', 'failed',)
+CONTENT_PART_KINDS = ('text', 'artifact', 'json', 'image', 'audio', 'video', 'document', 'code', 'tool_result',)
+PORT_TYPES = ('text', 'structured_json', 'image', 'audio', 'video', 'document', 'code_diff', 'dataset', 'tool_result', 'agent_report', 'approval_record',)
+PORT_SHAPES = ('single', 'list',)
+CAPABILITY_OUTPUT_STATUSES = ('ok', 'partial', 'blocked', 'failed',)
+PROTOCOL_VOCABULARIES = {
+    'run_event_types': RUN_EVENT_TYPES,
+    'artifact_statuses': ARTIFACT_STATUSES,
+    'content_part_kinds': CONTENT_PART_KINDS,
+    'port_types': PORT_TYPES,
+    'port_shapes': PORT_SHAPES,
+    'capability_output_statuses': CAPABILITY_OUTPUT_STATUSES,
+}
+
 Identifier = str
 
 Timestamp = str
@@ -261,4 +276,4 @@ def validation_verdict(kind: str, payload: Any) -> bool:
     except (ProtocolValidationError, TypeError, ValueError): return False
     return True
 
-__all__ = ['SCHEMA_VERSION', 'SCHEMA_ID', 'SCHEMA_DIGEST', 'SCHEMA', 'PROTOCOL_DEFINITION_NAMES', 'ProtocolValidationError', 'validate_protocol_payload', 'validation_verdict']
+__all__ = ['SCHEMA_VERSION', 'SCHEMA_ID', 'SCHEMA_DIGEST', 'SCHEMA', 'RUN_EVENT_TYPES', 'ARTIFACT_STATUSES', 'CONTENT_PART_KINDS', 'PORT_TYPES', 'PORT_SHAPES', 'CAPABILITY_OUTPUT_STATUSES', 'PROTOCOL_VOCABULARIES', 'PROTOCOL_DEFINITION_NAMES', 'ProtocolValidationError', 'validate_protocol_payload', 'validation_verdict']

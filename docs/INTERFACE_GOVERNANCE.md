@@ -26,7 +26,7 @@ The audit derives evidence from:
 - runtime scripts and internal callers;
 - explicit SSE, payload, provider metadata, MCP, CLI/launcher, and compatibility-shim contracts.
 
-For cross-provider runtime work, the active execution source is [ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md). It owns the migration of protocol schemas, Agent Envelope/delivery events, durable run state, the MCP broker, and the NodeType registry. This governance inventory must not be used to schedule a parallel implementation.
+For multi-provider runtime, external A2A, GUI/code orchestration, signed update, and release-stability work, the active execution source is [ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md). The completed [ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md) remains the implementation baseline for protocol schemas, Agent Envelope/delivery events, durable run state, the MCP broker, and the NodeType registry. This governance inventory must not be used to schedule a parallel implementation.
 
 Every interface records owner, schema source, definition evidence, consumer-search evidence, replacement, compatibility dependencies, removal prerequisites, and next investigation. Search evidence is bounded and cannot prove that an external or dynamically constructed caller does not exist.
 

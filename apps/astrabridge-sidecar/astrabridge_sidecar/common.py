@@ -162,6 +162,26 @@ def write_json(path: Path, payload: Any) -> None:
         raise last_error
 
 
+def emit_json_stdout(payload: Any) -> None:
+    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    try:
+        sys_stdout = getattr(__import__("sys"), "stdout")
+        reconfigure = getattr(sys_stdout, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
+        sys_stdout.write(text)
+        sys_stdout.flush()
+        return
+    except UnicodeEncodeError:
+        sys_stdout = getattr(__import__("sys"), "stdout")
+        buffer = getattr(sys_stdout, "buffer", None)
+        if buffer is not None:
+            buffer.write(text.encode("utf-8"))
+            buffer.flush()
+            return
+        raise
+
+
 def append_jsonl(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:

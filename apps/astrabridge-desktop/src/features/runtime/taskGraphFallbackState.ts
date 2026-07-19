@@ -291,6 +291,46 @@ export function removeFallbackTaskGraphEdge(
   } satisfies TaskGraphDefinition;
 }
 
+export function removeFallbackTaskGraphNode(
+  graph: TaskGraphDefinition,
+  nodeId: string,
+) {
+  const normalizedNodeId = nodeId.trim();
+  const targetNode = graph.nodes.find((node) => node.node_id === normalizedNodeId) ?? null;
+  if (!targetNode) {
+    return { graph, node: null, removedEdgeIds: [] };
+  }
+  const nextNodes = graph.nodes.filter((node) => node.node_id !== normalizedNodeId);
+  const removedEdges = graph.edges.filter(
+    (edge) => edge.from_node_id === normalizedNodeId || edge.to_node_id === normalizedNodeId,
+  );
+  const nextEdges = graph.edges.filter(
+    (edge) => edge.from_node_id !== normalizedNodeId && edge.to_node_id !== normalizedNodeId,
+  );
+  const priorEntryNodeIds = Array.isArray(graph.graph_policy?.entry_node_ids)
+    ? graph.graph_policy.entry_node_ids
+    : [];
+  const nextEntryNodeIds = priorEntryNodeIds.filter((entryNodeId) => entryNodeId !== normalizedNodeId);
+  if (!nextEntryNodeIds.length && nextNodes.length) {
+    nextEntryNodeIds.push(nextNodes[0].node_id);
+  }
+  return {
+    graph: {
+      ...graph,
+      updated_at: new Date().toISOString(),
+      state_version: graph.state_version + 1,
+      graph_policy: {
+        ...(graph.graph_policy ?? {}),
+        entry_node_ids: nextEntryNodeIds,
+      },
+      nodes: nextNodes,
+      edges: nextEdges,
+    } satisfies TaskGraphDefinition,
+    node: targetNode,
+    removedEdgeIds: removedEdges.map((edge) => edge.edge_id),
+  };
+}
+
 function asRecord(value: unknown) {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }

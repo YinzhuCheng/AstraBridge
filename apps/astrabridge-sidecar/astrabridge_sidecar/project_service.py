@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -8,6 +9,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from .agentic_updates.apply import AGENTIC_UPDATE_APPLY_JOURNAL_SCHEMA_VERSION
 from .common import (
     PROJECT_FILE_SUFFIX,
     PROJECT_SCHEMA_VERSION,
@@ -49,6 +51,8 @@ MANAGED_STATE_FILES = (
     "ui_state.json",
 )
 STORAGE_POLICY_SCHEMA_VERSION = "astrabridge-storage-policy-v1"
+RUNTIME_DIRECTORY_ACTIVATION_TRACK_ID = "runtime_directory_activation"
+RUNTIME_DIRECTORY_ACTIVATION_ROLLBACK_SCHEMA_VERSION = "astrabridge-runtime-directory-activation-rollback-v1"
 SIDEBAR_SCHEMA_VERSION = "astrabridge-sidebar-v1"
 SIDEBAR_TASK_STATE_SCHEMA_VERSION = "astrabridge-task-state-v1"
 _OPENAI_DEFAULT_MODEL = str(
@@ -683,9 +687,6 @@ class ProjectService:
         for dirname in MANAGED_STATE_DIRS:
             path = shell_root / dirname
             path.mkdir(parents=True, exist_ok=True)
-        if project_path is not None:
-            for runtime_root in self._runtime_roots_for_project(project_path.resolve(), workspace_root.resolve()).values():
-                runtime_root.mkdir(parents=True, exist_ok=True)
         for filename in MANAGED_STATE_FILES:
             path = shell_root / filename
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -694,12 +695,300 @@ class ProjectService:
                     write_json(path, {})
             else:
                 path.touch(exist_ok=True)
-        self._write_storage_policy(
-            workspace_root,
-            project_path=project_path,
-            entry_mode=entry_mode,
-        )
+        if project_path is not None:
+            self._activate_runtime_directories(
+                workspace_root,
+                project_path=project_path,
+                entry_mode=entry_mode,
+            )
+        else:
+            self._write_storage_policy(
+                workspace_root,
+                project_path=project_path,
+                entry_mode=entry_mode,
+            )
         self._ensure_git_exclude(workspace_root)
+
+    def _activate_runtime_directories(
+        self,
+        workspace_root: Path,
+        *,
+        project_path: Path,
+        entry_mode: str | None,
+    ) -> None:
+        shell_root = workspace_root / WORKSPACE_STATE_DIRNAME
+        journal_path = shell_root / "runtime-activation-journal.json"
+        rollback_path = shell_root / "runtime-activation-rollback.json"
+        policy_path = shell_root / "storage_policy.json"
+        runtime_roots = self._runtime_roots_for_project(project_path.resolve(), workspace_root.resolve())
+        state_before = self._runtime_activation_state(runtime_roots)
+        storage_policy_before = read_json(policy_path, None) if policy_path.exists() else None
+        activation_id = slugify(
+            f"{project_path.stem or workspace_root.name or 'runtime'}-{hashlib.sha256(str(project_path.resolve()).encode('utf-8')).hexdigest()[:8]}",
+            default="runtime-activation",
+        )
+        journal = self._initialize_runtime_activation_journal(
+            activation_id=activation_id,
+            project_path=project_path,
+            workspace_root=workspace_root,
+            entry_mode=entry_mode,
+            state_before=state_before,
+        )
+        self._write_runtime_activation_journal(journal_path, journal)
+        self._append_runtime_activation_stage(journal, journal_path, stage="baseline_captured")
+        try:
+            for runtime_root in runtime_roots.values():
+                runtime_root.mkdir(parents=True, exist_ok=True)
+            state_after_dirs = self._runtime_activation_state(runtime_roots)
+            self._append_runtime_activation_stage(
+                journal,
+                journal_path,
+                stage="runtime_directories_created",
+                staged_digest=self._runtime_activation_digest(state_after_dirs),
+            )
+            self._write_storage_policy(
+                workspace_root,
+                project_path=project_path,
+                entry_mode=entry_mode,
+            )
+            state_after = self._runtime_activation_state(runtime_roots)
+            rollback_manifest = self._write_runtime_activation_rollback_manifest(
+                rollback_path=rollback_path,
+                project_path=project_path,
+                workspace_root=workspace_root,
+                state_before=state_before,
+                state_after=state_after,
+                restored_state=state_after,
+                restore_status="available_for_manual_restore",
+                entry_mode=entry_mode,
+                storage_policy_before=storage_policy_before,
+                storage_policy_path=policy_path,
+            )
+            self._finalize_runtime_activation_journal(
+                journal,
+                journal_path,
+                terminal_status="committed",
+                staged_state=state_after,
+                health_verdict="pass",
+                changed_paths=[str(policy_path), *[str(path) for path in runtime_roots.values()]],
+                rollback_target={
+                    "rollback_manifest_path": str(rollback_path),
+                    "restore_status": str(rollback_manifest.get("restore_status") or ""),
+                    "project_runtime_root": str(runtime_roots["project_runtime_root"]),
+                },
+            )
+        except Exception:
+            self._restore_runtime_activation_state(
+                runtime_roots=runtime_roots,
+                state_before=state_before,
+                storage_policy_before=storage_policy_before,
+                storage_policy_path=policy_path,
+            )
+            restored_state = self._runtime_activation_state(runtime_roots)
+            rollback_manifest = self._write_runtime_activation_rollback_manifest(
+                rollback_path=rollback_path,
+                project_path=project_path,
+                workspace_root=workspace_root,
+                state_before=state_before,
+                state_after=restored_state,
+                restored_state=restored_state,
+                restore_status="restored_after_failure",
+                entry_mode=entry_mode,
+                storage_policy_before=storage_policy_before,
+                storage_policy_path=policy_path,
+            )
+            self._finalize_runtime_activation_journal(
+                journal,
+                journal_path,
+                terminal_status="rolled_back",
+                staged_state=restored_state,
+                health_verdict="fail",
+                changed_paths=[str(policy_path), *[str(path) for path in runtime_roots.values()]],
+                rollback_target={
+                    "rollback_manifest_path": str(rollback_path),
+                    "restore_status": str(rollback_manifest.get("restore_status") or ""),
+                    "project_runtime_root": str(runtime_roots["project_runtime_root"]),
+                },
+            )
+            raise
+
+    def _runtime_activation_state(self, runtime_roots: dict[str, Path]) -> dict[str, Any]:
+        return {
+            key: {
+                "path": str(path.resolve()),
+                "exists": bool(path.exists() and path.is_dir()),
+            }
+            for key, path in runtime_roots.items()
+        }
+
+    def _runtime_activation_digest(self, payload: dict[str, Any]) -> str:
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _initialize_runtime_activation_journal(
+        self,
+        *,
+        activation_id: str,
+        project_path: Path,
+        workspace_root: Path,
+        entry_mode: str | None,
+        state_before: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": AGENTIC_UPDATE_APPLY_JOURNAL_SCHEMA_VERSION,
+            "apply_id": activation_id,
+            "run_id": activation_id,
+            "status": "running",
+            "mode": "runtime_directory_activation",
+            "started_at": now_iso(),
+            "completed_at": None,
+            "risk_class": "runtime_directory_activation",
+            "approval": {
+                "approved": True,
+                "approved_by": "project_service_runtime_activation",
+                "approved_at": now_iso(),
+                "approval_note": str(entry_mode or "existing"),
+            },
+            "tracks": [
+                {
+                    "track_id": RUNTIME_DIRECTORY_ACTIVATION_TRACK_ID,
+                    "status": "running",
+                    "source_digest": self._runtime_activation_digest(state_before),
+                    "staged_digest": None,
+                    "trust_decision": f"workspace_local_runtime_activation:{str(entry_mode or 'existing')}",
+                    "health_verdict": "not_run",
+                    "changed_paths": [],
+                    "change_ids": [str(project_path.resolve())],
+                    "rollback_target": {
+                        "workspace_root": str(workspace_root.resolve()),
+                        "project_runtime_root": str(((state_before.get('project_runtime_root') or {}).get('path')) or ""),
+                    },
+                    "history": [
+                        {
+                            "stage": "initialized",
+                            "at": now_iso(),
+                            "workspace_root": str(workspace_root.resolve()),
+                            "project_file": str(project_path.resolve()),
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def _write_runtime_activation_journal(self, path: Path, journal: dict[str, Any]) -> None:
+        write_json(path, redact_sensitive(journal))
+
+    def _append_runtime_activation_stage(
+        self,
+        journal: dict[str, Any],
+        journal_path: Path,
+        *,
+        stage: str,
+        **details: Any,
+    ) -> None:
+        track = self._runtime_activation_track(journal)
+        history = list(track.get("history") or [])
+        entry = {"stage": stage, "at": now_iso()}
+        for key, value in details.items():
+            if value is not None:
+                entry[key] = value
+        history.append(entry)
+        track["history"] = history
+        self._write_runtime_activation_journal(journal_path, journal)
+
+    def _finalize_runtime_activation_journal(
+        self,
+        journal: dict[str, Any],
+        journal_path: Path,
+        *,
+        terminal_status: str,
+        staged_state: dict[str, Any],
+        health_verdict: str,
+        changed_paths: list[str],
+        rollback_target: dict[str, Any],
+    ) -> None:
+        journal["status"] = terminal_status
+        journal["completed_at"] = now_iso()
+        track = self._runtime_activation_track(journal)
+        track["status"] = terminal_status
+        track["staged_digest"] = self._runtime_activation_digest(staged_state)
+        track["health_verdict"] = health_verdict
+        track["changed_paths"] = list(changed_paths)
+        track["rollback_target"] = dict(rollback_target)
+        history = list(track.get("history") or [])
+        history.append({"stage": "healthcheck_completed", "at": now_iso(), "verdict": health_verdict})
+        history.append({"stage": terminal_status, "at": now_iso()})
+        track["history"] = history
+        self._write_runtime_activation_journal(journal_path, journal)
+
+    def _runtime_activation_track(self, journal: dict[str, Any]) -> dict[str, Any]:
+        for track in list(journal.get("tracks") or []):
+            if str(track.get("track_id") or "") == RUNTIME_DIRECTORY_ACTIVATION_TRACK_ID:
+                return track
+        raise ValueError("Missing runtime activation journal track.")
+
+    def _restore_runtime_activation_state(
+        self,
+        *,
+        runtime_roots: dict[str, Path],
+        state_before: dict[str, Any],
+        storage_policy_before: dict[str, Any] | None,
+        storage_policy_path: Path,
+    ) -> None:
+        if storage_policy_before is None:
+            if storage_policy_path.exists():
+                storage_policy_path.unlink()
+        else:
+            write_json(storage_policy_path, storage_policy_before)
+        project_runtime_root = runtime_roots.get("project_runtime_root")
+        if project_runtime_root is not None and not bool((state_before.get("project_runtime_root") or {}).get("exists")) and project_runtime_root.exists():
+            shutil.rmtree(project_runtime_root, ignore_errors=True)
+            return
+        for key, path in runtime_roots.items():
+            if not bool((state_before.get(key) or {}).get("exists")) and path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+
+    def _write_runtime_activation_rollback_manifest(
+        self,
+        *,
+        rollback_path: Path,
+        project_path: Path,
+        workspace_root: Path,
+        state_before: dict[str, Any],
+        state_after: dict[str, Any],
+        restored_state: dict[str, Any],
+        restore_status: str,
+        entry_mode: str | None,
+        storage_policy_before: dict[str, Any] | None,
+        storage_policy_path: Path,
+    ) -> dict[str, Any]:
+        manifest = {
+            "schema_version": RUNTIME_DIRECTORY_ACTIVATION_ROLLBACK_SCHEMA_VERSION,
+            "generated_at": now_iso(),
+            "project_file": str(project_path.resolve()),
+            "workspace_root": str(workspace_root.resolve()),
+            "entry_mode": str(entry_mode or ""),
+            "restore_status": restore_status,
+            "storage_policy_path": str(storage_policy_path),
+            "storage_policy_previously_present": storage_policy_before is not None,
+            "state_before": deepcopy(state_before),
+            "state_after": deepcopy(state_after),
+            "restored_state": deepcopy(restored_state),
+            "steps": [
+                {
+                    "step_id": "restore_storage_policy",
+                    "status": "ready",
+                    "path": str(storage_policy_path),
+                },
+                {
+                    "step_id": "restore_runtime_roots",
+                    "status": "ready",
+                    "project_runtime_root": str(((state_before.get("project_runtime_root") or {}).get("path")) or ""),
+                },
+            ],
+        }
+        write_json(rollback_path, manifest)
+        return manifest
 
     def _write_storage_policy(
         self,
@@ -858,6 +1147,7 @@ class ProjectService:
             "cursor_enhancement": "auto",
             "execution_host": runtime["execution_host"],
             "wsl_distro": runtime["wsl_distro"],
+            "update_channel": "stable",
             "left_sidebar_open": True,
             "left_sidebar_width": 288,
             "right_sidebar_width": 328,
@@ -879,6 +1169,10 @@ class ProjectService:
             merged["wsl_distro"] = str(merged.get("wsl_distro") or defaults["wsl_distro"] or DEFAULT_WSL_DISTRO)
         else:
             merged["wsl_distro"] = str(merged.get("wsl_distro") or "")
+        update_channel = str(merged.get("update_channel") or "").strip().lower()
+        if update_channel and update_channel not in {"stable", "beta", "canary"}:
+            update_channel = ""
+        merged["update_channel"] = update_channel or defaults.get("update_channel")
         return merged
 
     def _normalize_project_runtime_defaults(self, payload: dict[str, Any]) -> dict[str, Any]:

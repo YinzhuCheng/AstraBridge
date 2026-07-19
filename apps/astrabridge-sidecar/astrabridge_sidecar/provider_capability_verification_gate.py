@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +24,7 @@ DEFAULT_TEST_GROUPS: tuple[dict[str, Any], ...] = (
             "tests.test_vision_analyze_adapter",
             "tests.test_speech_transcribe_adapter",
             "tests.test_speech_synthesize_adapter",
+            "tests.test_provider_transport_conformance",
             "tests.test_capability_smoke",
             "tests.test_provider_compatibility_smoke",
             "tests.test_capability_registry",
@@ -125,52 +128,61 @@ def run_provider_capability_verification_gate(
     gate_run_dir.mkdir(parents=True, exist_ok=True)
     command_dir = gate_run_dir / "commands"
     command_dir.mkdir(parents=True, exist_ok=True)
+    state_root = gate_run_dir / "state"
+    state_root.mkdir(parents=True, exist_ok=True)
 
     python_cmd = python_executable or sys.executable
     command_results: list[dict[str, Any]] = []
-    if include_tests:
-        for group in DEFAULT_TEST_GROUPS:
-            command_results.append(
-                _run_test_group(
-                    label=str(group.get("label") or "tests"),
-                    modules=tuple(str(item) for item in tuple(group.get("modules") or ()) if str(item).strip()),
-                    python_executable=python_cmd,
-                    cwd=_SIDECAR_ROOT,
-                    command_dir=command_dir,
-                )
-            )
-            if command_results[-1]["exit_code"] != 0:
-                summary = _write_gate_outputs(
-                    gate_run_dir=gate_run_dir,
-                    created_at=created_at,
-                    run_id=resolved_run_id,
-                    baseline_path=baseline_path,
-                    command_results=command_results,
-                    dry_run_summary=None,
-                    baseline_evaluation=None,
-                    status="fail",
-                    include_tests=include_tests,
-                )
-                return summary
 
-    dry_run_summary = run_provider_capability_dry_run_matrix(
-        workspace_root=root,
-        run_id=f"{resolved_run_id}-dry-run",
-    )
-    baseline = load_verification_baseline(baseline_path)
-    baseline_evaluation = evaluate_dry_run_summary(dry_run_summary, baseline)
-    summary = _write_gate_outputs(
-        gate_run_dir=gate_run_dir,
-        created_at=created_at,
-        run_id=resolved_run_id,
-        baseline_path=baseline_path,
-        command_results=command_results,
-        dry_run_summary=dry_run_summary,
-        baseline_evaluation=baseline_evaluation,
-        status="pass" if baseline_evaluation["status"] == "pass" else "fail",
-        include_tests=include_tests,
-    )
-    return summary
+    with _temporary_env(
+        {
+            "ASTRABRIDGE_APPDATA": str(state_root / "appdata"),
+            "ASTRABRIDGE_RUNTIME_ROOT": str(state_root / "runtime"),
+        }
+    ):
+        if include_tests:
+            for group in DEFAULT_TEST_GROUPS:
+                command_results.append(
+                    _run_test_group(
+                        label=str(group.get("label") or "tests"),
+                        modules=tuple(str(item) for item in tuple(group.get("modules") or ()) if str(item).strip()),
+                        python_executable=python_cmd,
+                        cwd=_SIDECAR_ROOT,
+                        command_dir=command_dir,
+                    )
+                )
+                if command_results[-1]["exit_code"] != 0:
+                    summary = _write_gate_outputs(
+                        gate_run_dir=gate_run_dir,
+                        created_at=created_at,
+                        run_id=resolved_run_id,
+                        baseline_path=baseline_path,
+                        command_results=command_results,
+                        dry_run_summary=None,
+                        baseline_evaluation=None,
+                        status="fail",
+                        include_tests=include_tests,
+                    )
+                    return summary
+
+        dry_run_summary = run_provider_capability_dry_run_matrix(
+            workspace_root=root,
+            run_id=f"{resolved_run_id}-dry-run",
+        )
+        baseline = load_verification_baseline(baseline_path)
+        baseline_evaluation = evaluate_dry_run_summary(dry_run_summary, baseline)
+        summary = _write_gate_outputs(
+            gate_run_dir=gate_run_dir,
+            created_at=created_at,
+            run_id=resolved_run_id,
+            baseline_path=baseline_path,
+            command_results=command_results,
+            dry_run_summary=dry_run_summary,
+            baseline_evaluation=baseline_evaluation,
+            status="pass" if baseline_evaluation["status"] == "pass" else "fail",
+            include_tests=include_tests,
+        )
+        return summary
 
 
 def _resolve_gate_run_dir(*, root: Path, artifact_root: str | Path | None, run_id: str) -> Path:
@@ -251,6 +263,7 @@ def _write_gate_outputs(
             "summary_json": str(summary_path),
             "report_md": str(report_path),
             "command_dir": str(gate_run_dir / "commands"),
+            "state_root": str(gate_run_dir / "state"),
         },
         "policy": {
             "live_provider_calls": False,
@@ -334,3 +347,18 @@ def _render_gate_report(summary: dict[str, Any]) -> str:
 
 def _shell_line(command: list[str]) -> str:
     return " ".join(str(item) for item in command)
+
+
+@contextmanager
+def _temporary_env(updates: dict[str, str]) -> Any:
+    previous = {key: os.environ.get(key) for key in updates}
+    try:
+        for key, value in updates.items():
+            os.environ[key] = value
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value

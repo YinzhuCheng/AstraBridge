@@ -21,6 +21,8 @@ from astrabridge_sidecar.agent_orchestration_contract import (  # noqa: E402
     validate_agent_orchestration_graph,
 )
 from astrabridge_sidecar.agent_orchestration_file_format import agent_orchestration_example_catalog  # noqa: E402
+from astrabridge_sidecar.external_a2a_conformance import EXTERNAL_A2A_CONFORMANCE_KIT_SCHEMA_VERSION  # noqa: E402
+from astrabridge_sidecar.external_a2a_gateway import EXTERNAL_A2A_GATEWAY_SCHEMA_VERSION  # noqa: E402
 from astrabridge_sidecar.protocol.compatibility import compatibility_manifest  # noqa: E402
 from astrabridge_sidecar.protocol.generated.v1 import (  # noqa: E402
     SCHEMA_VERSION,
@@ -42,10 +44,12 @@ from astrabridge_sidecar.task_graph_contract import (  # noqa: E402
 
 
 CONTRACT_BOUNDARY_AUDIT_SCHEMA_VERSION = "astrabridge-contract-boundary-audit-v1"
-STABILITY_PLAN_PATH = REPO_ROOT / "PLAN" / "ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md"
+ACTIVE_STABILITY_PLAN_PATH = REPO_ROOT / "PLAN" / "ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md"
+BASELINE_STABILITY_PLAN_PATH = REPO_ROOT / "PLAN" / "ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md"
 CAPABILITY_PLAN_PATH = REPO_ROOT / "PLAN" / "CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md"
 OWNERSHIP_DOC_PATH = REPO_ROOT / "docs" / "CODE_OWNERSHIP_AND_CONTRACTS.md"
 PROTOCOL_PACKAGE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "protocol" / "__init__.py"
+PROTOCOL_PERSISTENCE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "protocol" / "persistence.py"
 PROTOCOL_SCHEMA_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "protocol" / "schema" / "v1" / "protocol.json"
 PROTOCOL_MANIFEST_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "protocol" / "compatibility_manifest.json"
 PROTOCOL_GENERATOR_PATH = REPO_ROOT / "scripts" / "generate_protocol_types.py"
@@ -62,9 +66,13 @@ MULTIMODAL_RESULT_ENVELOPE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "multim
 RUNTIME_OBSERVABILITY_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "runtime_observability.py"
 RUNTIME_STABILITY_GATE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "runtime_stability_gate.py"
 RUNTIME_ROLLOUT_GATE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "runtime_rollout_gate.py"
+TASK_GRAPH_MUTATION_SERVICE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "task_graph_mutation_service.py"
+RUNTIME_GRAPH_RUN_DISPATCH_SERVICE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "runtime_graph_run_dispatch_service.py"
 NODE_TYPE_REGISTRY_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "node_type_registry.py"
 COMFYUI_WORKFLOW_ADAPTER_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "comfyui_workflow_adapter.py"
 LANGGRAPH_STATEGRAPH_ADAPTER_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "langgraph_stategraph_adapter.py"
+EXTERNAL_A2A_GATEWAY_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "external_a2a_gateway.py"
+EXTERNAL_A2A_CONFORMANCE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "external_a2a_conformance.py"
 DESKTOP_SIDECAR_SUPERVISION_PATH = REPO_ROOT / "apps" / "astrabridge-desktop" / "src-tauri" / "src" / "sidecar_supervision.rs"
 DESKTOP_TAURI_MAIN_PATH = REPO_ROOT / "apps" / "astrabridge-desktop" / "src-tauri" / "src" / "main.rs"
 DESKTOP_API_PATH = REPO_ROOT / "apps" / "astrabridge-desktop" / "src" / "api.ts"
@@ -73,6 +81,14 @@ RUNTIME_SUPERVISOR_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "runtime_superv
 RUN_RUNTIME_STABILITY_GATE_SCRIPT_PATH = REPO_ROOT / "scripts" / "run_runtime_stability_gate.py"
 RUN_RUNTIME_ROLLOUT_GATE_SCRIPT_PATH = REPO_ROOT / "scripts" / "run_runtime_rollout_gate.py"
 RUN_LOCAL_GATE_PATH = REPO_ROOT / "scripts" / "run_local_gate.py"
+PROMOTION_GATE_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "promotion_gate.py"
+RUN_PROMOTION_GATE_SCRIPT_PATH = REPO_ROOT / "scripts" / "run_promotion_gate.py"
+RELEASE_IDENTITY_PATH = REPO_ROOT / "release" / "astrabridge-release-identity.json"
+RELEASE_IDENTITY_OWNER_PATH = SIDECAR_ROOT / "astrabridge_sidecar" / "release_identity.py"
+RUN_RELEASE_READINESS_GATE_SCRIPT_PATH = REPO_ROOT / "scripts" / "run_release_readiness_gate.py"
+PR_PROMOTION_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr-promotion-gate.yml"
+NIGHTLY_PROMOTION_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "nightly-promotion-gate.yml"
+RELEASE_PROMOTION_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release-promotion-gate.yml"
 RUNTIME_ROLLOUT_RUNBOOK_PATH = REPO_ROOT / "docs" / "RUNTIME_ROLLOUT_AND_MAINTENANCE_RUNBOOK.md"
 MCP_SERVER_ADAPTER_PATHS = {
     "capabilities": SIDECAR_ROOT / "astrabridge_sidecar" / "astrabridge_capabilities_mcp_server.py",
@@ -105,10 +121,12 @@ def _audit_stability_ownership() -> dict[str, Any]:
 
     errors: list[str] = []
     required_paths = {
-        "stability_plan": STABILITY_PLAN_PATH,
+        "active_stability_plan": ACTIVE_STABILITY_PLAN_PATH,
+        "baseline_stability_plan": BASELINE_STABILITY_PLAN_PATH,
         "capability_plan": CAPABILITY_PLAN_PATH,
         "ownership_doc": OWNERSHIP_DOC_PATH,
         "protocol_package": PROTOCOL_PACKAGE_PATH,
+        "protocol_persistence": PROTOCOL_PERSISTENCE_PATH,
         "runtime_client_pool": RUNTIME_CLIENT_POOL_PATH,
         "durable_run_store": DURABLE_RUN_STORE_PATH,
         "graph_scheduler": GRAPH_SCHEDULER_PATH,
@@ -130,6 +148,14 @@ def _audit_stability_ownership() -> dict[str, Any]:
         "runtime_stability_gate_script": RUN_RUNTIME_STABILITY_GATE_SCRIPT_PATH,
         "runtime_rollout_gate_script": RUN_RUNTIME_ROLLOUT_GATE_SCRIPT_PATH,
         "run_local_gate": RUN_LOCAL_GATE_PATH,
+        "promotion_gate": PROMOTION_GATE_PATH,
+        "promotion_gate_script": RUN_PROMOTION_GATE_SCRIPT_PATH,
+        "release_identity_manifest": RELEASE_IDENTITY_PATH,
+        "release_identity_owner": RELEASE_IDENTITY_OWNER_PATH,
+        "release_readiness_gate_script": RUN_RELEASE_READINESS_GATE_SCRIPT_PATH,
+        "pr_promotion_workflow": PR_PROMOTION_WORKFLOW_PATH,
+        "nightly_promotion_workflow": NIGHTLY_PROMOTION_WORKFLOW_PATH,
+        "release_promotion_workflow": RELEASE_PROMOTION_WORKFLOW_PATH,
         "runtime_rollout_runbook": RUNTIME_ROLLOUT_RUNBOOK_PATH,
     }
     missing = [name for name, path in required_paths.items() if not path.exists()]
@@ -137,7 +163,7 @@ def _audit_stability_ownership() -> dict[str, Any]:
         errors.append(f"missing stability ownership inputs: {', '.join(sorted(missing))}")
 
     ownership_text = OWNERSHIP_DOC_PATH.read_text(encoding="utf-8") if OWNERSHIP_DOC_PATH.exists() else ""
-    stability_text = STABILITY_PLAN_PATH.read_text(encoding="utf-8") if STABILITY_PLAN_PATH.exists() else ""
+    active_stability_text = ACTIVE_STABILITY_PLAN_PATH.read_text(encoding="utf-8") if ACTIVE_STABILITY_PLAN_PATH.exists() else ""
     capability_text = CAPABILITY_PLAN_PATH.read_text(encoding="utf-8") if CAPABILITY_PLAN_PATH.exists() else ""
 
     ownership_markers = (
@@ -149,15 +175,19 @@ def _audit_stability_ownership() -> dict[str, Any]:
         "astrabridge_sidecar.runtime_observability",
         "astrabridge_sidecar.runtime_stability_gate",
         "astrabridge_sidecar.runtime_rollout_gate",
+        "astrabridge_sidecar.task_graph_mutation_service",
+        "astrabridge_sidecar.runtime_graph_run_dispatch_service",
         "astrabridge_sidecar.node_type_registry",
         "astrabridge_sidecar.comfyui_workflow_adapter",
         "astrabridge_sidecar.langgraph_stategraph_adapter",
-        "Cross-layer trace lineage, reliability metrics/SLOs, and redacted diagnostics",
+        "Cross-layer trace lineage, reliability metrics/SLOs, redacted diagnostics, and runtime support bundles",
         "Deterministic fault injection and runtime stability release gate",
         "Final runtime rollout, migration, shadow comparison, rollback-readback, and release closure",
         "Canonical NodeType registry and compiled graph executable metadata",
         "Loss-aware ComfyUI workflow import/export bridge",
         "Optional LangGraph StateGraph interop bridge",
+        "Task-graph mutation, task-scoped import/export lifecycle, and graph-edit primitives",
+        "Live graph-run queue admission, scheduler receipt/status projection, and cancellation coordination",
         "Desktop-Sidecar host supervision, readiness, launch ownership, and run reattachment handshake",
         "sidecar_supervision.rs",
         "/readyz",
@@ -171,19 +201,20 @@ def _audit_stability_ownership() -> dict[str, Any]:
         "DurableRunEventStore",
         "DurableGraphScheduler",
         "Canonical NodeType registry and compiled graph executable metadata",
+        "ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md",
         "ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md",
     )
     for marker in ownership_markers:
         if marker not in ownership_text:
             errors.append(f"ownership document missing canonical marker: {marker}")
 
-    normalized_stability_text = stability_text.lower()
+    normalized_stability_text = active_stability_text.lower()
     if not (
         "single active execution source" in normalized_stability_text
         or "single execution source of truth" in normalized_stability_text
     ):
-        errors.append("stability plan does not declare one active execution source")
-    if "ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md" not in capability_text:
+        errors.append("active product-stability plan does not declare one active execution source")
+    if "ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md" not in capability_text:
         errors.append("capability runtime plan does not delegate overlapping stability work")
     if "web lane" not in capability_text.lower() or "standalone" not in capability_text.lower():
         errors.append("capability plan delegation lost the standalone web-lane boundary")
@@ -250,9 +281,13 @@ def _audit_runtime_observability() -> dict[str, Any]:
     desktop_app_source = (REPO_ROOT / "apps" / "astrabridge-desktop" / "src" / "App.tsx").read_text(encoding="utf-8")
     for marker in (
         "RUNTIME_OBSERVABILITY_SCHEMA_VERSION",
+        "RUNTIME_SUPPORT_BUNDLE_SCHEMA_VERSION",
         "build_runtime_observability_summary",
+        "build_runtime_support_bundle",
         "load_host_lineage_events",
         "extract_trace_context",
+        "persist_runtime_support_bundle",
+        "scan_runtime_support_bundle_artifacts",
         "duplicate_effect_count",
         "mcp_conformance_rate",
         "node_latency_p95_ms",
@@ -264,10 +299,12 @@ def _audit_runtime_observability() -> dict[str, Any]:
         errors.append("runtime service is not routing persisted runtime events and host lineage through the shared observability owner")
     if "build_runtime_observability_summary" not in supervisor_source or '"observability": observability' not in supervisor_source:
         errors.append("runtime supervisor status is not projecting the shared observability summary")
+    if "build_runtime_support_bundle" not in supervisor_source or '"support_bundle": {' not in supervisor_source:
+        errors.append("runtime supervisor status is not projecting the shared runtime support bundle")
     if "supervisor?.observability" not in desktop_app_source and "observability?.metrics" not in desktop_app_source:
         errors.append("Desktop status evidence is not consuming the shared observability summary")
     return {
-        "contract": "cross_layer_trace_metrics_and_redacted_diagnostics",
+        "contract": "cross_layer_trace_metrics_redacted_diagnostics_and_support_bundle",
         "owner": "astrabridge_sidecar.runtime_observability",
         "status": "pass" if not errors else "fail",
         "path": str(RUNTIME_OBSERVABILITY_PATH.relative_to(REPO_ROOT)),
@@ -282,8 +319,10 @@ def _audit_runtime_stability_gate() -> dict[str, Any]:
     local_gate_source = RUN_LOCAL_GATE_PATH.read_text(encoding="utf-8") if RUN_LOCAL_GATE_PATH.exists() else ""
     for marker in (
         "RUNTIME_STABILITY_GATE_SCHEMA_VERSION",
+        "RUNTIME_STABILITY_FAULT_MATRIX_SCHEMA_VERSION",
         "runtime_stability_gate_suite_specs",
         "run_runtime_stability_gate",
+        "build_runtime_stability_fault_matrix",
         "capture_runtime_stability_fixture_evidence",
         "scan_runtime_stability_artifacts",
         "PRIVATE\" / \"runtime-stability",
@@ -320,12 +359,18 @@ def _audit_node_type_registry() -> dict[str, Any]:
     desktop_api_source = DESKTOP_API_PATH.read_text(encoding="utf-8") if DESKTOP_API_PATH.exists() else ""
     for marker in (
         "NODE_TYPE_REGISTRY_SCHEMA_VERSION",
+        "EXECUTOR_REGISTRY_SCHEMA_VERSION",
         "class NodeTypeSpec",
+        "build_executor_registry",
         "build_node_type_registry",
+        "compiled_plan_executor_capability_report",
         "node_type_registry_snapshot",
         "resolve_node_type",
         "project_task_graph_kind",
         "registry_fingerprint",
+        "executor_registry_fingerprint",
+        "executor_matrix",
+        "executor_capability",
         "agent_model",
         "mcp_tool",
         "mcp_resource",
@@ -355,8 +400,12 @@ def _audit_node_type_registry() -> dict[str, Any]:
             errors.append(f"agent orchestration compiler is not projecting shared node type registry metadata: {marker}")
     if "task_graph_node_kind_ids" not in task_contract_source:
         errors.append("task graph contract is not deriving allowed node kinds from the shared node type registry")
-    if "node_type_registry_snapshot(" not in task_service_source:
-        errors.append("task service is not exposing the shared node type registry snapshot")
+    for marker in (
+        "node_type_registry_snapshot(",
+        "compiled_plan_executor_capability_report(",
+    ):
+        if marker not in task_service_source:
+            errors.append(f"task service is not consuming the shared node type / executor registry marker: {marker}")
     if 'if path == "/api/task-graphs/node-types":' not in server_source:
         errors.append("server is not exposing the shared node type registry API route")
     if '"/api/task-graphs/node-types"' not in desktop_api_source or "taskGraphNodeTypes" not in desktop_api_source:
@@ -382,6 +431,7 @@ def _audit_comfyui_workflow_adapter() -> dict[str, Any]:
     errors: list[str] = []
     adapter_source = COMFYUI_WORKFLOW_ADAPTER_PATH.read_text(encoding="utf-8") if COMFYUI_WORKFLOW_ADAPTER_PATH.exists() else ""
     task_service_source = (SIDECAR_ROOT / "astrabridge_sidecar" / "task_service.py").read_text(encoding="utf-8")
+    mutation_source = TASK_GRAPH_MUTATION_SERVICE_PATH.read_text(encoding="utf-8") if TASK_GRAPH_MUTATION_SERVICE_PATH.exists() else ""
     desktop_api_source = DESKTOP_API_PATH.read_text(encoding="utf-8") if DESKTOP_API_PATH.exists() else ""
     desktop_app_source = (REPO_ROOT / "apps" / "astrabridge-desktop" / "src" / "App.tsx").read_text(encoding="utf-8")
     for marker in (
@@ -407,7 +457,7 @@ def _audit_comfyui_workflow_adapter() -> dict[str, Any]:
         "_graph_interop_source_format(",
         "_apply_task_graph_overlays(",
     ):
-        if marker not in task_service_source:
+        if marker not in task_service_source and marker not in mutation_source:
             errors.append(f"task service is not routing ComfyUI interop through the shared adapter marker: {marker}")
     if 'exportTaskGraphFile: (payload: { graph_id: string; export_path?: string | null; format?: string | null })' not in desktop_api_source:
         errors.append("desktop API is not projecting the shared optional ComfyUI export-format field")
@@ -437,6 +487,7 @@ def _audit_langgraph_stategraph_adapter() -> dict[str, Any]:
     errors: list[str] = []
     adapter_source = LANGGRAPH_STATEGRAPH_ADAPTER_PATH.read_text(encoding="utf-8") if LANGGRAPH_STATEGRAPH_ADAPTER_PATH.exists() else ""
     task_service_source = (SIDECAR_ROOT / "astrabridge_sidecar" / "task_service.py").read_text(encoding="utf-8")
+    mutation_source = TASK_GRAPH_MUTATION_SERVICE_PATH.read_text(encoding="utf-8") if TASK_GRAPH_MUTATION_SERVICE_PATH.exists() else ""
     desktop_app_source = (REPO_ROOT / "apps" / "astrabridge-desktop" / "src" / "App.tsx").read_text(encoding="utf-8")
     for marker in (
         "LANGGRAPH_STATEGRAPH_ADAPTER_SCHEMA_VERSION",
@@ -464,7 +515,7 @@ def _audit_langgraph_stategraph_adapter() -> dict[str, Any]:
         "_graph_interop_source_format(",
         "_apply_task_graph_overlays(",
     ):
-        if marker not in task_service_source:
+        if marker not in task_service_source and marker not in mutation_source:
             errors.append(f"task service is not routing LangGraph interop through the shared adapter marker: {marker}")
     for marker in (
         'TASK_GRAPH_LANGGRAPH_SOURCE_FORMAT',
@@ -486,6 +537,90 @@ def _audit_langgraph_stategraph_adapter() -> dict[str, Any]:
     }
 
 
+def _audit_task_graph_mutation_service() -> dict[str, Any]:
+    errors: list[str] = []
+    mutation_source = TASK_GRAPH_MUTATION_SERVICE_PATH.read_text(encoding="utf-8") if TASK_GRAPH_MUTATION_SERVICE_PATH.exists() else ""
+    task_service_source = (SIDECAR_ROOT / "astrabridge_sidecar" / "task_service.py").read_text(encoding="utf-8")
+    for marker in (
+        "class TaskGraphMutationService",
+        "export_graph_for_orchestration_file",
+        "save_graph_definition",
+        "import_graph_from_orchestration_file",
+        "_graph_interop_source_format",
+        "_apply_task_graph_overlays",
+        "_prepare_graph_for_persist",
+        "_apply_graph_node_payload_to_graph",
+        "_apply_graph_edge_payload_to_graph",
+        "update_graph_node",
+        "update_graph_edge",
+    ):
+        if marker not in mutation_source:
+            errors.append(f"task graph mutation owner missing required marker: {marker}")
+    for marker in (
+        "TaskGraphMutationService",
+        "self._graph_mutation = TaskGraphMutationService(self)",
+        "return self._graph_mutation.export_graph_for_orchestration_file(payload)",
+        "return self._graph_mutation.save_graph_definition(payload)",
+        "return self._graph_mutation.import_graph_from_orchestration_file(",
+        "return self._graph_mutation.update_graph_node(payload)",
+        "return self._graph_mutation.update_graph_edge(payload)",
+    ):
+        if marker not in task_service_source:
+            errors.append(f"task service is not delegating graph mutation through the shared owner marker: {marker}")
+    return {
+        "contract": "task_graph_mutation_and_import_export_lifecycle",
+        "owner": "astrabridge_sidecar.task_graph_mutation_service",
+        "status": "pass" if not errors else "fail",
+        "paths": {
+            "task_graph_mutation_service": str(TASK_GRAPH_MUTATION_SERVICE_PATH.relative_to(REPO_ROOT)),
+            "task_service": str((SIDECAR_ROOT / 'astrabridge_sidecar' / 'task_service.py').relative_to(REPO_ROOT)),
+        },
+        "errors": errors,
+    }
+
+
+def _audit_runtime_graph_run_dispatch_service() -> dict[str, Any]:
+    errors: list[str] = []
+    dispatch_source = (
+        RUNTIME_GRAPH_RUN_DISPATCH_SERVICE_PATH.read_text(encoding="utf-8")
+        if RUNTIME_GRAPH_RUN_DISPATCH_SERVICE_PATH.exists()
+        else ""
+    )
+    runtime_source = (SIDECAR_ROOT / "astrabridge_sidecar" / "runtime_service.py").read_text(encoding="utf-8")
+    for marker in (
+        "class RuntimeGraphRunDispatchService",
+        "queue_task_graph_run",
+        "graph_scheduler_status",
+        "graph_run_status",
+        "cancel_task_graph_run",
+        "run_cancel_requested",
+        "cancelled_before_dispatch",
+        "status_url",
+    ):
+        if marker not in dispatch_source:
+            errors.append(f"runtime graph-run dispatch owner missing required marker: {marker}")
+    for marker in (
+        "RuntimeGraphRunDispatchService",
+        "self._graph_run_dispatch = RuntimeGraphRunDispatchService(self)",
+        "return self._graph_run_dispatch.queue_task_graph_run(payload)",
+        "return self._graph_run_dispatch.graph_scheduler_status()",
+        "return self._graph_run_dispatch.graph_run_status(run_id)",
+        "return self._graph_run_dispatch.cancel_task_graph_run(payload)",
+    ):
+        if marker not in runtime_source:
+            errors.append(f"runtime service is not delegating graph-run dispatch through the shared owner marker: {marker}")
+    return {
+        "contract": "live_graph_run_dispatch_and_cancellation_coordination",
+        "owner": "astrabridge_sidecar.runtime_graph_run_dispatch_service",
+        "status": "pass" if not errors else "fail",
+        "paths": {
+            "runtime_graph_run_dispatch_service": str(RUNTIME_GRAPH_RUN_DISPATCH_SERVICE_PATH.relative_to(REPO_ROOT)),
+            "runtime_service": str((SIDECAR_ROOT / "astrabridge_sidecar" / "runtime_service.py").relative_to(REPO_ROOT)),
+        },
+        "errors": errors,
+    }
+
+
 def _audit_runtime_rollout_gate() -> dict[str, Any]:
     errors: list[str] = []
     rollout_source = RUNTIME_ROLLOUT_GATE_PATH.read_text(encoding="utf-8") if RUNTIME_ROLLOUT_GATE_PATH.exists() else ""
@@ -502,6 +637,7 @@ def _audit_runtime_rollout_gate() -> dict[str, Any]:
         "_capture_desktop_visual_qa",
         "run_runtime_stability_gate",
         "scan_runtime_stability_artifacts",
+        "\"release_fault_matrix\"",
     ):
         if marker not in rollout_source:
             errors.append(f"runtime rollout gate owner missing required marker: {marker}")
@@ -523,6 +659,136 @@ def _audit_runtime_rollout_gate() -> dict[str, Any]:
             "runtime_rollout_gate": str(RUNTIME_ROLLOUT_GATE_PATH.relative_to(REPO_ROOT)),
             "runtime_rollout_gate_script": str(RUN_RUNTIME_ROLLOUT_GATE_SCRIPT_PATH.relative_to(REPO_ROOT)),
             "runtime_rollout_runbook": str(RUNTIME_ROLLOUT_RUNBOOK_PATH.relative_to(REPO_ROOT)),
+        },
+        "errors": errors,
+    }
+
+
+def _audit_promotion_gate() -> dict[str, Any]:
+    errors: list[str] = []
+    promotion_source = PROMOTION_GATE_PATH.read_text(encoding="utf-8") if PROMOTION_GATE_PATH.exists() else ""
+    wrapper_source = RUN_PROMOTION_GATE_SCRIPT_PATH.read_text(encoding="utf-8") if RUN_PROMOTION_GATE_SCRIPT_PATH.exists() else ""
+    workflow_sources = {
+        "pr": PR_PROMOTION_WORKFLOW_PATH.read_text(encoding="utf-8") if PR_PROMOTION_WORKFLOW_PATH.exists() else "",
+        "nightly": NIGHTLY_PROMOTION_WORKFLOW_PATH.read_text(encoding="utf-8") if NIGHTLY_PROMOTION_WORKFLOW_PATH.exists() else "",
+        "release": RELEASE_PROMOTION_WORKFLOW_PATH.read_text(encoding="utf-8") if RELEASE_PROMOTION_WORKFLOW_PATH.exists() else "",
+    }
+    for marker in (
+        "PROMOTION_GATE_SCHEMA_VERSION",
+        "PROMOTION_GATE_MANIFEST_SCHEMA_VERSION",
+        "collect_git_context",
+        "collect_toolchain_versions",
+        "promotion_gate_specs",
+        "required_status_paths",
+        "stdout summary does not match persisted summary.json",
+        "git worktree is dirty; promotion gates fail closed until evaluated from a clean tree",
+        "tested commit does not match the required promotion commit",
+        "required report_md artifact is missing",
+    ):
+        if marker not in promotion_source:
+            errors.append(f"promotion gate owner missing required marker: {marker}")
+    if "from astrabridge_sidecar.promotion_gate import run_promotion_gate" not in wrapper_source:
+        errors.append("promotion gate CLI wrapper is not delegating to the shared owner")
+    workflow_expectations = {
+        "pr": ("scripts/run_promotion_gate.py", "--mode pr", "upload-artifact", "promotion-gate-pr"),
+        "nightly": ("scripts/run_promotion_gate.py", "--mode nightly", "upload-artifact", "promotion-gate-nightly"),
+        "release": ("scripts/run_promotion_gate.py", "--mode release", "upload-artifact", "promotion-gate-release"),
+    }
+    for workflow_id, markers in workflow_expectations.items():
+        source = workflow_sources[workflow_id]
+        for marker in markers:
+            if marker not in source:
+                errors.append(f"{workflow_id} promotion workflow missing required marker: {marker}")
+    return {
+        "contract": "fail_closed_promotion_gate_and_ci_entrypoints",
+        "owner": "astrabridge_sidecar.promotion_gate + .github/workflows",
+        "status": "pass" if not errors else "fail",
+        "paths": {
+            "promotion_gate": str(PROMOTION_GATE_PATH.relative_to(REPO_ROOT)),
+            "promotion_gate_script": str(RUN_PROMOTION_GATE_SCRIPT_PATH.relative_to(REPO_ROOT)),
+            "pr_workflow": str(PR_PROMOTION_WORKFLOW_PATH.relative_to(REPO_ROOT)),
+            "nightly_workflow": str(NIGHTLY_PROMOTION_WORKFLOW_PATH.relative_to(REPO_ROOT)),
+            "release_workflow": str(RELEASE_PROMOTION_WORKFLOW_PATH.relative_to(REPO_ROOT)),
+        },
+        "errors": errors,
+    }
+
+
+def _audit_release_identity_and_staging() -> dict[str, Any]:
+    errors: list[str] = []
+    identity_source = RELEASE_IDENTITY_OWNER_PATH.read_text(encoding="utf-8") if RELEASE_IDENTITY_OWNER_PATH.exists() else ""
+    manifest_source = RELEASE_IDENTITY_PATH.read_text(encoding="utf-8") if RELEASE_IDENTITY_PATH.exists() else ""
+    wrapper_source = RUN_RELEASE_READINESS_GATE_SCRIPT_PATH.read_text(encoding="utf-8") if RUN_RELEASE_READINESS_GATE_SCRIPT_PATH.exists() else ""
+    for marker in (
+        "RELEASE_IDENTITY_SCHEMA_VERSION",
+        "RELEASE_STAGING_SCHEMA_VERSION",
+        "RELEASE_READINESS_SCHEMA_VERSION",
+        "load_release_identity",
+        "collect_release_bindings",
+        "evaluate_release_bindings",
+        "stage_release_workspace",
+        "compare_staging_runs",
+        "run_release_readiness_gate",
+        "forbidden_paths",
+        "release/updater",
+    ):
+        if marker not in identity_source:
+            errors.append(f"release identity owner missing required marker: {marker}")
+    for marker in (
+        '"schema_version": "astrabridge-release-identity-v1"',
+        '"release_version": "0.1.0"',
+        '"package_identifier": "app.astrabridge.desktop"',
+        '"manifest_version": "astrabridge-updater-release-v1"',
+    ):
+        if marker not in manifest_source:
+            errors.append(f"release identity manifest missing required marker: {marker}")
+    if "from astrabridge_sidecar.release_identity import run_release_readiness_gate" not in wrapper_source:
+        errors.append("release readiness gate CLI wrapper is not delegating to the shared owner")
+    return {
+        "contract": "release_identity_and_clean_staging_contract",
+        "owner": "astrabridge_sidecar.release_identity + release/astrabridge-release-identity.json",
+        "status": "pass" if not errors else "fail",
+        "paths": {
+            "release_identity_manifest": str(RELEASE_IDENTITY_PATH.relative_to(REPO_ROOT)),
+            "release_identity_owner": str(RELEASE_IDENTITY_OWNER_PATH.relative_to(REPO_ROOT)),
+            "release_readiness_gate_script": str(RUN_RELEASE_READINESS_GATE_SCRIPT_PATH.relative_to(REPO_ROOT)),
+        },
+        "errors": errors,
+    }
+
+
+def _audit_protocol_persistence_boundary() -> dict[str, Any]:
+    errors: list[str] = []
+    persistence_source = PROTOCOL_PERSISTENCE_PATH.read_text(encoding="utf-8") if PROTOCOL_PERSISTENCE_PATH.exists() else ""
+    durable_source = DURABLE_RUN_STORE_PATH.read_text(encoding="utf-8") if DURABLE_RUN_STORE_PATH.exists() else ""
+    for marker in (
+        "PROTOCOL_PERSISTENCE_SCHEMA_VERSION",
+        "CANONICAL_PROTOCOL_VOCABULARIES",
+        "LEGACY_RUN_PROJECTION_SCHEMA_VERSIONS",
+        "canonicalize_protocol_artifact_ref",
+        "canonicalize_protocol_content_part",
+        "canonicalize_protocol_agent_envelope",
+        "canonicalize_protocol_run_event",
+        "canonicalize_run_projection_payload",
+    ):
+        if marker not in persistence_source:
+            errors.append(f"protocol persistence owner missing required marker: {marker}")
+    for marker in (
+        "canonicalize_protocol_artifact_ref",
+        "canonicalize_protocol_agent_envelope",
+        "canonicalize_protocol_run_event",
+        "canonicalize_run_projection_payload",
+        "PROTOCOL_RUN_EVENT_TYPES",
+    ):
+        if marker not in durable_source:
+            errors.append(f"durable run store missing protocol write-boundary marker: {marker}")
+    return {
+        "contract": "canonical_protocol_persistence_write_boundary",
+        "owner": "astrabridge_sidecar.protocol.persistence + astrabridge_sidecar.durable_run_store",
+        "status": "pass" if not errors else "fail",
+        "paths": {
+            "protocol_persistence_owner": str(PROTOCOL_PERSISTENCE_PATH.relative_to(REPO_ROOT)),
+            "durable_run_store": str(DURABLE_RUN_STORE_PATH.relative_to(REPO_ROOT)),
         },
         "errors": errors,
     }
@@ -577,6 +843,11 @@ def _audit_mcp_broker() -> dict[str, Any]:
         "def invoke_capability(",
         "LoopbackMcpSession",
         "mcp_broker_tool_call",
+        "streamable_http",
+        "_discover_protected_resource_metadata",
+        "_validate_remote_typed_result",
+        "DurableRunEventStore",
+        "_REMOTE_PENDING_RESULT_SCHEMA_VERSION",
     ):
         if marker not in broker_source:
             errors.append(f"shared MCP broker missing required marker: {marker}")
@@ -597,6 +868,54 @@ def _audit_mcp_broker() -> dict[str, Any]:
         "owner": "astrabridge_sidecar.mcp_broker_service.McpBrokerService",
         "status": "pass" if not errors else "fail",
         "path": str(MCP_BROKER_PATH.relative_to(REPO_ROOT)),
+        "errors": errors,
+    }
+
+
+def _audit_external_a2a_gateway() -> dict[str, Any]:
+    errors: list[str] = []
+    gateway_source = EXTERNAL_A2A_GATEWAY_PATH.read_text(encoding="utf-8") if EXTERNAL_A2A_GATEWAY_PATH.exists() else ""
+    conformance_source = EXTERNAL_A2A_CONFORMANCE_PATH.read_text(encoding="utf-8") if EXTERNAL_A2A_CONFORMANCE_PATH.exists() else ""
+    contract_source = (SIDECAR_ROOT / "astrabridge_sidecar" / "agent_orchestration_contract.py").read_text(encoding="utf-8")
+    compiler_source = (SIDECAR_ROOT / "astrabridge_sidecar" / "agent_orchestration_compiler.py").read_text(encoding="utf-8")
+    for marker in (
+        "EXTERNAL_A2A_GATEWAY_SCHEMA_VERSION",
+        "EXTERNAL_A2A_AGENT_CARD_REGISTRY_SCHEMA_VERSION",
+        "EXTERNAL_A2A_CARD_REF_PREFIX",
+        "validate_external_a2a_agent_card_registry",
+        "build_external_a2a_gateway_snapshot",
+        "validate_external_a2a_task_transition",
+        "a2a_message_to_agent_envelope",
+        "a2a_task_to_agent_task",
+        "artifact_ref_to_a2a_artifact",
+        "SUPPORTED_A2A_PROTOCOL_VERSIONS",
+    ):
+        if marker not in gateway_source:
+            errors.append(f"external A2A gateway owner missing required marker: {marker}")
+    for marker in (
+        "EXTERNAL_A2A_CONFORMANCE_KIT_SCHEMA_VERSION",
+        "build_external_a2a_conformance_kit",
+        "negative_cases",
+        "replay_case",
+    ):
+        if marker not in conformance_source:
+            errors.append(f"external A2A conformance owner missing required marker: {marker}")
+    if "validate_external_a2a_agent_card_registry" not in contract_source:
+        errors.append("agent orchestration contract is not validating external A2A card registry ownership")
+    if "build_external_a2a_gateway_snapshot" not in compiler_source or '"external_a2a": external_a2a' not in compiler_source:
+        errors.append("agent orchestration compiler is not snapshotting resolved external A2A gateway state")
+    return {
+        "contract": "external_a2a_gateway_and_agent_card_registry",
+        "owner": "astrabridge_sidecar.external_a2a_gateway + astrabridge_sidecar.external_a2a_conformance + agent_orchestration_contract.py + agent_orchestration_compiler.py",
+        "status": "pass" if not errors else "fail",
+        "paths": {
+            "external_a2a_gateway": str(EXTERNAL_A2A_GATEWAY_PATH.relative_to(REPO_ROOT)),
+            "external_a2a_conformance": str(EXTERNAL_A2A_CONFORMANCE_PATH.relative_to(REPO_ROOT)),
+            "agent_orchestration_contract": str((SIDECAR_ROOT / "astrabridge_sidecar" / "agent_orchestration_contract.py").relative_to(REPO_ROOT)),
+            "agent_orchestration_compiler": str((SIDECAR_ROOT / "astrabridge_sidecar" / "agent_orchestration_compiler.py").relative_to(REPO_ROOT)),
+        },
+        "expected_schema_version": EXTERNAL_A2A_GATEWAY_SCHEMA_VERSION,
+        "expected_conformance_schema_version": EXTERNAL_A2A_CONFORMANCE_KIT_SCHEMA_VERSION,
         "errors": errors,
     }
 
@@ -960,12 +1279,18 @@ def audit_contract_boundaries() -> dict[str, Any]:
         _audit_stability_ownership(),
         _audit_mcp_server_core(),
         _audit_mcp_broker(),
+        _audit_external_a2a_gateway(),
         _audit_mcp_node_policy(),
         _audit_multimodal_result_envelope(),
         _audit_runtime_observability(),
         _audit_runtime_stability_gate(),
         _audit_runtime_rollout_gate(),
+        _audit_promotion_gate(),
+        _audit_release_identity_and_staging(),
+        _audit_protocol_persistence_boundary(),
         _audit_node_type_registry(),
+        _audit_task_graph_mutation_service(),
+        _audit_runtime_graph_run_dispatch_service(),
         _audit_comfyui_workflow_adapter(),
         _audit_langgraph_stategraph_adapter(),
         _audit_desktop_sidecar_supervision(),

@@ -7,6 +7,10 @@ from typing import Any, Literal
 AuthorityTier = Literal["A", "B", "C", "D"]
 SUPPORTED_APPLY_PATCH_TOOL_TYPES = {"freeform", "json"}
 STRUCTURED_MCP_POLICIES = {"verified", "conservative"}
+DEFAULT_ROUTE_BLOCKING_COMMAND_EXECUTION_STATUSES = {
+    "partial_no_command_execution",
+    "completed_without_command_execution",
+}
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,60 @@ def assess_model_authority(model: dict[str, Any]) -> AuthorityAssessment:
         command_execution_status=command_execution_status,
         command_execution_note=command_execution_note,
     )
+
+
+def assess_default_route_verification(
+    model: dict[str, Any],
+    *,
+    require_image_input_verified: bool = False,
+) -> dict[str, Any]:
+    authority = assess_model_authority(
+        {
+            **model,
+            "supports_tool_calls": has_structured_tool_surface(model),
+            "apply_patch_tool_type": model.get("apply_patch_tool_type"),
+        }
+    )
+    authority_tier = str(model.get("authority_tier") or authority.tier or "").strip().upper() or authority.tier
+    command_execution_status = str(model.get("command_execution_status") or authority.command_execution_status or "unknown").strip().lower() or "unknown"
+    supports_mcp_tools = bool(model.get("supports_mcp_tools", False))
+    mcp_policy = str(model.get("mcp_tool_call_policy") or "unsupported").strip().lower()
+    mcp_smoke_status = str(model.get("mcp_smoke_status") or "untested").strip().lower()
+    modality_limits = dict(model.get("modality_limits") or {})
+    input_modalities = [
+        str(item or "").strip().lower()
+        for item in list(model.get("input_modalities") or [])
+        if str(item or "").strip()
+    ]
+    image_input_status = str(modality_limits.get("app_server_image_input_status") or "unverified").strip().lower() or "unverified"
+    reasons: list[str] = []
+
+    if authority_tier != "A":
+        reasons.append(f"authority_tier_{authority_tier or 'unknown'}")
+    if command_execution_status in DEFAULT_ROUTE_BLOCKING_COMMAND_EXECUTION_STATUSES:
+        reasons.append(f"command_execution_{command_execution_status}")
+    if supports_mcp_tools and (
+        mcp_policy != "verified"
+        or not (mcp_smoke_status == "verified" or mcp_smoke_status.startswith("pass"))
+    ):
+        reasons.append(f"mcp_{mcp_policy or 'unsupported'}_{mcp_smoke_status or 'untested'}")
+
+    supports_image_input = "image" in input_modalities
+    if require_image_input_verified:
+        if image_input_status != "verified":
+            reasons.append(f"image_input_{image_input_status}")
+
+    verified = not reasons
+    return {
+        "verified": verified,
+        "status": "verified" if verified else "warning_gated",
+        "reasons": reasons,
+        "authority_tier": authority_tier,
+        "command_execution_status": command_execution_status,
+        "supports_image_input": supports_image_input,
+        "requires_image_input_verified": bool(require_image_input_verified),
+        "app_server_image_input_status": image_input_status,
+    }
 
 
 def _append_command_execution_warning(

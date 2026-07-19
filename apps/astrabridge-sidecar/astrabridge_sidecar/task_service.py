@@ -15,6 +15,7 @@ from .coding_kernel import task_refs_from_coding_events
 from .common import WORKSPACE_STATE_DIRNAME, new_id, now_iso, read_json, write_json
 from .durable_run_store import DurableRunEventStore
 from .agent_orchestration_contract import (
+    AGENT_ORCHESTRATION_SCHEMA_VERSION,
     lift_task_graph_to_agent_orchestration_graph,
     lower_agent_orchestration_graph_to_task_graph,
     validate_agent_orchestration_graph,
@@ -42,8 +43,12 @@ from .langgraph_stategraph_adapter import (
     import_langgraph_stategraph_manifest,
     looks_like_langgraph_stategraph_manifest,
 )
-from .model_catalog.catalog import preferred_provider_model_record, provider_model_records
-from .node_type_registry import OPAQUE_DISABLED_NODE_TYPE_ID, node_type_registry_snapshot
+from .model_catalog.catalog import provider_model_records
+from .node_type_registry import (
+    OPAQUE_DISABLED_NODE_TYPE_ID,
+    journaled_compiled_plan_executor_capability_report,
+    node_type_registry_snapshot,
+)
 from .protocol.compatibility import adapt_legacy_artifact_path
 from .protocol.generated.v1 import (
     ProtocolValidationError,
@@ -51,14 +56,18 @@ from .protocol.generated.v1 import (
     validate_protocol_payload,
 )
 from .providers.runtime_transition import summarize_transition
+from .providers.tooling import assess_default_route_verification
 from .security import DESKTOP_KEY_PATH_RE, SECRET_RE, SecurityError, redact_sensitive, resolve_under
 from .task_graph_contract import (
     ARTIFACT_KINDS,
     GRAPH_TEMPLATE_IDS,
+    TASK_GRAPH_SCHEMA_VERSION,
     load_task_graph_fixture,
     validate_graph_definition,
     validate_task_graph_run,
 )
+from .task_graph_mutation_service import TaskGraphMutationService
+from .task_graph_run_ref_service import TaskGraphRunRefService
 from .usage_signal import normalize_usage_signal, usage_not_available
 
 
@@ -69,6 +78,19 @@ GRAPH_DEFINITION_LIMIT = 20
 GRAPH_RUN_REF_LIMIT = 40
 GRAPH_SNAPSHOT_REF_LIMIT = 80
 AGENT_ORCHESTRATION_GRAPH_SOURCE_FORMAT = "agent_orchestration_graph"
+GRAPH_DOCUMENT_SCHEMA_VERSION = "astrabridge-graph-document-v3"
+GRAPH_DOCUMENT_LEGACY_SCHEMA_V2 = "astrabridge-graph-document-v2"
+GRAPH_DOCUMENT_MIGRATION_VERSIONS = (
+    "legacy_task_graph_definition",
+    GRAPH_DOCUMENT_LEGACY_SCHEMA_V2,
+    GRAPH_DOCUMENT_SCHEMA_VERSION,
+)
+GRAPH_SOURCE_OWNERSHIP_SCHEMA_VERSION = "astrabridge-graph-source-ownership-v1"
+GRAPH_SOURCE_OWNERSHIP_SOURCE_OWNED = "source_owned"
+GRAPH_SOURCE_OWNERSHIP_DETACHED = "detached_gui_edit"
+GRAPH_SOURCE_OWNERSHIP_WRITABLE_SOURCE = "source_owned_canonical_file"
+GRAPH_SOURCE_OWNERSHIP_DETACHED_WRITABLE_SOURCE = "detached_gui_graph"
+_GRAPH_CONFLICT_DELETE = object()
 GRAPH_TEMPLATE_SUMMARIES = {
     "supervisor_worker_synthesizer": "Supervisor plans, one worker executes, one synthesizer returns the bounded result.",
     "fanout_fanin_research": "One planner fans out bounded research branches and one synthesizer merges their artifacts.",
@@ -78,6 +100,26 @@ GRAPH_TEMPLATE_SUMMARIES = {
     "multimodal_capability_adapter": "Probe supported input/output modes, adapt the message contract, and verify multimodal fallback behavior.",
     "custom_blank_graph": "Minimal starter graph with one neutral entry node for custom orchestration authoring.",
 }
+
+
+class GraphRevisionConflictError(RuntimeError):
+    def __init__(self, message: str, *, payload: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.payload = dict(payload)
+
+    def response_payload(self) -> dict[str, Any]:
+        return {"ok": False, **dict(self.payload)}
+
+
+class GraphSourceOwnershipError(RuntimeError):
+    def __init__(self, message: str, *, payload: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.payload = dict(payload)
+
+    def response_payload(self) -> dict[str, Any]:
+        return {"ok": False, **dict(self.payload)}
+
+
 GRAPH_TEMPLATE_PRODUCT_METADATA = {
     "supervisor_worker_synthesizer": {
         "recommended_provider_ids": ["qwen", "kimi"],
@@ -211,6 +253,8 @@ class TaskService:
         self._projects = project_service
         self._durable_store: DurableRunEventStore | None = None
         self._durable_store_workspace: Path | None = None
+        self._graph_mutation = TaskGraphMutationService(self)
+        self._graph_run_refs = TaskGraphRunRefService(self)
 
     def durable_run_store(self) -> DurableRunEventStore:
         """Return the workspace-local durable run store for this service.
@@ -296,50 +340,7 @@ class TaskService:
         return current
 
     def _task_response_graph_run_refs(self, value: Any) -> list[dict[str, Any]]:
-        compacted: list[dict[str, Any]] = []
-        for item in list(value or []):
-            if not isinstance(item, dict):
-                continue
-            compact_ref = {
-                    "run_id": str(item.get("run_id") or "").strip(),
-                    "graph_id": str(item.get("graph_id") or "").strip(),
-                    "task_id": str(item.get("task_id") or "").strip(),
-                    "status": str(item.get("status") or "").strip(),
-                    "created_at": str(item.get("created_at") or "").strip(),
-                    "updated_at": str(item.get("updated_at") or "").strip(),
-                    "artifact_count": int(item.get("artifact_count") or 0),
-                    "event_count": int(item.get("event_count") or 0),
-                    "worker_count": int(item.get("worker_count") or 0),
-                    "approval_state": str(item.get("approval_state") or "").strip() or None,
-                    "latest_event_type": str(item.get("latest_event_type") or "").strip() or None,
-                    "latest_event_at": str(item.get("latest_event_at") or "").strip() or None,
-                    "node_status_counts": {
-                        str(key): int(count or 0)
-                        for key, count in dict(item.get("node_status_counts") or {}).items()
-                        if str(key or "").strip()
-                    },
-                    "node_outcome_counts": {
-                        str(key): int(count or 0)
-                        for key, count in dict(item.get("node_outcome_counts") or {}).items()
-                        if str(key or "").strip()
-                    },
-                    "metrics": redact_sensitive(dict(item.get("metrics") or {})),
-                    "budget": redact_sensitive(dict(item.get("budget") or {})),
-                }
-            # Keep active-run payloads compact, but preserve sanitized worker
-            # output after a run reaches a terminal state so the UI can show
-            # truthful per-node results instead of only aggregate counts.
-            status = str(item.get("status") or "").strip()
-            if status in {"completed", "failed", "cancelled", "partial", "dry_run_passed", "dry_run_blocked"}:
-                worker_bindings = [
-                    redact_sensitive(dict(binding))
-                    for binding in list(item.get("worker_bindings") or [])
-                    if isinstance(binding, dict)
-                ]
-                if worker_bindings:
-                    compact_ref["worker_bindings"] = worker_bindings[:80]
-            compacted.append(compact_ref)
-        return compacted[:12]
+        return self._graph_run_refs.task_response_graph_run_refs(value, limit=12)
 
     def _task_response_graph_definition_refs(self, value: Any) -> list[dict[str, Any]]:
         compacted: list[dict[str, Any]] = []
@@ -347,6 +348,7 @@ class TaskService:
             if not isinstance(item, dict):
                 continue
             graph_policy = dict(item.get("graph_policy") or {})
+            revision = self._graph_revision_payload(item)
             compacted.append(
                 {
                     "graph_id": str(item.get("graph_id") or "").strip(),
@@ -360,6 +362,7 @@ class TaskService:
                     "graph_policy": {"entry_node_ids": list(graph_policy.get("entry_node_ids") or [])[:12]},
                     "created_at": str(item.get("created_at") or "").strip(),
                     "updated_at": str(item.get("updated_at") or "").strip(),
+                    "graph_revision": revision,
                 }
             )
         return compacted[:20]
@@ -741,6 +744,7 @@ class TaskService:
         replayable_artifact_count: int = 0,
         projection_preview: str | None = None,
         warnings: list[str] | None = None,
+        neutral_handoff_bundle: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         task = self.bind_thread(thread_id=to_thread_id, settings=settings, role="provider", make_active=True)
         source_settings = self._provider_thread_settings(task, from_thread_id)
@@ -778,6 +782,29 @@ class TaskService:
             "permission_mode": settings.get("permission_mode"),
             "reused_existing": reused_existing,
             "transition_summary": transition.to_dict(),
+            "neutral_handoff_bundle": (
+                {
+                    "schema_version": str(dict(neutral_handoff_bundle).get("schema_version") or "").strip(),
+                    "path": str(dict(neutral_handoff_bundle).get("path") or "").strip(),
+                    "bundle_digest": str(dict(neutral_handoff_bundle).get("bundle_digest") or "").strip(),
+                    "projection_digest": str(dict(neutral_handoff_bundle).get("projection_digest") or "").strip(),
+                    "lineage_digest": str(dict(neutral_handoff_bundle).get("lineage_digest") or "").strip(),
+                    "source_thread_id": str(dict(neutral_handoff_bundle).get("source_thread_id") or "").strip() or None,
+                    "target_thread_id": str(dict(neutral_handoff_bundle).get("target_thread_id") or "").strip() or None,
+                    "source_provider_id": str(dict(neutral_handoff_bundle).get("source_provider_id") or "").strip() or None,
+                    "source_model_id": str(dict(neutral_handoff_bundle).get("source_model_id") or "").strip() or None,
+                    "target_provider_id": str(dict(neutral_handoff_bundle).get("target_provider_id") or "").strip() or None,
+                    "target_model_id": str(dict(neutral_handoff_bundle).get("target_model_id") or "").strip() or None,
+                    "projection_mode": str(dict(neutral_handoff_bundle).get("projection_mode") or "").strip() or None,
+                    "provider_private_state_removed": bool(dict(neutral_handoff_bundle).get("provider_private_state_removed")),
+                    "dropped_artifacts": int(dict(neutral_handoff_bundle).get("dropped_artifacts") or 0),
+                    "repaired_tool_pairs": int(dict(neutral_handoff_bundle).get("repaired_tool_pairs") or 0),
+                    "replayable_artifact_count": int(dict(neutral_handoff_bundle).get("replayable_artifact_count") or 0),
+                    "warning_count": int(dict(neutral_handoff_bundle).get("warning_count") or 0),
+                }
+                if isinstance(neutral_handoff_bundle, dict) and str(dict(neutral_handoff_bundle).get("path") or "").strip()
+                else None
+            ),
             "created_at": now_iso(),
         }
         handoff_events = list(task.get("handoff_events") or [])
@@ -794,6 +821,7 @@ class TaskService:
 
     def compact_handoff_event(self, event: dict[str, Any]) -> dict[str, Any]:
         transition = dict(event.get("transition_summary") or {})
+        neutral_handoff_bundle = dict(event.get("neutral_handoff_bundle") or {})
         warnings = [str(item).strip() for item in list(transition.get("warnings") or []) if str(item or "").strip()]
         return {
             "event_id": str(event.get("event_id") or ""),
@@ -825,6 +853,28 @@ class TaskService:
                 "warnings": warnings,
                 "warning_count": len(warnings),
             },
+            "neutral_handoff_bundle": (
+                {
+                    "path": str(neutral_handoff_bundle.get("path") or ""),
+                    "bundle_digest": str(neutral_handoff_bundle.get("bundle_digest") or ""),
+                    "projection_digest": str(neutral_handoff_bundle.get("projection_digest") or ""),
+                    "lineage_digest": str(neutral_handoff_bundle.get("lineage_digest") or ""),
+                    "source_thread_id": str(neutral_handoff_bundle.get("source_thread_id") or ""),
+                    "target_thread_id": str(neutral_handoff_bundle.get("target_thread_id") or ""),
+                    "source_provider_id": str(neutral_handoff_bundle.get("source_provider_id") or ""),
+                    "source_model_id": str(neutral_handoff_bundle.get("source_model_id") or ""),
+                    "target_provider_id": str(neutral_handoff_bundle.get("target_provider_id") or ""),
+                    "target_model_id": str(neutral_handoff_bundle.get("target_model_id") or ""),
+                    "projection_mode": str(neutral_handoff_bundle.get("projection_mode") or ""),
+                    "provider_private_state_removed": bool(neutral_handoff_bundle.get("provider_private_state_removed")),
+                    "dropped_artifacts": int(neutral_handoff_bundle.get("dropped_artifacts") or 0),
+                    "repaired_tool_pairs": int(neutral_handoff_bundle.get("repaired_tool_pairs") or 0),
+                    "replayable_artifact_count": int(neutral_handoff_bundle.get("replayable_artifact_count") or 0),
+                    "warning_count": int(neutral_handoff_bundle.get("warning_count") or 0),
+                }
+                if str(neutral_handoff_bundle.get("path") or "").strip()
+                else None
+            ),
         }
 
     def lane_state(self, task: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -982,6 +1032,22 @@ class TaskService:
         validated = validate_graph_definition(graph_definition)
         if str(validated.get("task_id") or "") != str(task.get("task_id") or ""):
             raise ValueError("graph_definition.task_id must match the current task.")
+        prior_graph = self.graph_definition(str(validated.get("graph_id") or ""))
+        prior_document = dict(dict(prior_graph or {}).get("graph_document") or {})
+        canonical_graph = validate_agent_orchestration_graph(
+            self._sync_orchestration_graph_with_task_graph(
+                dict(validated.get("orchestration_graph") or prior_document.get("canonical_graph") or {}),
+                task_graph=validated,
+            )
+        )
+        graph_document = self._graph_document_from_task_graph(
+            validated,
+            canonical_graph=canonical_graph,
+            existing_document=prior_document if prior_document else None,
+        )
+        validated["orchestration_graph"] = deepcopy(canonical_graph)
+        validated["graph_document"] = deepcopy(graph_document)
+        validated["graph_revision"] = deepcopy(dict(graph_document.get("current_revision") or {}))
         existing = [
             dict(item)
             for item in list(task.get("graph_definitions") or [])
@@ -993,11 +1059,1171 @@ class TaskService:
         self._save_task(task)
         return validated
 
+    @staticmethod
+    def _legacy_graph_revision_id(graph_id: str, etag: str) -> str:
+        digest = hashlib.sha256(f"{graph_id}|{etag}".encode("utf-8")).hexdigest()[:16]
+        return f"graph-revision-legacy-{digest}"
+
+    @staticmethod
+    def _graph_document_etag(canonical_graph: dict[str, Any]) -> str:
+        payload = json.dumps(redact_sensitive(canonical_graph), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+    def _normalize_graph_source_ownership(self, value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        source_file = dict(value.get("source_file") or {})
+        path = str(source_file.get("path") or "").strip()
+        sha256 = str(source_file.get("sha256") or "").strip()
+        if not path or not sha256:
+            return None
+        ownership_mode = str(value.get("ownership_mode") or "").strip() or GRAPH_SOURCE_OWNERSHIP_SOURCE_OWNED
+        detached_from = dict(value.get("detached_from") or {})
+        normalized = {
+            "schema_version": str(value.get("schema_version") or "").strip() or GRAPH_SOURCE_OWNERSHIP_SCHEMA_VERSION,
+            "ownership_mode": ownership_mode,
+            "can_write_from_gui": bool(value.get("can_write_from_gui"))
+            if ownership_mode != GRAPH_SOURCE_OWNERSHIP_SOURCE_OWNED
+            else False,
+            "owner_kind": str(value.get("owner_kind") or "").strip() or "canonical_graph_file",
+            "source_format": str(value.get("source_format") or "").strip() or AGENT_ORCHESTRATION_GRAPH_SOURCE_FORMAT,
+            "source_file": {
+                "path": path,
+                "sha256": sha256,
+                "symbol": str(source_file.get("symbol") or "").strip() or None,
+                "line_start": int(source_file.get("line_start") or 1),
+                "line_end": int(source_file.get("line_end") or source_file.get("line_start") or 1),
+            },
+            "symbol_refs": [
+                {
+                    "target_kind": str(dict(item).get("target_kind") or "").strip() or None,
+                    "target_id": str(dict(item).get("target_id") or "").strip() or None,
+                    "symbol": str(dict(item).get("symbol") or "").strip() or None,
+                    "source_path": str(dict(item).get("source_path") or path).strip() or path,
+                    "sha256": str(dict(item).get("sha256") or sha256).strip() or sha256,
+                    "line_start": int(dict(item).get("line_start") or 1),
+                    "line_end": int(dict(item).get("line_end") or dict(item).get("line_start") or 1),
+                }
+                for item in list(value.get("symbol_refs") or [])
+                if isinstance(item, dict)
+            ],
+            "detached_from": {
+                "path": str(detached_from.get("path") or "").strip() or None,
+                "sha256": str(detached_from.get("sha256") or "").strip() or None,
+                "symbol": str(detached_from.get("symbol") or "").strip() or None,
+                "line_start": int(detached_from.get("line_start") or 1),
+                "line_end": int(detached_from.get("line_end") or detached_from.get("line_start") or 1),
+            }
+            if detached_from
+            else None,
+            "detached_at": str(value.get("detached_at") or "").strip() or None,
+            "detached_reason": str(value.get("detached_reason") or "").strip() or None,
+        }
+        if not normalized["symbol_refs"]:
+            normalized["symbol_refs"] = [
+                {
+                    "target_kind": "graph",
+                    "target_id": str(source_file.get("symbol") or "").strip() or None,
+                    "symbol": str(source_file.get("symbol") or "").strip() or None,
+                    "source_path": path,
+                    "sha256": sha256,
+                    "line_start": int(source_file.get("line_start") or 1),
+                    "line_end": int(source_file.get("line_end") or source_file.get("line_start") or 1),
+                }
+            ]
+        return normalized
+
+    def _build_graph_source_ownership(
+        self,
+        *,
+        canonical_graph: dict[str, Any],
+        source_path: str,
+        source_text: str,
+        source_format: str,
+    ) -> dict[str, Any]:
+        clean_path = str(source_path or "").strip()
+        digest = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+        graph_id = str(canonical_graph.get("graph_id") or "").strip()
+        symbol_refs = [
+            {
+                "target_kind": "graph",
+                "target_id": graph_id,
+                "symbol": graph_id or "graph",
+                "source_path": clean_path,
+                "sha256": digest,
+                "line_start": 1,
+                "line_end": 1,
+            }
+        ]
+        for node in list(canonical_graph.get("nodes") or []):
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get("node_id") or "").strip()
+            if not node_id:
+                continue
+            symbol_refs.append(
+                {
+                    "target_kind": "node",
+                    "target_id": node_id,
+                    "symbol": node_id,
+                    "source_path": clean_path,
+                    "sha256": digest,
+                    "line_start": 1,
+                    "line_end": 1,
+                }
+            )
+        for edge in list(canonical_graph.get("edges") or []):
+            if not isinstance(edge, dict):
+                continue
+            edge_id = str(edge.get("edge_id") or "").strip()
+            if not edge_id:
+                continue
+            symbol_refs.append(
+                {
+                    "target_kind": "edge",
+                    "target_id": edge_id,
+                    "symbol": edge_id,
+                    "source_path": clean_path,
+                    "sha256": digest,
+                    "line_start": 1,
+                    "line_end": 1,
+                }
+            )
+        return {
+            "schema_version": GRAPH_SOURCE_OWNERSHIP_SCHEMA_VERSION,
+            "ownership_mode": GRAPH_SOURCE_OWNERSHIP_SOURCE_OWNED,
+            "can_write_from_gui": False,
+            "owner_kind": "canonical_graph_file",
+            "source_format": str(source_format or "").strip() or AGENT_ORCHESTRATION_GRAPH_SOURCE_FORMAT,
+            "source_file": {
+                "path": clean_path,
+                "sha256": digest,
+                "symbol": graph_id or "graph",
+                "line_start": 1,
+                "line_end": 1,
+            },
+            "symbol_refs": symbol_refs,
+            "detached_from": None,
+            "detached_at": None,
+            "detached_reason": None,
+        }
+
+    def _graph_source_ownership(
+        self,
+        *,
+        canonical_graph: dict[str, Any] | None = None,
+        document: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        metadata = dict(dict(canonical_graph or {}).get("metadata") or {})
+        ownership = self._normalize_graph_source_ownership(metadata.get("source_ownership"))
+        if ownership:
+            return ownership
+        return self._normalize_graph_source_ownership(dict(document or {}).get("source_ownership"))
+
+    def _apply_graph_source_ownership(
+        self,
+        canonical_graph: dict[str, Any],
+        ownership: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        updated = deepcopy(canonical_graph)
+        metadata = dict(updated.get("metadata") or {})
+        if ownership:
+            metadata["source_ownership"] = deepcopy(ownership)
+        else:
+            metadata.pop("source_ownership", None)
+        updated["metadata"] = metadata
+        return updated
+
+    def _detach_graph_source_ownership(self, value: Any) -> dict[str, Any] | None:
+        ownership = self._normalize_graph_source_ownership(value)
+        if not ownership:
+            return None
+        detached_from = dict(ownership.get("detached_from") or {}) or deepcopy(dict(ownership.get("source_file") or {}))
+        ownership["ownership_mode"] = GRAPH_SOURCE_OWNERSHIP_DETACHED
+        ownership["can_write_from_gui"] = True
+        ownership["detached_from"] = detached_from
+        ownership["detached_at"] = now_iso()
+        ownership["detached_reason"] = "gui_detach_requested"
+        return ownership
+
+    def _compact_graph_document(self, value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        revision = dict(value.get("current_revision") or {})
+        migration = dict(value.get("migration") or {})
+        compatibility = dict(value.get("compatibility_projection") or {})
+        source_ownership = self._graph_source_ownership(document=value)
+        compact = {
+            "schema_version": str(value.get("schema_version") or "").strip() or GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": str(value.get("graph_id") or "").strip(),
+            "task_id": str(value.get("task_id") or "").strip(),
+            "created_at": str(value.get("created_at") or "").strip(),
+            "updated_at": str(value.get("updated_at") or "").strip(),
+            "current_revision": {
+                "revision_id": str(revision.get("revision_id") or "").strip() or None,
+                "revision_index": int(revision.get("revision_index") or 0),
+                "etag": str(revision.get("etag") or "").strip() or None,
+                "created_at": str(revision.get("created_at") or "").strip() or None,
+                "graph_schema_version": str(revision.get("graph_schema_version") or "").strip() or None,
+                "task_graph_schema_version": str(revision.get("task_graph_schema_version") or "").strip() or None,
+            },
+            "migration": {
+                "document_schema_version": str(migration.get("document_schema_version") or "").strip() or GRAPH_DOCUMENT_SCHEMA_VERSION,
+                "upgraded_from": str(migration.get("upgraded_from") or "").strip() or None,
+                "chain": [
+                    deepcopy(dict(item))
+                    for item in list(migration.get("chain") or [])
+                    if isinstance(item, dict)
+                ][:8],
+                "compatibility_ranges": self._normalize_graph_document_compatibility_ranges(
+                    migration.get("compatibility_ranges")
+                ),
+                "rollback_support": str(migration.get("rollback_support") or "").strip() or None,
+            },
+            "compatibility_projection": {
+                "source_kind": str(compatibility.get("source_kind") or "").strip() or "canonical_orchestration_graph",
+                "writable_source": str(compatibility.get("writable_source") or "").strip() or "canonical_orchestration_graph",
+                "task_graph_schema_version": str(compatibility.get("task_graph_schema_version") or "").strip() or None,
+                "lowering_mode": str(compatibility.get("lowering_mode") or "").strip() or None,
+                "generated_at": str(compatibility.get("generated_at") or "").strip() or None,
+            },
+            "source_ownership": {
+                "ownership_mode": str(source_ownership.get("ownership_mode") or "").strip() or None,
+                "can_write_from_gui": bool(source_ownership.get("can_write_from_gui")),
+                "source_path": str(dict(source_ownership.get("source_file") or {}).get("path") or "").strip() or None,
+                "source_sha256": str(dict(source_ownership.get("source_file") or {}).get("sha256") or "").strip() or None,
+                "detached_at": str(source_ownership.get("detached_at") or "").strip() or None,
+                "detached_from_path": str(dict(source_ownership.get("detached_from") or {}).get("path") or "").strip() or None,
+                "symbol_ref_count": len(list(source_ownership.get("symbol_refs") or [])),
+            }
+            if source_ownership
+            else None,
+        }
+        return compact
+
+    @staticmethod
+    def _graph_document_schema_list(*groups: Any) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for group in groups:
+            for item in list(group or []):
+                text = str(item or "").strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                ordered.append(text)
+        return ordered
+
+    def _normalize_graph_document_compatibility_ranges(
+        self,
+        value: Any,
+        *,
+        task_graph_schema_version: str | None = None,
+        orchestration_schema_version: str | None = None,
+    ) -> dict[str, Any]:
+        raw = dict(value or {}) if isinstance(value, dict) else {}
+        raw_document = raw.get("document_schema_versions")
+        raw_task_consumers = dict(raw.get("task_graph_consumers") or {})
+        raw_orchestration_consumers = dict(raw.get("orchestration_consumers") or {})
+
+        document_read = self._graph_document_schema_list(
+            list(dict(raw_document).get("read") or []) if isinstance(raw_document, dict) else [],
+            raw_document if isinstance(raw_document, list) else [],
+            [GRAPH_DOCUMENT_LEGACY_SCHEMA_V2, GRAPH_DOCUMENT_SCHEMA_VERSION],
+        )
+        document_write = (
+            str(dict(raw_document).get("write") or "").strip()
+            if isinstance(raw_document, dict)
+            else ""
+        ) or GRAPH_DOCUMENT_SCHEMA_VERSION
+        task_graph_read = self._graph_document_schema_list(
+            list(raw.get("task_graph_schema_versions") or []),
+            list(raw_task_consumers.get("read") or []),
+            [task_graph_schema_version] if task_graph_schema_version else [],
+        )
+        orchestration_read = self._graph_document_schema_list(
+            list(raw.get("orchestration_schema_versions") or []),
+            list(raw_orchestration_consumers.get("read") or []),
+            [orchestration_schema_version] if orchestration_schema_version else [],
+        )
+        task_graph_write = (
+            str(raw_task_consumers.get("write") or "").strip()
+            or task_graph_schema_version
+            or (task_graph_read[0] if task_graph_read else TASK_GRAPH_SCHEMA_VERSION)
+        )
+        orchestration_write = (
+            str(raw_orchestration_consumers.get("write") or "").strip()
+            or orchestration_schema_version
+            or (orchestration_read[0] if orchestration_read else AGENT_ORCHESTRATION_SCHEMA_VERSION)
+        )
+        if not task_graph_read:
+            task_graph_read = [task_graph_write]
+        if not orchestration_read:
+            orchestration_read = [orchestration_write]
+        return {
+            "document_schema_versions": {
+                "read": document_read,
+                "write": document_write,
+                "rollback_read": self._graph_document_schema_list(
+                    list(dict(raw_document).get("rollback_read") or []) if isinstance(raw_document, dict) else [],
+                    document_read,
+                ),
+            },
+            "task_graph_schema_versions": task_graph_read,
+            "orchestration_schema_versions": orchestration_read,
+            "task_graph_consumers": {
+                "read": task_graph_read,
+                "write": task_graph_write,
+                "source_kind": "task_graph_definition",
+                "lowering_mode": "generated_compatibility_projection",
+            },
+            "orchestration_consumers": {
+                "read": orchestration_read,
+                "write": orchestration_write,
+                "source_kind": "canonical_orchestration_graph",
+                "writable_source": "canonical_orchestration_graph",
+            },
+        }
+
+    def _graph_document_evidence(self, source: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(source, dict):
+            return None
+        candidate = dict(source)
+        if (
+            str(candidate.get("schema_version") or "").strip() == GRAPH_DOCUMENT_SCHEMA_VERSION
+            and isinstance(candidate.get("canonical_graph"), dict)
+        ):
+            document = candidate
+            revision = dict(document.get("current_revision") or {})
+        else:
+            document = dict(candidate.get("graph_document") or {})
+            revision = dict(candidate.get("graph_revision") or document.get("current_revision") or {})
+        if not document:
+            return None
+        migration = dict(document.get("migration") or {})
+        compatibility = dict(document.get("compatibility_projection") or {})
+        current_canonical = dict(document.get("canonical_graph") or {})
+        source_ownership = self._graph_source_ownership(canonical_graph=current_canonical, document=document)
+        compatibility_ranges = self._normalize_graph_document_compatibility_ranges(
+            migration.get("compatibility_ranges"),
+            task_graph_schema_version=str(
+                compatibility.get("task_graph_schema_version")
+                or revision.get("task_graph_schema_version")
+                or candidate.get("schema_version")
+                or TASK_GRAPH_SCHEMA_VERSION
+            ).strip()
+            or TASK_GRAPH_SCHEMA_VERSION,
+            orchestration_schema_version=str(
+                revision.get("graph_schema_version")
+                or current_canonical.get("schema_version")
+                or AGENT_ORCHESTRATION_SCHEMA_VERSION
+            ).strip()
+            or AGENT_ORCHESTRATION_SCHEMA_VERSION,
+        )
+        return {
+            "document_schema_version": str(document.get("schema_version") or "").strip() or GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "migration_origin": str(migration.get("upgraded_from") or "").strip() or None,
+            "migration_chain_length": len(
+                [item for item in list(migration.get("chain") or []) if isinstance(item, dict)]
+            ),
+            "migration_source_kind": str(compatibility.get("migration_source_kind") or "").strip()
+            or str(dict(current_canonical.get("migration") or {}).get("source_kind") or "").strip()
+            or None,
+            "compatibility_mode": str(compatibility.get("lowering_mode") or "").strip()
+            or str(compatibility.get("source_kind") or "").strip()
+            or "generated_compatibility_projection",
+            "reviewed_for_live_execution": bool(compatibility.get("reviewed_for_live_execution")),
+            "rollback_support": str(migration.get("rollback_support") or "").strip() or None,
+            "revision_id": str(revision.get("revision_id") or "").strip() or None,
+            "revision_index": int(revision.get("revision_index") or 0),
+            "etag": str(revision.get("etag") or "").strip() or None,
+            "task_graph_schema_version": str(
+                compatibility.get("task_graph_schema_version")
+                or revision.get("task_graph_schema_version")
+                or candidate.get("schema_version")
+                or TASK_GRAPH_SCHEMA_VERSION
+            ).strip()
+            or TASK_GRAPH_SCHEMA_VERSION,
+            "orchestration_schema_version": str(
+                revision.get("graph_schema_version")
+                or current_canonical.get("schema_version")
+                or AGENT_ORCHESTRATION_SCHEMA_VERSION
+            ).strip()
+            or AGENT_ORCHESTRATION_SCHEMA_VERSION,
+            "compatibility_ranges": compatibility_ranges,
+            "source_ownership_mode": str(source_ownership.get("ownership_mode") or "").strip() or None if source_ownership else None,
+            "source_ownership_can_write_from_gui": bool(source_ownership.get("can_write_from_gui")) if source_ownership else None,
+            "source_ownership_path": str(dict(source_ownership.get("source_file") or {}).get("path") or "").strip() or None if source_ownership else None,
+            "source_ownership_detached_at": str(source_ownership.get("detached_at") or "").strip() or None if source_ownership else None,
+            "source_ownership_symbol_ref_count": len(list(source_ownership.get("symbol_refs") or [])) if source_ownership else 0,
+        }
+
+    def _graph_document_rollback_preview(
+        self,
+        *,
+        snapshot_id: str,
+        snapshot_graph: dict[str, Any],
+        current_graph: dict[str, Any],
+        comparison_mode: str,
+    ) -> dict[str, Any]:
+        return {
+            "snapshot_id": str(snapshot_id or "").strip(),
+            "comparison_mode": str(comparison_mode or "").strip() or "snapshot_to_current",
+            "restored_document": self._graph_document_evidence(snapshot_graph),
+            "current_document": self._graph_document_evidence(current_graph),
+        }
+
+    def _graph_document_from_task_graph(
+        self,
+        task_graph: dict[str, Any],
+        *,
+        canonical_graph: dict[str, Any] | None = None,
+        existing_document: dict[str, Any] | None = None,
+        upgraded_from: str | None = None,
+        preserve_existing_revision: bool = False,
+    ) -> dict[str, Any]:
+        validated_graph = validate_graph_definition(deepcopy(task_graph))
+        resolved_canonical = validate_agent_orchestration_graph(
+            deepcopy(canonical_graph)
+            if isinstance(canonical_graph, dict) and canonical_graph
+            else self._sync_orchestration_graph_with_task_graph(
+                dict(dict(existing_document or {}).get("canonical_graph") or validated_graph.get("orchestration_graph") or {}),
+                task_graph=validated_graph,
+            )
+        )
+        existing_revision = dict(dict(existing_document or {}).get("current_revision") or {})
+        existing_migration = dict(dict(existing_document or {}).get("migration") or {})
+        existing_compatibility = dict(dict(existing_document or {}).get("compatibility_projection") or {})
+        source_ownership = self._graph_source_ownership(canonical_graph=resolved_canonical, document=existing_document)
+        etag = self._graph_document_etag(resolved_canonical)
+        revision_created_at = str(validated_graph.get("updated_at") or now_iso()).strip() or now_iso()
+        task_graph_schema_version = str(validated_graph.get("schema_version") or "").strip() or TASK_GRAPH_SCHEMA_VERSION
+        orchestration_schema_version = str(resolved_canonical.get("schema_version") or "").strip() or AGENT_ORCHESTRATION_SCHEMA_VERSION
+        existing_revision_index = int(existing_revision.get("revision_index") or 0)
+        preserve_revision = (
+            preserve_existing_revision
+            and str(dict(existing_document or {}).get("schema_version") or "").strip() == GRAPH_DOCUMENT_SCHEMA_VERSION
+            and str(existing_revision.get("etag") or "").strip() == etag
+            and existing_revision_index >= int(validated_graph.get("state_version") or 0)
+        )
+        if preserve_revision:
+            revision = {
+                "revision_id": str(existing_revision.get("revision_id") or "").strip() or self._legacy_graph_revision_id(
+                    str(validated_graph.get("graph_id") or ""),
+                    etag,
+                ),
+                "revision_index": max(existing_revision_index, 1),
+                "etag": etag,
+                "created_at": str(existing_revision.get("created_at") or revision_created_at).strip() or revision_created_at,
+                "updated_at": str(existing_revision.get("updated_at") or existing_revision.get("created_at") or revision_created_at).strip() or revision_created_at,
+                "graph_schema_version": str(resolved_canonical.get("schema_version") or "").strip() or None,
+                "task_graph_schema_version": str(validated_graph.get("schema_version") or "").strip() or None,
+            }
+        else:
+            revision_index = max(
+                existing_revision_index + 1,
+                int(validated_graph.get("state_version") or 0),
+                1,
+            )
+            revision = {
+                "revision_id": new_id("graph-revision"),
+                "revision_index": revision_index,
+                "etag": etag,
+                "created_at": revision_created_at,
+                "updated_at": revision_created_at,
+                "graph_schema_version": str(resolved_canonical.get("schema_version") or "").strip() or None,
+                "task_graph_schema_version": str(validated_graph.get("schema_version") or "").strip() or None,
+            }
+        migration_chain = [
+            deepcopy(dict(item))
+            for item in list(existing_migration.get("chain") or [])
+            if isinstance(item, dict)
+        ]
+        upgrade_origin = str(
+            existing_migration.get("upgraded_from")
+            or upgraded_from
+            or GRAPH_DOCUMENT_SCHEMA_VERSION
+        ).strip() or GRAPH_DOCUMENT_SCHEMA_VERSION
+        existing_compatibility_ranges = self._normalize_graph_document_compatibility_ranges(
+            existing_migration.get("compatibility_ranges")
+        )
+        compatibility_ranges = self._normalize_graph_document_compatibility_ranges(
+            existing_migration.get("compatibility_ranges"),
+            task_graph_schema_version=task_graph_schema_version,
+            orchestration_schema_version=orchestration_schema_version,
+        )
+        preserve_migration_state = (
+            str(dict(existing_document or {}).get("schema_version") or "").strip() == GRAPH_DOCUMENT_SCHEMA_VERSION
+            and str(existing_migration.get("document_schema_version") or GRAPH_DOCUMENT_SCHEMA_VERSION).strip() == GRAPH_DOCUMENT_SCHEMA_VERSION
+            and str(existing_migration.get("upgraded_from") or upgrade_origin).strip() == upgrade_origin
+            and existing_compatibility_ranges == compatibility_ranges
+        )
+        current_step = {
+            "from": upgrade_origin,
+            "to": GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "status": "applied",
+            "applied_at": revision_created_at,
+            "preserves_extensions": True,
+            "rollback_mode": "snapshot_based",
+        }
+        route_already_recorded = any(
+            isinstance(item, dict)
+            and str(item.get("from") or "").strip() == str(current_step.get("from") or "").strip()
+            and str(item.get("to") or "").strip() == str(current_step.get("to") or "").strip()
+            and str(item.get("status") or "").strip() == str(current_step.get("status") or "").strip()
+            and str(item.get("rollback_mode") or "").strip() == str(current_step.get("rollback_mode") or "").strip()
+            and bool(item.get("preserves_extensions")) == bool(current_step.get("preserves_extensions"))
+            for item in migration_chain
+        )
+        if not route_already_recorded:
+            migration_chain.append(current_step)
+        compatibility_generated_at = (
+            str(existing_compatibility.get("generated_at") or "").strip()
+            if preserve_migration_state
+            else ""
+        ) or revision_created_at
+        canonical_migration = dict(resolved_canonical.get("migration") or {})
+        canonical_compatibility = dict(canonical_migration.get("compatibility") or {})
+        writable_source = "canonical_orchestration_graph"
+        source_kind = "canonical_orchestration_graph"
+        if source_ownership:
+            source_kind = "canonical_orchestration_graph_file"
+            writable_source = (
+                GRAPH_SOURCE_OWNERSHIP_DETACHED_WRITABLE_SOURCE
+                if str(source_ownership.get("ownership_mode") or "").strip() == GRAPH_SOURCE_OWNERSHIP_DETACHED
+                else GRAPH_SOURCE_OWNERSHIP_WRITABLE_SOURCE
+            )
+        return {
+            "schema_version": GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": str(validated_graph.get("graph_id") or "").strip(),
+            "task_id": str(validated_graph.get("task_id") or "").strip(),
+            "title": str(validated_graph.get("title") or "").strip(),
+            "template_id": str(validated_graph.get("template_id") or "").strip(),
+            "status": str(validated_graph.get("status") or "").strip(),
+            "created_at": str(dict(existing_document or {}).get("created_at") or validated_graph.get("created_at") or revision_created_at).strip() or revision_created_at,
+            "updated_at": revision_created_at,
+            "canonical_graph": deepcopy(resolved_canonical),
+            "current_revision": revision,
+            "migration": {
+                "document_schema_version": GRAPH_DOCUMENT_SCHEMA_VERSION,
+                "upgraded_from": upgrade_origin,
+                "chain": migration_chain,
+                "compatibility_ranges": compatibility_ranges,
+                "rollback_support": "graph_snapshot_refs",
+            },
+            "compatibility_projection": {
+                "source_kind": source_kind,
+                "migration_source_kind": str(canonical_migration.get("source_kind") or "").strip() or None,
+                "writable_source": writable_source,
+                "task_graph_schema_version": task_graph_schema_version,
+                "lowering_mode": "generated_compatibility_projection",
+                "preserves_unknown_fields": bool(
+                    canonical_compatibility.get("preserves_unknown_fields")
+                ),
+                "reviewed_for_live_execution": bool(canonical_compatibility.get("reviewed_for_live_execution")),
+                "generated_at": compatibility_generated_at,
+            },
+            "source_ownership": deepcopy(source_ownership) if source_ownership else None,
+        }
+
+    @staticmethod
+    def _graph_import_execution_guard(
+        orchestration_graph: dict[str, Any],
+        *,
+        require_live_contract: bool,
+    ) -> dict[str, Any]:
+        migration = dict(orchestration_graph.get("migration") or {})
+        compatibility = dict(migration.get("compatibility") or {})
+        source_kind = str(migration.get("source_kind") or "").strip() or "native_authoring"
+        reviewed_for_live_execution = bool(compatibility.get("reviewed_for_live_execution"))
+        graph_status = "pass"
+        graph_reasons: list[str] = []
+        if source_kind == "imported_file" and not reviewed_for_live_execution:
+            graph_status = "blocked" if require_live_contract else "warning"
+            graph_reasons.append(
+                "Imported compatibility graph is quarantined from live execution until migration.compatibility.reviewed_for_live_execution is set to true."
+                if require_live_contract
+                else "Imported compatibility graph should be reviewed before execution because migration.compatibility.reviewed_for_live_execution is not set."
+            )
+        node_results: dict[str, dict[str, Any]] = {}
+        for node in list(orchestration_graph.get("nodes") or []):
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get("node_id") or "").strip()
+            if not node_id:
+                continue
+            diagnostics = [
+                str(dict(item).get("message") or dict(item).get("code") or "").strip()
+                for item in list(node.get("node_type_diagnostics") or [])
+                if isinstance(item, dict)
+                and str(dict(item).get("message") or dict(item).get("code") or "").strip()
+            ]
+            if str(node.get("status") or "").strip() != "disabled" and not diagnostics:
+                continue
+            reasons = (
+                [
+                    f"Imported compatibility node `{node_id}` is disabled until its type mapping is reviewed: {message}"
+                    for message in diagnostics
+                ]
+                if diagnostics
+                else [f"Imported compatibility node `{node_id}` is disabled until its type mapping is reviewed."]
+            )
+            node_results[node_id] = {
+                "status": "blocked",
+                "reasons": reasons,
+            }
+        return {
+            "source_kind": source_kind,
+            "reviewed_for_live_execution": reviewed_for_live_execution,
+            "graph_status": graph_status,
+            "graph_reasons": graph_reasons,
+            "node_results": node_results,
+        }
+
+    def _migrate_graph_record_to_current_document(self, value: dict[str, Any], *, task_id: str) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        graph_document = dict(value.get("graph_document") or {})
+        if graph_document:
+            canonical_graph = dict(graph_document.get("canonical_graph") or value.get("orchestration_graph") or {})
+            if not canonical_graph:
+                canonical_graph = self._sync_orchestration_graph_with_task_graph({}, task_graph=value)
+            document = self._graph_document_from_task_graph(
+                value,
+                canonical_graph=canonical_graph,
+                existing_document=graph_document,
+                upgraded_from=str(
+                    dict(graph_document.get("migration") or {}).get("upgraded_from")
+                    or graph_document.get("schema_version")
+                    or GRAPH_DOCUMENT_LEGACY_SCHEMA_V2
+                ),
+                preserve_existing_revision=True,
+            )
+        else:
+            document = self._graph_document_from_task_graph(
+                value,
+                canonical_graph=dict(value.get("orchestration_graph") or {}),
+                existing_document=None,
+                upgraded_from="legacy_task_graph_definition",
+            )
+            document["current_revision"]["revision_id"] = self._legacy_graph_revision_id(
+                str(document.get("graph_id") or ""),
+                str(dict(document.get("current_revision") or {}).get("etag") or ""),
+            )
+        projected = validate_graph_definition(deepcopy(value))
+        projected["orchestration_graph"] = deepcopy(dict(document.get("canonical_graph") or {}))
+        projected["graph_document"] = deepcopy(document)
+        projected["graph_revision"] = deepcopy(dict(document.get("current_revision") or {}))
+        projected["state_version"] = max(
+            int(projected.get("state_version") or 0),
+            int(dict(document.get("current_revision") or {}).get("revision_index") or 0),
+            1,
+        )
+        if task_id and str(projected.get("task_id") or "").strip() != task_id:
+            return None
+        return projected
+
+    @staticmethod
+    def _graph_revision_payload(graph: dict[str, Any] | None) -> dict[str, Any]:
+        revision = dict(dict(graph or {}).get("graph_revision") or {})
+        if not revision and isinstance(dict(graph or {}).get("graph_document"), dict):
+            revision = dict(dict(dict(graph or {}).get("graph_document") or {}).get("current_revision") or {})
+        return {
+            "revision_id": str(revision.get("revision_id") or "").strip() or None,
+            "revision_index": int(revision.get("revision_index") or 0),
+            "etag": str(revision.get("etag") or "").strip() or None,
+        }
+
+    @staticmethod
+    def _payload_source_owner_action(payload: dict[str, Any] | None) -> str:
+        return str(dict(payload or {}).get("source_owner_action") or "").strip().lower()
+
+    def _raise_graph_source_ownership_error(
+        self,
+        *,
+        action: str,
+        current_graph: dict[str, Any],
+        source_ownership: dict[str, Any],
+    ) -> None:
+        source_path = str(dict(source_ownership.get("source_file") or {}).get("path") or "").strip()
+        raise GraphSourceOwnershipError(
+            "This graph is source-owned and cannot be overwritten from the GUI until it is detached.",
+            payload={
+                "error": "graph_source_owned",
+                "action": action,
+                "message": "This graph is source-owned and cannot be overwritten from the GUI until it is detached.",
+                "source_ownership": deepcopy(source_ownership),
+                "graph_document": self._graph_document_evidence(current_graph),
+                "graph": deepcopy(current_graph),
+                "task": self.task_view(self.current_task()),
+                "allow_detach_action": True,
+                "source_path": source_path or None,
+            },
+        )
+
+    def _require_graph_source_ownership_write_allowed(
+        self,
+        *,
+        action: str,
+        payload: dict[str, Any],
+        current_graph: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        source_ownership = self._graph_source_ownership(
+            canonical_graph=dict(dict(current_graph.get("graph_document") or {}).get("canonical_graph") or current_graph.get("orchestration_graph") or {}),
+            document=dict(current_graph.get("graph_document") or {}),
+        )
+        if not source_ownership:
+            return None
+        if str(source_ownership.get("ownership_mode") or "").strip() != GRAPH_SOURCE_OWNERSHIP_SOURCE_OWNED:
+            return source_ownership
+        if self._payload_source_owner_action(payload) == "detach":
+            return self._detach_graph_source_ownership(source_ownership)
+        self._raise_graph_source_ownership_error(
+            action=action,
+            current_graph=current_graph,
+            source_ownership=source_ownership,
+        )
+        return None
+
+    def _graph_snapshot_for_revision(
+        self,
+        *,
+        graph_id: str,
+        expected_revision: str | None,
+        expected_etag: str | None,
+    ) -> dict[str, Any] | None:
+        task = self.current_task()
+        if not task:
+            return None
+        clean_graph_id = str(graph_id or "").strip()
+        clean_expected_revision = str(expected_revision or "").strip()
+        clean_expected_etag = str(expected_etag or "").strip()
+        for item in list(task.get("graph_snapshot_refs") or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("graph_id") or "").strip() != clean_graph_id:
+                continue
+            evidence = dict(item.get("graph_document_evidence") or {})
+            revision_id = str(evidence.get("revision_id") or "").strip()
+            etag = str(evidence.get("etag") or "").strip()
+            if clean_expected_revision and revision_id == clean_expected_revision:
+                return dict(item)
+            if clean_expected_etag and etag == clean_expected_etag:
+                return dict(item)
+        return None
+
+    def _graph_from_snapshot_ref(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        task: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(snapshot, dict):
+            return None
+        effective_task = task or self.current_task()
+        if not effective_task:
+            return None
+        stored_graph = read_json(
+            self._resolve_snapshot_artifact_path(snapshot, key="task_graph_json", task=effective_task),
+            {},
+        )
+        if not isinstance(stored_graph, dict):
+            return None
+        return self._migrate_graph_record_to_current_document(
+            stored_graph,
+            task_id=str(effective_task.get("task_id") or ""),
+        )
+
+    @staticmethod
+    def _graph_conflict_orchestration_surface(graph: dict[str, Any]) -> dict[str, Any]:
+        normalized = deepcopy(dict(graph or {}))
+        normalized["nodes"] = {
+            str(item.get("node_id") or "").strip(): deepcopy(dict(item))
+            for item in list(normalized.get("nodes") or [])
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+        }
+        normalized["edges"] = {
+            str(item.get("edge_id") or "").strip(): deepcopy(dict(item))
+            for item in list(normalized.get("edges") or [])
+            if isinstance(item, dict) and str(item.get("edge_id") or "").strip()
+        }
+        return normalized
+
+    @staticmethod
+    def _graph_conflict_surface(graph: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "title": str(graph.get("title") or "").strip(),
+            "template_id": str(graph.get("template_id") or "").strip(),
+            "status": str(graph.get("status") or "").strip(),
+            "graph_policy": deepcopy(dict(graph.get("graph_policy") or {})),
+            "orchestration_graph": TaskService._graph_conflict_orchestration_surface(
+                dict(graph.get("orchestration_graph") or {})
+            ),
+            "nodes": {
+                str(item.get("node_id") or "").strip(): deepcopy(dict(item))
+                for item in list(graph.get("nodes") or [])
+                if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+            },
+            "edges": {
+                str(item.get("edge_id") or "").strip(): deepcopy(dict(item))
+                for item in list(graph.get("edges") or [])
+                if isinstance(item, dict) and str(item.get("edge_id") or "").strip()
+            },
+        }
+
+    @staticmethod
+    def _graph_conflict_ordered_union_keys(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+        keys = [str(key) for key in before.keys()]
+        keys.extend(str(key) for key in after.keys() if str(key) not in before)
+        return keys
+
+    def _graph_conflict_changes(
+        self,
+        before: Any,
+        after: Any,
+        *,
+        path: tuple[str, ...] = (),
+    ) -> dict[tuple[str, ...], dict[str, Any]]:
+        changes: dict[tuple[str, ...], dict[str, Any]] = {}
+        if isinstance(before, dict) and isinstance(after, dict):
+            for key in self._graph_conflict_ordered_union_keys(before, after):
+                in_before = key in before
+                in_after = key in after
+                next_path = (*path, key)
+                if in_before and in_after:
+                    changes.update(self._graph_conflict_changes(before[key], after[key], path=next_path))
+                elif in_before:
+                    changes[next_path] = {"before": deepcopy(before[key]), "after": _GRAPH_CONFLICT_DELETE}
+                elif in_after:
+                    changes[next_path] = {"before": _GRAPH_CONFLICT_DELETE, "after": deepcopy(after[key])}
+            return changes
+        if before != after and not self._graph_conflict_ignore_path(path):
+            changes[path] = {"before": deepcopy(before), "after": deepcopy(after)}
+        return changes
+
+    @staticmethod
+    def _graph_conflict_ignore_path(path: tuple[str, ...]) -> bool:
+        if path == ("orchestration_graph", "state_version"):
+            return True
+        if path == ("orchestration_graph", "metadata", "updated_at"):
+            return True
+        return False
+
+    @staticmethod
+    def _graph_conflict_paths_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+        shorter = left if len(left) <= len(right) else right
+        longer = right if shorter is left else left
+        return longer[: len(shorter)] == shorter
+
+    @staticmethod
+    def _graph_conflict_path_text(path: tuple[str, ...]) -> str:
+        return ".".join(path)
+
+    @staticmethod
+    def _graph_conflict_apply_change(target: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
+        cursor: dict[str, Any] = target
+        for key in path[:-1]:
+            next_value = cursor.get(key)
+            if not isinstance(next_value, dict):
+                next_value = {}
+                cursor[key] = next_value
+            cursor = next_value
+        leaf = path[-1]
+        if value is _GRAPH_CONFLICT_DELETE:
+            cursor.pop(leaf, None)
+        else:
+            cursor[leaf] = deepcopy(value)
+
+    @staticmethod
+    def _graph_conflict_value_at_path(value: Any, path: tuple[str, ...]) -> Any:
+        cursor = value
+        for key in path:
+            if not isinstance(cursor, dict) or key not in cursor:
+                return _GRAPH_CONFLICT_DELETE
+            cursor = cursor[key]
+        return deepcopy(cursor)
+
+    @staticmethod
+    def _graph_conflict_payload_value(value: Any) -> Any:
+        if value is _GRAPH_CONFLICT_DELETE:
+            return {"deleted": True}
+        return redact_sensitive(deepcopy(value))
+
+    def _materialize_graph_from_conflict_surface(
+        self,
+        *,
+        current_graph: dict[str, Any],
+        surface: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged = deepcopy(current_graph)
+        merged["title"] = str(surface.get("title") or "").strip()
+        merged["template_id"] = str(surface.get("template_id") or "").strip()
+        merged["status"] = str(surface.get("status") or "").strip()
+        merged["graph_policy"] = deepcopy(dict(surface.get("graph_policy") or {}))
+        orchestration_graph = deepcopy(dict(surface.get("orchestration_graph") or {}))
+        orchestration_graph["nodes"] = [
+            deepcopy(node)
+            for node in dict(orchestration_graph.get("nodes") or {}).values()
+            if isinstance(node, dict) and str(node.get("node_id") or "").strip()
+        ]
+        orchestration_graph["edges"] = [
+            deepcopy(edge)
+            for edge in dict(orchestration_graph.get("edges") or {}).values()
+            if isinstance(edge, dict) and str(edge.get("edge_id") or "").strip()
+        ]
+        merged["orchestration_graph"] = orchestration_graph
+        merged["nodes"] = [
+            deepcopy(node)
+            for node in dict(surface.get("nodes") or {}).values()
+            if isinstance(node, dict) and str(node.get("node_id") or "").strip()
+        ]
+        merged["edges"] = [
+            deepcopy(edge)
+            for edge in dict(surface.get("edges") or {}).values()
+            if isinstance(edge, dict) and str(edge.get("edge_id") or "").strip()
+        ]
+        return validate_graph_definition(merged)
+
+    def _merge_non_conflicting_graph_changes(
+        self,
+        *,
+        base_graph: dict[str, Any],
+        current_graph: dict[str, Any],
+        incoming_graph: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        base_surface = self._graph_conflict_surface(base_graph)
+        current_surface = self._graph_conflict_surface(current_graph)
+        incoming_surface = self._graph_conflict_surface(incoming_graph)
+        current_changes = self._graph_conflict_changes(base_surface, current_surface)
+        incoming_changes = self._graph_conflict_changes(base_surface, incoming_surface)
+        merged_surface = deepcopy(current_surface)
+        overlapping: list[dict[str, Any]] = []
+        for incoming_path, incoming_change in incoming_changes.items():
+            current_overlaps = [
+                (current_path, current_change)
+                for current_path, current_change in current_changes.items()
+                if self._graph_conflict_paths_overlap(current_path, incoming_path)
+            ]
+            conflicting_overlaps = [
+                (current_path, current_change)
+                for current_path, current_change in current_overlaps
+                if not (
+                    current_path == incoming_path
+                    and current_change.get("after") == incoming_change.get("after")
+                )
+            ]
+            if conflicting_overlaps:
+                overlapping.append(
+                    {
+                        "path": self._graph_conflict_path_text(incoming_path),
+                        "base": self._graph_conflict_payload_value(
+                            self._graph_conflict_value_at_path(base_surface, incoming_path)
+                        ),
+                        "current": self._graph_conflict_payload_value(
+                            self._graph_conflict_value_at_path(current_surface, incoming_path)
+                        ),
+                        "incoming": self._graph_conflict_payload_value(
+                            self._graph_conflict_value_at_path(incoming_surface, incoming_path)
+                        ),
+                        "current_paths": [
+                            self._graph_conflict_path_text(current_path)
+                            for current_path, _current_change in conflicting_overlaps
+                        ],
+                    }
+                )
+                continue
+            self._graph_conflict_apply_change(merged_surface, incoming_path, incoming_change.get("after"))
+        report = {
+            "status": "merged" if not overlapping else "overlap_rejected",
+            "current_changed_paths": [
+                self._graph_conflict_path_text(path)
+                for path in list(current_changes.keys())[:80]
+            ],
+            "incoming_changed_paths": [
+                self._graph_conflict_path_text(path)
+                for path in list(incoming_changes.keys())[:80]
+            ],
+            "overlapping_edits": overlapping[:40],
+        }
+        if overlapping:
+            return None, report
+        return self._materialize_graph_from_conflict_surface(current_graph=current_graph, surface=merged_surface), report
+
+    def _attempt_non_conflicting_graph_merge(
+        self,
+        *,
+        action: str,
+        current_graph: dict[str, Any],
+        incoming_graph: dict[str, Any],
+        expected_revision: str | None,
+        expected_etag: str | None,
+    ) -> dict[str, Any]:
+        task = self.current_task()
+        if not task:
+            raise ValueError("No current task.")
+        graph_id = str(current_graph.get("graph_id") or "").strip()
+        base_snapshot = self._graph_snapshot_for_revision(
+            graph_id=graph_id,
+            expected_revision=expected_revision,
+            expected_etag=expected_etag,
+        )
+        if not isinstance(base_snapshot, dict):
+            raise self._graph_revision_conflict(
+                action=action,
+                graph=current_graph,
+                expected_revision=expected_revision,
+                expected_etag=expected_etag,
+                incoming_graph=incoming_graph,
+                merge_status="base_revision_unavailable",
+            )
+        base_graph = self._graph_from_snapshot_ref(base_snapshot, task=task)
+        if not isinstance(base_graph, dict):
+            raise self._graph_revision_conflict(
+                action=action,
+                graph=current_graph,
+                expected_revision=expected_revision,
+                expected_etag=expected_etag,
+                incoming_graph=incoming_graph,
+                base_snapshot_id=str(base_snapshot.get("snapshot_id") or "").strip() or None,
+                merge_status="base_revision_unavailable",
+            )
+        merged_graph, merge_report = self._merge_non_conflicting_graph_changes(
+            base_graph=base_graph,
+            current_graph=current_graph,
+            incoming_graph=incoming_graph,
+        )
+        if not isinstance(merged_graph, dict):
+            raise self._graph_revision_conflict(
+                action=action,
+                graph=current_graph,
+                expected_revision=expected_revision,
+                expected_etag=expected_etag,
+                base_graph=base_graph,
+                incoming_graph=incoming_graph,
+                base_snapshot_id=str(base_snapshot.get("snapshot_id") or "").strip() or None,
+                merge_status="overlap_rejected",
+                merge_report=merge_report,
+            )
+        return merged_graph
+
+    def _graph_revision_conflict(
+        self,
+        *,
+        action: str,
+        graph: dict[str, Any],
+        expected_revision: str | None,
+        expected_etag: str | None,
+        base_graph: dict[str, Any] | None = None,
+        incoming_graph: dict[str, Any] | None = None,
+        base_snapshot_id: str | None = None,
+        merge_status: str | None = None,
+        merge_report: dict[str, Any] | None = None,
+    ) -> GraphRevisionConflictError:
+        current_revision = self._graph_revision_payload(graph)
+        payload = {
+            "error": "graph_revision_conflict",
+            "action": action,
+            "graph_id": str(graph.get("graph_id") or "").strip(),
+            "current_revision": current_revision,
+            "expected_revision": str(expected_revision or "").strip() or None,
+            "expected_etag": str(expected_etag or "").strip() or None,
+        }
+        if merge_status:
+            payload["merge_status"] = str(merge_status or "").strip() or None
+        if base_snapshot_id:
+            payload["base_snapshot_id"] = str(base_snapshot_id or "").strip() or None
+        if isinstance(base_graph, dict) or isinstance(incoming_graph, dict) or isinstance(merge_report, dict):
+            payload["edits"] = {
+                "base": {
+                    "snapshot_id": str(base_snapshot_id or "").strip() or None,
+                    "revision": self._graph_revision_payload(base_graph),
+                    "graph_document": self._graph_document_evidence(base_graph),
+                },
+                "current": {
+                    "revision": current_revision,
+                    "graph_document": self._graph_document_evidence(graph),
+                    "changed_paths": list(dict(merge_report or {}).get("current_changed_paths") or []),
+                },
+                "incoming": {
+                    "revision": self._graph_revision_payload(incoming_graph),
+                    "graph_document": self._graph_document_evidence(incoming_graph),
+                    "changed_paths": list(dict(merge_report or {}).get("incoming_changed_paths") or []),
+                },
+            }
+        if isinstance(merge_report, dict):
+            payload["overlapping_edits"] = [
+                deepcopy(dict(item))
+                for item in list(merge_report.get("overlapping_edits") or [])
+                if isinstance(item, dict)
+            ][:40]
+        return GraphRevisionConflictError(
+            f"{action} revision conflict for graph {str(graph.get('graph_id') or '')}.",
+            payload=payload,
+        )
+
+    def _require_graph_revision_match(
+        self,
+        *,
+        action: str,
+        current_graph: dict[str, Any],
+        expected_revision: str | None,
+        expected_etag: str | None,
+        require_token: bool = True,
+    ) -> None:
+        current_revision = self._graph_revision_payload(current_graph)
+        clean_expected_revision = str(expected_revision or "").strip()
+        clean_expected_etag = str(expected_etag or "").strip()
+        if require_token and not clean_expected_revision and not clean_expected_etag:
+            raise ValueError(f"{action} requires expected_revision or expected_etag.")
+        if clean_expected_revision and clean_expected_revision != str(current_revision.get("revision_id") or "").strip():
+            raise self._graph_revision_conflict(
+                action=action,
+                graph=current_graph,
+                expected_revision=clean_expected_revision,
+                expected_etag=clean_expected_etag or None,
+            )
+        if clean_expected_etag and clean_expected_etag != str(current_revision.get("etag") or "").strip():
+            raise self._graph_revision_conflict(
+                action=action,
+                graph=current_graph,
+                expected_revision=clean_expected_revision or None,
+                expected_etag=clean_expected_etag,
+            )
+
+    @staticmethod
+    def _payload_expected_graph_revision(
+        payload: dict[str, Any] | None = None,
+        *,
+        graph: dict[str, Any] | None = None,
+    ) -> tuple[str | None, str | None]:
+        body = dict(payload or {})
+        if isinstance(graph, dict):
+            revision = dict(graph.get("graph_revision") or {})
+            if not revision and isinstance(graph.get("graph_document"), dict):
+                revision = dict(dict(graph.get("graph_document") or {}).get("current_revision") or {})
+            expected_revision = str(
+                body.get("expected_revision")
+                or revision.get("revision_id")
+                or ""
+            ).strip() or None
+            expected_etag = str(
+                body.get("expected_etag")
+                or revision.get("etag")
+                or ""
+            ).strip() or None
+            return expected_revision, expected_etag
+        expected_revision = str(body.get("expected_revision") or "").strip() or None
+        expected_etag = str(body.get("expected_etag") or "").strip() or None
+        return expected_revision, expected_etag
+
     def graph_definition(self, graph_id: str | None = None) -> dict[str, Any] | None:
         task = self.current_task()
         if not task:
             return None
-        graph_definitions = [dict(item) for item in list(task.get("graph_definitions") or []) if isinstance(item, dict)]
+        graph_definitions = self._prune_graph_definitions(
+            list(task.get("graph_definitions") or []),
+            task_id=str(task.get("task_id") or ""),
+        )
         if graph_id:
             for item in graph_definitions:
                 if str(item.get("graph_id") or "").strip() == str(graph_id or "").strip():
@@ -1040,6 +2266,7 @@ class TaskService:
             "updated_at": str(snapshot.get("updated_at") or "").strip(),
             "artifact_paths": redact_sensitive(dict(snapshot.get("artifact_paths") or {})),
             "summary": redact_sensitive(dict(snapshot.get("summary") or {})),
+            "graph_document_evidence": redact_sensitive(dict(snapshot.get("graph_document_evidence") or {})),
         }
         comparison = snapshot.get("comparison")
         if isinstance(comparison, dict):
@@ -1088,6 +2315,7 @@ class TaskService:
                 "updated_at": str(item.get("updated_at") or "").strip(),
                 "artifact_paths": normalized_artifact_paths,
                 "summary": dict(item.get("summary") or {}),
+                "graph_document_evidence": dict(item.get("graph_document_evidence") or {}),
             }
             comparison = item.get("comparison")
             if isinstance(comparison, dict):
@@ -1192,6 +2420,7 @@ class TaskService:
             "warnings": [str(item) for item in list(migration.get("warnings") or []) if str(item).strip()],
             "node_count": len(list(task_graph.get("nodes") or [])),
             "edge_count": len(list(task_graph.get("edges") or [])),
+            "graph_document_evidence": self._graph_document_evidence(task_graph),
         }
 
     def _record_graph_snapshot(
@@ -1210,6 +2439,14 @@ class TaskService:
             raise ValueError("No current task.")
         validated_graph = validate_graph_definition(deepcopy(graph_definition))
         orchestration_graph = self._orchestration_graph_for_task_graph(validated_graph)
+        if not isinstance(validated_graph.get("graph_document"), dict):
+            validated_graph["graph_document"] = self._graph_document_from_task_graph(
+                validated_graph,
+                canonical_graph=orchestration_graph,
+            )
+        validated_graph["graph_revision"] = deepcopy(
+            dict(dict(validated_graph.get("graph_document") or {}).get("current_revision") or {})
+        )
         payload_text = serialize_agent_orchestration_graph(orchestration_graph)
         if SECRET_RE.search(payload_text) or DESKTOP_KEY_PATH_RE.search(payload_text):
             raise SecurityError("Secret-like content detected in orchestration graph snapshot payload.")
@@ -1225,18 +2462,22 @@ class TaskService:
         )
         task_graph_path = snapshot_root / "tg.json"
         orchestration_graph_path = snapshot_root / "og.json"
+        graph_document_path = snapshot_root / "gd.json"
         migration_report_path = snapshot_root / "mr.json"
         manifest_path = snapshot_root / "manifest.json"
         write_json(task_graph_path, validated_graph)
         write_json(orchestration_graph_path, orchestration_graph)
+        write_json(graph_document_path, dict(validated_graph.get("graph_document") or {}))
         write_json(migration_report_path, self._snapshot_migration_report(task_graph=validated_graph, orchestration_graph=orchestration_graph))
         artifact_paths: dict[str, str | None] = {
             "snapshot_dir": snapshot_root.relative_to(self._projects.require_workspace_root()).as_posix(),
             "task_graph_json": task_graph_path.relative_to(self._projects.require_workspace_root()).as_posix(),
             "orchestration_graph_json": orchestration_graph_path.relative_to(self._projects.require_workspace_root()).as_posix(),
+            "graph_document_json": graph_document_path.relative_to(self._projects.require_workspace_root()).as_posix(),
             "migration_report_json": migration_report_path.relative_to(self._projects.require_workspace_root()).as_posix(),
             "manifest_json": manifest_path.relative_to(self._projects.require_workspace_root()).as_posix(),
         }
+        graph_document_evidence = self._graph_document_evidence(validated_graph)
         comparison_summary: dict[str, Any] | None = None
         if isinstance(comparison_report, dict):
             diff_json_path = snapshot_root / "diff.json"
@@ -1271,6 +2512,7 @@ class TaskService:
                 "change_count": int((comparison_summary or {}).get("change_count") or 0),
                 "change_types": list((comparison_summary or {}).get("change_types") or []),
             },
+            "graph_document_evidence": graph_document_evidence,
         }
         if comparison_summary:
             snapshot["comparison"] = comparison_summary
@@ -1319,6 +2561,14 @@ class TaskService:
             key="orchestration_graph_json",
             task=task,
         )
+        snapshot_task_graph = read_json(
+            self._resolve_snapshot_artifact_path(
+                snapshot,
+                key="task_graph_json",
+                task=task,
+            ),
+            {},
+        )
         old_graph = read_json(snapshot_graph_path, {})
         if not isinstance(old_graph, dict):
             raise ValueError("Snapshot orchestration graph is missing.")
@@ -1333,13 +2583,24 @@ class TaskService:
                 task=task,
             )
             new_graph = read_json(comparison_graph_path, {})
+            comparison_task_graph = read_json(
+                self._resolve_snapshot_artifact_path(
+                    comparison_target_snapshot,
+                    key="task_graph_json",
+                    task=task,
+                ),
+                {},
+            )
             compared_label = str(comparison_target_snapshot.get("label") or comparison_target_snapshot.get("snapshot_id") or "").strip() or None
+            comparison_mode = "snapshot_to_snapshot"
         else:
             current_graph = self.graph_definition(str(snapshot.get("graph_id") or ""))
             if not current_graph:
                 raise ValueError("Current graph not found for snapshot diff.")
             new_graph = self._orchestration_graph_for_task_graph(current_graph)
+            comparison_task_graph = current_graph
             compared_label = "current graph"
+            comparison_mode = "snapshot_to_current"
         if not isinstance(new_graph, dict):
             raise ValueError("Comparison graph is missing.")
         report = diff_agent_orchestration_graphs(old_graph, new_graph)
@@ -1351,6 +2612,12 @@ class TaskService:
             "compared_label": compared_label,
             "diff_report": report,
             "diff_markdown": markdown,
+            "rollback_preview": self._graph_document_rollback_preview(
+                snapshot_id=snapshot_id,
+                snapshot_graph=snapshot_task_graph if isinstance(snapshot_task_graph, dict) else {},
+                current_graph=comparison_task_graph if isinstance(comparison_task_graph, dict) else {},
+                comparison_mode=comparison_mode,
+            ),
             "task": self.task_view(task, compact_graph_runs=True),
         }
 
@@ -1377,6 +2644,28 @@ class TaskService:
         current_graph = self.graph_definition(str(snapshot.get("graph_id") or ""))
         if not current_graph:
             raise ValueError("Current graph not found for rollback.")
+        ownership_override = self._require_graph_source_ownership_write_allowed(
+            action="rollback_graph_to_snapshot",
+            payload=payload,
+            current_graph=current_graph,
+        )
+        expected_revision, expected_etag = self._payload_expected_graph_revision(payload)
+        try:
+            self._require_graph_revision_match(
+                action="rollback_graph_to_snapshot",
+                current_graph=current_graph,
+                expected_revision=expected_revision,
+                expected_etag=expected_etag,
+                require_token=True,
+            )
+        except GraphRevisionConflictError:
+            stored_graph = self._attempt_non_conflicting_graph_merge(
+                action="rollback_graph_to_snapshot",
+                current_graph=current_graph,
+                incoming_graph=validate_graph_definition(deepcopy(stored_graph)),
+                expected_revision=expected_revision,
+                expected_etag=expected_etag,
+            )
         current_orchestration = self._orchestration_graph_for_task_graph(current_graph)
         snapshot_orchestration = read_json(
             self._resolve_snapshot_artifact_path(
@@ -1391,6 +2680,12 @@ class TaskService:
             if isinstance(snapshot_orchestration, dict)
             else None
         )
+        rollback_preview = self._graph_document_rollback_preview(
+            snapshot_id=snapshot_id,
+            snapshot_graph=stored_graph,
+            current_graph=current_graph,
+            comparison_mode="snapshot_to_current",
+        )
         restored_graph = validate_graph_definition(deepcopy(stored_graph))
         restored_graph["updated_at"] = now_iso()
         restored_graph["state_version"] = max(int(restored_graph.get("state_version") or 0), int(current_graph.get("state_version") or 0) + 1)
@@ -1398,6 +2693,11 @@ class TaskService:
             dict(snapshot_orchestration) if isinstance(snapshot_orchestration, dict) else self._orchestration_graph_for_task_graph(restored_graph),
             task_graph=restored_graph,
         )
+        if ownership_override:
+            restored_graph["orchestration_graph"] = self._apply_graph_source_ownership(
+                dict(restored_graph.get("orchestration_graph") or {}),
+                ownership_override,
+            )
         saved = self.upsert_graph_definition(restored_graph)
         rollback_snapshot = self._record_graph_snapshot(
             saved,
@@ -1413,6 +2713,7 @@ class TaskService:
             "graph": saved,
             "snapshot": rollback_snapshot,
             "rolled_back_to_snapshot": snapshot,
+            "rollback_preview": rollback_preview,
             "task": self.task_view(self.current_task()),
         }
 
@@ -1439,152 +2740,13 @@ class TaskService:
         return compact_ref
 
     def _refresh_graph_run_export_report(self, run_ref: dict[str, Any]) -> dict[str, Any]:
-        clean_run = dict(run_ref or {})
-        report_rel = self._graph_run_export_report_path(clean_run)
-        if not report_rel:
-            return clean_run
-        workspace_root = self._projects.require_workspace_root()
-        report_path = Path(workspace_root) / report_rel
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        export_payload = {
-            "schema_version": "astrabridge-task-graph-run-export-v1",
-            "generated_at": now_iso(),
-            "run": {
-                "run_id": str(clean_run.get("run_id") or ""),
-                "graph_id": str(clean_run.get("graph_id") or ""),
-                "task_id": str(clean_run.get("task_id") or ""),
-                "status": str(clean_run.get("status") or ""),
-                "created_at": str(clean_run.get("created_at") or ""),
-                "updated_at": str(clean_run.get("updated_at") or ""),
-                "latest_event_type": clean_run.get("latest_event_type"),
-                "latest_event_at": clean_run.get("latest_event_at"),
-            },
-            "metrics": redact_sensitive(dict(clean_run.get("metrics") or {})),
-            "budget": redact_sensitive(dict(clean_run.get("budget") or {})),
-            "approval": redact_sensitive(dict(clean_run.get("approval_details") or {})),
-            "timeline_events": [dict(item) for item in list(clean_run.get("timeline_events") or []) if isinstance(item, dict)],
-            "artifact_refs": [
-                {
-                    "artifact_id": str(item.get("artifact_id") or "").strip(),
-                    "artifact_kind": str(item.get("artifact_kind") or "").strip(),
-                    "path": str(item.get("path") or "").strip(),
-                    "status": str(item.get("status") or "").strip() or "ready",
-                    "label": str(item.get("label") or "").strip() or None,
-                }
-                for item in list(clean_run.get("artifact_refs") or [])
-                if isinstance(item, dict) and str(item.get("path") or "").strip()
-            ],
-            "diagnostic_refs": [
-                {
-                    "artifact_id": str(item.get("artifact_id") or "").strip(),
-                    "artifact_kind": str(item.get("artifact_kind") or "").strip(),
-                    "path": str(item.get("path") or "").strip(),
-                    "status": str(item.get("status") or "").strip() or "ready",
-                    "label": str(item.get("label") or "").strip() or None,
-                }
-                for item in list(clean_run.get("diagnostic_refs") or [])
-                if isinstance(item, dict) and str(item.get("path") or "").strip()
-            ],
-        }
-        write_json(report_path, export_payload)
-        export_ref = {
-            "artifact_id": f"{str(clean_run.get('run_id') or '').strip()}-run-export-json",
-            "artifact_kind": "run_summary",
-            "path": report_rel.as_posix(),
-            "status": "ready",
-            "label": "Run export",
-        }
-        clean_run["artifact_refs"] = self._merge_graph_run_export_ref(clean_run.get("artifact_refs"), export_ref)
-        clean_run["diagnostic_refs"] = self._merge_graph_run_diagnostic_refs(
-            [
-                *[dict(item) for item in list(clean_run.get("diagnostic_refs") or []) if isinstance(item, dict)],
-                export_ref,
-            ]
-        )
-        return clean_run
+        return self._graph_run_refs.refresh_graph_run_export_report(run_ref)
 
     def _graph_run_export_report_path(self, run_ref: dict[str, Any]) -> Path | None:
-        candidate_paths: list[str] = []
-        for collection_name in ("artifact_refs", "diagnostic_refs"):
-            for item in list(run_ref.get(collection_name) or []):
-                if isinstance(item, dict):
-                    path_text = str(item.get("path") or "").strip()
-                    if path_text:
-                        candidate_paths.append(path_text)
-        for path_text in candidate_paths:
-            relative = Path(path_text.replace("\\", "/"))
-            if relative.name:
-                return relative.parent / "run-export.json"
-        return None
+        return self._graph_run_refs._graph_run_export_report_path(run_ref)
 
     def _refresh_compact_graph_run_observability(self, run_ref: dict[str, Any]) -> dict[str, Any]:
-        clean_run = dict(run_ref or {})
-        worker_bindings = [dict(item) for item in list(clean_run.get("worker_bindings") or []) if isinstance(item, dict)]
-        usage_signals: list[dict[str, Any]] = []
-        provider_call_count = 0
-        tool_call_count = 0
-        retry_count = 0
-        elapsed_values: list[int] = []
-        for binding in worker_bindings:
-            if isinstance(binding.get("usage_signal"), dict):
-                usage_signals.append(dict(binding.get("usage_signal") or {}))
-            provider_value = _optional_int(binding.get("provider_call_count"))
-            if provider_value is not None:
-                provider_call_count += max(0, provider_value)
-            tool_value = _optional_int(binding.get("tool_call_count"))
-            if tool_value is not None:
-                tool_call_count += max(0, tool_value)
-            retry_value = _optional_int(binding.get("retry_count"))
-            if retry_value is None:
-                attempt_value = _optional_int(binding.get("attempt_count"))
-                retry_value = max(0, attempt_value - 1) if attempt_value is not None else None
-            if retry_value is not None:
-                retry_count += max(0, retry_value)
-            elapsed_value = _optional_int(binding.get("elapsed_ms"))
-            if elapsed_value is not None:
-                elapsed_values.append(max(0, elapsed_value))
-        existing_metrics = dict(clean_run.get("metrics") or {})
-        if not provider_call_count:
-            existing_provider_calls = _optional_int(existing_metrics.get("provider_call_count"))
-            if existing_provider_calls is not None:
-                provider_call_count = max(0, existing_provider_calls)
-        if not tool_call_count:
-            existing_tool_calls = _optional_int(existing_metrics.get("tool_call_count"))
-            if existing_tool_calls is not None:
-                tool_call_count = max(0, existing_tool_calls)
-        if not retry_count:
-            existing_retries = _optional_int(existing_metrics.get("retry_count"))
-            if existing_retries is not None:
-                retry_count = max(0, existing_retries)
-        if not elapsed_values:
-            existing_elapsed = _optional_int(existing_metrics.get("elapsed_ms"))
-            if existing_elapsed is not None:
-                elapsed_values.append(max(0, existing_elapsed))
-        pseudo_run = {
-            "run_policy_snapshot": dict(clean_run.get("policy_snapshot") or {}),
-        }
-        metrics = self._compact_graph_run_metrics(
-            run=pseudo_run,
-            node_status_counts={
-                str(key): int(value or 0)
-                for key, value in dict(clean_run.get("node_status_counts") or {}).items()
-                if str(key).strip()
-            },
-            elapsed_values=elapsed_values,
-            retry_count=retry_count,
-            provider_call_count=provider_call_count,
-            tool_call_count=tool_call_count,
-            usage_signals=usage_signals,
-            artifact_count=int(clean_run.get("artifact_count") or 0),
-            event_count=int(clean_run.get("event_count") or 0),
-            approval_status=str(clean_run.get("approval_state") or "").strip(),
-        )
-        clean_run["metrics"] = metrics
-        clean_run["budget"] = self._compact_graph_run_budget(
-            run=pseudo_run,
-            graph_metrics=metrics,
-        )
-        return clean_run
+        return self._graph_run_refs.refresh_compact_graph_run_observability(run_ref)
 
     def _merge_graph_run_export_ref(self, current: Any, export_ref: dict[str, Any]) -> list[dict[str, Any]]:
         refs = [dict(item) for item in list(current or []) if isinstance(item, dict)]
@@ -1598,40 +2760,10 @@ class TaskService:
         return filtered[:24]
 
     def graph_run_ref(self, run_id: str | None = None) -> dict[str, Any] | None:
-        task = self.current_task()
-        if not task:
-            return None
-        graph_run_refs = [dict(item) for item in list(task.get("graph_run_refs") or []) if isinstance(item, dict)]
-        if run_id:
-            for item in graph_run_refs:
-                if str(item.get("run_id") or "").strip() == str(run_id or "").strip():
-                    return item
-            return None
-        return graph_run_refs[0] if graph_run_refs else None
+        return self._graph_run_refs.graph_run_ref(run_id)
 
     def persist_graph_run_ref(self, run_ref: dict[str, Any]) -> dict[str, Any]:
-        task = self.current_task()
-        if not task:
-            raise ValueError("No current task.")
-        if not isinstance(run_ref, dict):
-            raise TypeError("Graph run ref must be a dict.")
-        run_id = str(run_ref.get("run_id") or "").strip()
-        if not run_id:
-            raise ValueError("run_id is required.")
-        graph_run_refs = [dict(item) for item in list(task.get("graph_run_refs") or []) if isinstance(item, dict)]
-        if not any(str(item.get("run_id") or "").strip() == run_id for item in graph_run_refs):
-            raise ValueError("Unknown run_id for graph run ref persistence.")
-        refreshed = self._refresh_compact_graph_run_observability(dict(run_ref))
-        refreshed = self._refresh_graph_run_export_report(refreshed)
-        task["graph_run_refs"] = [
-            refreshed if str(item.get("run_id") or "").strip() == run_id else item
-            for item in graph_run_refs
-        ]
-        task["graph_activity_summary"] = self._graph_activity_summary(task)
-        task["updated_at"] = now_iso()
-        self._save_task(task)
-        self.durable_run_store().sync_compact_run_ref(refreshed)
-        return {"run_ref": refreshed, "task": self.task_view(task, compact_graph_runs=True)}
+        return self._graph_run_refs.persist_graph_run_ref(run_ref)
 
     def record_graph_worker(
         self,
@@ -1809,9 +2941,28 @@ class TaskService:
         summary_md_path = artifact_root / "summary.md"
         output_envelope_json_path = artifact_root / "output-envelope.json"
         handoff_json_path = artifact_root / "handoff.json"
+        selected_edge_ids = {
+            str(item).strip()
+            for item in list(payload.get("selected_edge_ids") or [])
+            if str(item or "").strip()
+        }
+        extra_generated_artifact_refs = [
+            deepcopy(dict(item))
+            for item in list(payload.get("generated_artifact_refs") or [])
+            if isinstance(item, dict)
+            and str(item.get("artifact_id") or "").strip()
+            and str(item.get("artifact_kind") or "").strip()
+            and str(item.get("path") or "").strip()
+        ]
 
         human_summary = _compact_text(redact_sensitive(payload.get("human_summary") or ""), limit=1200)
         machine_result = _sanitize_graph_machine_result(redact_sensitive(payload.get("machine_result") or {}))
+        typed_output_values = {}
+        for port_id, value in dict(payload.get("typed_output_values") or {}).items():
+            clean_port_id = str(port_id or "").strip()
+            if not clean_port_id:
+                continue
+            typed_output_values[clean_port_id] = redact_sensitive(deepcopy(value))
         confidence = payload.get("confidence")
         next_action_hints = [
             _compact_text(redact_sensitive(item), limit=240)
@@ -1886,7 +3037,11 @@ class TaskService:
             "worker_thread_id": worker_thread_id,
             "human_summary": human_summary,
             "machine_result": machine_result,
-            "artifact_refs": list(binding.get("artifact_refs") or []),
+            "typed_output_values": deepcopy(typed_output_values),
+            "artifact_refs": self._merge_graph_worker_artifact_refs(
+                list(binding.get("artifact_refs") or []),
+                extra_generated_artifact_refs,
+            ),
             "provenance": provenance,
             "confidence": confidence,
             "next_action_hints": next_action_hints,
@@ -1920,6 +3075,7 @@ class TaskService:
                 "path": summary_md_path.relative_to(workspace_root).as_posix(),
                 "status": "ready",
             },
+            *extra_generated_artifact_refs,
         ]
         output_envelope = self._build_graph_worker_output_envelope(
             graph=graph,
@@ -1949,6 +3105,7 @@ class TaskService:
                     "output_envelope_json": output_envelope_json_path.relative_to(workspace_root).as_posix(),
                 },
                 generated_artifact_refs=generated_output_artifact_refs,
+                selected_edge_ids=selected_edge_ids or None,
             )
         write_json(
             handoff_json_path,
@@ -2051,6 +3208,11 @@ class TaskService:
         for template_id in GRAPH_TEMPLATE_IDS:
             graph = validate_graph_definition(load_task_graph_fixture(template_id))
             metadata = dict(GRAPH_TEMPLATE_PRODUCT_METADATA.get(template_id) or {})
+            recommended_provider_ids, recommended_model_ids = self._resolve_template_recommended_routes(
+                template_id,
+                metadata,
+                configured_models=configured_models,
+            )
             templates.append(
                 {
                     "template_id": template_id,
@@ -2087,11 +3249,8 @@ class TaskService:
                             if isinstance(item, dict)
                         ],
                     },
-                    "recommended_provider_ids": list(metadata.get("recommended_provider_ids") or []),
-                    "recommended_model_ids": self._resolve_template_recommended_model_ids(
-                        metadata,
-                        configured_models=configured_models,
-                    ),
+                    "recommended_provider_ids": recommended_provider_ids,
+                    "recommended_model_ids": recommended_model_ids,
                     "artifact_expectations": list(metadata.get("artifact_expectations") or []),
                     "validation_hints": list(metadata.get("validation_hints") or []),
                     "constraints": list(metadata.get("constraints") or []),
@@ -2108,7 +3267,43 @@ class TaskService:
         *,
         configured_models: list[dict[str, Any]] | None = None,
     ) -> list[str]:
+        return TaskService._resolve_template_recommended_routes(
+            "",
+            metadata,
+            configured_models=configured_models,
+        )[1]
+
+    @staticmethod
+    def _safe_provider_model_records(
+        provider_id: str,
+        configured_models: list[dict[str, Any]] | None = None,
+        *,
+        require_image_input_verified: bool = False,
+    ) -> list[dict[str, Any]]:
+        records = provider_model_records(
+            provider_id,
+            configured_models,
+            include_disabled=False,
+            include_deprecated=False,
+        )
+        return [
+            dict(item)
+            for item in records
+            if assess_default_route_verification(
+                item,
+                require_image_input_verified=require_image_input_verified,
+            ).get("verified", False)
+        ]
+
+    @staticmethod
+    def _resolve_template_recommended_routes(
+        template_id: str,
+        metadata: dict[str, Any],
+        *,
+        configured_models: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[str], list[str]]:
         """Keep template guidance aligned with the effective model catalog."""
+        require_image_input_verified = str(template_id or "").strip() == "multimodal_capability_adapter"
         providers = [
             str(item or "").strip()
             for item in list(metadata.get("recommended_provider_ids") or [])
@@ -2119,17 +3314,14 @@ class TaskService:
             for item in list(metadata.get("recommended_model_ids") or [])
             if str(item or "").strip()
         ]
-        if configured_models is None:
-            return model_ids
-
-        resolved: list[str] = []
+        resolved_providers: list[str] = []
+        resolved_models: list[str] = []
         for index, provider_id in enumerate(providers):
             candidate = model_ids[index] if index < len(model_ids) else ""
-            available = provider_model_records(
+            available = TaskService._safe_provider_model_records(
                 provider_id,
                 configured_models,
-                include_disabled=False,
-                include_deprecated=False,
+                require_image_input_verified=require_image_input_verified,
             )
             available_native = {
                 str(item.get("native_model") or "").strip()
@@ -2141,10 +3333,11 @@ class TaskService:
             elif available:
                 selected = str(available[0].get("native_model") or "").strip()
             else:
-                selected = candidate
-            if selected and selected not in resolved:
-                resolved.append(selected)
-        return resolved
+                selected = ""
+            if provider_id and selected and selected not in resolved_models:
+                resolved_providers.append(provider_id)
+                resolved_models.append(selected)
+        return resolved_providers, resolved_models
 
     def instantiate_graph_template(
         self,
@@ -2207,91 +3400,7 @@ class TaskService:
         return {"graph": validated, "task": self.task_view(self.current_task())}
 
     def export_graph_for_orchestration_file(self, payload: dict[str, Any]) -> dict[str, Any]:
-        task = self.current_task()
-        if not task:
-            raise ValueError("No current task.")
-        if not isinstance(payload, dict):
-            raise TypeError("Graph export payload must be a dict.")
-        graph_id = str(payload.get("graph_id") or "").strip()
-        if not graph_id:
-            raise ValueError("graph_id is required.")
-        graph = self.graph_definition(graph_id)
-        if not graph:
-            raise ValueError("Graph not found.")
-        validated_graph = validate_graph_definition(graph)
-        orchestration_graph = self._orchestration_graph_for_task_graph(validated_graph)
-        requested_format = str(payload.get("format") or "").strip()
-        source_format = self._graph_interop_source_format(validated_graph)
-        export_format = requested_format or source_format
-        if export_format not in {
-            AGENT_ORCHESTRATION_GRAPH_SOURCE_FORMAT,
-            COMFYUI_WORKFLOW_SOURCE_FORMAT,
-            LANGGRAPH_STATEGRAPH_SOURCE_FORMAT,
-        }:
-            raise ValueError(
-                "Unsupported graph export format. Expected one of: "
-                f"{AGENT_ORCHESTRATION_GRAPH_SOURCE_FORMAT}, {COMFYUI_WORKFLOW_SOURCE_FORMAT}, "
-                f"{LANGGRAPH_STATEGRAPH_SOURCE_FORMAT}."
-            )
-        adapter_manifest: dict[str, Any] | None = None
-        loss_report: dict[str, Any] | None = None
-        source_version: str | None = None
-        serialized = ""
-        generated_python: str | None = None
-        export_path_text = str(payload.get("export_path") or "").strip()
-        generated_python_path_text = str(payload.get("generated_python_path") or "").strip()
-        workspace_root = self._projects.require_workspace_root()
-        written_relative_path: str | None = None
-        if export_format == COMFYUI_WORKFLOW_SOURCE_FORMAT:
-            exported = export_comfyui_workflow(orchestration_graph, task_graph=validated_graph)
-            serialized = str(exported.get("serialized_text") or "")
-            adapter_manifest = deepcopy(exported.get("adapter_manifest") or None)
-            loss_report = deepcopy(exported.get("loss_report") or None)
-            source_version = str(exported.get("source_version") or "").strip() or None
-            if export_path_text:
-                target_path = resolve_under(workspace_root, export_path_text)
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                target_path.write_text(serialized, encoding="utf-8")
-                written_relative_path = target_path.relative_to(workspace_root).as_posix()
-        elif export_format == LANGGRAPH_STATEGRAPH_SOURCE_FORMAT:
-            exported = export_langgraph_stategraph_manifest(
-                orchestration_graph,
-                task_graph=validated_graph,
-                emit_generated_python=bool(payload.get("emit_generated_python", True)),
-            )
-            serialized = str(exported.get("serialized_text") or "")
-            generated_python = str(exported.get("generated_python") or "").strip() or None
-            adapter_manifest = deepcopy(exported.get("adapter_manifest") or None)
-            loss_report = deepcopy(exported.get("loss_report") or None)
-            source_version = str(exported.get("source_version") or "").strip() or None
-            if export_path_text:
-                target_path = resolve_under(workspace_root, export_path_text)
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                target_path.write_text(serialized, encoding="utf-8")
-                written_relative_path = target_path.relative_to(workspace_root).as_posix()
-            if generated_python and generated_python_path_text:
-                python_target_path = resolve_under(workspace_root, generated_python_path_text)
-                python_target_path.parent.mkdir(parents=True, exist_ok=True)
-                python_target_path.write_text(generated_python, encoding="utf-8")
-        else:
-            serialized = serialize_agent_orchestration_graph(orchestration_graph)
-            if export_path_text:
-                written = write_agent_orchestration_graph_file(resolve_under(workspace_root, export_path_text), orchestration_graph)
-                written_relative_path = written.relative_to(workspace_root).as_posix()
-        return {
-            "schema_version": "astrabridge-agent-orchestration-export-v1",
-            "graph": validated_graph,
-            "task": self.task_view(task, compact_graph_runs=True),
-            "orchestration_graph": orchestration_graph,
-            "serialized_text": serialized,
-            "source_format": source_format,
-            "export_format": export_format,
-            "source_version": source_version,
-            "adapter_manifest": adapter_manifest,
-            "loss_report": loss_report,
-            "generated_python": generated_python,
-            "export_path": written_relative_path,
-        }
+        return self._graph_mutation.export_graph_for_orchestration_file(payload)
 
     def _known_model_capabilities_for_graph(
         self,
@@ -2308,52 +3417,7 @@ class TaskService:
         )
 
     def save_graph_definition(self, payload: dict[str, Any]) -> dict[str, Any]:
-        task = self.current_task()
-        if not task:
-            raise ValueError("No current task.")
-        if not isinstance(payload, dict):
-            raise TypeError("Graph save payload must be a dict.")
-        graph_payload = payload.get("graph")
-        if not isinstance(graph_payload, dict):
-            raise ValueError("graph is required.")
-        validated_graph = validate_graph_definition(deepcopy(graph_payload))
-        if str(validated_graph.get("task_id") or "").strip() != str(task.get("task_id") or "").strip():
-            raise ValueError("graph.task_id must match the current task.")
-        prior_graph = self.graph_definition(str(validated_graph.get("graph_id") or ""))
-        pre_snapshot = (
-            self._record_graph_snapshot(
-                prior_graph,
-                reason="before_graph_save",
-                source_action="save_graph_definition",
-                label=f"Before save: {str(prior_graph.get('title') or prior_graph.get('graph_id') or '')}".strip(),
-            )
-            if isinstance(prior_graph, dict)
-            else None
-        )
-        validated_graph["orchestration_graph"] = self._orchestration_graph_for_task_graph(validated_graph)
-        saved = self.upsert_graph_definition(validated_graph)
-        comparison_report = (
-            diff_agent_orchestration_graphs(
-                self._orchestration_graph_for_task_graph(prior_graph),
-                dict(saved.get("orchestration_graph") or {}),
-            )
-            if isinstance(prior_graph, dict)
-            else None
-        )
-        snapshot = self._record_graph_snapshot(
-            saved,
-            reason="after_graph_save",
-            source_action="save_graph_definition",
-            label=f"After save: {str(saved.get('title') or saved.get('graph_id') or '')}".strip(),
-            based_on_snapshot_id=str((pre_snapshot or {}).get("snapshot_id") or "").strip() or None,
-            comparison_report=comparison_report,
-        )
-        return {
-            "schema_version": "astrabridge-task-graph-save-v1",
-            "graph": saved,
-            "snapshot": snapshot,
-            "task": self.task_view(self.current_task()),
-        }
+        return self._graph_mutation.save_graph_definition(payload)
 
     def import_graph_from_orchestration_file(
         self,
@@ -2362,274 +3426,46 @@ class TaskService:
         profiles_snapshot: dict[str, Any] | None = None,
         configured_models: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        task = self.current_task()
-        if not task:
-            raise ValueError("No current task.")
-        if not isinstance(payload, dict):
-            raise TypeError("Graph import payload must be a dict.")
-        graph_text = str(payload.get("graph_text") or "").strip()
-        graph_path = str(payload.get("graph_path") or "").strip()
-        if not graph_text and not graph_path:
-            raise ValueError("graph_text or graph_path is required.")
-        workspace_root = self._projects.require_workspace_root()
-        raw_import_text = graph_text
-        import_path_text: str | None = None
-        if graph_path:
-            resolved_path = resolve_under(workspace_root, graph_path)
-            raw_import_text = resolved_path.read_text(encoding="utf-8")
-            import_path_text = resolved_path.relative_to(workspace_root).as_posix()
-        source_name = import_path_text or "task-graph-import"
-        source_format = AGENT_ORCHESTRATION_GRAPH_SOURCE_FORMAT
-        source_version: str | None = None
-        adapter_manifest: dict[str, Any] | None = None
-        loss_report: dict[str, Any] | None = None
-        task_graph_overlays: dict[str, dict[str, Any]] = {}
-        parsed_json: Any = None
-        try:
-            parsed_json = json.loads(raw_import_text)
-        except json.JSONDecodeError:
-            parsed_json = None
-        if looks_like_comfyui_workflow(parsed_json):
-            imported_payload = import_comfyui_workflow(
-                parsed_json,
-                task_id=str(task.get("task_id") or ""),
-                title=str(payload.get("title") or "").strip() or None,
-            )
-            orchestration_graph = deepcopy(dict(imported_payload.get("orchestration_graph") or {}))
-            source_format = COMFYUI_WORKFLOW_SOURCE_FORMAT
-            source_version = str(imported_payload.get("source_version") or "").strip() or None
-            adapter_manifest = deepcopy(imported_payload.get("adapter_manifest") or None)
-            loss_report = deepcopy(imported_payload.get("loss_report") or None)
-            task_graph_overlays = {
-                str(node_id).strip(): deepcopy(dict(overlay))
-                for node_id, overlay in dict(imported_payload.get("task_graph_overlays") or {}).items()
-                if str(node_id).strip() and isinstance(overlay, dict)
-            }
-        elif looks_like_langgraph_stategraph_manifest(parsed_json):
-            imported_payload = import_langgraph_stategraph_manifest(
-                parsed_json,
-                task_id=str(task.get("task_id") or ""),
-                title=str(payload.get("title") or "").strip() or None,
-            )
-            orchestration_graph = deepcopy(dict(imported_payload.get("orchestration_graph") or {}))
-            source_format = LANGGRAPH_STATEGRAPH_SOURCE_FORMAT
-            source_version = str(imported_payload.get("source_version") or "").strip() or None
-            adapter_manifest = deepcopy(imported_payload.get("adapter_manifest") or None)
-            loss_report = deepcopy(imported_payload.get("loss_report") or None)
-            task_graph_overlays = {
-                str(node_id).strip(): deepcopy(dict(overlay))
-                for node_id, overlay in dict(imported_payload.get("task_graph_overlays") or {}).items()
-                if str(node_id).strip() and isinstance(overlay, dict)
-            }
-        else:
-            orchestration_graph = parse_agent_orchestration_graph_text(raw_import_text, source_name=source_name)
-        compile_agent_orchestration_graph(
-            orchestration_graph,
-            known_model_capabilities=self._known_model_capabilities_for_graph(
-                orchestration_graph,
-                profiles_snapshot=profiles_snapshot,
-                configured_models=configured_models,
-            ),
+        return self._graph_mutation.import_graph_from_orchestration_file(
+            payload,
+            profiles_snapshot=profiles_snapshot,
+            configured_models=configured_models,
         )
-        prior_graph = self.graph_definition()
-        pre_snapshot = (
-            self._record_graph_snapshot(
-                prior_graph,
-                reason="before_graph_import",
-                source_action="import_graph",
-                label=f"Before import: {str(prior_graph.get('title') or prior_graph.get('graph_id') or '')}".strip(),
-            )
-            if isinstance(prior_graph, dict)
-            else None
-        )
-        imported = deepcopy(orchestration_graph)
-        imported["task_id"] = str(task.get("task_id") or "")
-        imported["metadata"] = {
-            **dict(imported.get("metadata") or {}),
-            "updated_at": now_iso(),
-        }
-        task_graph = lower_agent_orchestration_graph_to_task_graph(imported)
-        task_graph["task_id"] = str(task.get("task_id") or "")
-        task_graph["updated_at"] = now_iso()
-        task_graph["state_version"] = int(task_graph.get("state_version") or 0) + 1
-        self._apply_task_graph_overlays(task_graph, task_graph_overlays)
-        task_graph["orchestration_graph"] = self._sync_orchestration_graph_with_task_graph(imported, task_graph=task_graph)
-        validated = self.upsert_graph_definition(task_graph)
-        comparison_report = (
-            diff_agent_orchestration_graphs(
-                self._orchestration_graph_for_task_graph(prior_graph),
-                dict(validated.get("orchestration_graph") or {}),
-            )
-            if isinstance(prior_graph, dict)
-            else None
-        )
-        snapshot = self._record_graph_snapshot(
-            validated,
-            reason="after_graph_import",
-            source_action="import_graph",
-            label=f"After import: {str(validated.get('title') or validated.get('graph_id') or '')}".strip(),
-            based_on_snapshot_id=str((pre_snapshot or {}).get("snapshot_id") or "").strip() or None,
-            comparison_report=comparison_report,
-        )
-        return {
-            "schema_version": "astrabridge-agent-orchestration-import-v1",
-            "graph": validated,
-            "task": self.task_view(self.current_task()),
-            "orchestration_graph": dict(validated.get("orchestration_graph") or {}),
-            "source_format": source_format,
-            "source_version": source_version,
-            "adapter_manifest": adapter_manifest,
-            "loss_report": loss_report,
-            "import_path": import_path_text,
-            "snapshot": snapshot,
-        }
 
     def _graph_interop_source_format(self, task_graph: dict[str, Any] | None) -> str:
-        graph = dict(task_graph or {})
-        orchestration_graph = dict(graph.get("orchestration_graph") or {})
-        migration = dict(orchestration_graph.get("migration") or {})
-        adapter = dict(migration.get("adapter") or {})
-        source_format = str(adapter.get("source_format") or "").strip()
-        if source_format:
-            return source_format
-        metadata = dict(orchestration_graph.get("metadata") or {})
-        manifest = dict(metadata.get("adapter_manifest") or {})
-        manifest_source_format = str(manifest.get("source_format") or "").strip()
-        if manifest_source_format:
-            return manifest_source_format
-        return AGENT_ORCHESTRATION_GRAPH_SOURCE_FORMAT
+        return self._graph_mutation._graph_interop_source_format(task_graph)
 
     def _apply_task_graph_overlays(
         self,
         task_graph: dict[str, Any],
         node_overlays: dict[str, dict[str, Any]] | None,
     ) -> None:
-        if not isinstance(task_graph, dict) or not isinstance(node_overlays, dict) or not node_overlays:
-            return
-        for node in list(task_graph.get("nodes") or []):
-            if not isinstance(node, dict):
-                continue
-            node_id = str(node.get("node_id") or "").strip()
-            overlay = dict(node_overlays.get(node_id) or {})
-            if not node_id or not overlay:
-                continue
-            ui_hints = dict(node.get("ui_hints") or {})
-            overlay_node_type_config = dict(overlay.get("node_type_config") or {})
-            existing_node_type_config = dict(ui_hints.get("node_type_config") or {})
-            node["ui_hints"] = {
-                **ui_hints,
-                **{key: deepcopy(value) for key, value in overlay.items() if key != "node_type_config"},
-                "node_type_config": {
-                    **existing_node_type_config,
-                    **overlay_node_type_config,
-                },
-            }
+        self._graph_mutation._apply_task_graph_overlays(task_graph, node_overlays)
+
+    def _prepare_graph_for_persist(
+        self,
+        graph: dict[str, Any],
+        *,
+        prior_graph: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        return self._graph_mutation._prepare_graph_for_persist(graph, prior_graph=prior_graph)
+
+    def _apply_graph_node_payload_to_graph(
+        self,
+        graph: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        return self._graph_mutation._apply_graph_node_payload_to_graph(graph, payload)
+
+    def _apply_graph_edge_payload_to_graph(
+        self,
+        graph: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        return self._graph_mutation._apply_graph_edge_payload_to_graph(graph, payload)
 
     def update_graph_node(self, payload: dict[str, Any]) -> dict[str, Any]:
-        task = self.current_task()
-        if not task:
-            raise ValueError("No current task.")
-        if not isinstance(payload, dict):
-            raise TypeError("Graph node update payload must be a dict.")
-        graph_id = str(payload.get("graph_id") or "").strip()
-        node_id = str(payload.get("node_id") or "").strip()
-        if not graph_id:
-            raise ValueError("graph_id is required.")
-        if not node_id:
-            raise ValueError("node_id is required.")
-        graph = self.graph_definition(graph_id)
-        if not graph:
-            raise ValueError("Graph not found.")
-        pre_snapshot = self._record_graph_snapshot(
-            graph,
-            reason="before_node_update",
-            source_action="update_graph_node",
-            label=f"Before node update: {node_id}",
-        )
-        updated = deepcopy(graph)
-        create_payload = payload.get("create")
-        target_node = next(
-            (
-                item
-                for item in list(updated.get("nodes") or [])
-                if isinstance(item, dict) and str(item.get("node_id") or "").strip() == node_id
-            ),
-            None,
-        )
-        if create_payload is not None:
-            if not isinstance(create_payload, dict):
-                raise ValueError("create must be an object.")
-            if isinstance(target_node, dict):
-                raise ValueError("Node already exists.")
-            target_node = self._build_graph_node(
-                updated,
-                requested_node_id=node_id,
-                kind=str(create_payload.get("kind") or ""),
-                label=str(create_payload.get("label") or ""),
-                position=create_payload.get("position"),
-                configuration=payload.get("configuration") if isinstance(payload.get("configuration"), dict) else None,
-            )
-            updated.setdefault("nodes", []).append(target_node)
-            graph_policy = dict(updated.get("graph_policy") or {})
-            entry_node_ids = [str(item).strip() for item in list(graph_policy.get("entry_node_ids") or []) if str(item).strip()]
-            if not entry_node_ids:
-                graph_policy["entry_node_ids"] = [target_node["node_id"]]
-                updated["graph_policy"] = graph_policy
-        elif not isinstance(target_node, dict):
-            raise ValueError("Node not found.")
-        if "position" in payload:
-            position = payload.get("position")
-            if not isinstance(position, dict):
-                raise ValueError("position must be an object.")
-            target_node["position"] = {"x": position.get("x"), "y": position.get("y")}
-        if "configuration" in payload:
-            configuration = payload.get("configuration")
-            if not isinstance(configuration, dict):
-                raise ValueError("configuration must be an object.")
-            for key in (
-                "label",
-                "provider_id",
-                "model_id",
-                "reasoning_effort",
-                "permission_mode",
-                "collaboration_mode",
-                "execution_backend",
-                "budget",
-                "human_summary_template",
-                "machine_result_schema",
-                "ui_hints",
-                "artifact_requirements",
-                "approval_gate",
-                "status",
-            ):
-                if key in configuration:
-                    target_node[key] = configuration.get(key)
-            if "execution_policy" in configuration:
-                target_node["execution_policy"] = dict(configuration.get("execution_policy") or {})
-            if "output_contract" in configuration:
-                target_node["output_contract"] = dict(configuration.get("output_contract") or {})
-        updated["updated_at"] = now_iso()
-        updated["state_version"] = int(updated.get("state_version") or 0) + 1
-        updated["orchestration_graph"] = self._sync_orchestration_graph_with_task_graph(updated.get("orchestration_graph"), task_graph=updated)
-        validated = self.upsert_graph_definition(updated)
-        comparison_report = diff_agent_orchestration_graphs(
-            self._orchestration_graph_for_task_graph(graph),
-            dict(validated.get("orchestration_graph") or {}),
-        )
-        snapshot = self._record_graph_snapshot(
-            validated,
-            reason="after_node_update",
-            source_action="update_graph_node",
-            label=f"After node update: {node_id}",
-            based_on_snapshot_id=str(pre_snapshot.get("snapshot_id") or "").strip() or None,
-            comparison_report=comparison_report,
-        )
-        refreshed_node = next(
-            dict(item)
-            for item in list(validated.get("nodes") or [])
-            if isinstance(item, dict) and str(item.get("node_id") or "").strip() == node_id
-        )
-        return {"graph": validated, "node": refreshed_node, "snapshot": snapshot, "task": self.task_view(self.current_task())}
+        return self._graph_mutation.update_graph_node(payload)
 
     def _build_graph_node(
         self,
@@ -2641,211 +3477,30 @@ class TaskService:
         position: Any,
         configuration: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        clean_kind = self._sanitize_graph_token(kind) or "custom"
-        clean_node_id = requested_node_id or self._next_graph_node_id(graph, clean_kind)
-        clean_label = str(label or self._default_graph_node_label(clean_kind)).strip() or self._default_graph_node_label(clean_kind)
-        resolved_position = self._next_graph_node_position(graph) if not isinstance(position, dict) else {
-            "x": int(position.get("x") or 80),
-            "y": int(position.get("y") or 160),
-        }
-        node = {
-            "node_id": clean_node_id,
-            "graph_id": str(graph.get("graph_id") or ""),
-            "kind": clean_kind,
-            "label": clean_label,
-            "agent_card_ref": f"agent_card_{clean_kind}",
-            "execution_policy": {
-                "spawn_mode": "isolated_lane",
-                "retry_policy": {"max_attempts": 1},
-                "timeout_ms": 180000,
-                "allow_provider_calls": True,
-                "allow_code_changes": False,
-                "allow_install": False,
-                "requires_human_approval": False,
-            },
-            "output_contract": {
-                "human_summary_required": True,
-                "artifact_outputs": ["structured_json"],
-                "machine_result_schema": {"type": "object", "required": ["result"]},
-                "artifact_only": False,
-            },
-            "position": resolved_position,
-            "status": "draft",
-            "permission_mode": "ask",
-            "collaboration_mode": "default",
-            "execution_backend": "app_server",
-            "ui_hints": {"context_policy_preset": "task_digest"},
-        }
-        if isinstance(configuration, dict):
-            for key in (
-                "provider_id",
-                "model_id",
-                "reasoning_effort",
-                "permission_mode",
-                "collaboration_mode",
-                "execution_backend",
-                "budget",
-                "human_summary_template",
-                "machine_result_schema",
-                "ui_hints",
-                "artifact_requirements",
-                "approval_gate",
-                "status",
-                "label",
-            ):
-                if key in configuration:
-                    node[key] = configuration.get(key)
-            if "execution_policy" in configuration:
-                node["execution_policy"] = dict(configuration.get("execution_policy") or {})
-            if "output_contract" in configuration:
-                node["output_contract"] = dict(configuration.get("output_contract") or {})
-        return node
+        return self._graph_mutation._build_graph_node(
+            graph,
+            requested_node_id=requested_node_id,
+            kind=kind,
+            label=label,
+            position=position,
+            configuration=configuration,
+        )
 
     def _next_graph_node_id(self, graph: dict[str, Any], kind: str) -> str:
-        base = f"node_{self._sanitize_graph_token(kind) or 'custom'}"
-        existing_ids = {
-            str(item.get("node_id") or "").strip()
-            for item in list(graph.get("nodes") or [])
-            if isinstance(item, dict)
-        }
-        if base not in existing_ids:
-            return base
-        index = 2
-        while f"{base}_{index}" in existing_ids:
-            index += 1
-        return f"{base}_{index}"
+        return self._graph_mutation._next_graph_node_id(graph, kind)
 
     def _next_graph_node_position(self, graph: dict[str, Any]) -> dict[str, int]:
-        positions: list[dict[str, Any]] = [
-            dict(item.get("position") or {})
-            for item in list(graph.get("nodes") or [])
-            if isinstance(item, dict) and isinstance(item.get("position"), dict)
-        ]
-        if not positions:
-            return {"x": 80, "y": 160}
-        min_x = min(int(item.get("x") or 0) for item in positions)
-        min_y = min(int(item.get("y") or 0) for item in positions)
-        next_index = len(positions)
-        column = next_index % 3
-        row = next_index // 3
-        return {"x": min_x + column * 260, "y": min_y + row * 180}
+        return self._graph_mutation._next_graph_node_position(graph)
 
     def _default_graph_node_label(self, kind: str) -> str:
-        mapping = {
-            "supervisor": "Supervisor",
-            "planner": "Planner",
-            "worker": "Worker",
-            "coder": "Coder",
-            "reviewer": "Reviewer",
-            "validator": "Validator",
-            "researcher": "Researcher",
-            "extractor": "Extractor",
-            "synthesizer": "Synthesizer",
-            "gate": "Gate",
-            "custom": "Custom Agent",
-        }
-        return mapping.get(self._sanitize_graph_token(kind) or "custom", "Custom Agent")
+        return self._graph_mutation._default_graph_node_label(kind)
 
     @staticmethod
     def _sanitize_graph_token(value: str) -> str:
-        return re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower()).strip("_")
+        return TaskGraphMutationService._sanitize_graph_token(value)
 
     def update_graph_edge(self, payload: dict[str, Any]) -> dict[str, Any]:
-        task = self.current_task()
-        if not task:
-            raise ValueError("No current task.")
-        if not isinstance(payload, dict):
-            raise TypeError("Graph edge update payload must be a dict.")
-        graph_id = str(payload.get("graph_id") or "").strip()
-        edge_id = str(payload.get("edge_id") or "").strip()
-        if not graph_id:
-            raise ValueError("graph_id is required.")
-        graph = self.graph_definition(graph_id)
-        if not graph:
-            raise ValueError("Graph not found.")
-        pre_snapshot = self._record_graph_snapshot(
-            graph,
-            reason="before_edge_update",
-            source_action="update_graph_edge",
-            label=f"Before edge update: {edge_id or 'new edge'}",
-        )
-        updated = deepcopy(graph)
-        target_edge = next(
-            (
-                item
-                for item in list(updated.get("edges") or [])
-                if isinstance(item, dict) and str(item.get("edge_id") or "").strip() == edge_id
-            ),
-            None,
-        )
-        creating = not isinstance(target_edge, dict)
-        if creating:
-            from_node_id = str(payload.get("from_node_id") or "").strip()
-            to_node_id = str(payload.get("to_node_id") or "").strip()
-            edge_type = str(payload.get("edge_type") or "").strip()
-            context_policy = payload.get("context_policy")
-            handoff_contract = payload.get("handoff_contract")
-            if not from_node_id:
-                raise ValueError("from_node_id is required when creating an edge.")
-            if not to_node_id:
-                raise ValueError("to_node_id is required when creating an edge.")
-            if not edge_type:
-                raise ValueError("edge_type is required when creating an edge.")
-            if from_node_id == to_node_id:
-                raise ValueError("from_node_id and to_node_id must be different.")
-            if not isinstance(context_policy, dict):
-                raise ValueError("context_policy is required when creating an edge.")
-            if handoff_contract is not None and not isinstance(handoff_contract, dict):
-                raise ValueError("handoff_contract must be an object.")
-            target_edge = {
-                "edge_id": edge_id or new_id("edge"),
-                "graph_id": graph_id,
-                "from_node_id": from_node_id,
-                "to_node_id": to_node_id,
-                "edge_type": edge_type,
-                "handoff_contract": dict(handoff_contract or {}),
-                "context_policy": dict(context_policy),
-                "status": str(payload.get("status") or "ready").strip() or "ready",
-            }
-            updated["edges"] = [*list(updated.get("edges") or []), target_edge]
-        else:
-            for key in ("from_node_id", "to_node_id", "edge_type", "status"):
-                if key in payload:
-                    target_edge[key] = payload.get(key)
-            if "context_policy" in payload:
-                context_policy = payload.get("context_policy")
-                if not isinstance(context_policy, dict):
-                    raise ValueError("context_policy must be an object.")
-                target_edge["context_policy"] = dict(context_policy)
-            if "handoff_contract" in payload:
-                handoff_contract = payload.get("handoff_contract")
-                if handoff_contract is not None and not isinstance(handoff_contract, dict):
-                    raise ValueError("handoff_contract must be an object.")
-                target_edge["handoff_contract"] = dict(handoff_contract or {})
-            if str(target_edge.get("from_node_id") or "").strip() == str(target_edge.get("to_node_id") or "").strip():
-                raise ValueError("from_node_id and to_node_id must be different.")
-        updated["updated_at"] = now_iso()
-        updated["state_version"] = int(updated.get("state_version") or 0) + 1
-        updated["orchestration_graph"] = self._sync_orchestration_graph_with_task_graph(updated.get("orchestration_graph"), task_graph=updated)
-        validated = self.upsert_graph_definition(updated)
-        comparison_report = diff_agent_orchestration_graphs(
-            self._orchestration_graph_for_task_graph(graph),
-            dict(validated.get("orchestration_graph") or {}),
-        )
-        snapshot = self._record_graph_snapshot(
-            validated,
-            reason="after_edge_update",
-            source_action="update_graph_edge",
-            label=f"After edge update: {str(target_edge.get('edge_id') or edge_id or 'edge')}",
-            based_on_snapshot_id=str(pre_snapshot.get("snapshot_id") or "").strip() or None,
-            comparison_report=comparison_report,
-        )
-        refreshed_edge = next(
-            dict(item)
-            for item in list(validated.get("edges") or [])
-            if isinstance(item, dict) and str(item.get("edge_id") or "").strip() == str(target_edge.get("edge_id") or "").strip()
-        )
-        return {"graph": validated, "edge": refreshed_edge, "snapshot": snapshot, "task": self.task_view(self.current_task())}
+        return self._graph_mutation.update_graph_edge(payload)
 
     def dry_run_graph(
         self,
@@ -2881,6 +3536,17 @@ class TaskService:
         compiled_plan = compile_agent_orchestration_graph(orchestration_graph, known_model_capabilities=known_model_capabilities)
         validation_mode = str(payload.get("validation_mode") or "default").strip().lower() or "default"
         require_live_contract = validation_mode == "live"
+        import_guard = self._graph_import_execution_guard(
+            orchestration_graph,
+            require_live_contract=require_live_contract,
+        )
+        executor_mode = "live_run" if require_live_contract else "fixture_run"
+        executor_report = journaled_compiled_plan_executor_capability_report(
+            compiled_plan,
+            execution_mode=executor_mode,
+            workspace_root=self._projects.require_workspace_root(),
+            activation_scope=f"task_graph_dry_run:{str(validated_graph.get('graph_id') or '') or 'graph'}:{executor_mode}",
+        )
         budget_snapshot = self._graph_run_budget_snapshot(
             graph=validated_graph,
             compiled_plan=compiled_plan,
@@ -2929,6 +3595,27 @@ class TaskService:
                 profile_records_present=bool(profile_records),
                 require_live_contract=require_live_contract,
             )
+            guarded = dict(import_guard.get("node_results") or {}).get(node_id)
+            if isinstance(guarded, dict):
+                guarded_status = str(guarded.get("status") or "").strip()
+                guarded_reasons = [
+                    str(item).strip()
+                    for item in list(guarded.get("reasons") or [])
+                    if str(item or "").strip()
+                ]
+                if guarded_status == "blocked":
+                    result["status"] = "blocked"
+                elif guarded_status == "warning":
+                    result["status"] = _promote_dry_run_status(str(result.get("status") or "").strip(), "warning")
+                merged_node_reasons = [
+                    str(item).strip()
+                    for item in list(result.get("reasons") or [])
+                    if str(item or "").strip()
+                ]
+                for reason in guarded_reasons:
+                    if reason not in merged_node_reasons:
+                        merged_node_reasons.append(reason)
+                result["reasons"] = merged_node_reasons
             node_results.append(result)
             if result["status"] == "blocked":
                 blockers.extend(result["reasons"])
@@ -2952,11 +3639,79 @@ class TaskService:
                 continue
             result = self._dry_run_edge_result(edge=edge, node_map=node_map)
             edge_results.append(result)
-            if result["status"] == "blocked":
-                blockers.extend(result["reasons"])
-            elif result["status"] == "warning":
-                warnings.extend(result["reasons"])
-        blockers.extend(list(budget_snapshot.get("static_blockers") or []))
+        node_results_by_id = {
+            str(item.get("node_id") or "").strip(): item
+            for item in node_results
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+        }
+        for entry in list(executor_report.get("entries") or []):
+            if not isinstance(entry, dict):
+                continue
+            target = node_results_by_id.get(str(entry.get("node_id") or "").strip())
+            if not target:
+                continue
+            blocking_reasons = [
+                str(item).strip()
+                for item in list(entry.get("blocking_reasons") or [])
+                if str(item or "").strip()
+            ]
+            if not blocking_reasons:
+                continue
+            target["status"] = "blocked"
+            merged_reasons = [
+                str(item).strip()
+                for item in list(target.get("reasons") or [])
+                if str(item or "").strip()
+            ]
+            for reason in blocking_reasons:
+                if reason not in merged_reasons:
+                    merged_reasons.append(reason)
+            target["reasons"] = merged_reasons
+        node_run_states = [
+            {
+                **dict(item),
+                "status": "dry_run_blocked"
+                if str(dict(node_results_by_id.get(str(item.get("node_id") or "").strip()) or {}).get("status") or "").strip()
+                == "blocked"
+                else "dry_run_passed",
+                "warnings": list(
+                    dict(node_results_by_id.get(str(item.get("node_id") or "").strip()) or {}).get("reasons")
+                    or []
+                )
+                if str(dict(node_results_by_id.get(str(item.get("node_id") or "").strip()) or {}).get("status") or "").strip()
+                == "warning"
+                else [],
+            }
+            for item in node_run_states
+        ]
+        warnings = []
+        blockers = []
+        for item in [*node_results, *edge_results]:
+            reasons = [
+                str(reason).strip()
+                for reason in list(dict(item).get("reasons") or [])
+                if str(reason or "").strip()
+            ]
+            if str(dict(item).get("status") or "").strip() == "blocked":
+                blockers.extend(reasons)
+            elif str(dict(item).get("status") or "").strip() == "warning":
+                warnings.extend(reasons)
+        guarded_graph_reasons = [
+            str(item).strip()
+            for item in list(import_guard.get("graph_reasons") or [])
+            if str(item or "").strip()
+        ]
+        if str(import_guard.get("graph_status") or "").strip() == "blocked":
+            blockers.extend(guarded_graph_reasons)
+        elif str(import_guard.get("graph_status") or "").strip() == "warning":
+            warnings.extend(guarded_graph_reasons)
+        blockers.extend(
+            [
+                str(item).strip()
+                for item in list(budget_snapshot.get("static_blockers") or [])
+                if str(item or "").strip()
+            ]
+        )
 
         overall_status = "blocked" if blockers else "warning" if warnings else "pass"
         graph_reasons = blockers if blockers else warnings
@@ -2985,6 +3740,13 @@ class TaskService:
                 "compiled_plan_json": compiled_plan_path.relative_to(workspace_root).as_posix(),
             },
             "compiled_plan_summary": dict(compiled_plan.get("topology") or {}),
+            "executor_contract": {
+                "execution_mode": executor_mode,
+                "registry_fingerprint": str(executor_report.get("current_registry_fingerprint") or ""),
+                "compiled_plan_registry_fingerprint": executor_report.get("compiled_plan_registry_fingerprint"),
+                "blocker_count": int(executor_report.get("blocker_count") or 0),
+            },
+            "compatibility_gate": import_guard,
             "budget": budget_snapshot,
         }
         write_json(summary_json_path, report_payload)
@@ -3075,6 +3837,12 @@ class TaskService:
                 "warning_count": len(warnings),
                 "max_parallelism": int(dict(compiled_plan.get("topology") or {}).get("max_parallelism") or 1),
                 "budget": budget_snapshot,
+                "executor_contract": {
+                    "execution_mode": executor_mode,
+                    "registry_fingerprint": str(executor_report.get("current_registry_fingerprint") or ""),
+                    "compiled_plan_registry_fingerprint": executor_report.get("compiled_plan_registry_fingerprint"),
+                    "blocker_count": int(executor_report.get("blocker_count") or 0),
+                },
                 "node_mcp_tool_policies": self._compiled_node_mcp_tool_policies(compiled_plan),
             },
             "created_at": created_at,
@@ -3142,6 +3910,22 @@ class TaskService:
             orchestration_graph,
             known_model_capabilities=self._known_model_capabilities_for_graph(orchestration_graph),
         )
+        executor_report = journaled_compiled_plan_executor_capability_report(
+            compiled_plan,
+            execution_mode="fixture_run",
+            workspace_root=self._projects.require_workspace_root(),
+            activation_scope=f"task_graph_fixture_run:{str(validated_graph.get('graph_id') or '') or 'graph'}",
+        )
+        if not bool(executor_report.get("ok")):
+            blockers = [
+                str(item).strip()
+                for item in list(executor_report.get("blockers") or [])
+                if str(item or "").strip()
+            ]
+            raise ValueError(
+                "Fixture task-graph execution is blocked until executor compatibility passes. "
+                + (blockers[0] if blockers else "Resolve the executor availability findings first.")
+            )
         write_json(compiled_plan_path, compiled_plan)
         budget_snapshot = self._graph_run_budget_snapshot(
             graph=validated_graph,
@@ -3459,13 +4243,16 @@ class TaskService:
             }
             for node_id, state in node_states.items()
         ]
+        entry_node_ids = [str(item).strip() for item in list(compiled_plan.get("entry_node_ids") or []) if str(item or "").strip()]
+        first_entry_node_id = entry_node_ids[0] if entry_node_ids else next(iter(node_map), "")
+        last_entry_node_id = entry_node_ids[-1] if entry_node_ids else first_entry_node_id
         artifact_refs = [
             {
                 "artifact_id": f"{run_id}-summary-json",
                 "artifact_kind": "structured_json",
                 "task_id": validated_graph["task_id"],
                 "run_id": run_id,
-                "source_node_id": str(compiled_plan.get("entry_node_ids") or [next(iter(node_map), "")])[0],
+                "source_node_id": first_entry_node_id,
                 "path": summary_json_path.relative_to(workspace_root).as_posix(),
                 "media_type": "application/json",
                 "status": "ready",
@@ -3476,7 +4263,7 @@ class TaskService:
                 "artifact_kind": "run_summary",
                 "task_id": validated_graph["task_id"],
                 "run_id": run_id,
-                "source_node_id": str(compiled_plan.get("entry_node_ids") or [next(iter(node_map), "")])[-1],
+                "source_node_id": last_entry_node_id,
                 "path": report_md_path.relative_to(workspace_root).as_posix(),
                 "media_type": "text/markdown",
                 "status": "ready",
@@ -3487,7 +4274,7 @@ class TaskService:
                 "artifact_kind": "graph_definition",
                 "task_id": validated_graph["task_id"],
                 "run_id": run_id,
-                "source_node_id": str(compiled_plan.get("entry_node_ids") or [next(iter(node_map), "")])[0],
+                "source_node_id": first_entry_node_id,
                 "path": compiled_plan_path.relative_to(workspace_root).as_posix(),
                 "media_type": "application/json",
                 "status": "ready",
@@ -3498,7 +4285,7 @@ class TaskService:
                 "artifact_kind": "structured_json",
                 "task_id": validated_graph["task_id"],
                 "run_id": run_id,
-                "source_node_id": str(compiled_plan.get("entry_node_ids") or [next(iter(node_map), "")])[0],
+                "source_node_id": first_entry_node_id,
                 "path": run_manifest_path.relative_to(workspace_root).as_posix(),
                 "media_type": "application/json",
                 "status": "ready",
@@ -3528,6 +4315,12 @@ class TaskService:
                 "compatibility_shim": False,
                 "parallel_group_ids": [str(dict(group).get("group_id") or "").strip() for group in parallel_groups if str(dict(group).get("group_id") or "").strip()],
                 "budget": budget_snapshot,
+                "executor_contract": {
+                    "execution_mode": "fixture_run",
+                    "registry_fingerprint": str(executor_report.get("current_registry_fingerprint") or ""),
+                    "compiled_plan_registry_fingerprint": executor_report.get("compiled_plan_registry_fingerprint"),
+                    "blocker_count": int(executor_report.get("blocker_count") or 0),
+                },
                 "node_mcp_tool_policies": self._compiled_node_mcp_tool_policies(compiled_plan),
                 "recovery": (
                     {
@@ -3542,11 +4335,7 @@ class TaskService:
                     else None
                 ),
             },
-            "compiled_plan": {
-                "schema_version": str(compiled_plan.get("schema_version") or ""),
-                "topology": dict(compiled_plan.get("topology") or {}),
-                "parallel_groups": list(compiled_plan.get("parallel_groups") or []),
-            },
+            "compiled_plan": deepcopy(compiled_plan),
             "created_at": created_at,
             "updated_at": final_updated_at,
             "state_version": 1,
@@ -4026,6 +4815,11 @@ class TaskService:
         }.get(template_id, {})
         available_by_provider: dict[str, set[str]] = {}
         preferred_by_provider: dict[str, str] = {}
+        recommended_provider_ids, recommended_model_ids = self._resolve_template_recommended_routes(
+            template_id,
+            GRAPH_TEMPLATE_PRODUCT_METADATA.get(template_id) or {},
+            configured_models=configured_models,
+        )
 
         def available_models_for(provider_id: str) -> set[str]:
             cached = available_by_provider.get(provider_id)
@@ -4033,11 +4827,9 @@ class TaskService:
                 return cached
             cached = {
                 str(item.get("native_model") or "").strip()
-                for item in provider_model_records(
+                for item in self._safe_provider_model_records(
                     provider_id,
-                    configured_models or [],
-                    include_disabled=False,
-                    include_deprecated=False,
+                    configured_models,
                 )
                 if str(item.get("native_model") or "").strip()
             }
@@ -4048,12 +4840,8 @@ class TaskService:
             cached = preferred_by_provider.get(provider_id)
             if cached is not None:
                 return cached
-            preferred = preferred_provider_model_record(
-                provider_id,
-                configured_models or [],
-                include_deprecated=False,
-            )
-            cached = str((preferred or {}).get("native_model") or "").strip()
+            preferred_records = self._safe_provider_model_records(provider_id, configured_models)
+            cached = str((preferred_records[0] if preferred_records else {}).get("native_model") or "").strip()
             preferred_by_provider[provider_id] = cached
             return cached
 
@@ -4071,11 +4859,15 @@ class TaskService:
             if configured_models is not None and provider_id:
                 available_models = available_models_for(provider_id)
                 preferred_model = preferred_model_for(provider_id)
-                if preferred_model and model_id and available_models and model_id not in available_models:
-                    node["provider_id"] = provider_id
-                    node["model_id"] = preferred_model
-                    if not str(node.get("reasoning_effort") or "").strip():
-                        node["reasoning_effort"] = str(defaults.get("reasoning_effort") or raw_defaults.get("reasoning_effort") or "").strip() or None
+                if model_id and model_id not in available_models:
+                    if preferred_model:
+                        node["provider_id"] = provider_id
+                        node["model_id"] = preferred_model
+                        if not str(node.get("reasoning_effort") or "").strip():
+                            node["reasoning_effort"] = str(defaults.get("reasoning_effort") or raw_defaults.get("reasoning_effort") or "").strip() or None
+                    else:
+                        node["provider_id"] = ""
+                        node["model_id"] = ""
             if "permission_mode" not in node:
                 node["permission_mode"] = "ask"
             if "collaboration_mode" not in node:
@@ -4084,9 +4876,8 @@ class TaskService:
                 node["execution_backend"] = "app_server"
             merged_ui_hints = dict(node.get("ui_hints") or {})
             merged_ui_hints.update(node_ui_hints.get(node_id) or {})
-            metadata = GRAPH_TEMPLATE_PRODUCT_METADATA.get(template_id) or {}
-            merged_ui_hints.setdefault("recommended_provider_ids", list(metadata.get("recommended_provider_ids") or []))
-            merged_ui_hints.setdefault("recommended_model_ids", list(metadata.get("recommended_model_ids") or []))
+            merged_ui_hints.setdefault("recommended_provider_ids", list(recommended_provider_ids))
+            merged_ui_hints.setdefault("recommended_model_ids", list(recommended_model_ids))
             node["ui_hints"] = merged_ui_hints
 
     def _resolve_template_node_defaults(
@@ -4108,24 +4899,21 @@ class TaskService:
                 if available_models is None:
                     available_models = {
                         str(item.get("native_model") or "").strip()
-                        for item in provider_model_records(
+                        for item in self._safe_provider_model_records(
                             provider_id,
                             configured_models,
-                            include_disabled=False,
-                            include_deprecated=False,
                         )
                         if str(item.get("native_model") or "").strip()
                     }
                     available_by_provider[provider_id] = available_models
                 if available_models and model_id not in available_models:
-                    preferred = preferred_provider_model_record(
-                        provider_id,
-                        configured_models,
-                        include_deprecated=False,
-                    )
-                    preferred_model = str((preferred or {}).get("native_model") or "").strip()
+                    preferred_records = self._safe_provider_model_records(provider_id, configured_models)
+                    preferred_model = str((preferred_records[0] if preferred_records else {}).get("native_model") or "").strip()
                     if preferred_model:
                         normalized["model_id"] = preferred_model
+                    else:
+                        normalized.pop("provider_id", None)
+                        normalized.pop("model_id", None)
             resolved[node_id] = normalized
         return resolved
 
@@ -4197,8 +4985,8 @@ class TaskService:
                 current_provider == str(raw_default.get("provider_id") or "").strip()
                 and current_model == str(raw_default.get("model_id") or "").strip()
             ):
-                next_provider = str(resolved_default.get("provider_id") or current_provider).strip()
-                next_model = str(resolved_default.get("model_id") or current_model).strip()
+                next_provider = str(resolved_default.get("provider_id") or "").strip()
+                next_model = str(resolved_default.get("model_id") or "").strip()
                 next_effort = str(resolved_default.get("reasoning_effort") or node.get("reasoning_effort") or "").strip()
                 if next_provider != current_provider or next_model != current_model:
                     node["provider_id"] = next_provider
@@ -4673,6 +5461,14 @@ class TaskService:
 
         node_id = str(approval_details.get("node_id") or "node_gate").strip() or "node_gate"
         review_kind = str(approval_details.get("review_kind") or "human_gate").strip() or "human_gate"
+        graph_node = next(
+            (
+                dict(item)
+                for item in list(graph.get("nodes") or [])
+                if isinstance(item, dict) and str(item.get("node_id") or "").strip() == node_id
+            ),
+            {},
+        )
         created_at = self._later_iso(
             str(approval_details.get("requested_at") or "").strip(),
             now_iso(),
@@ -4730,6 +5526,17 @@ class TaskService:
             if decision == "approve"
             else ["Revise the smoke evidence or routing scope before asking for approval again."]
         )
+        approval_output_payload = {
+            "decision": decision,
+            "review_kind": review_kind,
+            "notes": notes,
+            "approval_reason": approval_details.get("reason"),
+        }
+        output_ports = self._graph_node_port_map(graph_node, direction="outputs")
+        typed_output_values = {}
+        first_output_port_id = next(iter(output_ports), "")
+        if first_output_port_id:
+            typed_output_values[first_output_port_id] = deepcopy(approval_output_payload)
         worker_output = self.record_graph_worker_output(
             {
                 "graph_id": graph_id,
@@ -4737,12 +5544,8 @@ class TaskService:
                 "node_id": node_id,
                 "worker_thread_id": worker_thread_id,
                 "human_summary": human_summary,
-                "machine_result": {
-                    "decision": decision,
-                    "review_kind": review_kind,
-                    "notes": notes,
-                    "approval_reason": approval_details.get("reason"),
-                },
+                "machine_result": approval_output_payload,
+                "typed_output_values": typed_output_values,
                 "confidence": "human_review",
                 "next_action_hints": next_actions,
                 "status": resolved_status,
@@ -4758,6 +5561,200 @@ class TaskService:
         run_ref = next((item for item in graph_run_refs if str(item.get("run_id") or "").strip() == run_id), None)
         if run_ref is None:
             raise ValueError("Run disappeared while resolving approval.")
+        run_policy_mode = str(dict(run_ref.get("policy_snapshot") or {}).get("mode") or "").strip()
+
+        full_run = self._load_full_graph_run(run_ref)
+        if run_policy_mode == "live_run" and isinstance(full_run, dict):
+            validated_graph = validate_graph_definition(graph)
+            orchestration_graph = (
+                validated_graph
+                if validated_graph.get("schema_registry") is not None
+                else self._orchestration_graph_for_task_graph(validated_graph)
+            )
+            compiled_plan = compile_agent_orchestration_graph(
+                orchestration_graph,
+                known_model_capabilities=self._known_model_capabilities_for_graph(orchestration_graph),
+            )
+            compiled_node_order = [
+                str(item.get("node_id") or "").strip()
+                for item in list(compiled_plan.get("nodes") or [])
+                if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+            ]
+            dependency_node_ids_by_node = {
+                str(item.get("node_id") or "").strip(): [
+                    str(dep_id).strip()
+                    for dep_id in list(item.get("dependency_node_ids") or [])
+                    if str(dep_id or "").strip()
+                ]
+                for item in list(compiled_plan.get("nodes") or [])
+                if isinstance(item, dict) and str(item.get("node_id") or "").strip()
+            }
+            approval_state_value = {
+                **approval_details,
+                "status": "approved" if decision == "approve" else "rejected",
+                "decision": decision,
+                "notes": notes,
+                "resolved_at": created_at,
+                "resolution_summary": human_summary,
+            }
+            full_run["approval_state"] = approval_state_value
+            full_run["updated_at"] = created_at
+            full_run["worker_bindings"] = [
+                deepcopy(dict(item))
+                for item in list(run_ref.get("worker_bindings") or [])
+                if isinstance(item, dict)
+            ]
+            node_run_states: list[dict[str, Any]] = []
+            for item in list(full_run.get("node_run_states") or []):
+                if not isinstance(item, dict):
+                    continue
+                current = dict(item)
+                current_node_id = str(current.get("node_id") or "").strip()
+                current_status = str(current.get("status") or "").strip()
+                if current_node_id == node_id:
+                    current["status"] = resolved_status
+                    current["outcome"] = resolved_outcome
+                    current["updated_at"] = created_at
+                    current["warnings"] = [] if decision == "approve" else [human_summary]
+                    current["summary"] = human_summary
+                elif decision != "approve" and current_status in {
+                    "queued",
+                    "ready",
+                    "running",
+                    "waiting_on_dependencies",
+                    "waiting_on_artifact",
+                    "waiting_on_approval",
+                }:
+                    current["status"] = "blocked"
+                    current["outcome"] = "blocked"
+                    current["updated_at"] = created_at
+                    current["warnings"] = [human_summary]
+                    current["summary"] = (
+                        f"{self._graph_node_label(graph, current_node_id)} remained blocked after approval rejection."
+                    )
+                node_run_states.append(current)
+            if decision == "approve":
+                node_state_by_id = {
+                    str(item.get("node_id") or "").strip(): item
+                    for item in node_run_states
+                    if str(item.get("node_id") or "").strip()
+                }
+                for current_node_id in compiled_node_order:
+                    if current_node_id == node_id:
+                        continue
+                    current = node_state_by_id.get(current_node_id)
+                    if not isinstance(current, dict):
+                        continue
+                    current_status = str(current.get("status") or "").strip()
+                    current_outcome = str(current.get("outcome") or "").strip()
+                    if current_status in {"completed", "failed", "cancelled", "needs_review"} or current_outcome in {
+                        "passed",
+                        "failed",
+                        "cancelled",
+                        "needs_review",
+                    }:
+                        continue
+                    dependency_node_ids = list(dependency_node_ids_by_node.get(current_node_id) or [])
+                    if not dependency_node_ids:
+                        continue
+                    dependency_states = [
+                        dict(node_state_by_id.get(dep_id) or {})
+                        for dep_id in dependency_node_ids
+                        if isinstance(node_state_by_id.get(dep_id), dict)
+                    ]
+                    if not dependency_states:
+                        continue
+                    if any(
+                        str(item.get("status") or "").strip() in {"failed", "cancelled", "needs_review"}
+                        or str(item.get("outcome") or "").strip() in {"failed", "blocked", "cancelled", "needs_review"}
+                        for item in dependency_states
+                    ):
+                        continue
+                    if all(str(item.get("status") or "").strip() == "completed" for item in dependency_states):
+                        current["status"] = "queued"
+                        current["outcome"] = "pending"
+                        current["updated_at"] = created_at
+                        current["warnings"] = []
+                        current["summary"] = (
+                            f"{self._graph_node_label(graph, current_node_id)} resumed after approval resolution."
+                        )
+                    else:
+                        current["status"] = "waiting_on_dependencies"
+                        current["outcome"] = "pending"
+                        current["updated_at"] = created_at
+                        current["warnings"] = []
+                        current["summary"] = (
+                            f"{self._graph_node_label(graph, current_node_id)} is waiting on upstream dependencies after approval resolution."
+                        )
+            full_run["node_run_states"] = node_run_states
+
+            event_refs = [dict(item) for item in list(full_run.get("event_refs") or []) if isinstance(item, dict)]
+            event_refs.append(
+                {
+                    "event_id": f"{run_id}-{node_id}-approval-resolved",
+                    "run_id": run_id,
+                    "task_id": str(run_ref.get("task_id") or ""),
+                    "trace_id": str(full_run.get("trace_id") or run_ref.get("trace_id") or f"trace-{run_id}"),
+                    "event_type": "approval_resolved",
+                    "created_at": created_at,
+                    "summary": human_summary,
+                    "node_id": node_id,
+                    "status": "approved" if decision == "approve" else "rejected",
+                }
+            )
+
+            unresolved_after_resolution = [
+                dict(item)
+                for item in node_run_states
+                if str(item.get("status") or "").strip()
+                not in {"completed", "failed", "cancelled", "needs_review", "blocked"}
+            ]
+            if decision == "approve" and unresolved_after_resolution:
+                full_run["status"] = "queued"
+            elif decision == "approve":
+                full_run["status"] = "completed"
+                event_refs.append(
+                    {
+                        "event_id": f"{run_id}-completed-after-approval",
+                        "run_id": run_id,
+                        "task_id": str(run_ref.get("task_id") or ""),
+                        "trace_id": str(full_run.get("trace_id") or run_ref.get("trace_id") or f"trace-{run_id}"),
+                        "event_type": "run_completed",
+                        "created_at": created_at,
+                        "summary": f"{str(graph.get('title') or graph_id)} completed after approval resolution.",
+                    }
+                )
+            else:
+                full_run["status"] = "failed"
+                event_refs.append(
+                    {
+                        "event_id": f"{run_id}-failed-after-approval",
+                        "run_id": run_id,
+                        "task_id": str(run_ref.get("task_id") or ""),
+                        "trace_id": str(full_run.get("trace_id") or run_ref.get("trace_id") or f"trace-{run_id}"),
+                        "event_type": "run_failed",
+                        "created_at": created_at,
+                        "summary": f"{str(graph.get('title') or graph_id)} remained blocked after approval rejection.",
+                    }
+                )
+            full_run["event_refs"] = event_refs
+            compact_live_ref = self._compact_graph_run_ref(full_run)
+            compact_live_ref = self._refresh_graph_run_export_report(compact_live_ref)
+            self._persist_full_graph_run(compact_live_ref, full_run)
+            task["graph_run_refs"] = [
+                compact_live_ref if str(item.get("run_id") or "").strip() == run_id else item
+                for item in graph_run_refs
+            ]
+            task["graph_activity_summary"] = self._graph_activity_summary(task)
+            task["updated_at"] = now_iso()
+            self._save_task(task)
+            self.durable_run_store().sync_compact_run_ref(compact_live_ref)
+            return {
+                "approval": compact_live_ref.get("approval_details"),
+                "run_ref": compact_live_ref,
+                "graph": graph,
+                "task": self.task_view(task, compact_graph_runs=True),
+            }
 
         self._transition_run_ref_counts(
             run_ref,
@@ -4784,7 +5781,6 @@ class TaskService:
         run_ref["event_count"] = int(run_ref.get("event_count") or 0) + 2
         run_ref["updated_at"] = created_at
 
-        full_run = self._load_full_graph_run(run_ref)
         if isinstance(full_run, dict):
             full_run["status"] = run_ref["status"]
             full_run["approval_state"] = {
@@ -5633,10 +6629,11 @@ class TaskService:
             status = "blocked"
             reasons.append("Execution policy requires human approval but no approval gate is declared.")
         artifact_outputs = [str(item).strip() for item in list(output_contract.get("artifact_outputs") or []) if str(item).strip()]
-        if not artifact_outputs:
+        machine_schema = output_contract.get("machine_result_schema")
+        has_structured_machine_result = not bool(output_contract.get("artifact_only")) and isinstance(machine_schema, dict)
+        if not artifact_outputs and not has_structured_machine_result:
             status = "blocked"
             reasons.append("Output contract does not declare any artifact outputs.")
-        machine_schema = output_contract.get("machine_result_schema")
         if not bool(output_contract.get("artifact_only")) and not isinstance(machine_schema, dict):
             status = "blocked"
             reasons.append("Output contract is missing machine_result_schema.")
@@ -5654,6 +6651,11 @@ class TaskService:
         context_policy = dict(edge.get("context_policy") or {})
         from_node = node_map.get(str(edge.get("from_node_id") or "").strip()) or {}
         source_outputs = [str(item).strip() for item in list(dict(from_node.get("output_contract") or {}).get("artifact_outputs") or []) if str(item).strip()]
+        source_output_contract = dict(from_node.get("output_contract") or {})
+        source_has_structured_machine_result = (
+            not bool(source_output_contract.get("artifact_only"))
+            and isinstance(source_output_contract.get("machine_result_schema"), dict)
+        )
         artifact_mode = str(context_policy.get("artifact_mode") or "").strip()
         included_artifacts = [str(item).strip() for item in list(context_policy.get("included_artifacts") or []) if str(item).strip()]
         if artifact_mode == "required_output_only":
@@ -5666,7 +6668,7 @@ class TaskService:
         if unknown_artifacts:
             status = "blocked"
             reasons.append(f"Included artifacts are not produced by the source node: {', '.join(unknown_artifacts)}.")
-        if artifact_mode == "required_output_only" and not source_outputs:
+        if artifact_mode == "required_output_only" and not source_outputs and not source_has_structured_machine_result:
             status = "blocked"
             reasons.append("Edge expects required output artifacts but the source node does not declare any.")
         if str(context_policy.get("history_mode") or "").strip() == "explicit_refs_only" and not resource_refs and not included_artifacts:
@@ -5737,6 +6739,7 @@ class TaskService:
             "diagnostic_refs": [],
             "asset_context_refs": [],
             "context_pack_refs": [],
+            "graph_documents": [],
             "graph_definitions": [],
             "graph_run_refs": [],
             "graph_snapshot_refs": [],
@@ -5978,13 +6981,14 @@ class TaskService:
                 validated = validate_graph_definition(dict(item))
             except Exception:
                 continue
-            if task_id and str(validated.get("task_id") or "") != task_id:
+            migrated = self._migrate_graph_record_to_current_document(validated, task_id=task_id)
+            if not migrated:
                 continue
-            graph_id = str(validated.get("graph_id") or "").strip()
+            graph_id = str(migrated.get("graph_id") or "").strip()
             if not graph_id or graph_id in seen:
                 continue
             seen.add(graph_id)
-            pruned.append(validated)
+            pruned.append(migrated)
         return pruned[:GRAPH_DEFINITION_LIMIT]
 
     def _prune_graph_run_refs(
@@ -7304,7 +8308,7 @@ class TaskService:
                 raise GraphContractValidationError(
                     f"edge {edge_id} {direction} port {node_id}.{port_id} expects a non-empty text value."
                 )
-        elif port_type == "structured_json":
+        elif port_type in {"structured_json", "tool_result"}:
             if not isinstance(value, (dict, list)):
                 raise GraphContractValidationError(
                     f"edge {edge_id} {direction} port {node_id}.{port_id} expects structured JSON data."
@@ -7396,9 +8400,14 @@ class TaskService:
             for item in artifact_refs
             if isinstance(item, dict) and str(item.get("artifact_id") or "").strip()
         }
-        if human_summary:
+        for port_id, value in dict(output_bundle.get("typed_output_values") or {}).items():
+            clean_port_id = str(port_id or "").strip()
+            if not clean_port_id:
+                continue
+            source_values[clean_port_id] = deepcopy(value)
+        if human_summary and "human_summary" not in source_values:
             source_values["human_summary"] = human_summary
-        if isinstance(machine_result, dict) and machine_result:
+        if isinstance(machine_result, dict) and machine_result and "machine_result" not in source_values:
             source_values["machine_result"] = deepcopy(machine_result)
 
         projected_inputs: dict[str, Any] = {}
@@ -7506,8 +8515,7 @@ class TaskService:
             ),
             {},
         )
-        if not edge:
-            raise ValueError(f"agent envelope references unknown edge_id {edge_id}.")
+        injection_mode = str(metadata.get("injection_mode") or "").strip()
         node_map = {
             str(item.get("node_id") or "").strip(): dict(item)
             for item in list(graph.get("nodes") or [])
@@ -7515,7 +8523,7 @@ class TaskService:
         }
         source_node = dict(node_map.get(source_node_id) or {})
         target_node = dict(node_map.get(target_node_id) or {})
-        if not source_node or not target_node:
+        if not target_node:
             raise ValueError("agent envelope typed handoff references unknown source or target node.")
         typed_handoff = dict(metadata.get("typed_handoff") or {})
         if not typed_handoff:
@@ -7527,6 +8535,45 @@ class TaskService:
             raise ValueError(
                 f"agent envelope typed handoff is not live-runnable: {diagnostic}"
             )
+        if not edge:
+            if injection_mode != "subgraph_entry_seed":
+                raise ValueError(f"agent envelope references unknown edge_id {edge_id}.")
+            binding_records = [
+                dict(item)
+                for item in list(typed_handoff.get("bindings") or [])
+                if isinstance(item, dict)
+            ]
+            if not binding_records:
+                raise ValueError("subgraph entry seed handoff is missing typed binding records.")
+            inputs = dict(typed_handoff.get("inputs") or {})
+            target_ports = self._graph_node_port_map(target_node, direction="inputs")
+            schema_registry = dict(graph.get("schema_registry") or {})
+            for binding in binding_records:
+                to_port_id = str(binding.get("to_port_id") or "").strip()
+                if not to_port_id or to_port_id not in inputs:
+                    raise ValueError("subgraph entry seed handoff is missing a required target input payload.")
+                value = binding.get("value")
+                if inputs[to_port_id] != value:
+                    raise ValueError(
+                        f"subgraph entry seed payload for {to_port_id} does not match its binding value."
+                    )
+                target_port = dict(target_ports.get(to_port_id) or {})
+                if not target_port:
+                    raise ValueError(
+                        f"subgraph entry seed references unknown target input port {to_port_id}."
+                    )
+                self._graph_validate_port_value(
+                    port=target_port,
+                    value=value,
+                    schema_registry=schema_registry,
+                    edge_id=edge_id,
+                    node_id=target_node_id,
+                    port_id=to_port_id,
+                    direction="target",
+                )
+            return typed_handoff
+        if not source_node:
+            raise ValueError("agent envelope typed handoff references unknown source or target node.")
         expected_bindings = [
             {
                 "from_port_id": str(item.get("from_port_id") or "").strip(),
@@ -7777,6 +8824,7 @@ class TaskService:
         output_envelope: dict[str, Any],
         bundle_paths: dict[str, str],
         generated_artifact_refs: list[dict[str, Any]],
+        selected_edge_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         handoffs: list[dict[str, Any]] = []
         node_map = {
@@ -7789,6 +8837,9 @@ class TaskService:
             if not isinstance(edge, dict):
                 continue
             if str(edge.get("from_node_id") or "").strip() != node_id:
+                continue
+            edge_id = str(edge.get("edge_id") or "").strip()
+            if selected_edge_ids is not None and edge_id not in selected_edge_ids:
                 continue
             context_policy = dict(edge.get("context_policy") or {})
             handoff_contract = dict(edge.get("handoff_contract") or {})
@@ -8151,7 +9202,7 @@ class TaskService:
                 "attempt": attempt_count,
                 "idempotency_key": delivery_idempotency_key,
                 "trace_id": str(output_bundle.get("trace_id") or f"trace-{run_id}"),
-                "sequence": 0,
+                "sequence": max(0, attempt_count - 1),
             },
             "security_policy": {
                 "exclude_private_memory": bool(input_envelope.get("exclude_private_memory")),
@@ -8223,6 +9274,8 @@ class TaskService:
             raise ValueError(f"agent envelope is missing required metadata fields: {', '.join(missing)}")
         if str(metadata.get("target_node_id") or "").strip() != expected_target_node_id:
             raise ValueError("agent envelope target node does not match the requested node.")
+        if str(recipient.get("lane_id") or "").strip() and str(recipient.get("lane_id") or "").strip() != expected_target_node_id:
+            raise ValueError("agent envelope recipient lane_id does not match the target node.")
         if str(recipient.get("agent_id") or "").strip() != self._graph_worker_stable_identifier("agent", metadata.get("graph_id"), expected_target_node_id):
             raise ValueError("agent envelope recipient agent_id does not match the target node.")
         if str(metadata.get("intent") or "").strip() != "graph_node_handoff":
@@ -8588,39 +9641,7 @@ class TaskService:
         }
 
     def _graph_activity_summary(self, task: dict[str, Any]) -> dict[str, Any]:
-        graph_definitions = [dict(item) for item in list(task.get("graph_definitions") or []) if isinstance(item, dict)]
-        graph_run_refs = [dict(item) for item in list(task.get("graph_run_refs") or []) if isinstance(item, dict)]
-        graph_status_counts: dict[str, int] = {}
-        run_status_counts: dict[str, int] = {}
-        for item in graph_definitions:
-            status = str(item.get("status") or "").strip()
-            if status:
-                graph_status_counts[status] = int(graph_status_counts.get(status) or 0) + 1
-        for item in graph_run_refs:
-            status = str(item.get("status") or "").strip()
-            if status:
-                run_status_counts[status] = int(run_status_counts.get(status) or 0) + 1
-        latest_graph_id = str(graph_definitions[0].get("graph_id") or "").strip() or None if graph_definitions else None
-        latest_run_id = str(graph_run_refs[0].get("run_id") or "").strip() or None if graph_run_refs else None
-        latest_run_status = str(graph_run_refs[0].get("status") or "").strip() or None if graph_run_refs else None
-        latest_updated_at = None
-        for candidate in [
-            str((graph_run_refs[0] or {}).get("updated_at") or "").strip() if graph_run_refs else "",
-            str((graph_definitions[0] or {}).get("updated_at") or "").strip() if graph_definitions else "",
-        ]:
-            if candidate:
-                latest_updated_at = candidate
-                break
-        return {
-            "graph_count": len(graph_definitions),
-            "run_count": len(graph_run_refs),
-            "latest_graph_id": latest_graph_id,
-            "latest_run_id": latest_run_id,
-            "latest_run_status": latest_run_status,
-            "latest_updated_at": latest_updated_at,
-            "graph_status_counts": graph_status_counts,
-            "run_status_counts": run_status_counts,
-        }
+        return self._graph_run_refs.graph_activity_summary(task)
 
     def _select_reloaded_task(
         self,
@@ -8758,7 +9779,9 @@ class TaskService:
         return self._prune_graph_definitions(merged, task_id="")
 
     def _orchestration_graph_for_task_graph(self, task_graph: dict[str, Any]) -> dict[str, Any]:
-        base = dict(task_graph.get("orchestration_graph") or {})
+        base = dict(dict(task_graph.get("graph_document") or {}).get("canonical_graph") or {})
+        if not base:
+            base = dict(task_graph.get("orchestration_graph") or {})
         if base:
             return self._sync_orchestration_graph_with_task_graph(base, task_graph=task_graph)
         return self._sync_orchestration_graph_with_task_graph(
@@ -9339,134 +10362,18 @@ class TaskService:
         return mapping.get(kind, "text")
 
     def _merge_task_graph_run_refs(self, persisted: Any, incoming: Any) -> list[dict[str, Any]]:
-        by_id: dict[str, dict[str, Any]] = {}
-        for source in (persisted, incoming):
-            for item in list(source or []):
-                if not isinstance(item, dict):
-                    continue
-                run_id = str(item.get("run_id") or "").strip()
-                if not run_id:
-                    continue
-                candidate = dict(item)
-                existing = by_id.get(run_id)
-                by_id[run_id] = self._merge_task_graph_run_ref(existing, candidate)
-        merged = sorted(
-            by_id.values(),
-            key=self._graph_run_ref_sort_key,
-            reverse=True,
+        return self._graph_run_refs.merge_task_graph_run_refs(
+            persisted,
+            incoming,
+            limit=GRAPH_RUN_REF_LIMIT,
         )
-        return merged[:GRAPH_RUN_REF_LIMIT]
 
     def _merge_task_graph_run_ref(
         self,
         existing: dict[str, Any] | None,
         candidate: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        if not existing:
-            return dict(candidate or {})
-        if not candidate:
-            return dict(existing)
-        left = dict(existing)
-        right = dict(candidate)
-        left_status = str(left.get("status") or "").strip()
-        right_status = str(right.get("status") or "").strip()
-        terminal_statuses = {"completed", "failed", "cancelled", "partial", "dry_run_passed", "dry_run_blocked"}
-        left_terminal = left_status in terminal_statuses
-        right_terminal = right_status in terminal_statuses
-        left_sort_key = self._graph_run_ref_sort_key(left)
-        right_sort_key = self._graph_run_ref_sort_key(right)
-        if right_sort_key != left_sort_key:
-            right_preferred = right_sort_key > left_sort_key
-        elif right_terminal != left_terminal:
-            right_preferred = right_terminal
-        else:
-            right_preferred = True
-        preferred = right if right_preferred else left
-        fallback = left if right_preferred else right
-        preferred_sort_key = right_sort_key if right_preferred else left_sort_key
-        fallback_sort_key = left_sort_key if right_preferred else right_sort_key
-        worker_bindings, _worker_bindings_from_preferred = self._select_task_graph_run_ref_object_array(
-            preferred=preferred.get("worker_bindings"),
-            fallback=fallback.get("worker_bindings"),
-            preferred_sort_key=preferred_sort_key,
-            fallback_sort_key=fallback_sort_key,
-            key_for=lambda item: str(item.get("node_id") or item.get("binding_id") or "").strip(),
-        )
-        artifact_refs, _artifact_refs_from_preferred = self._select_task_graph_run_ref_object_array(
-            preferred=preferred.get("artifact_refs"),
-            fallback=fallback.get("artifact_refs"),
-            preferred_sort_key=preferred_sort_key,
-            fallback_sort_key=fallback_sort_key,
-            key_for=lambda item: (
-                f"{str(item.get('artifact_id') or '').strip()}|"
-                f"{str(item.get('path') or '').strip()}"
-            ),
-        )
-        diagnostic_refs, _diagnostic_refs_from_preferred = self._select_task_graph_run_ref_object_array(
-            preferred=preferred.get("diagnostic_refs"),
-            fallback=fallback.get("diagnostic_refs"),
-            preferred_sort_key=preferred_sort_key,
-            fallback_sort_key=fallback_sort_key,
-            key_for=lambda item: (
-                f"{str(item.get('artifact_id') or '').strip()}|"
-                f"{str(item.get('path') or '').strip()}"
-            ),
-        )
-        timeline_events, timeline_source = self._select_task_graph_run_ref_timeline_events(
-            preferred=preferred,
-            fallback=fallback,
-            preferred_sort_key=preferred_sort_key,
-            fallback_sort_key=fallback_sort_key,
-        )
-        merged = {**fallback, **preferred}
-        merged["node_status_counts"] = self._merge_task_graph_run_ref_count_map(
-            fallback.get("node_status_counts"),
-            preferred.get("node_status_counts"),
-        )
-        merged["node_outcome_counts"] = self._merge_task_graph_run_ref_count_map(
-            fallback.get("node_outcome_counts"),
-            preferred.get("node_outcome_counts"),
-        )
-        merged["worker_bindings"] = worker_bindings
-        merged["artifact_refs"] = artifact_refs
-        merged["diagnostic_refs"] = diagnostic_refs
-        merged["timeline_events"] = timeline_events
-        merged["worker_count"] = max(
-            int(preferred.get("worker_count") or 0),
-            int(fallback.get("worker_count") or 0),
-            len(worker_bindings),
-        )
-        merged["artifact_count"] = max(
-            int(preferred.get("artifact_count") or 0),
-            int(fallback.get("artifact_count") or 0),
-            len(artifact_refs),
-        )
-        merged["event_count"] = max(
-            int(timeline_source.get("event_count") or 0),
-            len(timeline_events),
-        )
-        latest_event = timeline_events[-1] if timeline_events else None
-        latest_event_at = str(dict(latest_event or {}).get("created_at") or "").strip()
-        latest_event_type = str(dict(latest_event or {}).get("event_type") or "").strip()
-        merged["latest_event_at"] = (
-            latest_event_at
-            or str(preferred.get("latest_event_at") or "").strip()
-            or str(fallback.get("latest_event_at") or "").strip()
-            or None
-        )
-        merged["latest_event_type"] = (
-            latest_event_type
-            or str(preferred.get("latest_event_type") or "").strip()
-            or str(fallback.get("latest_event_type") or "").strip()
-            or None
-        )
-        merged["updated_at"] = (
-            str(merged.get("latest_event_at") or "").strip()
-            or str(preferred.get("updated_at") or "").strip()
-            or str(fallback.get("updated_at") or "").strip()
-            or now_iso()
-        )
-        return merged
+        return self._graph_run_refs.merge_task_graph_run_ref(existing, candidate)
 
     def _select_task_graph_run_ref_timeline_events(
         self,
@@ -9476,21 +10383,12 @@ class TaskService:
         preferred_sort_key: tuple[float, float, str],
         fallback_sort_key: tuple[float, float, str],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        preferred_timeline = self._compact_graph_run_timeline_events(preferred.get("timeline_events"))
-        fallback_timeline = self._compact_graph_run_timeline_events(fallback.get("timeline_events"))
-        if preferred_timeline and fallback_timeline:
-            if preferred_sort_key > fallback_sort_key:
-                return preferred_timeline, preferred
-            if fallback_sort_key > preferred_sort_key:
-                return fallback_timeline, fallback
-            if len(preferred_timeline) >= len(fallback_timeline):
-                return preferred_timeline, preferred
-            return fallback_timeline, fallback
-        if preferred_timeline:
-            return preferred_timeline, preferred
-        if fallback_timeline:
-            return fallback_timeline, fallback
-        return [], preferred
+        return self._graph_run_refs._select_task_graph_run_ref_timeline_events(
+            preferred=preferred,
+            fallback=fallback,
+            preferred_sort_key=preferred_sort_key,
+            fallback_sort_key=fallback_sort_key,
+        )
 
     def _select_task_graph_run_ref_object_array(
         self,
@@ -9501,21 +10399,13 @@ class TaskService:
         fallback_sort_key: tuple[float, float, str],
         key_for: Callable[[dict[str, Any]], str],
     ) -> tuple[list[dict[str, Any]], bool]:
-        preferred_items = self._compact_task_graph_run_ref_object_array(preferred, key_for=key_for)
-        fallback_items = self._compact_task_graph_run_ref_object_array(fallback, key_for=key_for)
-        if preferred_items and fallback_items:
-            if preferred_sort_key > fallback_sort_key:
-                return preferred_items, True
-            if fallback_sort_key > preferred_sort_key:
-                return fallback_items, False
-            if len(preferred_items) >= len(fallback_items):
-                return preferred_items, True
-            return fallback_items, False
-        if preferred_items:
-            return preferred_items, True
-        if fallback_items:
-            return fallback_items, False
-        return [], True
+        return self._graph_run_refs._select_task_graph_run_ref_object_array(
+            preferred=preferred,
+            fallback=fallback,
+            preferred_sort_key=preferred_sort_key,
+            fallback_sort_key=fallback_sort_key,
+            key_for=key_for,
+        )
 
     @staticmethod
     def _compact_task_graph_run_ref_object_array(
@@ -9523,29 +10413,11 @@ class TaskService:
         *,
         key_for: Callable[[dict[str, Any]], str],
     ) -> list[dict[str, Any]]:
-        merged: dict[str, dict[str, Any]] = {}
-        anonymous: list[dict[str, Any]] = []
-        for item in list(value or []):
-            if not isinstance(item, dict):
-                continue
-            clean = dict(item)
-            key = key_for(clean)
-            if not key:
-                anonymous.append(clean)
-                continue
-            merged[key] = {**merged.get(key, {}), **clean}
-        return [*merged.values(), *anonymous]
+        return TaskGraphRunRefService._compact_task_graph_run_ref_object_array(value, key_for=key_for)
 
     @staticmethod
     def _merge_task_graph_run_ref_count_map(left: Any, right: Any) -> dict[str, int]:
-        merged: dict[str, int] = {}
-        for source in (left, right):
-            for key, value in dict(source or {}).items():
-                clean_key = str(key or "").strip()
-                if not clean_key:
-                    continue
-                merged[clean_key] = max(int(merged.get(clean_key) or 0), int(value or 0))
-        return merged
+        return TaskGraphRunRefService._merge_task_graph_run_ref_count_map(left, right)
 
     def _merge_task_graph_snapshot_refs(self, persisted: Any, incoming: Any) -> list[dict[str, Any]]:
         by_id: dict[str, dict[str, Any]] = {}
@@ -9569,11 +10441,7 @@ class TaskService:
 
     @staticmethod
     def _graph_run_ref_sort_key(item: dict[str, Any]) -> tuple[float, float, str]:
-        updated = str(item.get("updated_at") or "").strip()
-        created = str(item.get("created_at") or "").strip()
-        updated_ts = dt.datetime.fromisoformat(updated).timestamp() if updated else float("-inf")
-        created_ts = dt.datetime.fromisoformat(created).timestamp() if created else float("-inf")
-        return (updated_ts, created_ts, str(item.get("run_id") or "").strip())
+        return TaskGraphRunRefService.graph_run_ref_sort_key(item)
 
     @staticmethod
     def _graph_snapshot_ref_sort_key(item: dict[str, Any]) -> tuple[float, float, str]:

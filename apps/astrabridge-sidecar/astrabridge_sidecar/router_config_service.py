@@ -11,6 +11,13 @@ from .capabilities.capability_routes import (
 )
 from .common import app_data_dir, now_iso, read_json, write_json
 from .model_catalog import current_generated_catalog, resolved_web_capability_fields
+from .provider_capability_snapshot import (
+    build_verified_capability_snapshot,
+    capability_snapshot_matches_current_contract,
+    current_model_provider_contract,
+    describe_capability_snapshot_manifest,
+    aggregate_matrix_entries_by_model,
+)
 from .providers import (
     default_builtin_tool_support,
     default_context_compaction_support,
@@ -21,7 +28,7 @@ from .providers import (
 )
 from .providers.transports import transport_class_for_profile
 from .providers.transports.base import transport_signature_for_class
-from .providers.tooling import assess_model_authority, has_structured_tool_surface
+from .providers.tooling import assess_default_route_verification, assess_model_authority, has_structured_tool_surface
 
 
 PROFILE_MODEL_SEED_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
@@ -635,6 +642,68 @@ class RouterConfigService:
             updated_model,
         )
 
+    def record_verified_capability_snapshot(self, model_id: str, snapshot: dict[str, Any] | None) -> dict[str, Any]:
+        payload = self._load()
+        models = []
+        updated_model: dict[str, Any] | None = None
+        for item in payload["models"]:
+            if not isinstance(item, dict):
+                models.append(item)
+                continue
+            if str(item.get("id") or "") != str(model_id or "").strip():
+                models.append(item)
+                continue
+            updated = dict(item)
+            if snapshot:
+                updated["verified_capability_snapshot"] = dict(snapshot)
+            else:
+                updated.pop("verified_capability_snapshot", None)
+            updated["updated_at"] = now_iso()
+            updated_model = updated
+            models.append(updated)
+        if updated_model is None:
+            raise ValueError(f"Unknown model id: {model_id}")
+        payload["models"] = models
+        write_json(self.store_path, payload)
+        providers = payload["providers"]
+        return self._refresh_model(
+            {
+                str(item.get("id") or item.get("provider_id") or ""): dict(item)
+                for item in providers
+                if isinstance(item, dict)
+            },
+            updated_model,
+        )
+
+    def record_provider_compatibility_matrix(self, matrix: dict[str, Any]) -> dict[str, Any]:
+        payload = self._load()
+        provider_map = {
+            str(item.get("id") or item.get("provider_id") or ""): dict(item)
+            for item in list(payload.get("providers") or [])
+            if isinstance(item, dict)
+        }
+        entries_by_model = aggregate_matrix_entries_by_model(matrix)
+        models: list[dict[str, Any]] = []
+        for item in list(payload.get("models") or []):
+            if not isinstance(item, dict):
+                continue
+            updated = dict(item)
+            model_id = str(updated.get("id") or "").strip()
+            provider_id = str(updated.get("provider") or "").strip()
+            matrix_entries = list(entries_by_model.get(model_id) or [])
+            if matrix_entries:
+                updated["verified_capability_snapshot"] = build_verified_capability_snapshot(
+                    model=updated,
+                    provider=dict(provider_map.get(provider_id) or {}),
+                    matrix_entries=matrix_entries,
+                    created_at=str(matrix.get("generated_at") or matrix.get("created_at") or now_iso()),
+                )
+                updated["updated_at"] = now_iso()
+            models.append(updated)
+        payload["models"] = models
+        write_json(self.store_path, payload)
+        return self.snapshot()
+
     def export_sanitized(self) -> dict[str, Any]:
         payload = self._load()
         exported = {
@@ -917,7 +986,8 @@ class RouterConfigService:
             "provider_family": provider_family or model.get("provider_family"),
             **_model_capability_fields(merged),
         }
-        return _apply_app_server_image_transport_status(refreshed, provider=provider)
+        refreshed = _apply_app_server_image_transport_status(refreshed, provider=provider)
+        return _apply_verified_capability_snapshot_status(refreshed, provider=provider)
 
 
 def _profile_seed_entries(provider_family: str | None) -> list[dict[str, Any]]:
@@ -968,6 +1038,11 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
     for warning in authority.ui_warnings:
         if warning not in ui_warnings:
             ui_warnings.append(warning)
+    default_route = assess_default_route_verification(model)
+    default_multimodal_route = assess_default_route_verification(
+        model,
+        require_image_input_verified=True,
+    )
     # Keep the compact boolean capability fields for older UI/runtime
     # consumers, while allowing a provider-specific transport contract to
     # add richer limits on top.
@@ -1033,8 +1108,14 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
         "command_execution_note": authority.command_execution_note,
         "source_urls": list(model.get("source_urls") or []),
         "source_status": str(model.get("source_status") or "seeded"),
-        "recommended": bool(model.get("recommended", False)),
-        "default_for_provider": bool(model.get("default_for_provider", False)),
+        "default_route_verified": bool(default_route.get("verified", False)),
+        "default_route_status": str(default_route.get("status") or "warning_gated"),
+        "default_route_blockers": list(default_route.get("reasons") or []),
+        "default_multimodal_route_verified": bool(default_multimodal_route.get("verified", False)),
+        "default_multimodal_route_status": str(default_multimodal_route.get("status") or "warning_gated"),
+        "default_multimodal_route_blockers": list(default_multimodal_route.get("reasons") or []),
+        "recommended": bool(model.get("recommended", False)) and bool(default_route.get("verified", False)),
+        "default_for_provider": bool(model.get("default_for_provider", False)) and bool(default_route.get("verified", False)),
         "deprecated": bool(model.get("deprecated", False)),
         "deprecated_after": model.get("deprecated_after"),
         "confidence": model.get("confidence"),
@@ -1043,6 +1124,7 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
         "last_verified_at": model.get("last_verified_at"),
         "verification_notes": str(model.get("verification_notes") or ""),
         "app_server_image_transport_verification": dict(model.get("app_server_image_transport_verification") or {}),
+        "verified_capability_snapshot": dict(model.get("verified_capability_snapshot") or {}),
     }
 
 
@@ -1062,6 +1144,33 @@ def _apply_app_server_image_transport_status(model: dict[str, Any], *, provider:
     else:
         modality_limits.pop("app_server_image_last_verified_at", None)
     refreshed["modality_limits"] = modality_limits
+    return refreshed
+
+
+def _apply_verified_capability_snapshot_status(model: dict[str, Any], *, provider: dict[str, Any]) -> dict[str, Any]:
+    refreshed = dict(model)
+    snapshot = dict(refreshed.get("verified_capability_snapshot") or {})
+    current_contract = current_model_provider_contract(refreshed, provider=provider)
+    if snapshot:
+        manifest_state = describe_capability_snapshot_manifest(snapshot, current_contract=current_contract)
+        verification_state = str(manifest_state.get("verification_state") or "unknown").strip().lower() or "unknown"
+        if verification_state in {"verified", "partial", "blocked", "unknown"}:
+            refreshed["verified_capability_snapshot_status"] = str(snapshot.get("status") or "unknown").strip().lower() or "unknown"
+        else:
+            refreshed["verified_capability_snapshot_status"] = "stale"
+        refreshed["verified_capability_snapshot_last_verified_at"] = snapshot.get("verified_at")
+        refreshed["verified_capability_snapshot_manifest_digest"] = manifest_state.get("digest")
+        refreshed["verified_capability_snapshot_freshness_status"] = manifest_state.get("freshness_status")
+        refreshed["verified_capability_snapshot_verification_state"] = verification_state
+        refreshed["verified_capability_snapshot_expires_at"] = manifest_state.get("expires_at")
+    else:
+        refreshed["verified_capability_snapshot_status"] = "unverified"
+        refreshed["verified_capability_snapshot_last_verified_at"] = None
+        refreshed["verified_capability_snapshot_manifest_digest"] = None
+        refreshed["verified_capability_snapshot_freshness_status"] = None
+        refreshed["verified_capability_snapshot_verification_state"] = "unverified"
+        refreshed["verified_capability_snapshot_expires_at"] = None
+    refreshed["verified_capability_snapshot_contract"] = current_contract
     return refreshed
 
 

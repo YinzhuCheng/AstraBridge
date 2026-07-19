@@ -16,14 +16,16 @@ if __package__ in {None, ""}:
         write_stdio_message,
     )
     from astrabridge_sidecar.multimodal_result_envelope import typed_result_text_summary
+    from astrabridge_sidecar.release_identity import release_product_version
 else:
     from .capabilities.runtime import CapabilityRuntime
     from .mcp_server_core import McpServerCore, McpStdioFramingState, read_stdio_message, run_stdio_mcp_server, write_stdio_message
     from .multimodal_result_envelope import typed_result_text_summary
+    from .release_identity import release_product_version
 
 
 SERVER_NAME = "astrabridge-capabilities"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = release_product_version()
 _STREAM_STATE = McpStdioFramingState()
 
 

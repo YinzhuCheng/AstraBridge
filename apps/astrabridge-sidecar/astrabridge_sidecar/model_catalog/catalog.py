@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from ..providers import get_provider_profile, resolve_provider_id
-from ..providers.tooling import assess_model_authority, has_structured_tool_surface, normalize_apply_patch_tool_type
+from ..providers.tooling import (
+    assess_default_route_verification,
+    assess_model_authority,
+    has_structured_tool_surface,
+    normalize_apply_patch_tool_type,
+)
 from ..reasoning_policy import normalize_reasoning_effort, normalize_reasoning_efforts, resolve_reasoning_state_visibility
 
 
@@ -714,6 +719,11 @@ def model_catalog_entry(
     for warning in authority.ui_warnings:
         if warning not in ui_warnings:
             ui_warnings.append(warning)
+    default_route = assess_default_route_verification(configured_model)
+    default_multimodal_route = assess_default_route_verification(
+        configured_model,
+        require_image_input_verified=True,
+    )
     web_capabilities = resolved_web_capability_fields(configured_model)
     runtime_provider_contract = resolved_runtime_provider_contract_fields(
         {
@@ -821,8 +831,14 @@ def model_catalog_entry(
         "last_verified_at": configured_model.get("last_verified_at"),
         "verification_notes": configured_model.get("verification_notes") or "",
         "catalog_version": configured_model.get("catalog_version"),
-        "recommended": bool(configured_model.get("recommended", False)),
-        "default_for_provider": bool(configured_model.get("default_for_provider", False)),
+        "default_route_verified": bool(default_route.get("verified", False)),
+        "default_route_status": str(default_route.get("status") or "warning_gated"),
+        "default_route_blockers": list(default_route.get("reasons") or []),
+        "default_multimodal_route_verified": bool(default_multimodal_route.get("verified", False)),
+        "default_multimodal_route_status": str(default_multimodal_route.get("status") or "warning_gated"),
+        "default_multimodal_route_blockers": list(default_multimodal_route.get("reasons") or []),
+        "recommended": bool(configured_model.get("recommended", False)) and bool(default_route.get("verified", False)),
+        "default_for_provider": bool(configured_model.get("default_for_provider", False)) and bool(default_route.get("verified", False)),
         "deprecated": bool(configured_model.get("deprecated", False)),
         "deprecated_after": configured_model.get("deprecated_after"),
         "confidence": configured_model.get("confidence"),

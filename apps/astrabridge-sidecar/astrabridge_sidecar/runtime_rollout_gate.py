@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -116,71 +118,81 @@ def run_runtime_rollout_gate(
     reports_dir = gate_run_dir / "reports"
     validations_dir = gate_run_dir / "validations"
     screenshots_dir = gate_run_dir / "screenshots"
-    for path in (gate_run_dir, raw_dir, reports_dir, validations_dir, screenshots_dir):
+    state_root = gate_run_dir / "state"
+    for path in (gate_run_dir, raw_dir, reports_dir, validations_dir, screenshots_dir, state_root):
         path.mkdir(parents=True, exist_ok=True)
 
     command_runner = command_runner or _default_command_runner
     release_gate_runner = release_gate_runner or run_runtime_stability_gate
-    feature_flags = runtime_rollout_feature_flags()
-    write_json(validations_dir / "feature-flags.json", feature_flags)
+    with _temporary_env(
+        {
+            "ASTRABRIDGE_APPDATA": str(state_root / "appdata"),
+            "ASTRABRIDGE_RUNTIME_ROOT": str(state_root / "runtime"),
+        }
+    ):
+        feature_flags = runtime_rollout_feature_flags()
+        write_json(validations_dir / "feature-flags.json", feature_flags)
 
-    shadow_comparison = capture_runtime_rollout_shadow_comparison(output_dir=raw_dir / "shadow-comparison")
-    write_json(validations_dir / "shadow-comparison.json", redact_sensitive(shadow_comparison))
+        shadow_comparison = capture_runtime_rollout_shadow_comparison(output_dir=raw_dir / "shadow-comparison")
+        write_json(validations_dir / "shadow-comparison.json", redact_sensitive(shadow_comparison))
 
-    migration_evidence = capture_runtime_rollout_migration_evidence(
-        repo_workspace_root=root,
-        output_dir=raw_dir / "migration",
-        dogfood_source_workspace=dogfood_source_workspace or root,
-    )
-    write_json(validations_dir / "migration-evidence.json", redact_sensitive(migration_evidence))
-
-    rollback_readback = capture_runtime_rollout_rollback_readback(output_dir=raw_dir / "rollback-readback")
-    write_json(validations_dir / "rollback-readback.json", redact_sensitive(rollback_readback))
-
-    desktop_build = {
-        "status": "skipped",
-        "command": None,
-        "cwd": str(_DESKTOP_ROOT),
-        "stdout": "",
-        "stderr": "",
-        "returncode": None,
-    }
-    if include_desktop_build:
-        desktop_build = command_runner(
-            ["cmd", "/c", "npm", "run", "build"],
-            _DESKTOP_ROOT,
+        migration_evidence = capture_runtime_rollout_migration_evidence(
+            repo_workspace_root=root,
+            output_dir=raw_dir / "migration",
+            dogfood_source_workspace=dogfood_source_workspace or root,
         )
-        write_json(validations_dir / "desktop-build.json", redact_sensitive(desktop_build))
+        write_json(validations_dir / "migration-evidence.json", redact_sensitive(migration_evidence))
 
-    desktop_visual_qa = {
-        "schema_version": "astrabridge-runtime-rollout-desktop-visual-qa-v1",
-        "status": "skipped",
-        "screenshot_path": None,
-        "report_path": None,
-        "command": None,
-    }
-    if include_desktop_visual_qa:
-        desktop_visual_qa = _capture_desktop_visual_qa(
-            screenshots_dir=screenshots_dir,
-            reports_dir=reports_dir,
-            command_runner=command_runner,
-        )
-        write_json(validations_dir / "desktop-visual-qa.json", redact_sensitive(desktop_visual_qa))
+        rollback_readback = capture_runtime_rollout_rollback_readback(output_dir=raw_dir / "rollback-readback")
+        write_json(validations_dir / "rollback-readback.json", redact_sensitive(rollback_readback))
 
-    release_gate_summary: dict[str, Any] | None = None
-    if include_release_gate:
-        release_gate_summary = release_gate_runner(
-            workspace_root=root,
-            artifact_root=gate_run_dir / "rg",
-            run_id="r",
-            mode="release",
-            include_fixture_evidence=True,
-            include_process_inventory=True,
-        )
-        write_json(validations_dir / "release-gate-summary.json", redact_sensitive(release_gate_summary))
+        desktop_build = {
+            "status": "skipped",
+            "command": None,
+            "cwd": str(_DESKTOP_ROOT),
+            "stdout": "",
+            "stderr": "",
+            "returncode": None,
+        }
+        if include_desktop_build:
+            desktop_build = command_runner(
+                ["cmd", "/c", "npm", "run", "build"],
+                _DESKTOP_ROOT,
+            )
+            write_json(validations_dir / "desktop-build.json", redact_sensitive(desktop_build))
 
-    secret_scan = scan_runtime_stability_artifacts(gate_run_dir)
-    write_json(validations_dir / "secret-scan.json", secret_scan)
+        desktop_visual_qa = {
+            "schema_version": "astrabridge-runtime-rollout-desktop-visual-qa-v1",
+            "status": "skipped",
+            "screenshot_path": None,
+            "report_path": None,
+            "command": None,
+        }
+        if include_desktop_visual_qa:
+            desktop_visual_qa = _capture_desktop_visual_qa(
+                screenshots_dir=screenshots_dir,
+                reports_dir=reports_dir,
+                command_runner=command_runner,
+            )
+            write_json(validations_dir / "desktop-visual-qa.json", redact_sensitive(desktop_visual_qa))
+
+        release_gate_summary: dict[str, Any] | None = None
+        if include_release_gate:
+            release_gate_summary = release_gate_runner(
+                workspace_root=root,
+                artifact_root=gate_run_dir / "rg",
+                run_id="r",
+                mode="release",
+                include_fixture_evidence=True,
+                include_process_inventory=True,
+            )
+            write_json(validations_dir / "release-gate-summary.json", redact_sensitive(release_gate_summary))
+        release_fault_matrix = dict((release_gate_summary or {}).get("fault_matrix") or {})
+        release_long_horizon_bundle = dict((release_gate_summary or {}).get("long_horizon_bundle") or {})
+        release_injected_chaos_drills = dict((release_gate_summary or {}).get("injected_chaos_drills") or {})
+
+        secret_scan = scan_runtime_stability_artifacts(gate_run_dir)
+        write_json(validations_dir / "secret-scan.json", secret_scan)
 
     checks = {
         "feature_flags": "pass",
@@ -220,6 +232,41 @@ def run_runtime_rollout_gate(
                 else None
             ),
         },
+        "release_fault_matrix": {
+            "status": str(release_fault_matrix.get("status") or ("missing" if include_release_gate else "skipped")),
+            "release_ready": bool(release_fault_matrix.get("release_ready")),
+            "case_count": int(release_fault_matrix.get("case_count") or 0),
+            "path": (
+                str(dict(release_gate_summary.get("artifact_paths") or {}).get("fault_matrix_json") or "")
+                if isinstance(release_gate_summary, dict)
+                else None
+            ),
+            "cases": list(release_fault_matrix.get("cases") or []),
+        },
+        "release_long_horizon_bundle": {
+            "status": str(release_long_horizon_bundle.get("status") or ("missing" if include_release_gate else "skipped")),
+            "release_qualified": bool(release_long_horizon_bundle.get("release_qualified")),
+            "bundle_id": str(release_long_horizon_bundle.get("bundle_id") or ""),
+            "suite_count": int(release_long_horizon_bundle.get("suite_count") or 0),
+            "path": (
+                str(dict(release_gate_summary.get("artifact_paths") or {}).get("long_horizon_bundle_json") or "")
+                if isinstance(release_gate_summary, dict)
+                else None
+            ),
+            "suite_labels": list(release_long_horizon_bundle.get("suite_labels") or []),
+        },
+        "release_injected_chaos_drills": {
+            "status": str(release_injected_chaos_drills.get("status") or ("missing" if include_release_gate else "skipped")),
+            "release_qualified": bool(release_injected_chaos_drills.get("release_qualified")),
+            "drill_pack_id": str(release_injected_chaos_drills.get("drill_pack_id") or ""),
+            "drill_count": int(release_injected_chaos_drills.get("drill_count") or 0),
+            "path": (
+                str(dict(release_gate_summary.get("artifact_paths") or {}).get("injected_chaos_drills_json") or "")
+                if isinstance(release_gate_summary, dict)
+                else None
+            ),
+            "drill_labels": list(release_injected_chaos_drills.get("drill_labels") or []),
+        },
         "secret_scan": {
             "status": secret_scan.get("status"),
             "finding_count": secret_scan.get("finding_count"),
@@ -231,6 +278,7 @@ def run_runtime_rollout_gate(
             "reports_dir": str(reports_dir),
             "validations_dir": str(validations_dir),
             "screenshots_dir": str(screenshots_dir),
+            "state_root": str(state_root),
             "summary_json": str(reports_dir / "summary.json"),
             "report_md": str(reports_dir / "report.md"),
         },
@@ -243,7 +291,7 @@ def run_runtime_rollout_gate(
 def capture_runtime_rollout_shadow_comparison(*, output_dir: str | Path) -> dict[str, Any]:
     target_dir = Path(output_dir).expanduser().resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
-    fixture_root = target_dir / "fixture-workspace"
+    fixture_root = _new_fixture_root("shadow")
     workspace = fixture_root / "workspace"
     (workspace / "PRIVATE").mkdir(parents=True, exist_ok=True)
     (workspace / ".astrabridge").mkdir(parents=True, exist_ok=True)
@@ -397,7 +445,7 @@ def capture_runtime_rollout_migration_evidence(
 def capture_runtime_rollout_rollback_readback(*, output_dir: str | Path) -> dict[str, Any]:
     target_dir = Path(output_dir).expanduser().resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
-    fixture_root = target_dir / "rollback-fixture-workspace"
+    fixture_root = _new_fixture_root("rb")
     workspace = fixture_root / "workspace"
     (workspace / "PRIVATE").mkdir(parents=True, exist_ok=True)
     (workspace / ".astrabridge").mkdir(parents=True, exist_ok=True)
@@ -418,8 +466,8 @@ def capture_runtime_rollout_rollback_readback(*, output_dir: str | Path) -> dict
     store = tasks.durable_run_store()
     db_before = store.db_path.read_bytes()
     db_before_hash = hashlib.sha256(db_before).hexdigest()
-    snapshot_root = target_dir / "rollback-snapshot"
-    snapshot_workspace = snapshot_root / "workspace"
+    snapshot_root = target_dir / "r"
+    snapshot_workspace = snapshot_root / "w"
     if snapshot_root.exists():
         shutil.rmtree(snapshot_root)
     shutil.copytree(workspace, snapshot_workspace)
@@ -479,6 +527,27 @@ def render_runtime_rollout_gate_report(summary: dict[str, Any]) -> str:
             "",
             f"- Status: `{dict(summary.get('rollback_readback') or {}).get('status')}`",
             f"- Run id: `{dict(summary.get('rollback_readback') or {}).get('run_id')}`",
+            "",
+            "## Release fault matrix",
+            "",
+            f"- Status: `{dict(summary.get('release_fault_matrix') or {}).get('status')}`",
+            f"- Release ready: `{dict(summary.get('release_fault_matrix') or {}).get('release_ready')}`",
+            f"- Case count: `{dict(summary.get('release_fault_matrix') or {}).get('case_count')}`",
+            f"- Matrix path: `{dict(summary.get('release_fault_matrix') or {}).get('path')}`",
+            "",
+            "## Release long-horizon bundle",
+            "",
+            f"- Status: `{dict(summary.get('release_long_horizon_bundle') or {}).get('status')}`",
+            f"- Release qualified: `{dict(summary.get('release_long_horizon_bundle') or {}).get('release_qualified')}`",
+            f"- Bundle id: `{dict(summary.get('release_long_horizon_bundle') or {}).get('bundle_id')}`",
+            f"- Bundle path: `{dict(summary.get('release_long_horizon_bundle') or {}).get('path')}`",
+            "",
+            "## Release injected chaos drills",
+            "",
+            f"- Status: `{dict(summary.get('release_injected_chaos_drills') or {}).get('status')}`",
+            f"- Release qualified: `{dict(summary.get('release_injected_chaos_drills') or {}).get('release_qualified')}`",
+            f"- Drill pack id: `{dict(summary.get('release_injected_chaos_drills') or {}).get('drill_pack_id')}`",
+            f"- Drill path: `{dict(summary.get('release_injected_chaos_drills') or {}).get('path')}`",
             "",
             "## Artifact paths",
             "",
@@ -821,6 +890,25 @@ def _default_command_runner(command: list[str], cwd: Path) -> dict[str, Any]:
         "stdout": completed.stdout[-20000:],
         "stderr": completed.stderr[-20000:],
     }
+
+
+def _new_fixture_root(label: str) -> Path:
+    return Path(tempfile.mkdtemp(prefix=f"astrabridge-rollout-{label}-")).resolve()
+
+
+@contextmanager
+def _temporary_env(updates: dict[str, str]) -> Any:
+    previous = {key: os.environ.get(key) for key in updates}
+    try:
+        for key, value in updates.items():
+            os.environ[key] = value
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _resolve_rollout_run_dir(*, root: Path, artifact_root: str | Path | None, run_id: str) -> Path:

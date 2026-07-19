@@ -29,7 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from astrabridge_sidecar import common as common_module
 from astrabridge_sidecar import project_service as project_service_module
+from astrabridge_sidecar import release_identity as release_identity_module
 from astrabridge_sidecar import runtime_service as runtime_service_module
+from astrabridge_sidecar import server as server_module
 from astrabridge_sidecar import astrabridge_web_mcp_server
 from astrabridge_sidecar import web_tool_service as web_tool_service_module
 from astrabridge_sidecar.app_server_client import AppServerClient, JsonRpcError
@@ -94,7 +96,13 @@ from astrabridge_sidecar.router_service import ROUTER_ENV_KEY, RouterService
 from astrabridge_sidecar.runtime_config_service import RuntimeConfigService
 from astrabridge_sidecar.runtime_supervisor_service import RuntimeSupervisorService
 from astrabridge_sidecar.runtime_service import RuntimeService
-from astrabridge_sidecar.server import AppContext, Handler, sse_frame, turn_text_from_payload
+from astrabridge_sidecar.server import (
+    AppContext,
+    Handler,
+    runtime_event_sse_frames,
+    sse_frame,
+    turn_text_from_payload,
+)
 from astrabridge_sidecar.task_conversation_service import TaskConversationService
 from astrabridge_sidecar.task_service import TaskService
 from astrabridge_sidecar.tool_context_service import ToolContextService
@@ -152,6 +160,14 @@ class DummyRouter:
             "status": 200,
             "preview": {"model": model_id},
             "response_excerpt": "ok",
+        }
+
+
+class _UpdateRouteProjects:
+    def __init__(self, current_project: dict[str, object] | None = None) -> None:
+        self.current_project = current_project or {
+            "project_id": "project-1",
+            "ui_preferences": {"update_channel": "beta"},
         }
 
     def test_model_case(self, *, provider_id: str, model_id: str, effort: str | None = None, temperature: float | None = None, stream: bool = False) -> dict[str, object]:
@@ -4253,6 +4269,26 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
         heartbeat = sse_frame(comment="heartbeat cursor=3").decode("utf-8")
         self.assertEqual(heartbeat, ": heartbeat cursor=3\n\n")
+
+    def test_runtime_event_sse_frames_increment_cursor_per_event(self) -> None:
+        delivered_cursor, frames = runtime_event_sse_frames(
+            after=3,
+            payload={
+                "cursor": 7,
+                "events": [
+                    {"type": "notification", "method": "turn/started"},
+                    {"type": "notification", "method": "turn/completed"},
+                ],
+            },
+        )
+
+        self.assertEqual(delivered_cursor, 5)
+        self.assertEqual(len(frames), 2)
+        first = frames[0].decode("utf-8")
+        second = frames[1].decode("utf-8")
+        self.assertIn('"cursor": 4', first)
+        self.assertIn('"cursor": 5', second)
+        self.assertNotIn('"cursor": 7', first)
 
     def test_runtime_thread_start_registers_yunwu_dynamic_tools_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -10349,6 +10385,26 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(switched_turn["thread_id"], "thread-kimi-fresh")
             self.assertEqual(str((switched_turn.get("handoff") or {}).get("type") or ""), "provider_handoff")
             self.assertEqual(tasks.current_task()["active_provider_thread_id"], "thread-kimi-fresh")
+            second_turn_start = next(
+                params
+                for method, params in client.requests
+                if method == "turn/start" and str(params.get("threadId") or "") == "thread-kimi-fresh"
+            )
+            second_turn_inputs = [dict(item) for item in list(second_turn_start.get("input") or []) if isinstance(item, dict)]
+            self.assertTrue(
+                any(
+                    str(item.get("type") or "") == "text"
+                    and "Latest neutral handoff bundle:" in str(item.get("text") or "")
+                    for item in second_turn_inputs
+                )
+            )
+            self.assertTrue(
+                any(
+                    str(item.get("type") or "") == "mention"
+                    and "/provider_handoffs/thread-kimi-fresh-" in str(item.get("path") or "").replace("\\", "/")
+                    for item in second_turn_inputs
+                )
+            )
 
             runtime.read_thread({"profile_id": "deepseek-default", "provider_id": "deepseek"}, "thread-deepseek")
             runtime.read_thread({"profile_id": "kimi-default", "provider_id": "kimi"}, "thread-kimi-fresh")
@@ -16236,11 +16292,47 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             class FakeRuntime:
                 _tasks = FakeTasks()
+                _router_config = SimpleNamespace(
+                    models=lambda: [
+                        {
+                            "id": "qwen/qwen3.7-plus",
+                            "provider_id": "qwen",
+                            "model": "qwen3.7-plus",
+                            "authority_tier": "B",
+                            "authority_reason": "Model should stay in review/propose mode unless validation or approval promotes the action.",
+                            "supports_mcp_tools": True,
+                            "mcp_tool_call_policy": "conservative",
+                            "mcp_smoke_status": "pass_direct_tool_call",
+                            "parallel_tool_call_status": "serial_only",
+                            "command_execution_status": "verified",
+                            "ui_warnings": [
+                                "This model should propose changes before apply/execute actions.",
+                                "Parallel tool calls are disabled unless this model is explicitly verified for parallel execution.",
+                            ],
+                        }
+                    ]
+                )
 
                 def list_events(self, after: int = 0, limit: int | None = None) -> dict[str, object]:
                     return {
-                        "cursor": 3,
+                        "cursor": 5,
                         "events": [
+                            {
+                                "type": "turn_started_request",
+                                "timestamp": "2026-07-17T12:00:00+09:00",
+                                "thread_id": "thread-worker",
+                                "turn_id": "turn-worker",
+                                "runtime": {"provider_id": "qwen", "model": "qwen3.7-plus"},
+                                "attachment_diagnostics": {
+                                    "image_count": 1,
+                                    "route": {
+                                        "provider_id": "qwen",
+                                        "model_id": "qwen3.7-plus",
+                                        "context_mode": "default",
+                                        "local_image_items": 1,
+                                    },
+                                },
+                            },
                             {
                                 "type": "notification",
                                 "method": "turn/started",
@@ -16271,6 +16363,16 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                     },
                                 },
                             },
+                            {
+                                "type": "notification",
+                                "method": "error",
+                                "timestamp": "2026-07-17T12:00:09+09:00",
+                                "params": {
+                                    "threadId": "thread-worker",
+                                    "turnId": "turn-worker",
+                                    "error": {"message": "Provider route completed but returned no visible final answer."},
+                                },
+                            },
                         ],
                     }
 
@@ -16292,6 +16394,17 @@ class AstraBridgeServiceTests(unittest.TestCase):
             self.assertEqual(status["observability"]["trace_lineage"]["trace_id"], "trace-graph-run-1")
             metric_ids = [item["metric_id"] for item in status["observability"]["metrics"]]
             self.assertIn("mcp_conformance_rate", metric_ids)
+            self.assertEqual(status["observability"]["degraded_authority"]["selected_route"]["structured_tool_status"], "warning_gated")
+            self.assertEqual(status["observability"]["multimodal_quality"]["no_final_answer_incident_count"], 1)
+            self.assertEqual(status["support_bundle"]["schema_version"], "astrabridge-runtime-support-bundle-v1")
+            self.assertEqual(status["support_bundle"]["artifact_paths"]["redaction_scan"]["status"], "pass")
+            self.assertTrue((workspace / ".astrabridge" / "desktop-sidecar" / "observability" / "runtime-observability-summary.json").exists())
+            persisted = json.loads((workspace / ".astrabridge" / "desktop-sidecar" / "observability" / "runtime-observability-summary.json").read_text(encoding="utf-8"))
+            support_bundle = json.loads((workspace / ".astrabridge" / "desktop-sidecar" / "support" / "runtime-support-bundle.json").read_text(encoding="utf-8"))
+            self.assertIn("windows", persisted)
+            self.assertEqual(persisted["windows"][0]["window_id"], "5m")
+            self.assertEqual(persisted["degraded_authority"]["selected_route"]["mcp_tool_status"], "warning_gated")
+            self.assertEqual(support_bundle["health"]["release_gate"]["current_window_5m"], False)
             self.assertTrue(any(item["domain"] == "host" for item in status["observability"]["recent_diagnostics"]))
 
     def test_runtime_supervisor_does_not_auto_interrupt_pending_approval(self) -> None:
@@ -17988,6 +18101,75 @@ class AstraBridgeServiceTests(unittest.TestCase):
         handler.end_headers = lambda: None  # type: ignore[method-assign]
 
         handler._send(200, b'{"ok":true}')
+
+    def test_handler_runtime_desktop_update_route_returns_status_projection(self) -> None:
+        class UpdateHandler(Handler):
+            pass
+
+        class FakeContext:
+            def __init__(self) -> None:
+                self.projects = _UpdateRouteProjects()
+                self.admin_token = "token"
+
+        expected = {
+            "schema_version": "astrabridge-desktop-update-status-v1",
+            "selected_channel": "beta",
+            "updater_contract_status": "pass",
+        }
+        UpdateHandler.context = FakeContext()  # type: ignore[assignment]
+
+        with patch.object(server_module, "desktop_update_status", return_value=expected):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), UpdateHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                response = urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/api/runtime/desktop-update", timeout=5)
+                payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+                server.server_close()
+
+        self.assertEqual(response.getcode(), 200)
+        self.assertEqual(payload["selected_channel"], "beta")
+        self.assertEqual(payload["updater_contract_status"], "pass")
+
+    def test_handler_runtime_desktop_update_rehearsal_route_runs_owner(self) -> None:
+        class UpdateHandler(Handler):
+            pass
+
+        class FakeContext:
+            def __init__(self) -> None:
+                self.projects = _UpdateRouteProjects()
+                self.admin_token = "unit-test-admin-token"
+
+        expected = {
+            "schema_version": "astrabridge-windows-update-rehearsal-v1",
+            "run_id": "demo-run",
+            "status": "pass",
+            "selected_channel": "beta",
+        }
+        UpdateHandler.context = FakeContext()  # type: ignore[assignment]
+
+        with patch.object(server_module, "run_windows_update_rehearsal", return_value=expected):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), UpdateHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_address[1]}/api/runtime/desktop-update/rehearsal",
+                    data=b"{}",
+                    method="POST",
+                    headers={"Content-Type": "application/json", "X-Admin-Token": "unit-test-admin-token"},
+                )
+                response = urllib.request.urlopen(request, timeout=5)
+                payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+                server.server_close()
+
+        self.assertEqual(response.getcode(), 200)
+        self.assertEqual(payload["run_id"], "demo-run")
+        self.assertEqual(payload["status"], "pass")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@
             },
     "bundle":  {
                    "active":  true,
+                   "createUpdaterArtifacts":  true,
                    "targets":  "nsis",
                    "icon":  [
                                 "icons/icon.ico"
@@ -42,7 +43,21 @@
                                             }
                                },
                    "resources":  {
-                                     "../../astrabridge-sidecar":  "astrabridge-sidecar"
+                                     "../../../release/desktop-sidecar/windows-x64/astrabridge-sidecar":  "astrabridge-sidecar"
                                  }
-               }
+               },
+    "plugins":  {
+                    "updater":  {
+                                    "pubkey":  "untrusted comment: AstraBridge updater public key\nRWQk7T1LE8n6v2JixL5E0lCdj8m5wXyS4z6QyQwQ4lJ3Y7mQzW1S7V8n",
+                                    "endpoints":  [
+                                                      "https://updates.astrabridge.app/stable/{{target}}/{{arch}}/{{current_version}}"
+                                                  ],
+                                    "dangerousInsecureTransportProtocol":  false,
+                                    "dangerousAcceptInvalidCerts":  false,
+                                    "dangerousAcceptInvalidHostnames":  false,
+                                    "windows":  {
+                                                    "installMode":  "passive"
+                                                }
+                                }
+                }
 }

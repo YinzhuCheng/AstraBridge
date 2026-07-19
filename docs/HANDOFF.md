@@ -1,6 +1,6 @@
 # AstraBridge Handoff
 
-Last updated: 2026-07-10
+Last updated: 2026-07-17
 
 ## Product Identity
 
@@ -23,7 +23,7 @@ Last updated: 2026-07-10
 
 - Document and plan status: [DOCUMENT_REGISTRY.md](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.md)
 - Machine-readable registry: [DOCUMENT_REGISTRY.json](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.json)
-- Current default execution queue: [ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md)
+- Current default execution queue: [ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md)
 - Fast current state: [PROJECT_SUMMARY.md](/D:/AstraBridge/docs/PROJECT_SUMMARY.md)
 - Interface status and cleanup rules: [INTERFACE_GOVERNANCE.md](/D:/AstraBridge/docs/INTERFACE_GOVERNANCE.md)
 
@@ -201,7 +201,7 @@ The repository normalization and Codex kernel/plugin/skill integration plans are
 ## Active Operator Entry Points
 
 - [Canonical Document Registry](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.md)
-- [Current Standardization, UI, And Live Dogfood Plan](/D:/AstraBridge/PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md)
+- [Current Product Stability And Interoperability Plan](/D:/AstraBridge/PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md)
 - [Project Summary](/D:/AstraBridge/docs/PROJECT_SUMMARY.md)
 - [Project Log](/D:/AstraBridge/docs/PROJECT_LOG.md)
 - [Asset Sources](/D:/AstraBridge/docs/ASSET_SOURCES.md)
@@ -232,7 +232,7 @@ When a follow-up agent touches kernel or extension work, do not improvise the wo
 When continuing a numbered execution plan, follow the plan that explicitly owns the requested work:
 
 - use [DOCUMENT_REGISTRY.md](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.md) to resolve plan status before following any embedded progress block
-- for the current documentation/API normalization, UI renewal, and live-dogfood objective, use [ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md)
+- for current multi-provider control, external A2A, GUI/code orchestration, signed update, CI, and release-stability work, use [ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md)
 - if the user explicitly asks for capability-runtime implementation or advancement, use the conditional active [CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md](/D:/AstraBridge/PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md)
 - the repository normalization plan is complete and should not be reopened unless the user explicitly asks to revise that historical record
 - complete one full numbered step per turn when a plan declares that cadence, then update that plan's progress and completion record

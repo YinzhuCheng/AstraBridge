@@ -9,12 +9,14 @@ if __package__ in {None, ""}:
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from astrabridge_sidecar.mcp_server_core import McpServerCore, McpStdioFramingState, read_stdio_message, run_stdio_mcp_server, write_stdio_message
+    from astrabridge_sidecar.release_identity import release_product_version
 else:
     from .mcp_server_core import McpServerCore, McpStdioFramingState, read_stdio_message, run_stdio_mcp_server, write_stdio_message
+    from .release_identity import release_product_version
 
 
 SERVER_NAME = "astrabridge-mcp-probe-fixture"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = release_product_version()
 _STREAM_STATE = McpStdioFramingState()
 
 

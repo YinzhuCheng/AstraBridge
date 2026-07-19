@@ -94,6 +94,7 @@ const models: RouterModelEntry[] = [
     supported_reasoning_levels: ["low", "medium", "high"],
     default_reasoning_level: "high",
     default_for_provider: true,
+    default_route_verified: true,
     deprecated: true,
   },
   {
@@ -108,6 +109,7 @@ const models: RouterModelEntry[] = [
     supported_reasoning_levels: ["low", "medium", "high"],
     default_reasoning_level: "high",
     recommended: true,
+    default_route_verified: true,
   },
   {
     id: "qwen/qwen3.6-flash",
@@ -201,6 +203,32 @@ describe("runtime recovery plan", () => {
       model: "qwen3.7-plus",
       reasoning_effort: "high",
     });
+  });
+
+  it("fails closed when the target provider has no verified default recovery route", () => {
+    const action: RuntimeFailureAction = {
+      action: "handoff_provider",
+      label: "Switch Provider",
+      reason: "Move to qwen lane.",
+      transition: {
+        action: "handoff_provider",
+        reason: "move to qwen",
+        target: {
+          provider_id: "qwen",
+        },
+      },
+    };
+
+    const unverifiedModels = models.map((model) => ({ ...model, default_route_verified: false }));
+    const patch = resolveRecoveryComposerPatch({
+      action,
+      current: { profile_id: "deepseek-default", model: "deepseek-v4-pro", reasoning_effort: "xhigh" },
+      activeProfile: profiles[0],
+      profiles,
+      models: unverifiedModels,
+    });
+
+    expect(patch).toBeNull();
   });
 
   it("applies switch_model on the current provider using the transition model target", () => {

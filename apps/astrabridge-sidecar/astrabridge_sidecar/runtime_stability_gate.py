@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
+import os
 import platform
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +20,9 @@ from .task_service import TaskService
 
 
 RUNTIME_STABILITY_GATE_SCHEMA_VERSION = "astrabridge-runtime-stability-gate-v1"
+RUNTIME_STABILITY_FAULT_MATRIX_SCHEMA_VERSION = "astrabridge-runtime-stability-fault-matrix-v1"
+RUNTIME_STABILITY_LONG_HORIZON_BUNDLE_SCHEMA_VERSION = "astrabridge-runtime-stability-long-horizon-bundle-v1"
+RUNTIME_STABILITY_INJECTED_CHAOS_DRILLS_SCHEMA_VERSION = "astrabridge-runtime-stability-injected-chaos-drills-v1"
 RUNTIME_STABILITY_SECRET_SCAN_SCHEMA_VERSION = "astrabridge-runtime-stability-secret-scan-v1"
 RUNTIME_STABILITY_FIXTURE_EVIDENCE_SCHEMA_VERSION = "astrabridge-runtime-stability-fixture-evidence-v1"
 RUNTIME_STABILITY_PROCESS_INVENTORY_SCHEMA_VERSION = "astrabridge-runtime-stability-process-inventory-v1"
@@ -186,6 +192,128 @@ def runtime_stability_gate_suite_specs() -> tuple[dict[str, Any], ...]:
             "critical": False,
         },
         {
+            "label": "automation_clock_shift_and_scheduler_recovery",
+            "kind": "python_unittest",
+            "cwd": _SIDECAR_ROOT,
+            "targets": (
+                "tests.test_automation_scheduler.AutomationSchedulerTests.test_daily_schedule_and_next_wake_up_use_timezone",
+                "tests.test_automation_scheduler.AutomationSchedulerTests.test_missed_run_policies_skip_or_queue_once",
+                "tests.test_automation_scheduler.AutomationSchedulerTests.test_stale_running_run_is_recovered_and_not_reclaimed_until_cleared",
+            ),
+            "covers": (
+                "clock_shift_schedule_recovery",
+                "missed_run_policy_reconciliation",
+                "watchdog_stale_run_recovery",
+            ),
+            "fast_iterations": 1,
+            "release_iterations": 1,
+            "fast_required_passes": 1,
+            "release_required_passes": 1,
+            "internal_passes_per_run": 1,
+            "critical": False,
+        },
+        {
+            "label": "durable_store_damage_and_legacy_recovery",
+            "kind": "python_unittest",
+            "cwd": _SIDECAR_ROOT,
+            "targets": (
+                "tests.test_durable_run_store.DurableRunStoreTests.test_initialize_blocks_damaged_store_and_preserves_backup",
+                "tests.test_durable_run_store.DurableRunStoreTests.test_empty_migration_is_deterministic_and_does_not_create_legacy_files",
+                "tests.test_durable_run_store.DurableRunStoreTests.test_legacy_migration_preserves_source_redacts_secrets_and_marks_active_or_external_runs",
+            ),
+            "covers": (
+                "sqlite_damage_guard",
+                "legacy_readback_determinism",
+                "cross_version_needs_review_projection",
+            ),
+            "fast_iterations": 1,
+            "release_iterations": 1,
+            "fast_required_passes": 1,
+            "release_required_passes": 1,
+            "internal_passes_per_run": 1,
+            "critical": False,
+        },
+        {
+            "label": "observability_fault_visibility_and_support_bundle",
+            "kind": "python_unittest",
+            "cwd": _SIDECAR_ROOT,
+            "targets": (
+                "tests.test_runtime_observability.RuntimeObservabilityTests.test_build_runtime_observability_summary_computes_trace_metrics_and_host_diagnostics",
+                "tests.test_runtime_observability.RuntimeObservabilityTests.test_runtime_support_bundle_secret_scan_flags_secret_like_content",
+                "tests.test_sidecar_services.AstraBridgeServiceTests.test_runtime_supervisor_status_includes_observability_summary_from_runtime_events",
+            ),
+            "covers": (
+                "multimodal_no_visible_final_answer_visibility",
+                "downgraded_authority_projection_visibility",
+                "support_bundle_redaction_scan",
+            ),
+            "fast_iterations": 1,
+            "release_iterations": 1,
+            "fast_required_passes": 1,
+            "release_required_passes": 1,
+            "internal_passes_per_run": 1,
+            "critical": False,
+        },
+        {
+            "label": "windows_update_interruption_rehearsal",
+            "kind": "python_unittest",
+            "cwd": _SIDECAR_ROOT,
+            "targets": (
+                "tests.test_release_identity.ReleaseIdentityTests.test_run_windows_update_rehearsal_records_clean_install_update_and_rollback",
+            ),
+            "covers": (
+                "windows_update_interruption_rehearsal",
+                "rollback_readback_after_update",
+            ),
+            "fast_iterations": 1,
+            "release_iterations": 1,
+            "fast_required_passes": 1,
+            "release_required_passes": 1,
+            "internal_passes_per_run": 1,
+            "critical": False,
+        },
+        {
+            "label": "supervised_update_policy_and_containment",
+            "kind": "python_unittest",
+            "cwd": _SIDECAR_ROOT,
+            "targets": (
+                "tests.test_agentic_update_service.AgenticUpdateServiceTests.test_supervised_run_applies_supported_tracks_and_records_policy_health_and_recovery_points",
+                "tests.test_agentic_update_service.AgenticUpdateServiceTests.test_supervised_run_contains_rollout_after_unsupported_track_and_preserves_recovery_point",
+                "tests.test_agentic_update_service.AgenticUpdateServiceTests.test_supervised_run_respects_pause_switch_before_apply",
+            ),
+            "covers": (
+                "supervised_policy_defaults",
+                "mixed_track_containment",
+                "pause_switch_fail_closed",
+            ),
+            "fast_iterations": 1,
+            "release_iterations": 8,
+            "fast_required_passes": 1,
+            "release_required_passes": 8,
+            "internal_passes_per_run": 1,
+            "critical": False,
+        },
+        {
+            "label": "provider_retry_storm_and_circuit_breaker_chaos",
+            "kind": "python_unittest",
+            "cwd": _SIDECAR_ROOT,
+            "targets": (
+                "tests.test_graph_scheduler.DurableGraphSchedulerTests.test_retry_budget_caps_retry_storms_for_single_node",
+                "tests.test_graph_scheduler.DurableGraphSchedulerTests.test_circuit_breaker_blocks_later_same_provider_dispatch_and_is_observable",
+            ),
+            "covers": (
+                "provider_429_retry_storm_budget",
+                "provider_429_circuit_breaker_fanout_containment",
+                "cross_lane_provider_dispatch_backpressure_visibility",
+            ),
+            "fast_iterations": 1,
+            "release_iterations": 8,
+            "fast_required_passes": 1,
+            "release_required_passes": 8,
+            "internal_passes_per_run": 1,
+            "critical": False,
+        },
+        {
             "label": "desktop_forced_exit_restart",
             "kind": "cargo_test",
             "cwd": _DESKTOP_TAURI_ROOT,
@@ -279,7 +407,8 @@ def run_runtime_stability_gate(
     command_dir = raw_dir / "commands"
     process_dir = raw_dir / "process-inventory"
     fixture_dir = raw_dir / "fixture-evidence"
-    for path in (gate_run_dir, raw_dir, reports_dir, validations_dir, command_dir):
+    state_root = gate_run_dir / "state"
+    for path in (gate_run_dir, raw_dir, reports_dir, validations_dir, command_dir, state_root):
         path.mkdir(parents=True, exist_ok=True)
 
     command_runner = command_runner or _default_command_runner
@@ -288,57 +417,86 @@ def run_runtime_stability_gate(
     cargo_cmd = cargo_executable or "cargo"
     suites = runtime_stability_gate_suite_specs()
 
-    process_inventory_before: dict[str, Any] | None = None
-    process_inventory_after: dict[str, Any] | None = None
-    if include_process_inventory:
-        process_dir.mkdir(parents=True, exist_ok=True)
-        process_inventory_before = process_inventory_provider(process_dir / "before")
-        write_json(validations_dir / "process-inventory-before.json", process_inventory_before)
+    with _temporary_env(
+        {
+            "ASTRABRIDGE_APPDATA": str(state_root / "appdata"),
+            "ASTRABRIDGE_RUNTIME_ROOT": str(state_root / "runtime"),
+        }
+    ):
+        process_inventory_before: dict[str, Any] | None = None
+        process_inventory_after: dict[str, Any] | None = None
+        if include_process_inventory:
+            process_dir.mkdir(parents=True, exist_ok=True)
+            process_inventory_before = process_inventory_provider(process_dir / "before")
+            write_json(validations_dir / "process-inventory-before.json", process_inventory_before)
 
-    suite_results: list[dict[str, Any]] = []
-    overall_status = "pass"
-    for spec in suites:
-        iteration_count = int(spec.get("fast_iterations") if resolved_mode == "fast" else spec.get("release_iterations") or 0)
-        if iteration_count <= 0:
-            continue
-        suite_result = _run_suite(
-            spec=spec,
-            mode=resolved_mode,
-            iteration_count=iteration_count,
-            python_executable=python_cmd,
-            cargo_executable=cargo_cmd,
-            command_dir=command_dir,
-            command_runner=command_runner,
-        )
-        suite_results.append(suite_result)
-        if suite_result["status"] != "pass":
-            overall_status = "fail"
+        suite_results: list[dict[str, Any]] = []
+        overall_status = "pass"
+        for spec in suites:
+            iteration_count = int(spec.get("fast_iterations") if resolved_mode == "fast" else spec.get("release_iterations") or 0)
+            if iteration_count <= 0:
+                continue
+            suite_result = _run_suite(
+                spec=spec,
+                mode=resolved_mode,
+                iteration_count=iteration_count,
+                python_executable=python_cmd,
+                cargo_executable=cargo_cmd,
+                command_dir=command_dir,
+                command_runner=command_runner,
+            )
+            suite_results.append(suite_result)
+            if suite_result["status"] != "pass":
+                overall_status = "fail"
 
-    fixture_evidence: dict[str, Any] | None = None
-    if include_fixture_evidence:
-        fixture_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            fixture_evidence = capture_runtime_stability_fixture_evidence(output_dir=fixture_dir)
-        except Exception as exc:  # noqa: BLE001 - the gate reports failures as durable data.
-            fixture_evidence = {
-                "schema_version": RUNTIME_STABILITY_FIXTURE_EVIDENCE_SCHEMA_VERSION,
-                "status": "fail",
-                "error_type": type(exc).__name__,
-                "error": str(redact_sensitive(str(exc)))[:240],
-                "artifact_paths": {
-                    "output_dir": str(fixture_dir),
-                },
-            }
-            overall_status = "fail"
-        write_json(validations_dir / "fixture-evidence.json", redact_sensitive(fixture_evidence))
+        fixture_evidence: dict[str, Any] | None = None
+        if include_fixture_evidence:
+            fixture_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                fixture_evidence = capture_runtime_stability_fixture_evidence(output_dir=fixture_dir)
+            except Exception as exc:  # noqa: BLE001 - the gate reports failures as durable data.
+                fixture_evidence = {
+                    "schema_version": RUNTIME_STABILITY_FIXTURE_EVIDENCE_SCHEMA_VERSION,
+                    "status": "fail",
+                    "error_type": type(exc).__name__,
+                    "error": str(redact_sensitive(str(exc)))[:240],
+                    "artifact_paths": {
+                        "output_dir": str(fixture_dir),
+                    },
+                }
+                overall_status = "fail"
+            write_json(validations_dir / "fixture-evidence.json", redact_sensitive(fixture_evidence))
 
-    if include_process_inventory:
-        process_inventory_after = process_inventory_provider(process_dir / "after")
-        write_json(validations_dir / "process-inventory-after.json", process_inventory_after)
+        if include_process_inventory:
+            process_inventory_after = process_inventory_provider(process_dir / "after")
+            write_json(validations_dir / "process-inventory-after.json", process_inventory_after)
 
     secret_scan = scan_runtime_stability_artifacts(gate_run_dir)
     write_json(validations_dir / "secret-scan.json", secret_scan)
     if str(secret_scan.get("status") or "") != "pass":
+        overall_status = "fail"
+
+    fault_matrix = build_runtime_stability_fault_matrix(
+        mode=resolved_mode,
+        suite_results=suite_results,
+        fixture_evidence=fixture_evidence,
+    )
+    write_json(validations_dir / "fault-matrix.json", fault_matrix)
+    long_horizon_bundle = build_runtime_stability_long_horizon_bundle(
+        mode=resolved_mode,
+        suite_results=suite_results,
+    )
+    write_json(validations_dir / "long-horizon-bundle.json", long_horizon_bundle)
+    injected_chaos_drills = build_runtime_stability_injected_chaos_drills(
+        mode=resolved_mode,
+        suite_results=suite_results,
+    )
+    write_json(validations_dir / "injected-chaos-drills.json", injected_chaos_drills)
+    if resolved_mode == "release" and not bool(fault_matrix.get("release_ready")):
+        overall_status = "fail"
+    if resolved_mode == "release" and not bool(long_horizon_bundle.get("release_qualified")):
+        overall_status = "fail"
+    if resolved_mode == "release" and not bool(injected_chaos_drills.get("release_qualified")):
         overall_status = "fail"
 
     summary_path = reports_dir / "summary.json"
@@ -354,6 +512,9 @@ def run_runtime_stability_gate(
         "critical_suite_pass_count": sum(1 for item in suite_results if item.get("critical") and item.get("status") == "pass"),
         "suites": suite_results,
         "fixture_evidence": fixture_evidence,
+        "fault_matrix": fault_matrix,
+        "long_horizon_bundle": long_horizon_bundle,
+        "injected_chaos_drills": injected_chaos_drills,
         "secret_scan": {
             "status": secret_scan.get("status"),
             "finding_count": secret_scan.get("finding_count"),
@@ -368,8 +529,12 @@ def run_runtime_stability_gate(
             "raw_dir": str(raw_dir),
             "reports_dir": str(reports_dir),
             "validations_dir": str(validations_dir),
+            "state_root": str(state_root),
             "summary_json": str(summary_path),
             "report_md": str(report_path),
+            "fault_matrix_json": str(validations_dir / "fault-matrix.json"),
+            "long_horizon_bundle_json": str(validations_dir / "long-horizon-bundle.json"),
+            "injected_chaos_drills_json": str(validations_dir / "injected-chaos-drills.json"),
         },
         "policy": {
             "live_provider_calls": False,
@@ -387,7 +552,7 @@ def run_runtime_stability_gate(
 def capture_runtime_stability_fixture_evidence(*, output_dir: str | Path) -> dict[str, Any]:
     target_dir = Path(output_dir).expanduser().resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
-    fixture_root = target_dir / "fx"
+    fixture_root = Path(tempfile.mkdtemp(prefix="astrabridge-stability-fixture-")).resolve()
     workspace = fixture_root / "ws"
     (workspace / "PRIVATE").mkdir(parents=True, exist_ok=True)
     (workspace / ".astrabridge").mkdir(parents=True, exist_ok=True)
@@ -620,6 +785,76 @@ def render_runtime_stability_gate_report(summary: dict[str, Any]) -> str:
                 f"- Durable store snapshot: `{((fixture.get('artifact_paths') or {}).get('durable_store_snapshot'))}`",
             ]
         )
+    fault_matrix = dict(summary.get("fault_matrix") or {})
+    if fault_matrix:
+        lines.extend(
+            [
+                "",
+                "## Fault Matrix",
+                "",
+                f"- Status: `{fault_matrix.get('status')}`",
+                f"- Release ready: `{fault_matrix.get('release_ready')}`",
+                f"- Case count: `{fault_matrix.get('case_count')}`",
+                f"- Matrix JSON: `{((summary.get('artifact_paths') or {}).get('fault_matrix_json'))}`",
+                "",
+            ]
+        )
+        for case in list(fault_matrix.get("cases") or []):
+            lines.extend(
+                [
+                    f"- `{case.get('fault_id')}` status=`{case.get('status')}` final_state=`{case.get('final_state')}`",
+                    f"  - recovery_time: `{dict(case.get('recovery_time') or {}).get('summary')}`",
+                    f"  - duplicate_effects: `{case.get('duplicate_effects')}`",
+                    f"  - evidence_completeness: `{dict(case.get('evidence_completeness') or {}).get('status')}`",
+                    f"  - stale_process_count: `{dict(case.get('stale_process_count') or {}).get('value')}`",
+                    f"  - downgraded_authority_visibility: `{dict(case.get('downgraded_authority_visibility') or {}).get('status')}`",
+                ]
+            )
+    long_horizon_bundle = dict(summary.get("long_horizon_bundle") or {})
+    if long_horizon_bundle:
+        lines.extend(
+            [
+                "",
+                "## Long-Horizon Stability Bundle",
+                "",
+                f"- Status: `{long_horizon_bundle.get('status')}`",
+                f"- Release qualified: `{long_horizon_bundle.get('release_qualified')}`",
+                f"- Bundle id: `{long_horizon_bundle.get('bundle_id')}`",
+                f"- Bundle JSON: `{((summary.get('artifact_paths') or {}).get('long_horizon_bundle_json'))}`",
+                "",
+            ]
+        )
+        for suite in list(long_horizon_bundle.get("suites") or []):
+            lines.extend(
+                [
+                    f"- `{suite.get('label')}` status=`{suite.get('status')}`",
+                    f"  - iterations: `{suite.get('executed_iterations')}` required_passes=`{suite.get('required_pass_count')}` consecutive_passes=`{suite.get('max_consecutive_passes')}`",
+                    f"  - covers: `{', '.join(list(suite.get('covers') or []))}`",
+                ]
+            )
+    injected_chaos_drills = dict(summary.get("injected_chaos_drills") or {})
+    if injected_chaos_drills:
+        lines.extend(
+            [
+                "",
+                "## Injected Cross-Lane Chaos Drills",
+                "",
+                f"- Status: `{injected_chaos_drills.get('status')}`",
+                f"- Release qualified: `{injected_chaos_drills.get('release_qualified')}`",
+                f"- Drill pack id: `{injected_chaos_drills.get('drill_pack_id')}`",
+                f"- Drill JSON: `{((summary.get('artifact_paths') or {}).get('injected_chaos_drills_json'))}`",
+                "",
+            ]
+        )
+        for drill in list(injected_chaos_drills.get("drills") or []):
+            lines.extend(
+                [
+                    f"- `{drill.get('label')}` status=`{drill.get('status')}`",
+                    f"  - iterations: `{drill.get('executed_iterations')}` required_passes=`{drill.get('required_pass_count')}` consecutive_passes=`{drill.get('max_consecutive_passes')}`",
+                    f"  - failure_classes: `{', '.join(list(drill.get('failure_classes') or []))}`",
+                    f"  - covers: `{', '.join(list(drill.get('covers') or []))}`",
+                ]
+            )
     secret_scan = dict(summary.get("secret_scan") or {})
     lines.extend(
         [
@@ -649,6 +884,21 @@ def _resolve_gate_run_dir(*, root: Path, artifact_root: str | Path | None, run_i
     if artifact_root:
         return Path(artifact_root).expanduser().resolve() / run_id
     return root / "PRIVATE" / "runtime-stability" / run_id
+
+
+@contextmanager
+def _temporary_env(updates: dict[str, str]) -> Any:
+    previous = {key: os.environ.get(key) for key in updates}
+    try:
+        for key, value in updates.items():
+            os.environ[key] = value
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _default_command_runner(command: list[str], cwd: Path) -> dict[str, Any]:
@@ -785,6 +1035,331 @@ def _suite_command(*, spec: dict[str, Any], python_executable: str, cargo_execut
     if kind == "cargo_test":
         return [cargo_executable, "test", str(spec.get("filter") or ""), "--", "--exact", "--nocapture"]
     raise ValueError(f"Unsupported runtime stability gate suite kind: {kind}")
+
+
+def build_runtime_stability_fault_matrix(
+    *,
+    mode: str,
+    suite_results: list[dict[str, Any]],
+    fixture_evidence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    suite_by_label = {str(item.get("label") or ""): item for item in suite_results}
+    cases = [
+        _build_fault_case(
+            fault_id="process_level_kill",
+            label="Process-level kill and host-owned restart recovery",
+            suite_by_label=suite_by_label,
+            suite_labels=("desktop_forced_exit_restart", "desktop_twenty_restart_cycles_no_orphans"),
+            final_state="sidecar_restart_recovered_without_owned_orphans",
+            duplicate_effects="suppressed",
+            recovery_summary="bounded host restart after forced exit",
+            stale_process_required=True,
+            stale_process_value=0,
+        ),
+        _build_fault_case(
+            fault_id="disk_full_or_read_only",
+            label="Disk-full / read-only write retry and duplicate suppression",
+            suite_by_label=suite_by_label,
+            suite_labels=("client_disconnect_and_disk_write_recovery",),
+            final_state="write_retry_completed_without_duplicate_response",
+            duplicate_effects="suppressed",
+            recovery_summary="bounded retry after transient write failure",
+        ),
+        _build_fault_case(
+            fault_id="sqlite_damage",
+            label="SQLite damage guard with preserved backup",
+            suite_by_label=suite_by_label,
+            suite_labels=("durable_store_damage_and_legacy_recovery",),
+            final_state="damaged_store_blocked_and_backup_preserved",
+            duplicate_effects="not_applicable",
+            recovery_summary="operator repair required before restart",
+        ),
+        _build_fault_case(
+            fault_id="clock_shift",
+            label="Clock shift / schedule jump reconciliation",
+            suite_by_label=suite_by_label,
+            suite_labels=("automation_clock_shift_and_scheduler_recovery",),
+            final_state="schedule_recomputed_and_missed_run_policy_applied",
+            duplicate_effects="queued_once_or_skipped",
+            recovery_summary="next scheduler tick after clock jump",
+        ),
+        _build_fault_case(
+            fault_id="network_partition",
+            label="Network partition / disconnect retry handling",
+            suite_by_label=suite_by_label,
+            suite_labels=("client_disconnect_and_disk_write_recovery",),
+            final_state="single_retry_or_clean_disconnect_recovered",
+            duplicate_effects="second_response_suppressed",
+            recovery_summary="bounded single transport retry or disconnect cleanup",
+        ),
+        _build_fault_case(
+            fault_id="truncated_stream",
+            label="Truncated stream / terminal projection recovery",
+            suite_by_label=suite_by_label,
+            suite_labels=("terminal_projection_and_stream_recovery",),
+            final_state="terminal_projection_reconciled_after_stream_loss",
+            duplicate_effects="suppressed",
+            recovery_summary="post-timeout or follow-on-turn reconciliation",
+        ),
+        _build_fault_case(
+            fault_id="update_interruption",
+            label="Updater interruption with rollback readback preserved",
+            suite_by_label=suite_by_label,
+            suite_labels=("windows_update_interruption_rehearsal",),
+            final_state="clean_install_update_and_rollback_rehearsed",
+            duplicate_effects="suppressed",
+            recovery_summary="rollback/readback rehearsal closes the update path",
+        ),
+        _build_fault_case(
+            fault_id="multimodal_no_final_answer",
+            label="Multimodal no-visible-final-answer visibility",
+            suite_by_label=suite_by_label,
+            suite_labels=("observability_fault_visibility_and_support_bundle",),
+            final_state="incident_persisted_in_observability_and_support_bundle",
+            duplicate_effects="not_applicable",
+            recovery_summary="incident remains operator-visible until route is repaired",
+            downgraded_authority_required=True,
+            downgraded_authority_status="pass",
+            downgraded_authority_summary="visible_in_observability_summary_and_support_bundle",
+        ),
+        _build_fault_case(
+            fault_id="cross_version",
+            label="Cross-version legacy readback and migration compatibility",
+            suite_by_label=suite_by_label,
+            suite_labels=("durable_store_damage_and_legacy_recovery",),
+            final_state="legacy_reads_preserved_and_repeated_migration_stable",
+            duplicate_effects="idempotent_repeated_migration",
+            recovery_summary="legacy inputs are imported or marked needs_review without mutating source state",
+        ),
+    ]
+    pass_count = sum(1 for item in cases if item.get("status") == "pass")
+    partial_count = sum(1 for item in cases if item.get("status") == "partial")
+    fail_count = sum(1 for item in cases if item.get("status") == "fail")
+    release_ready = all(item.get("status") == "pass" for item in cases)
+    if release_ready:
+        status = "pass"
+    elif mode == "fast" and fail_count == 0:
+        status = "partial"
+    else:
+        status = "fail" if fail_count else "partial"
+    return {
+        "schema_version": RUNTIME_STABILITY_FAULT_MATRIX_SCHEMA_VERSION,
+        "mode": mode,
+        "status": status,
+        "release_ready": release_ready,
+        "case_count": len(cases),
+        "pass_count": pass_count,
+        "partial_count": partial_count,
+        "fail_count": fail_count,
+        "fixture_evidence_status": str((fixture_evidence or {}).get("status") or "not_captured"),
+        "cases": cases,
+    }
+
+
+def build_runtime_stability_long_horizon_bundle(
+    *,
+    mode: str,
+    suite_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    suite_by_label = {str(item.get("label") or ""): item for item in suite_results}
+    selected_labels = (
+        "scheduler_recovery_and_idempotency",
+        "terminal_projection_and_stream_recovery",
+        "mcp_timeout_cancel_and_policy_fail_closed",
+        "windows_update_interruption_rehearsal",
+        "supervised_update_policy_and_containment",
+    )
+    selected = [suite_by_label[label] for label in selected_labels if label in suite_by_label]
+    missing = [label for label in selected_labels if label not in suite_by_label]
+    any_failed = any(str(item.get("status") or "") == "fail" for item in selected)
+    all_passed = bool(selected) and all(str(item.get("status") or "") == "pass" for item in selected) and not missing
+    if mode == "release" and all_passed:
+        status = "pass"
+    elif any_failed:
+        status = "fail"
+    else:
+        status = "partial"
+    return {
+        "schema_version": RUNTIME_STABILITY_LONG_HORIZON_BUNDLE_SCHEMA_VERSION,
+        "mode": mode,
+        "status": status,
+        "release_qualified": bool(mode == "release" and status == "pass"),
+        "bundle_id": "shipping_state_long_horizon_stability",
+        "bundle_label": "Shipping-state long-horizon stability bundle",
+        "suite_count": len(selected_labels),
+        "executed_suite_count": len(selected),
+        "missing_suite_labels": missing,
+        "suite_labels": list(selected_labels),
+        "suites": [
+            {
+                "label": str(item.get("label") or ""),
+                "status": str(item.get("status") or ""),
+                "executed_iterations": int(item.get("executed_iterations") or 0),
+                "required_pass_count": int(item.get("required_pass_count") or 0),
+                "max_consecutive_passes": int(item.get("max_consecutive_passes") or 0),
+                "covers": list(item.get("covers") or []),
+            }
+            for item in selected
+        ],
+        "thresholds": {
+            "promotion_mode_required": "release",
+            "all_selected_suites_must_pass": True,
+            "selected_suite_labels": list(selected_labels),
+        },
+    }
+
+
+def build_runtime_stability_injected_chaos_drills(
+    *,
+    mode: str,
+    suite_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    suite_by_label = {str(item.get("label") or ""): item for item in suite_results}
+    selected_labels = ("provider_retry_storm_and_circuit_breaker_chaos",)
+    selected = [suite_by_label[label] for label in selected_labels if label in suite_by_label]
+    missing = [label for label in selected_labels if label not in suite_by_label]
+    any_failed = any(str(item.get("status") or "") == "fail" for item in selected)
+    all_passed = bool(selected) and all(str(item.get("status") or "") == "pass" for item in selected) and not missing
+    if mode == "release" and all_passed:
+        status = "pass"
+    elif any_failed:
+        status = "fail"
+    else:
+        status = "partial"
+    drills: list[dict[str, Any]] = []
+    for item in selected:
+        evidence_paths: list[str] = []
+        for iteration in list(item.get("iterations") or []):
+            evidence_paths.extend(
+                [str(iteration.get("stdout_path") or ""), str(iteration.get("stderr_path") or "")]
+            )
+        drills.append(
+            {
+                "drill_id": "provider_retry_storm_and_circuit_breaker",
+                "label": str(item.get("label") or ""),
+                "status": str(item.get("status") or ""),
+                "executed_iterations": int(item.get("executed_iterations") or 0),
+                "required_pass_count": int(item.get("required_pass_count") or 0),
+                "max_consecutive_passes": int(item.get("max_consecutive_passes") or 0),
+                "covers": list(item.get("covers") or []),
+                "failure_classes": [
+                    "provider_429_retry_storm",
+                    "provider_429_circuit_breaker_open",
+                    "cross_lane_provider_dispatch_backpressure",
+                ],
+                "thresholds": {
+                    "retry_budget_exhaustion_stops_after_single_retry": True,
+                    "later_same_provider_dispatch_must_be_denied_when_breaker_opens": True,
+                    "breaker_state_must_remain_operator_visible": True,
+                },
+                "evidence_paths": [path for path in evidence_paths if path],
+            }
+        )
+    return {
+        "schema_version": RUNTIME_STABILITY_INJECTED_CHAOS_DRILLS_SCHEMA_VERSION,
+        "mode": mode,
+        "status": status,
+        "release_qualified": bool(mode == "release" and status == "pass"),
+        "drill_pack_id": "cross_lane_injected_chaos",
+        "drill_pack_label": "Injected cross-lane chaos drills",
+        "drill_count": len(selected_labels),
+        "executed_drill_count": len(selected),
+        "missing_drill_labels": missing,
+        "drill_labels": list(selected_labels),
+        "drills": drills,
+        "thresholds": {
+            "promotion_mode_required": "release",
+            "all_selected_drills_must_pass": True,
+            "selected_drill_labels": list(selected_labels),
+        },
+    }
+
+
+def _build_fault_case(
+    *,
+    fault_id: str,
+    label: str,
+    suite_by_label: dict[str, dict[str, Any]],
+    suite_labels: tuple[str, ...],
+    final_state: str,
+    duplicate_effects: str,
+    recovery_summary: str,
+    stale_process_required: bool = False,
+    stale_process_value: int | None = None,
+    downgraded_authority_required: bool = False,
+    downgraded_authority_status: str = "not_required",
+    downgraded_authority_summary: str = "not_required",
+) -> dict[str, Any]:
+    matched = [suite_by_label[label] for label in suite_labels if label in suite_by_label]
+    evidence_paths: list[str] = []
+    for suite in matched:
+        for iteration in list(suite.get("iterations") or []):
+            evidence_paths.extend(
+                [str(iteration.get("stdout_path") or ""), str(iteration.get("stderr_path") or "")]
+            )
+    observed_fields = ["final_state", "duplicate_effects", "recovery_time", "evidence_paths"]
+    missing_fields: list[str] = []
+    if stale_process_required:
+        if matched:
+            observed_fields.append("stale_process_count")
+        else:
+            missing_fields.append("stale_process_count")
+    if downgraded_authority_required:
+        if matched:
+            observed_fields.append("downgraded_authority_visibility")
+        else:
+            missing_fields.append("downgraded_authority_visibility")
+    all_passed = bool(matched) and all(str(item.get("status") or "") == "pass" for item in matched)
+    if all_passed:
+        status = "pass"
+        completeness_status = "pass"
+    elif matched:
+        status = "fail"
+        completeness_status = "partial"
+    else:
+        status = "partial"
+        completeness_status = "partial"
+        missing_fields.append("suite_execution")
+    return {
+        "fault_id": fault_id,
+        "label": label,
+        "status": status,
+        "final_state": final_state,
+        "duplicate_effects": duplicate_effects,
+        "recovery_time": {
+            "summary": recovery_summary,
+            "duration_ms_upper_bound": _suite_duration_upper_bound(matched),
+        },
+        "evidence_completeness": {
+            "status": completeness_status,
+            "observed_fields": observed_fields,
+            "missing_fields": sorted(set(missing_fields)),
+        },
+        "stale_process_count": {
+            "required": stale_process_required,
+            "status": "pass" if stale_process_required and all_passed else ("not_required" if not stale_process_required else "partial"),
+            "value": stale_process_value if stale_process_required and all_passed else None,
+        },
+        "downgraded_authority_visibility": {
+            "required": downgraded_authority_required,
+            "status": downgraded_authority_status if downgraded_authority_required and all_passed else ("not_required" if not downgraded_authority_required else "partial"),
+            "summary": downgraded_authority_summary if downgraded_authority_required and all_passed else ("not_required" if not downgraded_authority_required else "evidence_not_executed"),
+        },
+        "evidence_paths": [path for path in evidence_paths if path],
+        "suite_labels": list(suite_labels),
+    }
+
+
+def _suite_duration_upper_bound(suites: list[dict[str, Any]]) -> int | None:
+    durations = [
+        int(iteration.get("duration_ms") or 0)
+        for suite in suites
+        for iteration in list(suite.get("iterations") or [])
+        if iteration.get("duration_ms") is not None
+    ]
+    if not durations:
+        return None
+    return max(durations)
 
 
 def _copy_fixture_run_artifacts(*, workspace_root: Path, run_payload: dict[str, Any], target_dir: Path) -> list[str]:

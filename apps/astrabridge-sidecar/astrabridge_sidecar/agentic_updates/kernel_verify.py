@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from ..codex_kernel_probe import discover_codex_binary_and_version
-from ..common import now_iso, slugify, write_json
+from ..common import new_id, now_iso, slugify, write_json
+from .apply import AGENTIC_UPDATE_APPLY_JOURNAL_SCHEMA_VERSION
 from .artifacts import (
     ensure_agentic_update_run_layout,
     rollback_manifest_template,
@@ -20,6 +21,7 @@ from .contracts import assert_secret_free_agentic_update_payload, validate_updat
 AGENTIC_UPDATE_KERNEL_VERIFY_SCHEMA_VERSION = "astrabridge-agentic-update-codex-kernel-verify-v1"
 AGENTIC_UPDATE_KERNEL_VERIFY_FILENAME = "validation/codex-kernel-verify-report.json"
 KERNEL_VERIFY_STATUSES = ("verified", "partial", "blocked")
+APPLY_TRACK_CODEX_KERNEL_CANDIDATE = "codex_kernel_candidate"
 
 KernelSmokeRunner = Callable[..., dict[str, Any]]
 
@@ -71,6 +73,26 @@ def run_agentic_update_kernel_candidate_verification(
         kernel_smoke_runner=kernel_smoke_runner,
     )
     report_path = validate_agentic_update_artifact_path(workspace, run_id, AGENTIC_UPDATE_KERNEL_VERIFY_FILENAME)
+    journal_path = Path(layout["files"]["apply_journal"])
+    activation_id = new_id("kernel-verify")
+    runtime_state_before = _kernel_runtime_state_before(
+        execution_host=execution_host,
+        wsl_distro=wsl_distro,
+        baseline=baseline,
+        binary_locator=locator,
+        candidate=selected,
+    )
+    activation_journal = _initialize_kernel_activation_journal(
+        run_id=run_id,
+        activation_id=activation_id,
+        proposal=validated_proposal,
+        candidate=selected,
+        execution_host=execution_host,
+        wsl_distro=wsl_distro,
+        runtime_state_before=runtime_state_before,
+    )
+    _write_kernel_activation_journal(journal_path, activation_journal)
+    _append_kernel_activation_stage(activation_journal, journal_path, stage="baseline_captured")
     facts = _candidate_facts(smoke_report=smoke_report, selected=selected, binary_locator=locator)
     evidence = _evidence_summary(workspace, smoke_report)
     status, reasons, warnings = _verification_status(
@@ -90,19 +112,60 @@ def run_agentic_update_kernel_candidate_verification(
         wsl_distro=wsl_distro,
     )
     rollback_required, rollback_reason = _rollback_required(status=status, baseline=baseline)
-    rollback_manifest_path = None
-    if rollback_required:
-        rollback_manifest_path = _write_kernel_rollback_manifest(
+    track_changed_paths = _kernel_track_changed_paths(workspace=workspace, run_id=run_id, evidence=evidence, report_path=report_path)
+    staged_state = _kernel_activation_staged_state(
+        candidate=selected,
+        facts=facts,
+        evidence=evidence,
+        status=status,
+        verified=status == "verified",
+        matrix_update=matrix_update,
+        rollback_required=rollback_required,
+        rollback_reason=rollback_reason,
+    )
+    _append_kernel_activation_stage(activation_journal, journal_path, stage="candidate_checked")
+    _finalize_kernel_activation_track(
+        activation_journal,
+        journal_path,
+        staged_state=staged_state,
+        health_verdict="pass" if status == "verified" else "fail",
+        changed_paths=track_changed_paths,
+    )
+    rollback_manifest_path = _write_kernel_rollback_manifest(
+        workspace=workspace,
+        run_id=run_id,
+        contract=contract,
+        selected=selected,
+        facts=facts,
+        status=status,
+        reason=rollback_reason or ("verification_gate_passed" if status == "verified" else "candidate_requires_rollback_evidence"),
+        evidence=evidence,
+        baseline=baseline,
+        runtime_state_before=runtime_state_before,
+    )
+    runtime_state_after = _kernel_runtime_state_after(
+        execution_host=execution_host,
+        wsl_distro=wsl_distro,
+        baseline=baseline,
+        binary_locator=locator,
+        candidate=selected,
+    )
+    restored_runtime_state = runtime_state_after["active_env_locator"] == runtime_state_before["active_env_locator"]
+    _close_kernel_activation_track(
+        activation_journal,
+        journal_path,
+        rollback_target=_kernel_activation_rollback_target(
             workspace=workspace,
             run_id=run_id,
-            contract=contract,
-            selected=selected,
-            facts=facts,
+            rollback_manifest_path=Path(rollback_manifest_path),
+            runtime_state_before=runtime_state_before,
+            runtime_state_after=runtime_state_after,
+            restored_runtime_state=restored_runtime_state,
             status=status,
-            reason=rollback_reason,
-            evidence=evidence,
-            baseline=baseline,
-        )
+        ),
+        restored_runtime_state=restored_runtime_state,
+        committed=status == "verified",
+    )
 
     candidate_after = deepcopy(selected)
     candidate_after["validation_state"] = {
@@ -138,6 +201,14 @@ def run_agentic_update_kernel_candidate_verification(
             "reason": rollback_reason,
             "manifest_path": rollback_manifest_path,
         },
+        "activation": {
+            "activation_id": activation_id,
+            "journal_status": activation_journal.get("status"),
+            "track_id": APPLY_TRACK_CODEX_KERNEL_CANDIDATE,
+            "restored_runtime_state": restored_runtime_state,
+            "runtime_state_before": runtime_state_before,
+            "runtime_state_after": runtime_state_after,
+        },
         "matrix_update_suggestion": matrix_update,
         "side_effect_policy": {
             "writes_official_codex_config": False,
@@ -157,6 +228,7 @@ def run_agentic_update_kernel_candidate_verification(
             "verification_root": str(artifact_root),
             "smoke_report": evidence["smoke_report_path"],
             "kernel_probe_snapshot": evidence["kernel_probe_snapshot_path"],
+            "apply_journal": str(journal_path),
             "rollback_manifest": rollback_manifest_path,
         },
         "reasons": reasons,
@@ -422,6 +494,7 @@ def _write_kernel_rollback_manifest(
     reason: str | None,
     evidence: dict[str, Any],
     baseline: dict[str, Any] | None,
+    runtime_state_before: dict[str, Any],
 ) -> str:
     manifest = rollback_manifest_template(run_id, contract)
     manifest["rollback_targets"]["codex_binary_locator_state"].append(
@@ -431,6 +504,8 @@ def _write_kernel_rollback_manifest(
             "candidate_version": selected.get("version"),
             "candidate_locator": facts.get("binary_locator"),
             "baseline_locator": dict(baseline or {}).get("binary_locator"),
+            "env_key": runtime_state_before.get("env_key"),
+            "baseline_env_locator": runtime_state_before.get("active_env_locator"),
             "status": status,
             "reason": reason,
         }
@@ -460,6 +535,256 @@ def _write_kernel_rollback_manifest(
     rollback_path = Path(layout["files"]["rollback_manifest"])
     write_json(rollback_path, validated)
     return str(rollback_path)
+
+
+def _kernel_runtime_state_before(
+    *,
+    execution_host: str,
+    wsl_distro: str | None,
+    baseline: dict[str, Any] | None,
+    binary_locator: str,
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    env_key = _kernel_locator_env_key(execution_host)
+    return {
+        "execution_host": execution_host,
+        "wsl_distro": wsl_distro,
+        "env_key": env_key,
+        "active_env_locator": str(os.environ.get(env_key) or ""),
+        "baseline_locator": str(dict(baseline or {}).get("binary_locator") or ""),
+        "candidate_locator": str(binary_locator or candidate.get("binary_locator") or ""),
+        "candidate_id": str(candidate.get("candidate_id") or ""),
+        "candidate_version": str(candidate.get("version") or ""),
+    }
+
+
+def _kernel_runtime_state_after(
+    *,
+    execution_host: str,
+    wsl_distro: str | None,
+    baseline: dict[str, Any] | None,
+    binary_locator: str,
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    state = _kernel_runtime_state_before(
+        execution_host=execution_host,
+        wsl_distro=wsl_distro,
+        baseline=baseline,
+        binary_locator=binary_locator,
+        candidate=candidate,
+    )
+    state["restored_at"] = now_iso()
+    return state
+
+
+def _kernel_locator_env_key(execution_host: str) -> str:
+    return "ASTRABRIDGE_WSL_CODEX_BIN" if execution_host == "wsl" else "ASTRABRIDGE_CODEX_BIN"
+
+
+def _initialize_kernel_activation_journal(
+    *,
+    run_id: str,
+    activation_id: str,
+    proposal: dict[str, Any],
+    candidate: dict[str, Any],
+    execution_host: str,
+    wsl_distro: str | None,
+    runtime_state_before: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": AGENTIC_UPDATE_APPLY_JOURNAL_SCHEMA_VERSION,
+        "apply_id": activation_id,
+        "run_id": run_id,
+        "status": "running",
+        "mode": "kernel_candidate_verify",
+        "started_at": now_iso(),
+        "completed_at": None,
+        "risk_class": str(dict(proposal.get("diff") or {}).get("risk_class") or ""),
+        "approval": {
+            "approved": True,
+            "approved_by": "kernel_verification_gate",
+            "approved_at": now_iso(),
+            "approval_note": "verification_only_no_runtime_promotion",
+        },
+        "tracks": [
+            {
+                "track_id": APPLY_TRACK_CODEX_KERNEL_CANDIDATE,
+                "status": "running",
+                "source_digest": _json_sha256(runtime_state_before),
+                "staged_digest": None,
+                "trust_decision": _kernel_trust_decision(candidate=candidate, execution_host=execution_host, wsl_distro=wsl_distro),
+                "health_verdict": "not_run",
+                "changed_paths": [],
+                "change_ids": [str(candidate.get("candidate_id") or str(candidate.get("version") or "codex-kernel-candidate"))],
+                "rollback_target": {},
+                "history": [
+                    {
+                        "stage": "initialized",
+                        "at": now_iso(),
+                        "candidate_id": str(candidate.get("candidate_id") or ""),
+                        "candidate_version": str(candidate.get("version") or ""),
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _kernel_trust_decision(*, candidate: dict[str, Any], execution_host: str, wsl_distro: str | None) -> str:
+    apply_mode = str(dict(candidate.get("permission_policy") or {}).get("apply_mode") or "verify_candidate").strip()
+    if execution_host == "wsl" and wsl_distro:
+        return f"kernel_candidate_{apply_mode}:{execution_host}:{wsl_distro}"
+    return f"kernel_candidate_{apply_mode}:{execution_host}"
+
+
+def _write_kernel_activation_journal(path: Path, journal: dict[str, Any]) -> None:
+    assert_secret_free_agentic_update_payload(journal, label="kernel_activation_journal")
+    write_json(path, journal)
+
+
+def _append_kernel_activation_stage(
+    journal: dict[str, Any],
+    journal_path: Path,
+    *,
+    stage: str,
+    **details: Any,
+) -> None:
+    track = _kernel_activation_track(journal)
+    history = list(track.get("history") or [])
+    entry = {"stage": stage, "at": now_iso()}
+    for key, value in details.items():
+        if value is not None:
+            entry[key] = value
+    history.append(entry)
+    track["history"] = history
+    _write_kernel_activation_journal(journal_path, journal)
+
+
+def _finalize_kernel_activation_track(
+    journal: dict[str, Any],
+    journal_path: Path,
+    *,
+    staged_state: dict[str, Any],
+    health_verdict: str,
+    changed_paths: list[str],
+) -> None:
+    track = _kernel_activation_track(journal)
+    track["staged_digest"] = _json_sha256(staged_state)
+    track["health_verdict"] = health_verdict
+    track["changed_paths"] = list(changed_paths)
+    _append_kernel_activation_stage(
+        journal,
+        journal_path,
+        stage="healthcheck_completed",
+        verdict=health_verdict,
+    )
+
+
+def _close_kernel_activation_track(
+    journal: dict[str, Any],
+    journal_path: Path,
+    *,
+    rollback_target: dict[str, Any],
+    restored_runtime_state: bool,
+    committed: bool,
+) -> None:
+    terminal_status = "committed" if committed else "rolled_back"
+    journal["status"] = terminal_status
+    journal["completed_at"] = now_iso()
+    track = _kernel_activation_track(journal)
+    track["status"] = terminal_status
+    track["rollback_target"] = dict(rollback_target)
+    history = list(track.get("history") or [])
+    history.append(
+        {
+            "stage": terminal_status,
+            "at": now_iso(),
+            "restored_runtime_state": restored_runtime_state,
+        }
+    )
+    track["history"] = history
+    _write_kernel_activation_journal(journal_path, journal)
+
+
+def _kernel_activation_track(journal: dict[str, Any]) -> dict[str, Any]:
+    for track in list(journal.get("tracks") or []):
+        if str(track.get("track_id") or "") == APPLY_TRACK_CODEX_KERNEL_CANDIDATE:
+            return track
+    raise ValueError("Missing kernel activation journal track.")
+
+
+def _kernel_activation_staged_state(
+    *,
+    candidate: dict[str, Any],
+    facts: dict[str, Any],
+    evidence: dict[str, Any],
+    status: str,
+    verified: bool,
+    matrix_update: dict[str, Any],
+    rollback_required: bool,
+    rollback_reason: str | None,
+) -> dict[str, Any]:
+    return {
+        "candidate_id": str(candidate.get("candidate_id") or ""),
+        "candidate_version": str(candidate.get("version") or ""),
+        "status": status,
+        "verified": verified,
+        "binary_locator": facts.get("binary_locator"),
+        "probe_evidence_paths": list(evidence.get("probe_evidence_paths") or []),
+        "smoke_evidence_paths": list(evidence.get("smoke_evidence_paths") or []),
+        "matrix_id": matrix_update.get("matrix_id"),
+        "smoke_result": matrix_update.get("smoke_result"),
+        "rollback_required": rollback_required,
+        "rollback_reason": rollback_reason,
+    }
+
+
+def _kernel_track_changed_paths(
+    *,
+    workspace: Path,
+    run_id: str,
+    evidence: dict[str, Any],
+    report_path: Path,
+) -> list[str]:
+    paths: list[str] = []
+    for value in (
+        evidence.get("smoke_report_path"),
+        evidence.get("kernel_probe_snapshot_path"),
+        str(report_path),
+    ):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        paths.append(_run_relative(workspace, run_id, Path(text)))
+    return _dedupe(paths)
+
+
+def _kernel_activation_rollback_target(
+    *,
+    workspace: Path,
+    run_id: str,
+    rollback_manifest_path: Path,
+    runtime_state_before: dict[str, Any],
+    runtime_state_after: dict[str, Any],
+    restored_runtime_state: bool,
+    status: str,
+) -> dict[str, Any]:
+    return {
+        "rollback_manifest_path": _run_relative(workspace, run_id, rollback_manifest_path),
+        "runtime_state_before": deepcopy(runtime_state_before),
+        "runtime_state_after": deepcopy(runtime_state_after),
+        "restored_runtime_state": restored_runtime_state,
+        "status": status,
+    }
+
+
+def _json_sha256(payload: Any) -> str:
+    import hashlib
+    import json
+
+    canonical = deepcopy(payload)
+    json_bytes = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(json_bytes).hexdigest()
 
 
 def _normalize_mode(mode: str) -> str:

@@ -1,0 +1,102 @@
+{
+  "schema_version": "astrabridge-release-identity-v1",
+  "product_name": "AstraBridge",
+  "package_identifier": "app.astrabridge.desktop",
+  "release_version": "0.1.0",
+  "desktop": {
+    "package_name": "astrabridge-desktop",
+    "package_version": "0.1.0",
+    "bundle_targets": [
+      "nsis"
+    ]
+  },
+  "sidecar": {
+    "package_name": "astrabridge-sidecar",
+    "package_version": "0.1.0",
+    "python_entry": "astrabridge_sidecar.server:main",
+    "formal_bundle": {
+      "schema_version": "astrabridge-sidecar-formal-bundle-v1",
+      "resource_path": "release/desktop-sidecar/windows-x64/astrabridge-sidecar",
+      "tauri_resource_source": "../../../release/desktop-sidecar/windows-x64/astrabridge-sidecar",
+      "resource_destination": "astrabridge-sidecar",
+      "launcher_path": "python-runtime/python.exe",
+      "launch_arguments": [
+        "-m",
+        "astrabridge_sidecar.server"
+      ],
+      "pythonpath_entry": ".",
+      "package_root": "astrabridge_sidecar",
+      "skills_root": "skills",
+      "origin": "app_managed",
+      "launcher_mode": "desktop-app-managed",
+      "allow_source_fallback_in_formal_package": false
+    }
+  },
+  "protocol": {
+    "schema_version": "astrabridge-protocol-v1",
+    "compatibility_manifest_path": "apps/astrabridge-sidecar/astrabridge_sidecar/protocol/compatibility_manifest.json"
+  },
+  "mcp": {
+    "server_names": [
+      "astrabridge-capabilities",
+      "astrabridge-web-tools",
+      "astrabridge-yunwu-image",
+      "astrabridge-mcp-probe-fixture"
+    ],
+    "desktop_client_name": "astrabridge-desktop",
+    "broker_client_name": "astrabridge-sidecar-broker"
+  },
+  "updater": {
+    "manifest_version": "astrabridge-updater-release-v1",
+    "create_updater_artifacts": true,
+    "pubkey": "untrusted comment: AstraBridge updater public key\nRWQk7T1LE8n6v2JixL5E0lCdj8m5wXyS4z6QyQwQ4lJ3Y7mQzW1S7V8n",
+    "windows": {
+      "install_mode": "passive"
+    },
+    "default_channel": "stable",
+    "kill_switch": {
+      "manifest_path": "release/updater/kill-switch.json",
+      "default_mode": "allow",
+      "allow_disable_updates": true
+    },
+    "channels": [
+      {
+        "channel": "stable",
+        "manifest_path": "release/updater/stable.json",
+        "endpoint": "https://updates.astrabridge.app/stable/{{target}}/{{arch}}/{{current_version}}",
+        "rollout": "general_availability"
+      },
+      {
+        "channel": "beta",
+        "manifest_path": "release/updater/beta.json",
+        "endpoint": "https://updates.astrabridge.app/beta/{{target}}/{{arch}}/{{current_version}}",
+        "rollout": "release_candidate"
+      },
+      {
+        "channel": "canary",
+        "manifest_path": "release/updater/canary.json",
+        "endpoint": "https://updates.astrabridge.app/canary/{{target}}/{{arch}}/{{current_version}}",
+        "rollout": "internal_preview"
+      }
+    ]
+  },
+  "staging": {
+    "manifest_version": "astrabridge-release-staging-v1",
+    "forbidden_paths": [
+      ".venv",
+      "node_modules",
+      "tests",
+      "PRIVATE",
+      ".astrabridge",
+      "__pycache__",
+      ".pytest_cache",
+      "dist",
+      "output",
+      "target",
+      ".pnpm-store",
+      ".tmp",
+      "tmp"
+    ],
+    "documented_nondeterministic_metadata": []
+  }
+}

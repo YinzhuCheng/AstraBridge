@@ -1,10 +1,10 @@
 # Agentic Update Pipeline Runbook
 
-Last updated: 2026-07-06
+Last updated: 2026-07-19
 
-This runbook defines the controlled AstraBridge workflow for provider/model metadata updates, provider adapter review, capability route drift checks, plugin/skill surface checks, and Codex kernel candidate validation.
+This runbook defines the controlled AstraBridge workflow for provider/model metadata updates, provider adapter review, capability route drift checks, plugin/skill surface checks, Codex kernel candidate validation, and supervised auto-upgrade control for the tracks that are currently justified for unattended apply.
 
-The pipeline is not an auto-updater. It is an agent-assisted proposal and validation system. A user or a stored user-approved automation must define the update scope before discovery starts. The updater discovers, proposes, validates, and records rollback evidence; it applies or promotes only when the current run contract and explicit approval allow it.
+The pipeline is not a blanket auto-updater. It remains an agent-assisted proposal, validation, and supervised-apply system. A user or a stored user-approved automation must define the update scope before discovery starts. The updater discovers, proposes, validates, and records rollback evidence; only explicitly enabled tracks may advance through the supervised controller, and unsupported or higher-risk tracks remain off by default until their trust and recovery evidence exists.
 
 ## User Scope Contract
 
@@ -73,7 +73,7 @@ These actions never happen silently:
 - pushing commits, merging branches, publishing releases, or writing external platforms
 - marking a model, capability, provider, or kernel candidate verified without preserved validation evidence
 
-If any of those actions are needed, the current run contract must explicitly permit the relevant authorization flag, and the run must preserve an apply manifest, validation report, and rollback manifest.
+If any of those actions are needed, the current run contract must explicitly permit the relevant authorization flag, and the run must preserve the relevant apply journal, validation report or apply manifest, and rollback manifest.
 
 ## Entry Points
 
@@ -94,10 +94,11 @@ Use these endpoints for controlled runs:
 | `GET /api/agentic-updates/result` | Read the proposal result. |
 | `GET /api/agentic-updates/runs` | List preserved update runs. |
 | `POST /api/agentic-updates/validate` | Run validation gates for a proposal. |
-| `POST /api/agentic-updates/apply` | Apply metadata-only proposals after approval. |
+| `POST /api/agentic-updates/apply` | Apply journaled provider-metadata or capability-route proposals after approval. |
 | `POST /api/agentic-updates/rollback` | Roll back an applied metadata proposal. |
+| `POST /api/agentic-updates/supervised-run` | Run the supervised auto-upgrade controller across the requested tracks, enforcing per-track policy, cohorts, pause/kill switches, containment, and recovery-point recording. |
 | `POST /api/agentic-updates/code-change-plan` | Create a code-change worktree plan without mutating source by default. |
-| `POST /api/agentic-updates/kernel-verify` | Verify a Codex kernel candidate with fixture or binary evidence. |
+| `POST /api/agentic-updates/kernel-verify` | Verify a Codex kernel candidate with fixture or binary evidence and preserve a journaled activation-gate record. |
 | `POST /api/agentic-updates/automation-template` | Create a disabled-by-default recurring update check template. |
 
 ### Skill And Scripts
@@ -142,7 +143,10 @@ Expected core artifacts:
 - `diffs/proposal.md`
 - `validation/validation-report.json`
 - `validation/validation-report.md`
+- `apply/apply-journal.json` when apply is attempted
 - `apply/apply-manifest.json` when apply is attempted
+- `apply/supervised-run-summary.json` when supervised apply is attempted
+- `apply/supervised-run-report.md` when supervised apply is attempted
 - `rollback/rollback-manifest.json`
 - `secret-scan/secret-scan-report.json`
 - `summary.json`
@@ -161,6 +165,8 @@ Use for model lists, context windows, output limits, pricing, deprecation, sourc
 4. Diff against current catalog/profile state.
 5. Validate with schema, metadata, model catalog, diff, and secret-scan gates.
 6. Apply only if the proposal is `metadata_only` or lower risk, the run has manual approval, and rollback evidence exists.
+
+Capability-route apply inside this lane must stay track-separated from provider metadata: it may write only isolated router-config state plus explicit apply-journal and rollback evidence, and it must fail closed on ambiguous route records.
 
 ### Provider Adapter Or Capability Routes
 
@@ -249,6 +255,121 @@ Kernel verification must preserve:
 - rollback requirement when verification is blocked or failed
 
 Noop or proposal-only runs should still write a rollback manifest explaining that no runtime/source state changed.
+
+## Supervised Auto-Upgrade Policy
+
+The supervised controller is the only lane that may advance an update without a per-run interactive approval click, and even then it stays bounded by explicit per-track policy.
+
+Current policy shape:
+
+| Field | Meaning |
+| --- | --- |
+| `automation_mode` | `off` or `supervised_apply`. |
+| `cohort` | Named rollout cohort such as `canary` or `manual_only`. |
+| `cohort_size` | Intended cohort width for the current stage. |
+| `paused` | Stops the track before apply. |
+| `kill_switch` | Emergency stop that blocks the track immediately. |
+| `depends_on` | Earlier tracks that must commit first in the same supervised run. |
+| `max_failures_before_pause` | Failure threshold after which the track should remain paused for the next run. |
+
+Current default posture on Sunday, July 19, 2026:
+
+- `provider_metadata`: enabled for `supervised_apply`
+- `capability_routes`: enabled for `supervised_apply`, dependent on metadata when both are present
+- `codex_kernel`: off by default
+- `plugin_skill_surface`: off by default
+- `node_executors`: off by default
+- `desktop_application`: off by default
+
+The controller must preserve:
+
+- one controller summary JSON and operator-facing Markdown report
+- per-track apply journal and apply manifest for every committed unattended track
+- rollback manifest paths for all committed unattended tracks
+- clear containment state when a blocked or failed track stops the rollout
+
+Mixed-track runs fail closed: once a track is blocked or fails, later tracks are skipped and the summary records the exact recovery point.
+
+### Operator Recovery Playbook: Supervised Containment Or Updater Interruption
+
+Use this bounded operator path when a supervised run stops on containment or an
+update interruption rehearsal shows a rollback-required state.
+
+1. Read `apply/supervised-run-summary.json` first and identify:
+   - `stopped_after_track`
+   - `containment.reason`
+   - the last committed recovery point under `containment.recovery_points`
+2. If a committed track exists, inspect its child-run artifacts before retrying:
+   - child `apply/apply-journal.json`
+   - child `apply/apply-manifest.json`
+   - child `rollback/rollback-manifest.json`
+3. If the blocked track is paused or kill-switched, do not retry until policy is
+   changed deliberately and the reason is recorded.
+4. If containment followed a failed apply, run rollback from the recorded child
+   recovery point before enabling any later track.
+5. Preserve the failed controller summary, the child rollback manifest, and the
+   release-gate or runtime-stability bundle that caught the issue; do not clean
+   them.
+
+Expected bounded outcomes:
+
+- `track_paused` or `kill_switch_active`: quarantine the track and stop.
+- `automation_mode_off` or `automation_not_supported_for_track`: return to
+  manual verification or manual promotion for that lane.
+- `apply_failed:<track>`: roll back the last committed child run, preserve the
+  failing child artifacts, and reopen only the single affected track after the
+  root cause is fixed.
+
+### Operator Recovery Playbook: Runtime Stability Long-Horizon And Chaos Signals
+
+Use this consolidated operator surface when the shared runtime-stability gate or
+rollout gate records failure, partial qualification, or a blocked release lane
+for long-horizon stability or injected chaos drills. This playbook is a read
+path over the existing gate owners; it must not become a second scheduler,
+soak ledger, or ad hoc issue tracker.
+
+Start with these shared evidence roots:
+
+- `PRIVATE/runtime-stability/<run_id>/reports/summary.json`
+- `PRIVATE/runtime-stability/<run_id>/reports/report.md`
+- `PRIVATE/runtime-stability/<run_id>/validations/fault-matrix.json`
+- `PRIVATE/runtime-stability/<run_id>/validations/long-horizon-bundle.json`
+- `PRIVATE/runtime-stability/<run_id>/validations/injected-chaos-drills.json`
+- `PRIVATE/runtime-rollout/<run_id>/reports/summary.json`
+- `PRIVATE/runtime-rollout/<run_id>/validations/release-gate-summary.json`
+- `PRIVATE/runtime-rollout/<run_id>/validations/rollback-readback.json`
+
+Current bounded examples preserved by Step 29 work:
+
+- `PRIVATE/runtime-stability/step29-2-gate/reports/summary.json`
+- `PRIVATE/runtime-stability/step29-2-gate/validations/injected-chaos-drills.json`
+- `PRIVATE/runtime-stability/step29-1/summary.json`
+- `PRIVATE/runtime-stability/step29-2/summary.json`
+
+Recovery table:
+
+| Failure signature | Read first | Quarantine / containment action | Rollback or recovery action | Preserve for support bundle or escalation | Rerun entry point |
+| --- | --- | --- | --- | --- | --- |
+| `release_long_horizon_bundle.status != pass` | runtime rollout `reports/summary.json`, then nested release gate `validations/long-horizon-bundle.json` | Stop promotion for the affected release candidate. Do not advance later tracks or declare rollout-ready state. | Follow the failing suite entry under `long_horizon_bundle.suites[]` and recover only that lane. If the failing lane is updater-related, apply the supervised containment path above before reopening later tracks. | Preserve the rollout summary, nested release-gate summary, long-horizon bundle JSON, and matching suite stdout/stderr logs. | Re-run `python scripts/run_runtime_stability_gate.py --mode release` only after the single failing lane is repaired and rollback/quarantine notes are recorded. |
+| `supervised_update_policy_and_containment` failure or containment stop | `apply/supervised-run-summary.json`, child apply/rollback manifests, then runtime-stability long-horizon bundle | Keep the blocked track paused or kill-switched. Do not reopen unrelated tracks to “see if they pass.” | Roll back from the last committed child recovery point when apply already touched state. If automation is unsupported, fall back to manual verification for that one track. | Preserve controller summary, child apply journal, child rollback manifest, and the long-horizon bundle/report that caught the failure. | Re-run the supervised controller only for the repaired track set after policy and recovery point are explicitly confirmed. |
+| `windows_update_interruption_rehearsal` failure or rollback-readback mismatch | runtime rollout `validations/rollback-readback.json`, nested release gate `long-horizon-bundle.json`, and update rehearsal evidence | Freeze the candidate build or track. Do not promote new binaries or sidecar bundle changes from the same candidate. | Execute the recorded rollback/readback path first; only restore promotion once durable store readback and projection rebuilds are clean. | Preserve rollback-readback JSON, rehearsal logs, nested release-gate summary, and any affected apply or activation manifest. | Re-run the rollout gate after rollback-readback evidence returns to `pass`. |
+| `provider_retry_storm_and_circuit_breaker_chaos` failure or `release_injected_chaos_drills.release_qualified=false` | runtime-stability `validations/injected-chaos-drills.json`, rollout `release-gate-summary.json`, and the provider chaos stdout/stderr logs | Quarantine the affected provider lane or release cohort. Do not widen provider concurrency, retry budgets, or default recommendations while the breaker path is unqualified. | Keep retry-budget and breaker thresholds fail-closed. Repair provider backpressure, rate-limit handling, or dispatch visibility before reopening the lane; do not bypass the breaker to force continuation. | Preserve the drill JSON, the provider chaos command logs, rollout summary, and any provider compatibility or failure-taxonomy evidence tied to the lane. | Re-run the runtime stability gate first; if release qualification is required, re-run the nested rollout gate only after the drill pack returns `pass` in release mode. |
+| `mcp_timeout_cancel_and_policy_fail_closed` failure | runtime-stability summary plus the matching suite stdout/stderr logs | Quarantine the affected MCP capability or policy lane. Do not treat timeouts or policy bypass as a UI-only issue. | Restore timeout, cancellation, or policy fail-closed behavior before resuming long-running MCP tasks. If a task was partially applied, preserve it as needs-review rather than auto-retrying side effects. | Preserve suite logs, broker/server validation evidence, and the gate summary that marked the lane failed. | Re-run the stability gate after the exact MCP boundary fix lands; do not reopen broad provider or update promotion first. |
+| `terminal_projection_and_stream_recovery` or `scheduler_recovery_and_idempotency` failure | runtime-stability summary, matching suite logs, and the fault matrix entry for truncated stream or duplicate suppression | Quarantine the affected release candidate or graph-runtime change set. Do not rely on manual observation that “the UI seemed fine.” | Repair terminal reconciliation, duplicate suppression, or resume semantics before allowing recovery-sensitive runs to proceed. If ambiguous external effects were recorded, stop on `needs_review` instead of replaying blindly. | Preserve suite logs, fault matrix JSON, durable run projection evidence, and any support-bundle snapshot captured during the failing run. | Re-run the stability gate only after the single recovery or idempotency fault is corrected and the preserved ambiguous run evidence is reviewed. |
+
+Operator rules that apply to every row:
+
+1. Read the shared gate summary first, then narrow to the specific child JSON or
+   command logs named above.
+2. Quarantine only the affected lane, cohort, or candidate unless the evidence
+   explicitly shows cross-lane corruption.
+3. Roll back or repair before rerun when any recorded state mutation already
+   occurred; do not “test forward” through a known bad recovery point.
+4. Preserve gate summaries, child JSON artifacts, and matching stdout/stderr
+   logs as the support-bundle seed. Do not replace them with a handwritten
+   narrative.
+5. Re-run only the bounded gate named in the row after the fix; avoid creating
+   a parallel checklist or out-of-band approval tracker.
 
 ## Automation Template
 

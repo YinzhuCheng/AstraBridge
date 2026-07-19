@@ -168,6 +168,23 @@ class ProviderCatalogContractTests(unittest.TestCase):
                 any("partial" in warning.lower() and "command execution" in warning.lower() for warning in list(model.get("ui_warnings") or []))
             )
 
+    def test_effective_catalog_suppresses_unsafe_default_route_advertising(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService(root / "profiles.json")
+            config = RouterConfigService(profiles, root / "router.json")
+            metadata = MetadataService(config, DummyRouter(), root / "sources.json", root / "report")
+            metadata.import_seed(apply=True)
+
+            catalog = metadata.effective_catalog("qwen/qwen3.7-plus")
+            self.assertEqual(catalog["model_count"], 1)
+            model = catalog["models"][0]
+            self.assertEqual(model["id"], "qwen/qwen3.7-plus")
+            self.assertFalse(model["recommended"])
+            self.assertFalse(model["default_for_provider"])
+            self.assertFalse(model["default_route_verified"])
+            self.assertIn("authority_tier_C", list(model.get("default_route_blockers") or []))
+
 
 if __name__ == "__main__":
     unittest.main()

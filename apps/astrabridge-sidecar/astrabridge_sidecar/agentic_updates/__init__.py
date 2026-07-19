@@ -20,8 +20,10 @@ from .artifacts import (
 )
 from .apply import (
     AGENTIC_UPDATE_APPLY_MANIFEST_SCHEMA_VERSION,
+    AGENTIC_UPDATE_APPLY_JOURNAL_SCHEMA_VERSION,
     AGENTIC_UPDATE_ROLLBACK_RESULT_SCHEMA_VERSION,
     SAFE_APPLY_RISK_CLASSES,
+    apply_journaled_proposal,
     apply_metadata_only_proposal,
     rollback_metadata_apply,
 )
@@ -110,6 +112,7 @@ from .validation import (
 __all__ = [
     "AGENTIC_UPDATE_ARTIFACT_CONTRACT_SCHEMA_VERSION",
     "AGENTIC_UPDATE_APPLY_MANIFEST_SCHEMA_VERSION",
+    "AGENTIC_UPDATE_APPLY_JOURNAL_SCHEMA_VERSION",
     "AGENTIC_UPDATE_CONTRACT_SCHEMA_VERSION",
     "AGENTIC_UPDATE_CODE_CHANGE_TASK_BRIEF_FILENAME",
     "AGENTIC_UPDATE_DIFF_SCHEMA_VERSION",
@@ -164,6 +167,7 @@ __all__ = [
     "agentic_update_run_root",
     "agentic_update_runs_root",
     "agentic_update_schema_definitions",
+    "apply_journaled_proposal",
     "apply_metadata_only_proposal",
     "assert_secret_free_agentic_update_payload",
     "build_agentic_update_diff",

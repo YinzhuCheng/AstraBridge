@@ -13,6 +13,7 @@ export type CollaborationMode = "default" | "plan";
 export type AppearancePreset = "codex" | "paper" | "slate" | "cobalt" | "sunrise";
 export type CursorEnhancementPreference = "auto" | "off";
 export type ExecutionHost = "windows" | "wsl";
+export type UpdateChannel = "stable" | "beta" | "canary";
 
 export type ProjectPluginSkillPresetPluginRef = {
   plugin_id: string;
@@ -67,6 +68,7 @@ export type ProjectFile = {
     cursor_enhancement?: CursorEnhancementPreference;
     execution_host?: ExecutionHost;
     wsl_distro?: string;
+    update_channel?: UpdateChannel;
     left_sidebar_open?: boolean;
     left_sidebar_width?: number;
     right_sidebar_width?: number;
@@ -90,6 +92,125 @@ export type ProjectTaskProviderThread = {
   missing_reason?: string;
   created_at?: string;
   updated_at?: string;
+};
+
+export type DesktopUpdateStatus = {
+  schema_version: string;
+  generated_at: string;
+  release_version: string;
+  selected_channel: UpdateChannel;
+  default_channel: UpdateChannel;
+  channels: Array<{
+    channel: UpdateChannel;
+    manifest_path: string;
+    endpoint: string;
+    rollout: string;
+    selected: boolean;
+    default: boolean;
+  }>;
+  selected_endpoint: string;
+  updater_contract_status: string;
+  kill_switch: {
+    manifest_path: string;
+    source_path: string;
+    loaded_from_disk: boolean;
+    default_mode: string;
+    active_mode: string;
+    allow_disable_updates: boolean;
+    updates_enabled: boolean;
+    raw_manifest?: Record<string, unknown> | null;
+  };
+  formal_bundle: {
+    status: string;
+    resource_path: string;
+    launcher_path: string;
+    bundle_manifest_path: string;
+    bundle_manifest_exists?: boolean;
+    launcher_exists?: boolean;
+    package_root?: string;
+    package_root_exists?: boolean;
+    skills_root?: string;
+    skills_root_exists?: boolean;
+  };
+  tauri_runtime: {
+    schema_version?: string;
+    create_updater_artifacts?: boolean;
+    pubkey?: string;
+    endpoints?: string[];
+    dangerous_insecure_transport_protocol?: boolean;
+    dangerous_accept_invalid_certs?: boolean;
+    dangerous_accept_invalid_hostnames?: boolean;
+    windows_install_mode?: string;
+    default_channel?: string;
+  };
+  latest_rehearsal?: {
+    status: string;
+    run_id?: string | null;
+    selected_channel?: string | null;
+    created_at?: string | null;
+    summary_json: string;
+    report_md: string;
+    run_root: string;
+  } | null;
+  warnings?: string[];
+  project_update_channel?: string | null;
+};
+
+export type DesktopUpdateRehearsalResult = {
+  schema_version: string;
+  run_id: string;
+  created_at: string;
+  status: string;
+  release_version: string;
+  selected_channel: UpdateChannel;
+  default_channel: UpdateChannel;
+  kill_switch: DesktopUpdateStatus["kill_switch"];
+  updater_contract_status: string;
+  release_readiness_run_root: string;
+  release_readiness_summary_json: string;
+  clean_install_check: {
+    status: string;
+    staged_bundle_root: string;
+    bundle_manifest_path: string;
+    launcher_path: string;
+    package_root: string;
+    skills_root: string;
+    selected_channel_manifest_path: string;
+    kill_switch_manifest_path: string;
+    selected_channel_manifest_sha256?: string | null;
+    kill_switch_manifest_sha256?: string | null;
+    bundle_manifest_sha256?: string | null;
+    checks: Record<string, boolean>;
+    notes?: string[];
+  };
+  update_check: {
+    status: string;
+    selected_channel: string;
+    selected_endpoint: string;
+    kill_switch_mode: string;
+    updates_enabled: boolean;
+    channel_manifest_path: string;
+    channel_manifest_sha256?: string | null;
+    activation_journal_path: string;
+  };
+  rollback_check: {
+    status: string;
+    current_pointer_path: string;
+    rollback_generation_id: string;
+    rollback_entry_manifest_path: string;
+    rollback_entry_manifest_sha256?: string | null;
+  };
+  artifact_paths: {
+    run_root: string;
+    rehearsal_root: string;
+    summary_json: string;
+    report_md: string;
+    activation_journal_json: string;
+    current_pointer_json: string;
+    prior_generation_manifest_json: string;
+    candidate_generation_manifest_json: string;
+  };
+  errors?: string[];
 };
 
 export type TaskLaneSummary = {
@@ -251,6 +372,39 @@ export type TaskGraphDefinition = {
     entry_node_ids?: string[];
   };
   orchestration_graph?: AgentOrchestrationGraph;
+  graph_document?: {
+    schema_version?: string;
+    current_revision?: Record<string, unknown>;
+    migration?: Record<string, unknown>;
+    compatibility_projection?: {
+      source_kind?: string | null;
+      writable_source?: string | null;
+      task_graph_schema_version?: string | null;
+      lowering_mode?: string | null;
+      generated_at?: string | null;
+    } | null;
+    source_ownership?: {
+      ownership_mode?: string | null;
+      can_write_from_gui?: boolean;
+      source_path?: string | null;
+      source_sha256?: string | null;
+      detached_at?: string | null;
+      detached_from_path?: string | null;
+      symbol_ref_count?: number | null;
+      source_file?: {
+        path?: string | null;
+        sha256?: string | null;
+        symbol?: string | null;
+        line_start?: number | null;
+        line_end?: number | null;
+      } | null;
+    } | null;
+  } | null;
+  graph_revision?: {
+    revision_id?: string | null;
+    revision_index?: number | null;
+    etag?: string | null;
+  } | null;
   created_at: string;
   updated_at: string;
   state_version: number;
@@ -358,6 +512,29 @@ export type TaskGraphRunRef = {
   budget?: TaskGraphRunBudget | null;
   worker_count?: number;
   worker_bindings?: TaskGraphWorkerBinding[];
+};
+
+export type TaskGraphCommandLogEntry = {
+  entry_id: string;
+  graph_id: string;
+  action:
+    | "create_node"
+    | "move_node"
+    | "save_node"
+    | "delete_node"
+    | "create_edge"
+    | "save_edge"
+    | "delete_edge"
+    | "undo"
+    | "redo"
+    | "detach_source_ownership";
+  target_kind: "graph" | "node" | "edge";
+  target_id?: string | null;
+  summary: string;
+  detail?: string | null;
+  status: "pending" | "applied" | "failed";
+  created_at: string;
+  updated_at: string;
 };
 
 export type TaskGraphSnapshotRef = {
@@ -532,6 +709,24 @@ export type NodeTypeRegistryPortSpec = {
   label?: string;
 };
 
+export type NodeExecutorModeSpec = {
+  available: boolean;
+  status: string;
+  reason?: string;
+  supports_checkpointing?: boolean;
+  supports_cancellation?: boolean;
+};
+
+export type NodeExecutorCapability = {
+  executor_id: string;
+  executor_version: number;
+  executor_registry_fingerprint: string;
+  availability_summary: string;
+  supported_modes: Record<string, NodeExecutorModeSpec>;
+  effect_classification: string;
+  capability_dependencies: string[];
+};
+
 export type NodeTypeRegistryEntry = {
   type_id: string;
   version: number;
@@ -548,15 +743,36 @@ export type NodeTypeRegistryEntry = {
   ui_hints: Record<string, unknown>;
   migration: Record<string, unknown>;
   registry_fingerprint: string;
+  executor_capability?: NodeExecutorCapability;
   internal_only?: boolean;
 };
 
 export type NodeTypeRegistrySnapshot = {
   schema_version: string;
   registry_fingerprint: string;
+  executor_registry_fingerprint?: string;
   role_ids: string[];
   kind_aliases: Record<string, string>;
   node_types: NodeTypeRegistryEntry[];
+  executor_matrix?: {
+    schema_version: string;
+    registry_fingerprint: string;
+    execution_modes: string[];
+    executors: Array<{
+      executor_id: string;
+      version: number;
+      title: string;
+      description?: string;
+      supported_modes: Record<string, NodeExecutorModeSpec>;
+      effect_classification: string;
+      capability_dependencies: string[];
+    }>;
+    node_types: Array<{
+      type_id: string;
+      compiler_executor_id: string;
+      executor_capability: NodeExecutorCapability;
+    }>;
+  };
 };
 
 export type TaskGraphDryRunStatus = "pass" | "warning" | "blocked" | string;
@@ -1505,6 +1721,12 @@ export type RouterModelEntry = {
   parallel_tool_call_status?: "verified" | "serial_only" | "disabled" | string;
   command_execution_status?: string;
   command_execution_note?: string;
+  default_route_verified?: boolean;
+  default_route_status?: string;
+  default_route_blockers?: string[];
+  default_multimodal_route_verified?: boolean;
+  default_multimodal_route_status?: string;
+  default_multimodal_route_blockers?: string[];
   source_urls?: string[];
   source_status?: string;
   recommended?: boolean;

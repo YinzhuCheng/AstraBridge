@@ -5,6 +5,7 @@ from typing import Any
 
 from .agent_orchestration_contract import validate_agent_orchestration_graph
 from .common import now_iso
+from .external_a2a_gateway import build_external_a2a_gateway_snapshot
 from .mcp_node_policy import resolve_node_mcp_tool_policy
 from .node_type_registry import OPAQUE_DISABLED_NODE_TYPE_ID, resolve_node_type
 
@@ -197,6 +198,14 @@ def compile_agent_orchestration_graph(
                 },
             }
         )
+    external_a2a = build_external_a2a_gateway_snapshot(
+        registry=dict(canonical.get("external_agent_card_registry") or {}) or None,
+        referenced_card_refs={
+            str(node.get("card_ref") or "").strip()
+            for node in node_map.values()
+            if str(node.get("card_ref") or "").strip()
+        },
+    )
     return {
         "schema_version": AGENT_ORCHESTRATION_COMPILED_PLAN_VERSION,
         "graph_id": canonical["graph_id"],
@@ -218,6 +227,7 @@ def compile_agent_orchestration_graph(
         },
         "parallel_groups": parallel_groups,
         "approval_nodes": approval_nodes,
+        "external_a2a": external_a2a,
         "nodes": compiled_nodes,
         "edges": compiled_edges,
     }

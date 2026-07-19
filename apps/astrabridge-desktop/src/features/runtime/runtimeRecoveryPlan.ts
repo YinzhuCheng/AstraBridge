@@ -69,9 +69,26 @@ function resolveRecoveryModelEntry(providerId: string, nativeModel: string, mode
   return models.find((model) => model.provider === providerId && (model.native_model === nativeModel || model.id === `${providerId}/${nativeModel}`)) ?? null;
 }
 
+function defaultRouteVerified(model: RouterModelEntry): boolean {
+  if (model.default_route_verified !== undefined) return Boolean(model.default_route_verified);
+  const authorityTier = String(model.authority_tier ?? "").trim().toUpperCase();
+  if (authorityTier !== "A") return false;
+  const commandExecutionStatus = String(model.command_execution_status ?? "unknown").trim().toLowerCase();
+  if (commandExecutionStatus === "partial_no_command_execution" || commandExecutionStatus === "completed_without_command_execution") {
+    return false;
+  }
+  if (model.supports_mcp_tools) {
+    const mcpPolicy = String(model.mcp_tool_call_policy ?? "unsupported").trim().toLowerCase();
+    const mcpSmokeStatus = String(model.mcp_smoke_status ?? "untested").trim().toLowerCase();
+    if (mcpPolicy !== "verified") return false;
+    if (!(mcpSmokeStatus === "verified" || mcpSmokeStatus.startsWith("pass"))) return false;
+  }
+  return true;
+}
+
 function preferredProviderModel(providerId: string, models: RouterModelEntry[], profile: Profile | null | undefined, currentModel: string): string {
   const providerModels = models
-    .filter((model) => model.provider === providerId && model.enabled !== false)
+    .filter((model) => model.provider === providerId && model.enabled !== false && defaultRouteVerified(model))
     .sort((left, right) => {
       const leftDeprecated = Number(Boolean(left.deprecated));
       const rightDeprecated = Number(Boolean(right.deprecated));
@@ -85,7 +102,16 @@ function preferredProviderModel(providerId: string, models: RouterModelEntry[], 
       return String(left.native_model ?? left.id ?? "").localeCompare(String(right.native_model ?? right.id ?? ""));
     });
   const exactDefault = providerModels[0] ?? null;
-  return exactDefault?.native_model ?? profile?.model ?? currentModel;
+  if (exactDefault?.native_model) return exactDefault.native_model;
+  const profileModelEntry = resolveRecoveryModelEntry(providerId, String(profile?.model ?? "").trim(), models);
+  if (profileModelEntry && defaultRouteVerified(profileModelEntry)) {
+    return String(profileModelEntry.native_model ?? profileModelEntry.id ?? "").trim();
+  }
+  const currentModelEntry = resolveRecoveryModelEntry(providerId, currentModel, models);
+  if (currentModelEntry && defaultRouteVerified(currentModelEntry)) {
+    return String(currentModelEntry.native_model ?? currentModelEntry.id ?? "").trim();
+  }
+  return "";
 }
 
 export function resolveRecoveryComposerPatch(context: RecoveryContext): Partial<ComposerRecoverySettings> | null {
@@ -104,6 +130,9 @@ export function resolveRecoveryComposerPatch(context: RecoveryContext): Partial<
     nativeModelId(target?.model_id)
     || (action.action === "switch_model" ? nativeModelId(action.target) : "")
     || (action.action === "handoff_provider" ? preferredProviderModel(nextProviderId, models, resolvedProfile, current.model) : current.model);
+  if (action.action === "handoff_provider" && !nextModel) {
+    return null;
+  }
   const nextModelEntry = resolveRecoveryModelEntry(nextProviderId, nextModel, models);
   const reasoningOptions = composerReasoningOptions(nextModelEntry, resolvedProfile, current.reasoning_effort);
   const requestedReasoning =

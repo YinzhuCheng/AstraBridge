@@ -11,12 +11,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from astrabridge_sidecar.durable_run_store import (
+    DeliveryPolicyConflict,
     DURABLE_RUN_MIGRATION_SCHEMA_VERSION,
+    DURABLE_RUN_STORE_SCHEMA_REVISION,
     DURABLE_RUN_STORE_SCHEMA_VERSION,
     DurableRunEventStore,
     ImmutableRecordConflict,
     LeaseBusy,
     StateVersionConflict,
+    StoreInitializationBlocked,
+    STORE_MIGRATION_BACKUP_DIRNAME,
+    STORE_MIGRATION_REPORT_DIRNAME,
     TerminalStateConflict,
 )
 
@@ -50,11 +55,18 @@ def _run(run_id: str = "run-1", *, status: str = "queued") -> dict[str, object]:
     }
 
 
-def _agent_envelope(run_id: str = "run-1") -> dict[str, object]:
+def _agent_envelope(
+    run_id: str = "run-1",
+    *,
+    edge_id: str = "edge-source-target",
+    attempt: int = 1,
+    sequence: int | None = None,
+) -> dict[str, object]:
+    delivery_sequence = max(0, attempt - 1) if sequence is None else sequence
     return {
-        "envelope_id": f"envelope-{run_id}",
+        "envelope_id": f"envelope-{run_id}-{edge_id}-{attempt}",
         "schema_version": "astrabridge-protocol-v1",
-        "message_id": f"message-{run_id}",
+        "message_id": f"message-{run_id}-{edge_id}-{attempt}",
         "task_id": "task-1",
         "run_id": run_id,
         "sender": {
@@ -80,10 +92,10 @@ def _agent_envelope(run_id: str = "run-1") -> dict[str, object]:
         ],
         "created_at": "2026-01-01T00:01:00+00:00",
         "delivery": {
-            "attempt": 1,
-            "idempotency_key": f"delivery-{run_id}",
+            "attempt": attempt,
+            "idempotency_key": f"delivery-{run_id}-{edge_id}-{attempt}",
             "trace_id": f"trace-{run_id}",
-            "sequence": 0,
+            "sequence": delivery_sequence,
         },
         "security_policy": {
             "exclude_private_memory": True,
@@ -94,7 +106,7 @@ def _agent_envelope(run_id: str = "run-1") -> dict[str, object]:
             "context_id": f"context-{run_id}",
             "source_node_id": "node-source",
             "target_node_id": "node-target",
-            "edge_id": "edge-source-target",
+            "edge_id": edge_id,
             "intent": "graph_node_handoff",
             "correlation_id": f"corr-{run_id}",
             "causation_id": f"cause-{run_id}",
@@ -121,6 +133,130 @@ class DurableRunStoreTests(unittest.TestCase):
             finally:
                 conn.close()
             self.assertTrue({"runs", "run_events", "node_attempts", "leases", "inbox", "outbox", "external_operations"}.issubset(tables))
+
+    def test_initialize_upgrades_old_store_revision_with_backup_and_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = DurableRunEventStore(root)
+            store.db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(store.db_path)
+            try:
+                conn.execute("CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                conn.execute("INSERT INTO store_meta(key, value) VALUES(?, ?)", ("schema_version", "legacy-schema"))
+                conn.execute("PRAGMA user_version=0")
+                conn.commit()
+            finally:
+                conn.close()
+
+            self.assertEqual(store.initialize()["schema_version"], DURABLE_RUN_STORE_SCHEMA_VERSION)
+
+            conn = sqlite3.connect(store.db_path)
+            try:
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], DURABLE_RUN_STORE_SCHEMA_REVISION)
+            finally:
+                conn.close()
+
+            reports = sorted(
+                path
+                for path in (root / ".astrabridge" / STORE_MIGRATION_REPORT_DIRNAME).glob("*.json")
+                if not path.name.endswith(".readback.json")
+            )
+            self.assertTrue(reports)
+            report = next(
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in reports
+                if json.loads(path.read_text(encoding="utf-8")).get("detected_state") == "old"
+            )
+            self.assertEqual(report["detected_state"], "old")
+            self.assertEqual(report["terminal_outcome"], "committed")
+            self.assertTrue(report["backup_paths"])
+            backup_root = root / ".astrabridge" / STORE_MIGRATION_BACKUP_DIRNAME / report["migration_id"]
+            self.assertTrue((backup_root / store.db_path.name).exists())
+
+    def test_initialize_blocks_future_store_revision_and_preserves_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = DurableRunEventStore(root)
+            store.create_run(_run("run-future"))
+            store.record_agent_envelope(_agent_envelope("run-future"))
+            conn = sqlite3.connect(store.db_path)
+            try:
+                conn.execute(f"PRAGMA user_version={DURABLE_RUN_STORE_SCHEMA_REVISION + 1}")
+                conn.commit()
+            finally:
+                conn.close()
+
+            with self.assertRaises(StoreInitializationBlocked) as raised:
+                DurableRunEventStore(root).initialize()
+
+            report = raised.exception.report
+            self.assertEqual(report["detected_state"], "future_version")
+            self.assertEqual(report["terminal_outcome"], "blocked_future_version")
+            self.assertTrue(report["backup_paths"])
+            backup_root = root / ".astrabridge" / STORE_MIGRATION_BACKUP_DIRNAME / report["migration_id"]
+            self.assertTrue((backup_root / store.db_path.name).exists())
+            self.assertEqual(report["readback"]["status"], "pass")
+            self.assertEqual(report["readback"]["sample_run_id"], "run-future")
+            self.assertEqual(sorted(report["readback"]["provider_participants"]), ["deepseek", "qwen"])
+            readback = json.loads((root / report["readback"]["readback_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(readback["projection"]["run_id"], "run-future")
+            self.assertEqual(readback["projection"]["graph_id"], "graph-1")
+
+    def test_initialize_blocks_damaged_store_and_preserves_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = DurableRunEventStore(root)
+            store.db_path.parent.mkdir(parents=True, exist_ok=True)
+            store.db_path.write_text("not-a-sqlite-database", encoding="utf-8")
+
+            with self.assertRaises(StoreInitializationBlocked) as raised:
+                store.initialize()
+
+            report = raised.exception.report
+            self.assertEqual(report["detected_state"], "damaged")
+            self.assertEqual(report["terminal_outcome"], "blocked_damaged")
+            self.assertTrue(report["backup_paths"])
+            backup_root = root / ".astrabridge" / STORE_MIGRATION_BACKUP_DIRNAME / report["migration_id"]
+            self.assertTrue((backup_root / store.db_path.name).exists())
+            self.assertEqual(report["readback"]["status"], "blocked")
+
+    def test_initialize_rolled_back_report_preserves_readback_for_prior_run_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = DurableRunEventStore(root)
+            store.create_run(_run("run-rollback"))
+            store.record_agent_envelope(_agent_envelope("run-rollback"))
+            conn = sqlite3.connect(store.db_path)
+            try:
+                conn.execute("ALTER TABLE store_meta RENAME TO store_meta_valid")
+                conn.execute("CREATE TABLE store_meta (key TEXT PRIMARY KEY)")
+                conn.execute("INSERT INTO store_meta(key) VALUES(?)", ("schema_version",))
+                conn.commit()
+            finally:
+                conn.close()
+
+            with self.assertRaises(sqlite3.DatabaseError):
+                DurableRunEventStore(root).initialize()
+
+            reports = sorted(
+                path
+                for path in (root / ".astrabridge" / STORE_MIGRATION_REPORT_DIRNAME).glob("*.json")
+                if not path.name.endswith(".readback.json")
+            )
+            self.assertTrue(reports)
+            report = next(
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in reports
+                if json.loads(path.read_text(encoding="utf-8")).get("terminal_outcome") == "rolled_back"
+            )
+            self.assertEqual(report["terminal_outcome"], "rolled_back")
+            self.assertTrue(report["backup_paths"])
+            self.assertEqual(report["readback"]["status"], "pass")
+            self.assertEqual(report["readback"]["sample_run_id"], "run-rollback")
+            self.assertEqual(sorted(report["readback"]["provider_participants"]), ["deepseek", "qwen"])
+            readback = json.loads((root / report["readback"]["readback_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(readback["projection"]["run_id"], "run-rollback")
+            self.assertEqual(readback["projection"]["delivery_ledger"], [])
 
     def test_empty_migration_is_deterministic_and_does_not_create_legacy_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -186,7 +322,7 @@ class DurableRunStoreTests(unittest.TestCase):
             first = store.append_event(event)
             self.assertEqual(store.append_event(event), first)
             with self.assertRaises(ImmutableRecordConflict):
-                store.append_event({**event, "event_type": "different"})
+                store.append_event({**event, "event_type": "node_completed"})
             with self.assertRaises(ImmutableRecordConflict):
                 store.append_event({**event, "event_id": "run-1-other", "sequence": 1})
 
@@ -229,7 +365,12 @@ class DurableRunStoreTests(unittest.TestCase):
             self.assertEqual(store.acquire_lease("run-1", "node-a", 1, owner_boot_id="boot-b")["status"], "active")
             self.assertTrue(store.record_inbox("message-1", run_id="run-1"))
             self.assertFalse(store.record_inbox("message-1", run_id="run-1"))
+            with self.assertRaises(ImmutableRecordConflict):
+                store.record_inbox("message-1", run_id="run-1", payload={"different": True})
             self.assertEqual(store.enqueue_outbox("operation-1", "run-1", kind="dispatch")["status"], "pending")
+            self.assertEqual(store.enqueue_outbox("operation-1", "run-1", kind="dispatch"), store.get_outbox_operation("operation-1"))
+            with self.assertRaises(ImmutableRecordConflict):
+                store.enqueue_outbox("operation-1", "run-1", kind="dispatch", payload={"different": True})
             operation = store.record_external_operation("operation-1", "run-1", kind="provider_call", classification="read_only", status="completed")
             self.assertEqual(operation["status"], "completed")
 
@@ -256,7 +397,7 @@ class DurableRunStoreTests(unittest.TestCase):
             )
             projection = store.load_run("run-1")
             self.assertEqual(len(projection["agent_envelopes"]), 1)
-            self.assertEqual(projection["agent_envelopes"][0]["envelope_id"], "envelope-run-1")
+            self.assertEqual(projection["agent_envelopes"][0]["envelope_id"], "envelope-run-1-edge-source-target-1")
             self.assertEqual(len(projection["delivery_ledger"]), 1)
             self.assertEqual(projection["delivery_ledger"][0]["event_type"], "handoff_created")
             self.assertEqual(projection["delivery_ledger"][0]["payload"]["envelope_id"], "envelope-run-1")
@@ -274,6 +415,67 @@ class DurableRunStoreTests(unittest.TestCase):
                         ],
                     }
                 )
+
+    def test_agent_envelope_delivery_sequence_and_processing_policy_are_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = DurableRunEventStore(temp)
+            store.create_run(_run())
+            first = store.record_agent_envelope(_agent_envelope())
+            first_sequence = dict(first.get("delivery") or {}).get("sequence")
+            self.assertEqual(-1 if first_sequence is None else int(first_sequence), 0)
+            second = store.record_agent_envelope(_agent_envelope(attempt=2))
+            second_sequence = dict(second.get("delivery") or {}).get("sequence")
+            self.assertEqual(-1 if second_sequence is None else int(second_sequence), 1)
+            with self.assertRaises(DeliveryPolicyConflict):
+                store.record_agent_envelope(_agent_envelope(edge_id="edge-source-target", attempt=4, sequence=3))
+            with self.assertRaises(DeliveryPolicyConflict):
+                store.record_agent_envelope(
+                    {
+                        **_agent_envelope(edge_id="edge-source-target", attempt=3, sequence=0),
+                        "content": [
+                            {
+                                "part_id": "part-conflict",
+                                "kind": "json",
+                                "mime_type": "application/json",
+                                "data": {"result": "conflict"},
+                            }
+                        ],
+                    }
+                )
+
+    def test_admit_agent_envelope_processing_rejects_early_expired_or_mismatched_audience(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = DurableRunEventStore(temp)
+            store.create_run(_run())
+            accepted = store.admit_agent_envelope_processing(_agent_envelope(), target_node_id="node-target", target_provider_id="deepseek")
+            self.assertEqual(accepted["status"], "accepted")
+            duplicate = store.admit_agent_envelope_processing(_agent_envelope(), target_node_id="node-target", target_provider_id="deepseek")
+            self.assertEqual(duplicate["status"], "duplicate")
+
+            early = _agent_envelope(edge_id="edge-early")
+            early["metadata"] = {**dict(early.get("metadata") or {}), "not_before_at": "2026-01-01T00:05:00+00:00"}
+            with self.assertRaises(DeliveryPolicyConflict):
+                store.admit_agent_envelope_processing(
+                    early,
+                    target_node_id="node-target",
+                    target_provider_id="deepseek",
+                    now="2026-01-01T00:04:00+00:00",
+                )
+
+            expired = _agent_envelope(edge_id="edge-expired")
+            expired["metadata"] = {**dict(expired.get("metadata") or {}), "ttl_seconds": 10}
+            with self.assertRaises(DeliveryPolicyConflict):
+                store.admit_agent_envelope_processing(
+                    expired,
+                    target_node_id="node-target",
+                    target_provider_id="deepseek",
+                    now="2026-01-01T00:02:00+00:00",
+                )
+
+            wrong_audience = _agent_envelope(edge_id="edge-audience")
+            wrong_audience["recipient"] = {**dict(wrong_audience.get("recipient") or {}), "lane_id": "node-other"}
+            with self.assertRaises(DeliveryPolicyConflict):
+                store.admit_agent_envelope_processing(wrong_audience, target_node_id="node-target", target_provider_id="deepseek")
 
     def test_legacy_migration_preserves_source_redacts_secrets_and_marks_active_or_external_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

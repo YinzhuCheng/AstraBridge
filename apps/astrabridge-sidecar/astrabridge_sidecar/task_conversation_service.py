@@ -290,6 +290,7 @@ class TaskConversationService:
         replayable_artifact_count = int(transition_summary.get("replayable_artifact_count") or 0)
         projection_preview = str(transition_summary.get("projection_preview") or "").strip()
         warning_count = len(list(transition_summary.get("warnings") or []))
+        neutral_handoff_bundle = dict(handoff_event.get("neutral_handoff_bundle") or {})
         source_provider = str(handoff_event.get("from_provider_id") or transition_summary.get("from_provider") or "").strip()
         source_model = str(handoff_event.get("from_model") or "").strip()
         target_provider = str(handoff_event.get("provider_id") or "").strip()
@@ -314,6 +315,10 @@ class TaskConversationService:
             summary_parts.append(f"replayable_artifacts={replayable_artifact_count}")
         if warning_count:
             summary_parts.append(f"warnings={warning_count}")
+        if str(neutral_handoff_bundle.get("projection_digest") or "").strip():
+            summary_parts.append(f"projection_digest={str(neutral_handoff_bundle.get('projection_digest') or '').strip()[:16]}")
+        if str(neutral_handoff_bundle.get("lineage_digest") or "").strip():
+            summary_parts.append(f"lineage_digest={str(neutral_handoff_bundle.get('lineage_digest') or '').strip()[:16]}")
         if projection_preview:
             summary_parts.append(f'preview="{self._clip(projection_preview, 220)}"')
         summary = " ".join(part for part in summary_parts if part).strip()
@@ -332,6 +337,8 @@ class TaskConversationService:
             "handoff_to_thread_id": target_thread_id,
             "projection_preview": projection_preview or None,
             "replayable_artifact_count": replayable_artifact_count,
+            "projection_digest": str(neutral_handoff_bundle.get("projection_digest") or "").strip() or None,
+            "lineage_digest": str(neutral_handoff_bundle.get("lineage_digest") or "").strip() or None,
         }
 
     def _item_text(self, item: dict[str, Any]) -> str:

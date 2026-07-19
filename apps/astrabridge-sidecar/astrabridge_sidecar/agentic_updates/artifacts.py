@@ -42,6 +42,7 @@ RUN_FILE_RELATIVE_PATHS = {
     "validation_report": "validation/validation-report.json",
     "validation_markdown": "validation/validation-report.md",
     "screenshot_index": "screenshots/screenshot-index.json",
+    "apply_journal": "apply/apply-journal.json",
     "apply_manifest": "apply/apply-manifest.json",
     "rollback_manifest": "rollback/rollback-manifest.json",
     "secret_scan": "secret-scan/secret-scan-report.json",
