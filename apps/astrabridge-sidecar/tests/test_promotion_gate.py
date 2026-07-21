@@ -36,7 +36,7 @@ class LocalGateSummaryTests(unittest.TestCase):
 
             self.assertEqual(summary["status"], "pass")
             self.assertEqual(summary["mode"], "quick")
-            self.assertEqual(summary["check_count"], 5)
+            self.assertEqual(summary["check_count"], 7)
             self.assertTrue(Path(summary["artifact_paths"]["summary_json"]).exists())
             self.assertTrue(Path(summary["artifact_paths"]["report_md"]).exists())
             self.assertTrue(all(check["status"] == "pass" for check in summary["checks"]))

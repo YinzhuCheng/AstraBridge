@@ -1,0 +1,4 @@
+interface:
+  display_name: "Provider Update Smoke"
+  short_description: "Provider update smoke and approval gate skill"
+  default_prompt: "Use $astrabridge-provider-update-smoke to qualify a provider or model update with a bounded smoke matrix and approval gate."

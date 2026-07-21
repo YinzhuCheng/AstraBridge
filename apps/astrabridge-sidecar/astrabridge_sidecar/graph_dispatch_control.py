@@ -30,6 +30,7 @@ class GraphDispatchController:
         self._lock = threading.RLock()
         self._active_tokens: dict[str, dict[str, Any]] = {}
         self._retry_usage: dict[tuple[str, str, str], int] = {}
+        self._provider_call_usage: dict[str, int] = {}
         self._breakers: dict[tuple[str, str], dict[str, Any]] = {}
 
     def try_acquire(self, request: GraphDispatchRequest, *, limits: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
@@ -42,9 +43,21 @@ class GraphDispatchController:
             global_limit = max(0, int(limits.get("max_active_nodes") or 0))
             reserved_interactive = max(0, int(limits.get("reserved_interactive_slots") or 0))
             graph_global_limit = max(0, global_limit - reserved_interactive)
-            provider_limit = max(0, int(limits.get("max_provider_active_nodes") or 0))
-            model_limit = max(0, int(limits.get("max_model_active_nodes") or 0))
+            provider_limit = _route_concurrency_limit(
+                limits.get("provider_concurrency"),
+                provider_id=request.provider_id,
+                model_id=None,
+                fallback=max(0, int(limits.get("max_provider_active_nodes") or 0)),
+            )
+            model_limit = _route_concurrency_limit(
+                limits.get("model_concurrency"),
+                provider_id=request.provider_id,
+                model_id=request.model_id,
+                fallback=max(0, int(limits.get("max_model_active_nodes") or 0)),
+            )
             workspace_limit = max(0, int(limits.get("max_workspace_active_nodes") or 0))
+            provider_call_limit = max(0, int(limits.get("max_provider_calls") or 0))
+            provider_calls_used = int(self._provider_call_usage.get(request.run_id) or 0)
 
             global_in_use = len(active)
             provider_in_use = sum(1 for item in active if str(item.get("provider_id") or "") == request.provider_id)
@@ -57,6 +70,13 @@ class GraphDispatchController:
 
             if graph_global_limit <= 0:
                 return None, {"status": "denied", "reason": "global_limit", "limit": graph_global_limit}
+            if provider_call_limit > 0 and provider_calls_used >= provider_call_limit:
+                return None, {
+                    "status": "denied",
+                    "reason": "provider_call_budget",
+                    "used": provider_calls_used,
+                    "limit": provider_call_limit,
+                }
             if global_in_use >= graph_global_limit:
                 return None, {"status": "denied", "reason": "global_limit", "limit": graph_global_limit}
             if provider_limit > 0 and provider_in_use >= provider_limit:
@@ -76,11 +96,14 @@ class GraphDispatchController:
                 "model_id": request.model_id,
                 "acquired_at": now_iso(),
             }
+            self._provider_call_usage[request.run_id] = provider_calls_used + 1
             return token, {
                 "status": "acquired",
                 "token": token,
                 "global_in_use": global_in_use + 1,
                 "graph_global_limit": graph_global_limit,
+                "provider_calls_used": provider_calls_used + 1,
+                "provider_call_limit": provider_call_limit or None,
             }
 
     def release(self, token: str | None) -> None:
@@ -170,6 +193,7 @@ class GraphDispatchController:
                 for key, value in self._retry_usage.items()
                 if str(key[0] or "") != clean_run_id
             }
+            self._provider_call_usage.pop(clean_run_id, None)
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -206,6 +230,7 @@ class GraphDispatchController:
                     for item in active
                 ],
                 "circuit_breakers": breakers,
+                "run_provider_call_counts": dict(self._provider_call_usage),
             }
 
     def _breaker_gate_locked(self, *, request: GraphDispatchRequest, limits: dict[str, Any]) -> dict[str, Any] | None:
@@ -231,6 +256,29 @@ class GraphDispatchController:
             "model_id": request.model_id,
             "last_failure_category": breaker.get("last_failure_category"),
         }
+
+
+def _route_concurrency_limit(
+    entries: Any,
+    *,
+    provider_id: str,
+    model_id: str | None,
+    fallback: int,
+) -> int:
+    if not isinstance(entries, list):
+        return fallback
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("provider_id") or "").strip() != provider_id:
+            continue
+        if model_id is not None and str(item.get("model_id") or "").strip() != model_id:
+            continue
+        try:
+            return max(0, int(item.get("max_active_agents") or 0))
+        except (TypeError, ValueError):
+            return 0
+    return fallback
 
 
 __all__ = ["GraphDispatchController", "GraphDispatchRequest"]

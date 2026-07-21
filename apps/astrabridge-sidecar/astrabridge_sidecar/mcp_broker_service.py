@@ -50,10 +50,12 @@ class McpBrokerService:
     capability_runtime: Any | None = None
     yunwu_image_service: Any | None = None
     mcp_config: Any | None = None
+    orchestration_service: Any | None = None
     http_transport: RemoteHttpTransport | None = None
     _web_core: McpServerCore = field(init=False, repr=False)
     _capability_core: McpServerCore | None = field(init=False, repr=False)
     _yunwu_core: McpServerCore | None = field(init=False, repr=False)
+    _orchestration_core: McpServerCore | None = field(init=False, repr=False)
     _remote_sessions: dict[str, _RemoteSessionState] = field(default_factory=dict, init=False, repr=False)
     _remote_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _durable_store: DurableRunEventStore | None = field(default=None, init=False, repr=False)
@@ -63,6 +65,25 @@ class McpBrokerService:
         self._web_core = web_server_core()
         self._capability_core = capability_server_core(self.capability_runtime) if self.capability_runtime is not None else None
         self._yunwu_core = yunwu_server_core(self.yunwu_image_service) if self.yunwu_image_service is not None else None
+        self._orchestration_core = None
+        if self.orchestration_service is not None:
+            self.bind_orchestration_service(self.orchestration_service)
+
+    def bind_orchestration_service(self, service: Any | None) -> None:
+        """Attach the canonical orchestration MCP core after runtime bootstrap.
+
+        RuntimeService depends on this broker during construction, so the
+        orchestration service is deliberately late-bound once both objects
+        exist.  The broker remains the only loopback transport owner.
+        """
+
+        if service is None:
+            self._orchestration_core = None
+            return
+        core_factory = getattr(service, "server_core", None)
+        if not callable(core_factory):
+            raise TypeError("orchestration_service must expose server_core().")
+        self._orchestration_core = core_factory()
 
     def invoke_tool(
         self,
@@ -838,6 +859,10 @@ class McpBrokerService:
             if self._yunwu_core is None:
                 raise RuntimeError("Yunwu image service is not available for the MCP broker.")
             return self._yunwu_core
+        if clean_server == "astrabridge-orchestration":
+            if self._orchestration_core is None:
+                raise RuntimeError("Skill orchestration MCP service is not available for the broker.")
+            return self._orchestration_core
         return None
 
     def _resolve_remote_server_config(self, server: str) -> dict[str, Any]:
@@ -1276,6 +1301,13 @@ class McpBrokerService:
             return ""
 
     def _server_enabled(self, server: str) -> bool:
+        if str(server or "").strip() in {
+            "astrabridge_web",
+            "astrabridge_capabilities",
+            "yunwu_image",
+            "astrabridge-orchestration",
+        }:
+            return True
         if self.mcp_config is None:
             return False
         try:

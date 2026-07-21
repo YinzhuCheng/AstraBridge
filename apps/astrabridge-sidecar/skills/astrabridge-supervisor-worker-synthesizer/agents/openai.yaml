@@ -1,0 +1,4 @@
+interface:
+  display_name: "Supervisor Worker Synthesizer"
+  short_description: "Bounded planner-worker-synthesis graph skill"
+  default_prompt: "Use $astrabridge-supervisor-worker-synthesizer to run a bounded planner, worker, and synthesis graph."

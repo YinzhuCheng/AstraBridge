@@ -30,6 +30,7 @@ from .modal_service import ModalService
 from .metadata_service import MetadataService
 from .mcp_config_service import McpConfigService
 from .mcp_broker_service import McpBrokerService
+from .skill_orchestration_mcp_service import SkillOrchestrationMcpService
 from .llm_api_manager_service import LlmApiManagerService
 from .runtime_config_service import RuntimeConfigService
 from .official_login_guard import disabled_status
@@ -277,6 +278,14 @@ class AppContext:
             key_injector=self.llm_manager.inject_profile_key,
             mcp_broker_service=self.mcp_broker,
         )
+        self.orchestration_mcp = SkillOrchestrationMcpService(
+            project_service=self.projects,
+            task_service=self.tasks,
+            runtime_service=self.runtime,
+            profile_service=self.profiles,
+            router_config=self.router_config,
+        )
+        self.mcp_broker.bind_orchestration_service(self.orchestration_mcp)
         self.project_tools = ProjectToolsService(
             self.projects,
             self.runtime,

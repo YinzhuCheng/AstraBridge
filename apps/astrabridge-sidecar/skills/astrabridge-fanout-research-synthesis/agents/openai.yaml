@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fanout Research Synthesis"
+  short_description: "Bounded two-branch research synthesis skill"
+  default_prompt: "Use $astrabridge-fanout-research-synthesis to run two bounded research branches and merge attributable findings."

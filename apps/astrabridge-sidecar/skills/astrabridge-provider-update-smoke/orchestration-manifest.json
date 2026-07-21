@@ -1,0 +1,149 @@
+{
+  "schema_version": "astrabridge-skill-to-graph-manifest-v1",
+  "skill_id": "astrabridge.provider-update-smoke",
+  "version": "1.0.0",
+  "kind": "orchestration_skill",
+  "status": "candidate",
+  "metadata": {
+    "display_name": "Provider Update / Smoke / Gate",
+    "description": "Source-backed provider/model qualification with a bounded smoke matrix and manual promotion gate.",
+    "tags": ["provider", "model", "smoke", "promotion-gate"],
+    "owners": ["astrabridge-core"],
+    "notes": ["Qualification evidence never silently promotes or writes back to an external platform."]
+  },
+  "resolution": {
+    "mode": "builtin_template",
+    "graph_template_ref": "provider_update_smoke_gate",
+    "graph_schema_version": "astrabridge-agent-orchestration-graph-v1",
+    "parameter_schema": {
+      "type": "object",
+      "properties": {
+        "update_goal": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "provider_ids": {"type": "array", "items": {"type": "string", "maxLength": 128}, "minItems": 1, "maxItems": 8},
+        "model_ids": {"type": "array", "items": {"type": "string", "maxLength": 128}, "maxItems": 32},
+        "smoke_cases": {"type": "array", "items": {"type": "string", "maxLength": 600}, "minItems": 1, "maxItems": 32},
+        "promotion_owner": {"type": "string", "minLength": 1, "maxLength": 256}
+      },
+      "required": ["update_goal", "provider_ids", "smoke_cases", "promotion_owner"],
+      "additionalProperties": false
+    },
+    "bindings": [
+      {"parameter": "update_goal", "graph_path": "input.task_context", "required": true},
+      {"parameter": "provider_ids", "graph_path": "nodes.node_discover.prompt", "required": true},
+      {"parameter": "model_ids", "graph_path": "nodes.node_smoke.prompt", "required": false},
+      {"parameter": "smoke_cases", "graph_path": "nodes.node_smoke.prompt", "required": true},
+      {"parameter": "promotion_owner", "graph_path": "nodes.node_gate.prompt", "required": true}
+    ]
+  },
+  "prompt": {
+    "mode": "reference",
+    "template_ref": "prompt.provider_update_smoke.v1",
+    "variables_schema": {
+      "type": "object",
+      "properties": {
+        "update_goal": {"type": "string"},
+        "provider_ids": {"type": "array"},
+        "model_ids": {"type": "array"},
+        "smoke_cases": {"type": "array"},
+        "promotion_owner": {"type": "string"}
+      },
+      "required": ["update_goal", "provider_ids", "smoke_cases", "promotion_owner"],
+      "additionalProperties": false
+    }
+  },
+  "contracts": {
+    "input": {
+      "schema_ref": "schema.skill_provider_update_input",
+      "required_message_parts": ["text", "structured_json"],
+      "artifact_specs": []
+    },
+    "output": {
+      "schema_ref": "schema.provider_gate_decision",
+      "required_message_parts": ["machine_result", "human_summary", "artifact_ref"],
+      "artifact_specs": [
+        {"kind": "structured_json", "id": "provider_change_bundle"},
+        {"kind": "validation_report", "id": "smoke_matrix"},
+        {"kind": "approval_record", "id": "promotion_decision"}
+      ]
+    }
+  },
+  "policies": {
+    "routing": {
+      "selection_mode": "bounded_pool",
+      "allowed_provider_ids": ["qwen", "glm"],
+      "allowed_model_ids": ["qwen3.7-plus", "qwen3-coder-plus", "glm-5.2"],
+      "fallback_mode": "catalog_verified",
+      "required_capabilities": ["text", "structured_json", "web_search"]
+    },
+    "mcp": {
+      "preset_ids": ["astrabridge_web", "astrabridge_workspace"],
+      "tool_rules": [
+        {"server": "astrabridge_web", "tools": ["astrabridge_web_search_batch", "astrabridge_web_fetch"], "approval_mode": "allow", "effect_class": "network_read", "max_calls": 16},
+        {"server": "astrabridge_workspace", "tools": ["astrabridge_workspace_read_file"], "approval_mode": "allow", "effect_class": "read_only", "max_calls": 16}
+      ],
+      "approval_mode": "manual",
+      "loopback_allowed": true
+    },
+    "communication": {
+      "history_mode": "explicit_refs_only",
+      "artifact_mode": "explicit_artifacts",
+      "exclude_private_memory": true,
+      "include_machine_results": true,
+      "include_human_summaries": true,
+      "allow_direct_teammate_messages": false
+    },
+    "subagent": {
+      "isolation_mode": "lane",
+      "max_turns": 8,
+      "allow_nested_subagents": false,
+      "allow_direct_teammate_messages": false
+    },
+    "budget": {
+      "max_total_agents": 3,
+      "max_parallel_agents": 1,
+      "max_total_tokens": 60000,
+      "max_provider_calls": 6,
+      "max_retries": 1,
+      "provider_concurrency": [
+        {"provider_id": "qwen", "max_active_agents": 1},
+        {"provider_id": "glm", "max_active_agents": 1}
+      ],
+      "model_concurrency": [
+        {"provider_id": "qwen", "model_id": "qwen3.7-plus", "max_active_agents": 1},
+        {"provider_id": "glm", "model_id": "glm-5.2", "max_active_agents": 1}
+      ]
+    },
+    "approval": {
+      "default_mode": "manual",
+      "risky_effects_require_approval": ["provider_call", "file_write", "external_write", "side_effect"]
+    },
+    "a2a": {
+      "external_enabled": false,
+      "allowed_card_refs": [],
+      "minimum_trust_level": "workspace_trusted",
+      "gateway_required": true
+    }
+  },
+  "composition": {
+    "allow_runtime_nesting": false,
+    "max_expansion_depth": 1,
+    "template_refs": []
+  },
+  "compatibility": {
+    "graph_schema_version": "astrabridge-agent-orchestration-graph-v1",
+    "min_runtime_version": "0.1.0",
+    "legacy_sources": ["astrabridge-task-graph-v1"],
+    "migration_notes": ["A manual gate timeout or incomplete smoke matrix remains a blocker; no automatic promotion is inferred."]
+  },
+  "evidence": {
+    "required_level": "productized",
+    "fixture_ref": "fixture.provider_update_smoke_gate",
+    "artifact_root": "PRIVATE/skill-first-orchestration/step6-skill-templates/"
+  },
+  "extensions": {
+    "taxonomy_version": "astrabridge-skill-template-taxonomy-v1",
+    "template_id": "provider_update_smoke_gate",
+    "manual_gate_required": true,
+    "mcp_resolution": "astrabridge_workspace is a declared workspace-MCP dependency; availability is checked before product promotion."
+  }
+}

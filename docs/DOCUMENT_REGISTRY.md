@@ -1,6 +1,6 @@
 # AstraBridge Document Registry
 
-Last verified: 2026-07-17
+Last verified: 2026-07-21
 
 ## Purpose
 
@@ -72,6 +72,7 @@ The following are finished records and must not be reopened as active queues:
 - Multimodal adapter/update implementation
 - Provider/model compatibility foundation, residual-risk repair, capability/reasoning validation, and exhaustive smoke
 - Agentic update pipeline
+- Skill-first multi-provider agent orchestration, MCP surface, canonical skill-to-graph boundary, and bounded authoring/operator runbooks
 - Capability UI, multimodal drift, and plugin/skill gap snapshots whose findings were consumed by later surface maps, runbooks, or completed implementation
 
 Use the exact file list and replacement paths in the JSON registry.
@@ -100,6 +101,7 @@ Reference documents include:
 - interface governance for HTTP, SSE, payload, provider metadata, CLI/launcher, MCP, and compatibility shims;
 - multimodal contracts, official-source pack, exposure gates, maintenance runbook, and rollout/rollback policy;
 - dogfood task pools and evidence summaries;
+- skill-first orchestration boundary, skill-to-graph, MCP surface, template taxonomy, and authoring/operator runbooks;
 - brand tokens, icons, edge primitives, wallpaper, and provenance guidance.
 
 They inform implementation but do not own the execution queue.
@@ -142,12 +144,12 @@ When adding or changing a guiding document or execution plan:
 
 ## Current Counts
 
-As verified on 2026-07-17, the registry contains 107 entries:
+As verified on 2026-07-21, the registry contains 114 entries:
 
 | Status | Count |
 | --- | ---: |
 | `active` | 14 |
-| `complete` | 26 |
-| `reference` | 46 |
+| `complete` | 27 |
+| `reference` | 52 |
 | `superseded` | 20 |
 | `archived` | 1 |

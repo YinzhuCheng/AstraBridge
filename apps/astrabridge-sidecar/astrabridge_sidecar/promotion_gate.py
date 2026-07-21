@@ -19,6 +19,7 @@ _RUN_LOCAL_GATE = _REPO_ROOT / "scripts" / "run_local_gate.py"
 _RUN_RUNTIME_STABILITY_GATE = _REPO_ROOT / "scripts" / "run_runtime_stability_gate.py"
 _RUN_RUNTIME_ROLLOUT_GATE = _REPO_ROOT / "scripts" / "run_runtime_rollout_gate.py"
 _RUN_PROVIDER_GATE = _REPO_ROOT / "scripts" / "run_provider_capability_verification_gate.py"
+_RUN_SKILL_ORCHESTRATION_EVALUATION_GATE = _REPO_ROOT / "scripts" / "run_skill_orchestration_evaluation_gate.py"
 _LOCKFILE_PATHS = {
     "desktop_package_lock": _REPO_ROOT / "apps" / "astrabridge-desktop" / "package-lock.json",
     "desktop_pnpm_lock": _REPO_ROOT / "apps" / "astrabridge-desktop" / "pnpm-lock.yaml",
@@ -163,6 +164,28 @@ def promotion_gate_specs(*, mode: str, gate_run_dir: Path, repo_root: Path) -> t
     provider_root = gate_run_dir / "nested" / "provider-capability"
     runtime_release_root = gate_run_dir / "nested" / "runtime-stability-release"
     rollout_root = gate_run_dir / "nested" / "runtime-rollout"
+    skill_orchestration_root = gate_run_dir / "nested" / "skill-orchestration-evaluation"
+    skill_orchestration_mode = "promotion" if mode == "release" else "evaluate"
+    skill_orchestration_spec = {
+        "check_id": "skill_orchestration_evaluation",
+        "label": "Skill orchestration evaluation and promotion gate",
+        "required": True,
+        "cwd": repo_root,
+        "command": [
+            python_cmd,
+            str(_RUN_SKILL_ORCHESTRATION_EVALUATION_GATE),
+            "--mode",
+            skill_orchestration_mode,
+            "--artifact-root",
+            str(skill_orchestration_root),
+            "--run-id",
+            "skill-orchestration-evaluation",
+        ],
+        "required_status_paths": ("status", "patterns.*.status"),
+        "required_summary_fields": ("schema_version", "status", "mode", "promotion_ready", "patterns", "artifact_paths"),
+        "required_artifact_keys": ("summary_json", "report_md"),
+        "expected_schema_version": "astrabridge-skill-orchestration-evaluation-gate-v1",
+    }
     if mode == "pr":
         return (
             {
@@ -185,6 +208,7 @@ def promotion_gate_specs(*, mode: str, gate_run_dir: Path, repo_root: Path) -> t
                 "required_artifact_keys": ("summary_json", "report_md"),
                 "expected_schema_version": "astrabridge-local-gate-v1",
             },
+            skill_orchestration_spec,
         )
     if mode == "nightly":
         return (
@@ -246,6 +270,7 @@ def promotion_gate_specs(*, mode: str, gate_run_dir: Path, repo_root: Path) -> t
                 "required_artifact_keys": ("summary_json", "report_md"),
                 "expected_schema_version": "astrabridge-runtime-stability-gate-v1",
             },
+            skill_orchestration_spec,
         )
     return (
         {
@@ -304,6 +329,7 @@ def promotion_gate_specs(*, mode: str, gate_run_dir: Path, repo_root: Path) -> t
             "required_artifact_keys": ("summary_json", "report_md"),
             "expected_schema_version": "astrabridge-runtime-rollout-gate-v1",
         },
+        skill_orchestration_spec,
     )
 
 

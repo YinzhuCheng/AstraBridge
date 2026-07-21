@@ -45,7 +45,7 @@ class RuntimeGraphRunDispatchService:
         def _override_or_default(key: str, default: Any) -> Any:
             return overrides[key] if key in overrides else default
 
-        return {
+        resolved = {
             "max_active_nodes": max(
                 1,
                 int(_override_or_default("max_active_nodes", min(max(2, max_parallelism), GRAPH_DISPATCH_MAX_ACTIVE_NODES))),
@@ -78,7 +78,16 @@ class RuntimeGraphRunDispatchService:
                 0,
                 int(_override_or_default("retry_budget_max", min(max_parallelism, GRAPH_DISPATCH_RETRY_BUDGET_MAX))),
             ),
+            "max_provider_calls": max(
+                1,
+                int(_override_or_default("max_provider_calls", 64)),
+            ),
         }
+        for key in ("provider_concurrency", "model_concurrency"):
+            value = overrides.get(key)
+            if isinstance(value, list):
+                resolved[key] = deepcopy(value)
+        return resolved
 
     @staticmethod
     def normalize_parallel_groups(
@@ -167,7 +176,12 @@ class RuntimeGraphRunDispatchService:
             else new_id("graph-run-live")
         )
         created_at = now_iso()
-        dispatch_control = self.resolve_dispatch_limits(payload=payload, compiled_plan=compiled_plan)
+        dispatch_control = dict(
+            submission.get("dispatch_limits")
+            or self.resolve_dispatch_limits(payload=payload, compiled_plan=compiled_plan)
+        )
+        runtime_guardrails = deepcopy(dict(submission.get("runtime_guardrails") or {}))
+        communication_isolation = deepcopy(dict(submission.get("communication_isolation") or {}))
         parallel_groups, max_parallelism = self.normalize_parallel_groups(
             compiled_plan,
             dispatch_limits=dispatch_control,
@@ -251,6 +265,12 @@ class RuntimeGraphRunDispatchService:
                 ],
                 "model_capability_snapshots": model_capability_snapshots,
                 "dispatch_control": dispatch_control,
+                "runtime_guardrails": runtime_guardrails,
+                "communication_isolation": communication_isolation,
+                "skill_ref": deepcopy(dict(payload.get("skill_ref") or {})),
+                "resolution_ref": deepcopy(dict(payload.get("resolution_ref") or {})),
+                "dry_run_receipt": deepcopy(dict(payload.get("dry_run_receipt") or {})),
+                "approval": deepcopy(dict(payload.get("approval") or {})),
                 "budget": budget_snapshot,
                 "node_mcp_tool_policies": node_mcp_tool_policies,
                 "resume_payload": self._runtime._graph_live_resume_payload(  # noqa: SLF001
@@ -280,6 +300,9 @@ class RuntimeGraphRunDispatchService:
                 )
         worker_payload = dict(payload)
         worker_payload["_scheduler_run_id"] = run_id
+        worker_payload["_dispatch_limits"] = deepcopy(dispatch_control)
+        worker_payload["_runtime_guardrails"] = deepcopy(runtime_guardrails)
+        worker_payload["_communication_isolation"] = deepcopy(communication_isolation)
         try:
             self._runtime._graph_scheduler.submit(  # noqa: SLF001
                 run_id,

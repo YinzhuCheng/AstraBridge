@@ -1,0 +1,511 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astrabridge.dev/schemas/skill-backed-orchestration-mcp/v1",
+  "title": "AstraBridge skill-backed orchestration MCP protocol",
+  "description": "Typed, fail-closed MCP request and response envelopes for skill-backed orchestration over the canonical graph runtime.",
+  "oneOf": [
+    {"$ref": "#/$defs/propose_request"},
+    {"$ref": "#/$defs/patch_request"},
+    {"$ref": "#/$defs/validate_request"},
+    {"$ref": "#/$defs/dry_run_request"},
+    {"$ref": "#/$defs/diff_request"},
+    {"$ref": "#/$defs/launch_request"},
+    {"$ref": "#/$defs/inspect_request"},
+    {"$ref": "#/$defs/cancel_request"},
+    {"$ref": "#/$defs/recover_request"},
+    {"$ref": "#/$defs/response"}
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[A-Fa-f0-9]{64}$"
+    },
+    "request_common": {
+      "type": "object",
+      "required": ["direction", "schema_version", "operation", "request_id"],
+      "properties": {
+        "direction": {"const": "request", "type": "string"},
+        "schema_version": {
+          "const": "astrabridge-skill-backed-orchestration-mcp-v1",
+          "type": "string"
+        },
+        "operation": {"type": "string"},
+        "request_id": {"$ref": "#/$defs/identifier"},
+        "operation_id": {"$ref": "#/$defs/identifier"},
+        "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 256},
+        "trace_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "policy_tightening": {"$ref": "#/$defs/policy_tightening"}
+      }
+    },
+    "skill_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["skill_id", "version"],
+      "properties": {
+        "skill_id": {"$ref": "#/$defs/identifier"},
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+        },
+        "manifest_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "resolution_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resolution_id", "skill_ref", "manifest_digest", "graph_digest"],
+      "properties": {
+        "resolution_id": {"$ref": "#/$defs/identifier"},
+        "skill_ref": {"$ref": "#/$defs/skill_ref"},
+        "manifest_digest": {"$ref": "#/$defs/digest"},
+        "graph_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "route_restriction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "uniqueItems": true,
+          "maxItems": 16
+        },
+        "model_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "uniqueItems": true,
+          "maxItems": 64
+        },
+        "profile_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "uniqueItems": true,
+          "maxItems": 16
+        },
+        "required_capabilities": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 64},
+          "uniqueItems": true,
+          "maxItems": 32
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_depth",
+        "max_total_agents",
+        "max_parallel_agents",
+        "max_total_tokens",
+        "max_provider_calls",
+        "max_retries",
+        "provider_concurrency",
+        "model_concurrency",
+        "allow_nested_subagents",
+        "allow_direct_teammate_messages"
+      ],
+      "properties": {
+        "max_depth": {"const": 2, "type": "integer"},
+        "max_total_agents": {"type": "integer", "minimum": 1, "maximum": 16},
+        "max_parallel_agents": {"type": "integer", "minimum": 1, "maximum": 8},
+        "max_total_tokens": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_provider_calls": {"type": "integer", "minimum": 1, "maximum": 64},
+        "max_retries": {"type": "integer", "minimum": 0, "maximum": 8},
+        "provider_concurrency": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/provider_limit"},
+          "maxItems": 16
+        },
+        "model_concurrency": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/model_limit"},
+          "maxItems": 64
+        },
+        "allow_nested_subagents": {"const": false, "type": "boolean"},
+        "allow_direct_teammate_messages": {"const": false, "type": "boolean"}
+      }
+    },
+    "provider_limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_id", "max_active_agents"],
+      "properties": {
+        "provider_id": {"$ref": "#/$defs/identifier"},
+        "max_active_agents": {"type": "integer", "minimum": 1, "maximum": 8}
+      }
+    },
+    "model_limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_id", "model_id", "max_active_agents"],
+      "properties": {
+        "provider_id": {"$ref": "#/$defs/identifier"},
+        "model_id": {"$ref": "#/$defs/identifier"},
+        "max_active_agents": {"type": "integer", "minimum": 1, "maximum": 8}
+      }
+    },
+    "policy_tightening": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_total_agents": {"type": "integer", "minimum": 1, "maximum": 16},
+        "max_parallel_agents": {"type": "integer", "minimum": 1, "maximum": 8},
+        "max_total_tokens": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_provider_calls": {"type": "integer", "minimum": 1, "maximum": 64},
+        "max_retries": {"type": "integer", "minimum": 0, "maximum": 8},
+        "provider_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "uniqueItems": true,
+          "maxItems": 16
+        },
+        "model_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "uniqueItems": true,
+          "maxItems": 64
+        },
+        "require_approval": {"const": true, "type": "boolean"}
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "risky_effects_require_approval"],
+      "properties": {
+        "mode": {"enum": ["ask", "manual", "deny"], "type": "string"},
+        "approval_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "risky_effects_require_approval": {
+          "type": "array",
+          "items": {"enum": ["provider_call", "file_write", "install", "external_write", "side_effect"], "type": "string"},
+          "uniqueItems": true,
+          "maxItems": 8
+        }
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "maxProperties": 64,
+      "description": "Validated against the referenced skill manifest parameter_schema; unknown or secret-bearing values are rejected before resolution."
+    },
+    "patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "path"],
+      "properties": {
+        "op": {"enum": ["add", "replace", "remove"], "type": "string"},
+        "path": {
+          "type": "string",
+          "pattern": "^/(parameters|graph)(?:/[^~/]{1,128}){0,8}$"
+        },
+        "value": {}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"op": {"enum": ["add", "replace"]}}},
+          "then": {"required": ["value"]}
+        }
+      ]
+    },
+    "dry_run_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_id", "graph_digest", "policy_digest", "expires_at"],
+      "properties": {
+        "operation_id": {"$ref": "#/$defs/identifier"},
+        "graph_digest": {"$ref": "#/$defs/digest"},
+        "policy_digest": {"$ref": "#/$defs/digest"},
+        "expires_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "propose_request": {
+      "allOf": [
+        {"$ref": "#/$defs/request_common"},
+        {
+          "type": "object",
+          "required": ["operation", "skill_ref", "parameters"],
+          "properties": {
+            "operation": {"const": "propose"},
+            "skill_ref": {"$ref": "#/$defs/skill_ref"},
+            "parameters": {"$ref": "#/$defs/parameters"},
+            "requested_route": {"$ref": "#/$defs/route_restriction"},
+            "requested_budget": {"$ref": "#/$defs/policy_tightening"},
+            "evidence_mode": {"enum": ["resolve_only", "validate", "dry_run"], "type": "string"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "patch_request": {
+      "allOf": [
+        {"$ref": "#/$defs/request_common"},
+        {
+          "type": "object",
+          "required": ["operation", "resolution_ref", "patches"],
+          "properties": {
+            "operation": {"const": "patch"},
+            "resolution_ref": {"$ref": "#/$defs/resolution_ref"},
+            "patches": {"type": "array", "items": {"$ref": "#/$defs/patch"}, "minItems": 1, "maxItems": 64},
+            "requested_budget": {"$ref": "#/$defs/policy_tightening"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "subject": {
+      "oneOf": [
+        {"$ref": "#/$defs/resolution_subject"},
+        {"$ref": "#/$defs/skill_subject"}
+      ]
+    },
+    "resolution_subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resolution_ref"],
+      "properties": {"resolution_ref": {"$ref": "#/$defs/resolution_ref"}}
+    },
+    "skill_subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["skill_ref", "parameters"],
+      "properties": {
+        "skill_ref": {"$ref": "#/$defs/skill_ref"},
+        "parameters": {"$ref": "#/$defs/parameters"},
+        "requested_route": {"$ref": "#/$defs/route_restriction"},
+        "requested_budget": {"$ref": "#/$defs/policy_tightening"}
+      }
+    },
+    "validate_request": {
+      "allOf": [
+        {"$ref": "#/$defs/request_common"},
+        {
+          "type": "object",
+          "required": ["operation", "subject"],
+          "properties": {
+            "operation": {"const": "validate"},
+            "subject": {"$ref": "#/$defs/subject"},
+            "checks": {
+              "type": "array",
+              "items": {"enum": ["manifest", "graph", "compile", "policy", "mcp", "a2a", "secrets"], "type": "string"},
+              "uniqueItems": true,
+              "maxItems": 16
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "dry_run_request": {
+      "allOf": [
+        {"$ref": "#/$defs/request_common"},
+        {
+          "type": "object",
+          "required": ["operation", "resolution_ref", "budget"],
+          "properties": {
+            "operation": {"const": "dry_run"},
+            "resolution_ref": {"$ref": "#/$defs/resolution_ref"},
+            "budget": {"$ref": "#/$defs/budget"},
+            "requested_route": {"$ref": "#/$defs/route_restriction"},
+            "include_compiled_plan": {"type": "boolean"},
+            "include_artifact_manifest": {"type": "boolean"}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "diff_request": {
+      "allOf": [
+        {"$ref": "#/$defs/request_common"},
+        {
+          "type": "object",
+          "required": ["operation", "base_ref", "target_ref"],
+          "properties": {
+            "operation": {"const": "diff"},
+            "base_ref": {"$ref": "#/$defs/resolution_ref"},
+            "target_ref": {"$ref": "#/$defs/resolution_ref"},
+            "include": {
+              "type": "array",
+              "items": {"enum": ["manifest", "parameters", "graph", "compiled_plan", "policy"], "type": "string"},
+              "uniqueItems": true,
+              "maxItems": 8
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "launch_request": {
+      "allOf": [
+        {"$ref": "#/$defs/request_common"},
+        {
+          "type": "object",
+          "required": ["operation", "resolution_ref", "budget", "approval", "idempotency_key", "dry_run_receipt", "mode"],
+          "properties": {
+            "operation": {"const": "launch"},
+            "resolution_ref": {"$ref": "#/$defs/resolution_ref"},
+            "budget": {"$ref": "#/$defs/budget"},
+            "approval": {"$ref": "#/$defs/approval"},
+            "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 256},
+            "dry_run_receipt": {"$ref": "#/$defs/dry_run_receipt"},
+            "mode": {"enum": ["fixture", "live"], "type": "string"},
+            "task_id": {"$ref": "#/$defs/identifier"},
+            "input": {"type": "object", "maxProperties": 64}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "inspect_request": {
+      "allOf": [
+        {"$ref": "#/$defs/request_common"},
+        {
+          "type": "object",
+          "required": ["operation", "run_id", "projection"],
+          "properties": {
+            "operation": {"const": "inspect"},
+            "run_id": {"$ref": "#/$defs/identifier"},
+            "projection": {"enum": ["compact", "summary", "events"], "type": "string"},
+            "event_cursor": {"type": "integer", "minimum": 0},
+            "max_events": {"type": "integer", "minimum": 1, "maximum": 200}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "cancel_request": {
+      "allOf": [
+        {"$ref": "#/$defs/request_common"},
+        {
+          "type": "object",
+          "required": ["operation", "run_id", "reason", "idempotency_key"],
+          "properties": {
+            "operation": {"const": "cancel"},
+            "run_id": {"$ref": "#/$defs/identifier"},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 600},
+            "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 256},
+            "expected_state_version": {"type": "integer", "minimum": 1}
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "recover_request": {
+      "allOf": [
+        {"$ref": "#/$defs/request_common"},
+        {
+          "type": "object",
+          "required": ["operation", "run_id", "strategy", "budget", "approval", "idempotency_key", "dry_run_receipt", "mode"],
+          "properties": {
+            "operation": {"const": "recover"},
+            "run_id": {"$ref": "#/$defs/identifier"},
+            "strategy": {"enum": ["resume_run", "retry_failed_nodes", "rerun_selected_nodes", "partial_execution"], "type": "string"},
+            "selected_node_ids": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/identifier"},
+              "uniqueItems": true,
+              "maxItems": 16
+            },
+            "source_state_version": {"type": "integer", "minimum": 1},
+            "budget": {"$ref": "#/$defs/budget"},
+            "approval": {"$ref": "#/$defs/approval"},
+            "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 256},
+            "dry_run_receipt": {"$ref": "#/$defs/dry_run_receipt"},
+            "mode": {"enum": ["fixture", "live"], "type": "string"}
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"strategy": {"enum": ["rerun_selected_nodes", "partial_execution"]}}},
+              "then": {"required": ["selected_node_ids"], "properties": {"selected_node_ids": {"minItems": 1}}}
+            }
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resolution_id", "skill_ref", "manifest_digest", "graph_digest"],
+      "properties": {
+        "resolution_id": {"$ref": "#/$defs/identifier"},
+        "skill_ref": {"$ref": "#/$defs/skill_ref"},
+        "manifest_digest": {"$ref": "#/$defs/digest"},
+        "graph_digest": {"$ref": "#/$defs/digest"},
+        "source_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "policy_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_depth", "max_total_agents", "max_parallel_agents", "max_total_tokens", "max_provider_calls", "max_retries", "allow_nested_subagents", "allow_direct_teammate_messages"],
+      "properties": {
+        "max_depth": {"type": "integer", "minimum": 0, "maximum": 2},
+        "max_total_agents": {"type": "integer", "minimum": 1, "maximum": 16},
+        "max_parallel_agents": {"type": "integer", "minimum": 1, "maximum": 8},
+        "max_total_tokens": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_provider_calls": {"type": "integer", "minimum": 1, "maximum": 64},
+        "max_retries": {"type": "integer", "minimum": 0, "maximum": 8},
+        "allow_nested_subagents": {"const": false, "type": "boolean"},
+        "allow_direct_teammate_messages": {"const": false, "type": "boolean"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "kind", "media_type", "status"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/identifier"},
+        "kind": {"type": "string", "minLength": 1, "maxLength": 64},
+        "media_type": {"type": "string", "minLength": 1, "maxLength": 128},
+        "workspace_uri": {"type": "string", "pattern": "^(workspace://|PRIVATE/|\\.astrabridge/)"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "status": {"enum": ["pending", "ready", "failed"], "type": "string"}
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direction", "schema_version", "operation", "operation_id", "status", "provenance", "policy_snapshot", "warnings", "blockers"],
+      "properties": {
+        "direction": {"const": "response", "type": "string"},
+        "schema_version": {
+          "const": "astrabridge-skill-backed-orchestration-mcp-v1",
+          "type": "string"
+        },
+        "operation": {"enum": ["propose", "patch", "validate", "dry_run", "diff", "launch", "inspect", "cancel", "recover"], "type": "string"},
+        "operation_id": {"$ref": "#/$defs/identifier"},
+        "status": {"enum": ["completed", "accepted", "pending", "blocked", "failed", "cancelled"], "type": "string"},
+        "provenance": {"$ref": "#/$defs/provenance"},
+        "policy_snapshot": {"$ref": "#/$defs/policy_snapshot"},
+        "warnings": {"type": "array", "items": {"type": "object"}, "maxItems": 64},
+        "blockers": {"type": "array", "items": {"type": "object"}, "maxItems": 64},
+        "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifact"}, "maxItems": 64},
+        "result": {"type": "object", "maxProperties": 128},
+        "error": {"type": "object", "maxProperties": 16}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"enum": ["blocked", "failed"]}}},
+          "then": {"required": ["error"]}
+        }
+      ]
+    }
+  },
+  "x-forbidden-properties": [
+    "api_key",
+    "access_token",
+    "authorization",
+    "bearer",
+    "cookie",
+    "private_reasoning",
+    "raw_prompt",
+    "raw_secret",
+    "secret"
+  ]
+}

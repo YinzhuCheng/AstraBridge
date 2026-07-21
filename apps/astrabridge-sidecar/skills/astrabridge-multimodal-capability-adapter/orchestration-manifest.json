@@ -1,0 +1,152 @@
+{
+  "schema_version": "astrabridge-skill-to-graph-manifest-v1",
+  "skill_id": "astrabridge.multimodal-capability-adapter",
+  "version": "1.0.0",
+  "kind": "orchestration_skill",
+  "status": "candidate",
+  "metadata": {
+    "display_name": "Multimodal Capability Adapter",
+    "description": "MCP-routed modality probing, contract adaptation, and explicit fallback validation.",
+    "tags": ["multimodal", "capability", "fallback", "mcp"],
+    "owners": ["astrabridge-core"],
+    "notes": ["v1 covers image generation, vision analysis, speech transcription, and speech synthesis; video remains deferred."]
+  },
+  "resolution": {
+    "mode": "builtin_template",
+    "graph_template_ref": "multimodal_capability_adapter",
+    "graph_schema_version": "astrabridge-agent-orchestration-graph-v1",
+    "parameter_schema": {
+      "type": "object",
+      "properties": {
+        "task_goal": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "capability_id": {"type": "string", "minLength": 1, "maxLength": 64},
+        "input_artifacts": {"type": "array", "items": {"type": "object", "maxProperties": 16}, "minItems": 1, "maxItems": 8},
+        "desired_output": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "allowed_fallbacks": {"type": "array", "items": {"type": "string", "maxLength": 128}, "maxItems": 8}
+      },
+      "required": ["task_goal", "capability_id", "input_artifacts", "desired_output"],
+      "additionalProperties": false
+    },
+    "bindings": [
+      {"parameter": "task_goal", "graph_path": "input.task_context", "required": true},
+      {"parameter": "capability_id", "graph_path": "input.capability_id", "required": true},
+      {"parameter": "input_artifacts", "graph_path": "input.user_image", "required": true},
+      {"parameter": "desired_output", "graph_path": "nodes.node_adapt_contract.prompt", "required": true},
+      {"parameter": "allowed_fallbacks", "graph_path": "nodes.node_validate_fallback.prompt", "required": false}
+    ]
+  },
+  "prompt": {
+    "mode": "reference",
+    "template_ref": "prompt.multimodal_capability_adapter.v1",
+    "variables_schema": {
+      "type": "object",
+      "properties": {
+        "task_goal": {"type": "string"},
+        "capability_id": {"type": "string"},
+        "input_artifacts": {"type": "array"},
+        "desired_output": {"type": "string"},
+        "allowed_fallbacks": {"type": "array"}
+      },
+      "required": ["task_goal", "capability_id", "input_artifacts", "desired_output"],
+      "additionalProperties": false
+    }
+  },
+  "contracts": {
+    "input": {
+      "schema_ref": "schema.skill_multimodal_input",
+      "required_message_parts": ["text", "artifact_ref", "structured_json"],
+      "artifact_specs": [{"kind": "image", "id": "input_image"}]
+    },
+    "output": {
+      "schema_ref": "schema.multimodal_validation",
+      "required_message_parts": ["machine_result", "human_summary", "artifact_ref"],
+      "artifact_specs": [
+        {"kind": "document_extract", "id": "adapted_contract"},
+        {"kind": "validation_report", "id": "multimodal_validation"}
+      ]
+    }
+  },
+  "policies": {
+    "routing": {
+      "selection_mode": "bounded_pool",
+      "allowed_provider_ids": ["qwen", "glm", "kimi"],
+      "allowed_model_ids": ["qwen3.7-plus", "qwen3-coder-plus", "glm-5.2", "kimi-k2.6"],
+      "fallback_mode": "catalog_verified",
+      "required_capabilities": ["text", "structured_json"]
+    },
+    "mcp": {
+      "preset_ids": ["astrabridge_capabilities", "astrabridge_workspace"],
+      "tool_rules": [
+        {"server": "astrabridge_capabilities", "tools": ["astrabridge_capability_routes"], "approval_mode": "allow", "effect_class": "read_only", "max_calls": 4},
+        {"server": "astrabridge_capabilities", "tools": ["astrabridge_capability_image_generate", "astrabridge_capability_vision_analyze", "astrabridge_capability_speech_transcribe", "astrabridge_capability_speech_synthesize"], "approval_mode": "ask", "effect_class": "provider_call", "max_calls": 8},
+        {"server": "astrabridge_workspace", "tools": ["astrabridge_workspace_read_file"], "approval_mode": "allow", "effect_class": "read_only", "max_calls": 8}
+      ],
+      "approval_mode": "ask",
+      "loopback_allowed": true
+    },
+    "communication": {
+      "history_mode": "explicit_refs_only",
+      "artifact_mode": "explicit_artifacts",
+      "exclude_private_memory": true,
+      "include_machine_results": true,
+      "include_human_summaries": true,
+      "allow_direct_teammate_messages": false
+    },
+    "subagent": {
+      "isolation_mode": "lane",
+      "max_turns": 8,
+      "allow_nested_subagents": false,
+      "allow_direct_teammate_messages": false
+    },
+    "budget": {
+      "max_total_agents": 3,
+      "max_parallel_agents": 1,
+      "max_total_tokens": 80000,
+      "max_provider_calls": 6,
+      "max_retries": 2,
+      "provider_concurrency": [
+        {"provider_id": "qwen", "max_active_agents": 1},
+        {"provider_id": "glm", "max_active_agents": 1},
+        {"provider_id": "kimi", "max_active_agents": 1}
+      ],
+      "model_concurrency": [
+        {"provider_id": "qwen", "model_id": "qwen3.7-plus", "max_active_agents": 1},
+        {"provider_id": "glm", "model_id": "glm-5.2", "max_active_agents": 1},
+        {"provider_id": "kimi", "model_id": "kimi-k2.6", "max_active_agents": 1}
+      ]
+    },
+    "approval": {
+      "default_mode": "ask",
+      "risky_effects_require_approval": ["provider_call", "file_write", "external_write"]
+    },
+    "a2a": {
+      "external_enabled": false,
+      "allowed_card_refs": [],
+      "minimum_trust_level": "workspace_trusted",
+      "gateway_required": true
+    }
+  },
+  "composition": {
+    "allow_runtime_nesting": false,
+    "max_expansion_depth": 1,
+    "template_refs": []
+  },
+  "compatibility": {
+    "graph_schema_version": "astrabridge-agent-orchestration-graph-v1",
+    "min_runtime_version": "0.1.0",
+    "legacy_sources": ["astrabridge-task-graph-v1"],
+    "migration_notes": ["Capability IDs remain stable while provider-specific request and response shapes stay inside adapters."]
+  },
+  "evidence": {
+    "required_level": "productized",
+    "fixture_ref": "fixture.multimodal_capability_adapter",
+    "artifact_root": "PRIVATE/skill-first-orchestration/step6-skill-templates/"
+  },
+  "extensions": {
+    "taxonomy_version": "astrabridge-skill-template-taxonomy-v1",
+    "template_id": "multimodal_capability_adapter",
+    "capability_ids": ["image.generate", "vision.analyze", "speech.transcribe", "speech.synthesize"],
+    "video_policy": "deferred",
+    "mcp_resolution": "astrabridge_workspace is a declared workspace-MCP dependency; availability is checked before product promotion."
+  }
+}

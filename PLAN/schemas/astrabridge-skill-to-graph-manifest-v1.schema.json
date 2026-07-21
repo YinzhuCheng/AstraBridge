@@ -1,0 +1,516 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astrabridge.dev/schemas/skill-to-graph-manifest/v1",
+  "title": "AstraBridge skill-to-graph manifest",
+  "description": "Declarative manifest that resolves a reusable orchestration skill into one canonical AgentOrchestrationGraph.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "skill_id",
+    "version",
+    "kind",
+    "status",
+    "metadata",
+    "resolution",
+    "prompt",
+    "contracts",
+    "policies",
+    "composition",
+    "compatibility",
+    "evidence"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "astrabridge-skill-to-graph-manifest-v1",
+      "type": "string"
+    },
+    "skill_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "kind": {
+      "const": "orchestration_skill",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "candidate",
+        "validated",
+        "productized",
+        "provider-qualified",
+        "external-a2a-qualified"
+      ],
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "resolution": {
+      "$ref": "#/$defs/resolution"
+    },
+    "prompt": {
+      "$ref": "#/$defs/prompt"
+    },
+    "contracts": {
+      "$ref": "#/$defs/contracts"
+    },
+    "policies": {
+      "$ref": "#/$defs/policies"
+    },
+    "composition": {
+      "$ref": "#/$defs/composition"
+    },
+    "compatibility": {
+      "$ref": "#/$defs/compatibility"
+    },
+    "evidence": {
+      "$ref": "#/$defs/evidence"
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": ["productized", "provider-qualified", "external-a2a-qualified"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "resolution": {
+            "required": ["graph_template_ref"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "policies": {
+            "properties": {
+              "a2a": {
+                "properties": {
+                  "external_enabled": {"const": true}
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "enum": ["provider-qualified", "external-a2a-qualified"]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "schema_ref": {
+      "type": "string",
+      "pattern": "^schema\\.[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["display_name", "description"],
+      "properties": {
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "description": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "tags": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 64},
+          "uniqueItems": true,
+          "maxItems": 32
+        },
+        "owners": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 128},
+          "uniqueItems": true,
+          "maxItems": 16
+        },
+        "notes": {
+          "type": "array",
+          "items": {"type": "string", "maxLength": 1000},
+          "maxItems": 32
+        }
+      }
+    },
+    "resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "graph_schema_version", "parameter_schema", "bindings"],
+      "properties": {
+        "mode": {
+          "enum": ["builtin_template", "project_graph", "inline_graph"],
+          "type": "string"
+        },
+        "graph_template_ref": {"$ref": "#/$defs/identifier"},
+        "graph_file_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "inline_graph": {"type": "object"},
+        "graph_schema_version": {
+          "const": "astrabridge-agent-orchestration-graph-v1",
+          "type": "string"
+        },
+        "source_digest": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "parameter_schema": {
+          "type": "object",
+          "required": ["type", "properties", "additionalProperties"],
+          "properties": {
+            "type": {"const": "object", "type": "string"},
+            "properties": {"type": "object"},
+            "required": {
+              "type": "array",
+              "items": {"type": "string", "minLength": 1},
+              "uniqueItems": true
+            },
+            "additionalProperties": {"const": false, "type": "boolean"}
+          },
+          "additionalProperties": true
+        },
+        "bindings": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/binding"},
+          "maxItems": 128
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"mode": {"const": "builtin_template"}}},
+          "then": {"required": ["graph_template_ref"]}
+        },
+        {
+          "if": {"properties": {"mode": {"const": "project_graph"}}},
+          "then": {"required": ["graph_file_ref"]}
+        },
+        {
+          "if": {"properties": {"mode": {"const": "inline_graph"}}},
+          "then": {"required": ["inline_graph"]}
+        }
+      ]
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parameter", "graph_path", "required"],
+      "properties": {
+        "parameter": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$"},
+        "graph_path": {"type": "string", "pattern": "^(input(?:\\.[A-Za-z0-9._:-]+)?|nodes\\.[A-Za-z0-9._:-]+\\.[A-Za-z0-9._:-]+)$"},
+        "required": {"type": "boolean"}
+      }
+    },
+    "prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "variables_schema"],
+      "properties": {
+        "mode": {"enum": ["inline", "reference"], "type": "string"},
+        "template": {"type": "string", "minLength": 1, "maxLength": 20000},
+        "template_ref": {"$ref": "#/$defs/identifier"},
+        "variables_schema": {"type": "object"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"mode": {"const": "inline"}}},
+          "then": {"required": ["template"]}
+        },
+        {
+          "if": {"properties": {"mode": {"const": "reference"}}},
+          "then": {"required": ["template_ref"]}
+        }
+      ]
+    },
+    "contracts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "output"],
+      "properties": {
+        "input": {"$ref": "#/$defs/io_contract"},
+        "output": {"$ref": "#/$defs/io_contract"}
+      }
+    },
+    "io_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_ref", "required_message_parts", "artifact_specs"],
+      "properties": {
+        "schema_ref": {"$ref": "#/$defs/schema_ref"},
+        "required_message_parts": {
+          "type": "array",
+          "items": {"enum": ["text", "machine_result", "human_summary", "structured_json", "artifact_ref"], "type": "string"},
+          "uniqueItems": true,
+          "maxItems": 16
+        },
+        "artifact_specs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/artifact_spec"},
+          "maxItems": 32
+        }
+      }
+    },
+    "artifact_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 64},
+        "id": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "policies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["routing", "mcp", "communication", "subagent", "budget", "approval", "a2a"],
+      "properties": {
+        "routing": {"$ref": "#/$defs/routing"},
+        "mcp": {"$ref": "#/$defs/mcp"},
+        "communication": {"$ref": "#/$defs/communication"},
+        "subagent": {"$ref": "#/$defs/subagent"},
+        "budget": {"$ref": "#/$defs/budget"},
+        "approval": {"$ref": "#/$defs/approval"},
+        "a2a": {"$ref": "#/$defs/a2a"}
+      }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selection_mode", "allowed_provider_ids", "allowed_model_ids", "fallback_mode", "required_capabilities"],
+      "properties": {
+        "selection_mode": {"enum": ["profile", "explicit", "bounded_pool"], "type": "string"},
+        "profile_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "uniqueItems": true,
+          "maxItems": 32
+        },
+        "allowed_provider_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "uniqueItems": true,
+          "maxItems": 32
+        },
+        "allowed_model_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "uniqueItems": true,
+          "maxItems": 128
+        },
+        "fallback_mode": {"enum": ["deny", "explicit", "catalog_verified"], "type": "string"},
+        "required_capabilities": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 64},
+          "uniqueItems": true,
+          "maxItems": 32
+        }
+      }
+    },
+    "mcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preset_ids", "tool_rules", "approval_mode", "loopback_allowed"],
+      "properties": {
+        "preset_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "uniqueItems": true,
+          "maxItems": 32
+        },
+        "tool_rules": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/mcp_tool_rule"},
+          "maxItems": 128
+        },
+        "approval_mode": {"enum": ["allow", "ask", "deny", "manual"], "type": "string"},
+        "loopback_allowed": {"const": true, "type": "boolean"}
+      }
+    },
+    "mcp_tool_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["server", "tools", "approval_mode", "effect_class", "max_calls"],
+      "properties": {
+        "server": {"$ref": "#/$defs/identifier"},
+        "tools": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 128},
+          "uniqueItems": true,
+          "maxItems": 64
+        },
+        "approval_mode": {"enum": ["allow", "ask", "deny", "manual"], "type": "string"},
+        "effect_class": {"enum": ["read_only", "network_read", "provider_call", "file_write", "side_effect"], "type": "string"},
+        "max_calls": {"type": "integer", "minimum": 0}
+      }
+    },
+    "communication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["history_mode", "artifact_mode", "exclude_private_memory", "include_machine_results", "include_human_summaries", "allow_direct_teammate_messages"],
+      "properties": {
+        "history_mode": {"enum": ["none", "last_n_messages", "latest_summary_only", "latest_machine_result_only", "explicit_refs_only"], "type": "string"},
+        "artifact_mode": {"enum": ["none", "explicit_artifacts", "latest_matching_kind", "required_output_only"], "type": "string"},
+        "exclude_private_memory": {"const": true, "type": "boolean"},
+        "include_machine_results": {"type": "boolean"},
+        "include_human_summaries": {"type": "boolean"},
+        "allow_direct_teammate_messages": {"const": false, "type": "boolean"}
+      }
+    },
+    "subagent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["isolation_mode", "max_turns", "allow_nested_subagents", "allow_direct_teammate_messages"],
+      "properties": {
+        "isolation_mode": {"enum": ["lane"], "type": "string"},
+        "max_turns": {"type": "integer", "minimum": 1, "maximum": 64},
+        "allow_nested_subagents": {"const": false, "type": "boolean"},
+        "allow_direct_teammate_messages": {"const": false, "type": "boolean"}
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_total_agents", "max_parallel_agents", "max_total_tokens", "max_provider_calls", "max_retries", "provider_concurrency", "model_concurrency"],
+      "properties": {
+        "max_total_agents": {"type": "integer", "minimum": 1, "maximum": 32},
+        "max_parallel_agents": {"type": "integer", "minimum": 1, "maximum": 32},
+        "max_total_tokens": {"type": "integer", "minimum": 1},
+        "max_provider_calls": {"type": "integer", "minimum": 1},
+        "max_retries": {"type": "integer", "minimum": 0, "maximum": 16},
+        "provider_concurrency": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/provider_limit"},
+          "maxItems": 32
+        },
+        "model_concurrency": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/model_limit"},
+          "maxItems": 128
+        }
+      }
+    },
+    "provider_limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_id", "max_active_agents"],
+      "properties": {
+        "provider_id": {"$ref": "#/$defs/identifier"},
+        "max_active_agents": {"type": "integer", "minimum": 1, "maximum": 32}
+      }
+    },
+    "model_limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_id", "model_id", "max_active_agents"],
+      "properties": {
+        "provider_id": {"$ref": "#/$defs/identifier"},
+        "model_id": {"$ref": "#/$defs/identifier"},
+        "max_active_agents": {"type": "integer", "minimum": 1, "maximum": 32}
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default_mode", "risky_effects_require_approval"],
+      "properties": {
+        "default_mode": {"enum": ["ask", "manual", "deny"], "type": "string"},
+        "risky_effects_require_approval": {
+          "type": "array",
+          "items": {"enum": ["provider_call", "file_write", "install", "external_write", "side_effect"], "type": "string"},
+          "uniqueItems": true
+        }
+      }
+    },
+    "a2a": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["external_enabled", "allowed_card_refs", "minimum_trust_level", "gateway_required"],
+      "properties": {
+        "external_enabled": {"type": "boolean"},
+        "allowed_card_refs": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^a2a_card:[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+          "uniqueItems": true,
+          "maxItems": 32
+        },
+        "minimum_trust_level": {"enum": ["untrusted", "workspace_trusted", "pinned"], "type": "string"},
+        "gateway_required": {"const": true, "type": "boolean"}
+      }
+    },
+    "composition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allow_runtime_nesting", "max_expansion_depth", "template_refs"],
+      "properties": {
+        "allow_runtime_nesting": {"const": false, "type": "boolean"},
+        "max_expansion_depth": {"const": 1, "type": "integer"},
+        "template_refs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "uniqueItems": true,
+          "maxItems": 16
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["graph_schema_version", "min_runtime_version", "legacy_sources", "migration_notes"],
+      "properties": {
+        "graph_schema_version": {
+          "const": "astrabridge-agent-orchestration-graph-v1",
+          "type": "string"
+        },
+        "min_runtime_version": {"type": "string", "minLength": 1, "maxLength": 64},
+        "legacy_sources": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 128},
+          "uniqueItems": true,
+          "maxItems": 16
+        },
+        "migration_notes": {
+          "type": "array",
+          "items": {"type": "string", "maxLength": 1000},
+          "maxItems": 32
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required_level", "fixture_ref", "artifact_root"],
+      "properties": {
+        "required_level": {"enum": ["candidate", "validated", "productized", "provider-qualified", "external-a2a-qualified"], "type": "string"},
+        "fixture_ref": {"$ref": "#/$defs/identifier"},
+        "artifact_root": {"type": "string", "pattern": "^(PRIVATE/|\\.astrabridge/)"}
+      }
+    }
+  },
+  "x-forbidden-properties": [
+    "api_key",
+    "access_token",
+    "authorization",
+    "bearer",
+    "cookie",
+    "private_reasoning",
+    "raw_prompt",
+    "raw_secret",
+    "secret"
+  ]
+}

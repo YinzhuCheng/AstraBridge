@@ -70,7 +70,9 @@ from .router_service import ROUTER_ENV_KEY, ROUTER_PORT
 from .runtime_config_service import RuntimeConfigService, codex_model_id, codex_reasoning_effort
 from .runtime_client_pool import RuntimeClientPool
 from .runtime_graph_run_dispatch_service import RuntimeGraphRunDispatchService
+from .runtime_guardrails import evaluate_runtime_guardrails
 from .runtime_observability import enrich_runtime_event, load_host_lineage_events
+from .communication_isolation import validate_typed_communication_isolation
 from .security import SecurityError, redact_sensitive, resolve_under, scan_text_for_secrets
 from .secret_service import SecretService
 from .task_service import GraphContractValidationError, _compact_text, _display_thread_name
@@ -2434,6 +2436,52 @@ class RuntimeService:
             for item in list(compiled_plan.get("nodes") or [])
             if isinstance(item, dict) and str(item.get("node_id") or "").strip()
         }
+        dispatch_limits = self._graph_run_dispatch.resolve_dispatch_limits(
+            payload=payload,
+            compiled_plan=compiled_plan,
+        )
+        guardrail_decision = evaluate_runtime_guardrails(
+            graph=orchestration_graph,
+            compiled_plan=compiled_plan,
+            run_budget=run_budget,
+            dispatch_limits=dispatch_limits,
+            parent_context=self._graph_live_parent_context(payload),
+            mode="live_run",
+            require_complete_budget=bool(
+                payload.get("_require_complete_runtime_budget")
+                or payload.get("skill_ref")
+                or payload.get("resolution_ref")
+                or payload.get("skill_id")
+            ),
+        )
+        if str(guardrail_decision.get("status") or "").strip() != "pass":
+            guardrail_blockers = [
+                str(item).strip()
+                for item in list(guardrail_decision.get("blockers") or [])
+                if str(item or "").strip()
+            ]
+            raise ValueError(
+                "Runtime guardrails blocked live task-graph admission. "
+                + (guardrail_blockers[0] if guardrail_blockers else "Resolve the bounded runtime policy first.")
+            )
+        communication_isolation = validate_typed_communication_isolation(
+            orchestration_graph,
+            compiled_plan,
+        )
+        if str(communication_isolation.get("status") or "").strip() != "pass":
+            communication_blockers = [
+                str(item).strip()
+                for item in list(communication_isolation.get("blockers") or [])
+                if str(item or "").strip()
+            ]
+            raise ValueError(
+                "Typed communication isolation blocked live task-graph admission. "
+                + (communication_blockers[0] if communication_blockers else "Resolve the graph handoff isolation policy first.")
+            )
+        run_token_limit = int(
+            dict(guardrail_decision.get("normalized_budget") or {}).get("max_total_tokens")
+            or run_token_limit
+        )
         executor_report = journaled_compiled_plan_executor_capability_report(
             compiled_plan,
             execution_mode="live_run",
@@ -2500,6 +2548,9 @@ class RuntimeService:
             "prepared_nodes": prepared_nodes,
             "parent_thread_id": parent_thread_id,
             "model_capability_snapshots": model_capability_snapshots,
+            "runtime_guardrails": guardrail_decision,
+            "communication_isolation": communication_isolation,
+            "dispatch_limits": dict(guardrail_decision.get("effective_dispatch_limits") or dispatch_limits),
         }
 
     def queue_task_graph_run(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2907,6 +2958,58 @@ class RuntimeService:
             for item in list(compiled_plan.get("nodes") or [])
             if isinstance(item, dict) and str(item.get("node_id") or "").strip()
         }
+        dispatch_limits = self._graph_run_dispatch.resolve_dispatch_limits(
+            payload=payload,
+            compiled_plan=compiled_plan,
+        )
+        guardrail_decision = evaluate_runtime_guardrails(
+            graph=orchestration_graph,
+            compiled_plan=compiled_plan,
+            run_budget=run_budget,
+            dispatch_limits=dispatch_limits,
+            parent_context=self._graph_live_parent_context(payload),
+            mode="live_run",
+            require_complete_budget=bool(
+                payload.get("_require_complete_runtime_budget")
+                or payload.get("skill_ref")
+                or payload.get("resolution_ref")
+                or payload.get("skill_id")
+            ),
+        )
+        if str(guardrail_decision.get("status") or "").strip() != "pass":
+            guardrail_blockers = [
+                str(item).strip()
+                for item in list(guardrail_decision.get("blockers") or [])
+                if str(item or "").strip()
+            ]
+            raise ValueError(
+                "Runtime guardrails blocked live task-graph execution. "
+                + (guardrail_blockers[0] if guardrail_blockers else "Resolve the bounded runtime policy first.")
+            )
+        communication_isolation = validate_typed_communication_isolation(
+            orchestration_graph,
+            compiled_plan,
+        )
+        if str(communication_isolation.get("status") or "").strip() != "pass":
+            communication_blockers = [
+                str(item).strip()
+                for item in list(communication_isolation.get("blockers") or [])
+                if str(item or "").strip()
+            ]
+            raise ValueError(
+                "Typed communication isolation blocked live task-graph execution. "
+                + (communication_blockers[0] if communication_blockers else "Resolve the graph handoff isolation policy first.")
+            )
+        run_token_limit = int(
+            dict(guardrail_decision.get("normalized_budget") or {}).get("max_total_tokens")
+            or run_token_limit
+        )
+        payload = {
+            **payload,
+            "_dispatch_limits": deepcopy(dict(guardrail_decision.get("effective_dispatch_limits") or dispatch_limits)),
+            "_runtime_guardrails": deepcopy(guardrail_decision),
+            "_communication_isolation": deepcopy(communication_isolation),
+        }
         executor_report = journaled_compiled_plan_executor_capability_report(
             compiled_plan,
             execution_mode="live_run",
@@ -3023,6 +3126,10 @@ class RuntimeService:
             compiled_plan=compiled_plan,
         )
         dispatch_limits = self._graph_run_dispatch.resolve_dispatch_limits(payload=payload, compiled_plan=compiled_plan)
+        runtime_guardrails = deepcopy(dict(payload.get("_runtime_guardrails") or guardrail_decision))
+        communication_isolation = deepcopy(
+            dict(payload.get("_communication_isolation") or communication_isolation)
+        )
         parallel_groups, _normalized_parallelism = self._graph_run_dispatch.normalize_parallel_groups(
             compiled_plan,
             dispatch_limits=dispatch_limits,
@@ -3127,6 +3234,8 @@ class RuntimeService:
                 ],
                 "model_capability_snapshots": model_capability_snapshots,
                 "budget": budget_snapshot,
+                "runtime_guardrails": runtime_guardrails,
+                "communication_isolation": communication_isolation,
                 "executor_contract": {
                     "execution_mode": "live_run",
                     "registry_fingerprint": str(executor_report.get("current_registry_fingerprint") or ""),
@@ -5164,7 +5273,10 @@ class RuntimeService:
     @staticmethod
     def _graph_live_run_token_limit(run_budget: dict[str, Any]) -> int | None:
         limits = dict(run_budget.get("limits") or {}) if isinstance(run_budget.get("limits"), dict) else {}
-        raw_value = limits.get("total_tokens", run_budget.get("total_tokens"))
+        raw_value = limits.get(
+            "total_tokens",
+            limits.get("max_total_tokens", run_budget.get("max_total_tokens", run_budget.get("total_tokens"))),
+        )
         try:
             value = int(raw_value)
         except (TypeError, ValueError):

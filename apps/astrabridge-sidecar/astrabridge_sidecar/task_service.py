@@ -4322,6 +4322,10 @@ class TaskService:
                     "blocker_count": int(executor_report.get("blocker_count") or 0),
                 },
                 "node_mcp_tool_policies": self._compiled_node_mcp_tool_policies(compiled_plan),
+                "skill_ref": deepcopy(dict(payload.get("skill_ref") or {})),
+                "resolution_ref": deepcopy(dict(payload.get("resolution_ref") or {})),
+                "dry_run_receipt": deepcopy(dict(payload.get("dry_run_receipt") or {})),
+                "approval": deepcopy(dict(payload.get("approval") or {})),
                 "recovery": (
                     {
                         "recovery_id": str(recovery_context.get("recovery_id") or "").strip(),
@@ -5994,6 +5998,10 @@ class TaskService:
                     "node_research_b": branch_b_behavior,
                 },
                 "node_mcp_tool_policies": self._compiled_node_mcp_tool_policies(compiled_plan),
+                "skill_ref": deepcopy(dict(payload.get("skill_ref") or {})),
+                "resolution_ref": deepcopy(dict(payload.get("resolution_ref") or {})),
+                "dry_run_receipt": deepcopy(dict(payload.get("dry_run_receipt") or {})),
+                "approval": deepcopy(dict(payload.get("approval") or {})),
             },
             "created_at": created_at,
             "updated_at": created_at,
@@ -6306,6 +6314,10 @@ class TaskService:
                 "max_parallelism": int(dict(compiled_plan.get("topology") or {}).get("max_parallelism") or 1),
                 "budget": budget_snapshot,
                 "node_mcp_tool_policies": self._compiled_node_mcp_tool_policies(compiled_plan),
+                "skill_ref": deepcopy(dict(payload.get("skill_ref") or {})),
+                "resolution_ref": deepcopy(dict(payload.get("resolution_ref") or {})),
+                "dry_run_receipt": deepcopy(dict(payload.get("dry_run_receipt") or {})),
+                "approval": deepcopy(dict(payload.get("approval") or {})),
             },
             "created_at": created_at,
             "updated_at": created_at,
@@ -6496,6 +6508,10 @@ class TaskService:
                 "max_parallelism": int(dict(compiled_plan.get("topology") or {}).get("max_parallelism") or 1),
                 "budget": budget_snapshot,
                 "node_mcp_tool_policies": self._compiled_node_mcp_tool_policies(compiled_plan),
+                "skill_ref": deepcopy(dict(payload.get("skill_ref") or {})),
+                "resolution_ref": deepcopy(dict(payload.get("resolution_ref") or {})),
+                "dry_run_receipt": deepcopy(dict(payload.get("dry_run_receipt") or {})),
+                "approval": deepcopy(dict(payload.get("approval") or {})),
             },
             "created_at": created_at,
             "updated_at": created_at,
@@ -8117,6 +8133,134 @@ class TaskService:
                 return str(node.get("label") or node_id)
         return node_id
 
+    def _fixture_typed_output_values(
+        self,
+        *,
+        graph: dict[str, Any],
+        node: dict[str, Any],
+        run_id: str,
+        worker_thread_id: str,
+        machine_result: dict[str, Any],
+        summary: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Materialize deterministic values for every declared fixture output port.
+
+        Fixture runners historically emitted only ``machine_result``.  That was
+        sufficient for the older compatibility edges, but it made a fixture
+        unable to exercise typed artifact handoffs such as ``code_diff`` or
+        ``image``.  Keep the fixture local and provider-free while still
+        producing protocol-valid values and preserved artifact paths for every
+        optional output port.
+        """
+
+        workspace_root = self._projects.require_workspace_root()
+        node_id = str(node.get("node_id") or "").strip() or "fixture-node"
+        task_id = str(graph.get("task_id") or "").strip() or "fixture-task"
+        relative_root = Path("PRIVATE") / "task-graph" / "workers" / run_id / node_id
+        artifact_root = Path(workspace_root) / relative_root
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        typed_output_values: dict[str, Any] = {}
+        generated_artifact_refs: list[dict[str, Any]] = []
+        media_types = {
+            "code_diff": "text/x-diff",
+            "image": "image/png",
+            "audio": "audio/wav",
+            "video": "video/mp4",
+            "document": "application/json",
+            "dataset": "application/json",
+            "agent_report": "text/markdown",
+            "approval_record": "application/json",
+            "tool_result": "application/json",
+            "structured_json": "application/json",
+        }
+        default_artifact_kinds = {
+            "code_diff": "code_diff",
+            "image": "image",
+            "audio": "audio",
+            "video": "video",
+            "document": "document_extract",
+            "dataset": "dataset",
+            "agent_report": "text_report",
+            "approval_record": "approval_record",
+            "tool_result": "tool_result",
+            "structured_json": "structured_json",
+        }
+
+        for port_id, port in self._graph_node_port_map(node, direction="outputs").items():
+            if port_id == "machine_result":
+                typed_output_values[port_id] = deepcopy(machine_result)
+                continue
+            port_type = str(port.get("port_type") or "structured_json").strip() or "structured_json"
+            artifact_kind = str(port.get("artifact_kind") or default_artifact_kinds.get(port_type) or "fixture_artifact").strip()
+            artifact_id = f"{worker_thread_id}-{port_id}-artifact"
+            safe_suffix = "md" if port_type in {"text", "agent_report"} else "diff" if port_type == "code_diff" else "json"
+            relative_path = (relative_root / f"{port_id}.{safe_suffix}").as_posix()
+            artifact_path = Path(workspace_root) / relative_path
+            media_type = media_types.get(port_type, "application/octet-stream")
+
+            if port_type == "text":
+                typed_output_values[port_id] = str(summary or f"Fixture output for {node_id}.{port_id}.").strip() or f"Fixture output for {node_id}.{port_id}."
+                artifact_path.write_text(str(typed_output_values[port_id]), encoding="utf-8")
+            elif port_type in {"structured_json", "tool_result"}:
+                typed_output_values[port_id] = {
+                    "fixture": True,
+                    "node_id": node_id,
+                    "port_id": port_id,
+                    "summary": str(summary or "").strip()[:240],
+                }
+                write_json(artifact_path, typed_output_values[port_id])
+            elif port_type == "code_diff":
+                typed_output_values[port_id] = self._graph_worker_protocol_artifact_ref(
+                    {
+                        "artifact_id": artifact_id,
+                        "artifact_kind": artifact_kind,
+                        "path": relative_path,
+                        "media_type": media_type,
+                        "status": "ready",
+                    },
+                    task_id=task_id,
+                    run_id=run_id,
+                    source_node_id=node_id,
+                )
+                artifact_path.write_text(
+                    "--- a/fixture.txt\n+++ b/fixture.txt\n@@\n+fixture-only bounded patch\n",
+                    encoding="utf-8",
+                )
+            else:
+                typed_output_values[port_id] = self._graph_worker_protocol_artifact_ref(
+                    {
+                        "artifact_id": artifact_id,
+                        "artifact_kind": artifact_kind,
+                        "path": relative_path,
+                        "media_type": media_type,
+                        "status": "ready",
+                    },
+                    task_id=task_id,
+                    run_id=run_id,
+                    source_node_id=node_id,
+                )
+                # The fixture deliberately preserves a redacted placeholder;
+                # no provider payload or user file is copied into the bundle.
+                write_json(
+                    artifact_path,
+                    {
+                        "fixture": True,
+                        "artifact_kind": artifact_kind,
+                        "node_id": node_id,
+                        "port_id": port_id,
+                        "placeholder": "provider-free fixture artifact",
+                    },
+                )
+            generated_artifact_refs.append(
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_kind": artifact_kind,
+                    "path": relative_path,
+                    "status": "ready",
+                }
+            )
+        return typed_output_values, generated_artifact_refs
+
     def _record_fixture_worker_output(
         self,
         *,
@@ -8131,7 +8275,7 @@ class TaskService:
         machine_result: dict[str, Any],
         next_action_hints: list[str],
         status: str | None = None,
-    ) -> dict[str, Any]:
+        ) -> dict[str, Any]:
         effective_updated_at = str(updated_at or created_at or now_iso()).strip() or now_iso()
         worker_thread_id = f"fixture-{node_id}-{run_id}"
         node = next(
@@ -8161,6 +8305,23 @@ class TaskService:
             },
             graph_definition=graph,
         )
+        typed_graph = dict(graph.get("orchestration_graph") or graph)
+        typed_node = next(
+            (
+                dict(item)
+                for item in list(typed_graph.get("nodes") or [])
+                if isinstance(item, dict) and str(item.get("node_id") or "").strip() == node_id
+            ),
+            node,
+        )
+        fixture_typed_output_values, fixture_artifact_refs = self._fixture_typed_output_values(
+            graph=typed_graph,
+            node=typed_node,
+            run_id=run_id,
+            worker_thread_id=worker_thread_id,
+            machine_result=machine_result,
+            summary=summary,
+        )
         return self.record_graph_worker_output(
             {
                 "graph_id": str(graph.get("graph_id") or ""),
@@ -8169,6 +8330,8 @@ class TaskService:
                 "worker_thread_id": worker_thread_id,
                 "human_summary": summary,
                 "machine_result": machine_result,
+                "typed_output_values": fixture_typed_output_values,
+                "generated_artifact_refs": fixture_artifact_refs,
                 "confidence": "fixture",
                 "next_action_hints": next_action_hints,
                 "status": status or self._fixture_behavior_to_node_status(behavior),

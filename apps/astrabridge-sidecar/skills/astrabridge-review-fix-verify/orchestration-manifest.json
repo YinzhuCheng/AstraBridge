@@ -1,0 +1,148 @@
+{
+  "schema_version": "astrabridge-skill-to-graph-manifest-v1",
+  "skill_id": "astrabridge.review-fix-verify",
+  "version": "1.0.0",
+  "kind": "orchestration_skill",
+  "status": "candidate",
+  "metadata": {
+    "display_name": "Review / Fix / Verify",
+    "description": "Bounded code-change workflow with independent test and review evidence.",
+    "tags": ["code", "review", "verification", "bounded-change"],
+    "owners": ["astrabridge-core"],
+    "notes": ["The code worker is the only write-capable node and all risky effects require approval."]
+  },
+  "resolution": {
+    "mode": "builtin_template",
+    "graph_template_ref": "code_fix_test_review",
+    "graph_schema_version": "astrabridge-agent-orchestration-graph-v1",
+    "parameter_schema": {
+      "type": "object",
+      "properties": {
+        "task_goal": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "target_files": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}, "minItems": 1, "maxItems": 32},
+        "test_command": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "review_criteria": {"type": "array", "items": {"type": "string", "maxLength": 600}, "maxItems": 16}
+      },
+      "required": ["task_goal", "target_files", "test_command"],
+      "additionalProperties": false
+    },
+    "bindings": [
+      {"parameter": "task_goal", "graph_path": "input.task_context", "required": true},
+      {"parameter": "target_files", "graph_path": "nodes.node_apply_fix.prompt", "required": true},
+      {"parameter": "test_command", "graph_path": "nodes.node_run_tests.prompt", "required": true},
+      {"parameter": "review_criteria", "graph_path": "nodes.node_review.prompt", "required": false}
+    ]
+  },
+  "prompt": {
+    "mode": "reference",
+    "template_ref": "prompt.review_fix_verify.v1",
+    "variables_schema": {
+      "type": "object",
+      "properties": {
+        "task_goal": {"type": "string"},
+        "target_files": {"type": "array"},
+        "test_command": {"type": "string"},
+        "review_criteria": {"type": "array"}
+      },
+      "required": ["task_goal", "target_files", "test_command"],
+      "additionalProperties": false
+    }
+  },
+  "contracts": {
+    "input": {
+      "schema_ref": "schema.skill_review_fix_input",
+      "required_message_parts": ["text", "structured_json"],
+      "artifact_specs": []
+    },
+    "output": {
+      "schema_ref": "schema.review_fix_verify_output",
+      "required_message_parts": ["machine_result", "human_summary", "artifact_ref"],
+      "artifact_specs": [
+        {"kind": "code_diff", "id": "bounded_patch"},
+        {"kind": "test_report", "id": "test_report"},
+        {"kind": "validation_report", "id": "review_report"}
+      ]
+    }
+  },
+  "policies": {
+    "routing": {
+      "selection_mode": "bounded_pool",
+      "allowed_provider_ids": ["qwen", "deepseek", "kimi"],
+      "allowed_model_ids": ["qwen3.7-plus", "qwen3-coder-plus", "deepseek-v4-pro", "kimi-k2.6"],
+      "fallback_mode": "catalog_verified",
+      "required_capabilities": ["text", "structured_json", "structured_edit"]
+    },
+    "mcp": {
+      "preset_ids": ["astrabridge_workspace"],
+      "tool_rules": [
+        {"server": "astrabridge_workspace", "tools": ["astrabridge_workspace_read_file"], "approval_mode": "allow", "effect_class": "read_only", "max_calls": 32},
+        {"server": "astrabridge_workspace", "tools": ["astrabridge_workspace_apply_patch"], "approval_mode": "manual", "effect_class": "file_write", "max_calls": 8},
+        {"server": "astrabridge_workspace", "tools": ["astrabridge_workspace_run_command"], "approval_mode": "ask", "effect_class": "side_effect", "max_calls": 8}
+      ],
+      "approval_mode": "ask",
+      "loopback_allowed": true
+    },
+    "communication": {
+      "history_mode": "explicit_refs_only",
+      "artifact_mode": "explicit_artifacts",
+      "exclude_private_memory": true,
+      "include_machine_results": true,
+      "include_human_summaries": true,
+      "allow_direct_teammate_messages": false
+    },
+    "subagent": {
+      "isolation_mode": "lane",
+      "max_turns": 8,
+      "allow_nested_subagents": false,
+      "allow_direct_teammate_messages": false
+    },
+    "budget": {
+      "max_total_agents": 4,
+      "max_parallel_agents": 2,
+      "max_total_tokens": 80000,
+      "max_provider_calls": 6,
+      "max_retries": 2,
+      "provider_concurrency": [
+        {"provider_id": "qwen", "max_active_agents": 2},
+        {"provider_id": "deepseek", "max_active_agents": 1},
+        {"provider_id": "kimi", "max_active_agents": 1}
+      ],
+      "model_concurrency": [
+        {"provider_id": "qwen", "model_id": "qwen3.7-plus", "max_active_agents": 2},
+        {"provider_id": "deepseek", "model_id": "deepseek-v4-pro", "max_active_agents": 1},
+        {"provider_id": "kimi", "model_id": "kimi-k2.6", "max_active_agents": 1}
+      ]
+    },
+    "approval": {
+      "default_mode": "ask",
+      "risky_effects_require_approval": ["provider_call", "file_write", "install", "external_write", "side_effect"]
+    },
+    "a2a": {
+      "external_enabled": false,
+      "allowed_card_refs": [],
+      "minimum_trust_level": "workspace_trusted",
+      "gateway_required": true
+    }
+  },
+  "composition": {
+    "allow_runtime_nesting": false,
+    "max_expansion_depth": 1,
+    "template_refs": []
+  },
+  "compatibility": {
+    "graph_schema_version": "astrabridge-agent-orchestration-graph-v1",
+    "min_runtime_version": "0.1.0",
+    "legacy_sources": ["astrabridge-task-graph-v1"],
+    "migration_notes": ["Workspace MCP tools are a declared capability dependency; direct app-server tools are not a skill bypass."]
+  },
+  "evidence": {
+    "required_level": "productized",
+    "fixture_ref": "fixture.code_fix_test_review",
+    "artifact_root": "PRIVATE/skill-first-orchestration/step6-skill-templates/"
+  },
+  "extensions": {
+    "taxonomy_version": "astrabridge-skill-template-taxonomy-v1",
+    "template_id": "code_fix_test_review",
+    "mcp_resolution": "astrabridge_workspace is a declared workspace-MCP dependency; availability is checked before product promotion."
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multimodal Capability Adapter"
+  short_description: "MCP multimodal routing and fallback skill"
+  default_prompt: "Use $astrabridge-multimodal-capability-adapter to probe, adapt, and validate a bounded multimodal capability route."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Fix Verify"
+  short_description: "Bounded code-change review and verification skill"
+  default_prompt: "Use $astrabridge-review-fix-verify to plan, patch, test, and independently review a bounded code change."
