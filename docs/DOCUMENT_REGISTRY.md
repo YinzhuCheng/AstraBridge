@@ -1,6 +1,6 @@
 # AstraBridge Document Registry
 
-Last verified: 2026-07-21
+Last verified: 2026-07-27
 
 ## Purpose
 
@@ -37,14 +37,18 @@ Do not use file modification time, filename wording, or an old progress paragrap
 | --- | --- | --- | --- |
 | [ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md) | Current default queue | `product-stability-interoperability` | Multi-provider control, external A2A interoperability, GUI/code orchestration parity, signed updates, CI, and release closure. |
 | [CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md](/D:/AstraBridge/PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md) | Only when the user explicitly requests capability-runtime implementation or advancement | `capability-runtime` | Remaining capability-runtime implementation beginning at its recorded Step 2. |
+| [ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md) | Only when the user explicitly requests AstraBridge open-source developer-product upgrades | `open-source-productization` | Public onboarding, contributor adoption, extension readiness, evidence-qualified positioning, and developer-preview closure. |
 
-These activation conditions do not conflict: the capability-runtime queue is dormant unless the user explicitly invokes that scope. The prior UI/live-dogfood queue and the completed stability/protocol/runtime plan remain preserved as historical implementation evidence. All other execution plans are `complete` or `superseded` in the registry.
+These activation conditions do not conflict: both conditional queues are dormant unless the user explicitly invokes their scope, and neither replaces the default stability queue. The prior UI/live-dogfood queue and the completed stability/protocol/runtime plan remain preserved as historical implementation evidence. All other execution plans are `complete` or `superseded` in the registry.
 
 ## Active Policy And Memory
 
 | Path | Owner | Scope |
 | --- | --- | --- |
 | [AGENTS.md](/D:/AstraBridge/AGENTS.md) | `repository-governance` | Safety and execution rules. |
+| [CONTRIBUTING.md](/D:/AstraBridge/CONTRIBUTING.md) | `open-source-productization` | Pre-license participation guidance and future contribution workflow. |
+| [CODE_OF_CONDUCT.md](/D:/AstraBridge/CODE_OF_CONDUCT.md) | `open-source-productization` | Conduct standards and private-enforcement-contact gate. |
+| [SECURITY.md](/D:/AstraBridge/SECURITY.md) | `open-source-productization` | Pre-preview security-reporting policy and private-reporting-route gate. |
 | [README.md](/D:/AstraBridge/README.md) | `repository-governance` | Public entry and quickstart. |
 | [PROJECT_SUMMARY.md](/D:/AstraBridge/docs/PROJECT_SUMMARY.md) | `project-memory` | Fast current state. |
 | [PROJECT_LOG.md](/D:/AstraBridge/docs/PROJECT_LOG.md) | `project-memory` | Chronological memory. |
@@ -98,6 +102,10 @@ Reference documents include:
 - runtime rollout, migration, rollback-readback, and maintenance runbooks;
 - Agent Graph contracts, maintenance runbooks, canvas UX targets, internal contracts, and surface maps;
 - capability runtime, automation, kernel, plugin/skill, and provider compatibility contracts or surface maps;
+- the current open-source foundation decision record for licensing, contribution, security, and maintainer choices;
+- the documented no-provider first-ten-minutes route, its bounded
+  current-source fixture evidence, and its clean-clone dependency gate;
+- the current open-source product positioning and material-claim matrix;
 - interface governance for HTTP, SSE, payload, provider metadata, CLI/launcher, MCP, and compatibility shims;
 - multimodal contracts, official-source pack, exposure gates, maintenance runbook, and rollout/rollback policy;
 - dogfood task pools and evidence summaries;
@@ -110,7 +118,7 @@ They inform implementation but do not own the execution queue.
 
 The governance check reads the JSON registry before evaluating documentation:
 
-- every `AGENTS.md`, `README.md`, `docs/**/*.md`, `docs/DOCUMENT_REGISTRY.json`, and `PLAN/*` file must have exactly one registry entry;
+- every supported public root document (`AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `SECURITY.md`), every `docs/**/*.md`, `docs/DOCUMENT_REGISTRY.json`, and every `PLAN/*` file must have exactly one registry entry;
 - every registered path and replacement target must exist;
 - every `superseded` entry must name a replacement;
 - active plans must be either the current plan or an explicitly conditional plan;
@@ -144,12 +152,12 @@ When adding or changing a guiding document or execution plan:
 
 ## Current Counts
 
-As verified on 2026-07-21, the registry contains 114 entries:
+As verified on 2026-07-27, the registry contains 122 entries:
 
 | Status | Count |
 | --- | ---: |
-| `active` | 14 |
+| `active` | 18 |
 | `complete` | 27 |
-| `reference` | 52 |
-| `superseded` | 20 |
+| `reference` | 55 |
+| `superseded` | 21 |
 | `archived` | 1 |

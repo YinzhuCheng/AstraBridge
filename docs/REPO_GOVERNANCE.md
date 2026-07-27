@@ -1,6 +1,6 @@
 # Repository Governance
 
-Last updated: 2026-07-17
+Last updated: 2026-07-27
 
 ## Purpose
 
@@ -43,16 +43,20 @@ Use these statuses when describing plan and documentation files:
 
 The registry owns document status, replacement, archive policy, and execution activation. Historical progress text inside a plan does not override the registry. Every superseded entry must name a replacement, and every archived entry must name a replacement or explicit historical purpose.
 
-Only two execution plans are classified `active`:
+Three execution plans are classified `active`:
 
 - `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md` is the current default queue.
 - `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md` is conditional and activates only when the user explicitly asks to implement or advance capability runtime.
+- `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md` is conditional and activates only when the user explicitly asks to create or advance the open-source developer-product upgrade lane.
 
 ## Bootstrap Document Inventory
 
 | File | Status | Notes |
 | --- | --- | --- |
 | `AGENTS.md` | active | Repository rules and execution-loop constraints. |
+| `CONTRIBUTING.md` | active | Pre-license participation guidance and future contribution workflow. |
+| `CODE_OF_CONDUCT.md` | active | Conduct standards and private-enforcement-contact gate. |
+| `SECURITY.md` | active | Pre-preview security-reporting policy and private-reporting-route gate. |
 | `README.md` | active | Public development entry point. |
 | `docs/PROJECT_SUMMARY.md` | active | Fast project state and current entry points. |
 | `docs/PROJECT_LOG.md` | active | Chronological memory of substantive repository work. |
@@ -63,19 +67,23 @@ Only two execution plans are classified `active`:
 | `docs/OWNERSHIP_BOUNDARIES.md` | active | Product subsystem and state ownership boundaries. |
 | `docs/ASSET_SOURCES.md` | active | Committed asset provenance and local-artifact policy. |
 | `docs/ARCHITECTURE.md` | reference | Current architecture and user mental model. |
+| `docs/OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md` | reference | Current evidence-backed open-source foundation decision record. |
+| `docs/NO_KEY_FIRST_TEN_MINUTES.md` | reference | Documented no-provider onboarding route, bounded current-source fixture evidence, and clean-clone dependency gate. |
+| `docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md` | reference | Current evidence-qualified public positioning and material-claim matrix. |
 | `docs/HANDOFF.md` | reference | Handoff guidance for future agents/operators. |
 | `docs/LEGACY_CLEANUP_AUDIT.md` | reference | Current classification of legacy residue. |
 | `docs/INTERFACE_GOVERNANCE.md` | reference | Current interface status, evidence, replacement, and cleanup rules. |
 | `docs/archive/LEGACY_COMPATIBILITY_SHIMS.md` | archived | Compatibility shim inventory and do-not-revive list. |
 | `PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md` | complete | Completed normalization record. |
 | `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md` | active | Capability runtime follow-on plan when requested. |
+| `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md` | active | Conditional public onboarding, contributor adoption, extension readiness, and developer-preview productization queue. |
 | `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md` | active | Current default multi-provider, A2A, orchestration, update, and release-stability queue. |
 | `PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md` | complete | Completed 22-step stability/protocol/runtime implementation baseline. |
 | `PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md` | superseded | Preserved prior UI/live-dogfood execution record. |
 | `PLAN/CAPABILITY_REAL_SCENARIO_DOGFOOD_PLAN.md` | complete | Completed 24-step dogfood record; preserved evidence. |
 | `PLAN/FIVE_CAPABILITY_REAL_SCENARIO_EXECUTION_PLAN.md` | superseded | Superseded by the completed 24-step dogfood record. |
 
-The full 107-entry inventory lives in the canonical registry. Do not infer status for an unlisted future file; add it to the registry before treating it as guidance or an execution queue.
+The full 122-entry inventory lives in the canonical registry. Do not infer status for an unlisted future file; add it to the registry before treating it as guidance or an execution queue.
 
 ## Local Governance Gate
 

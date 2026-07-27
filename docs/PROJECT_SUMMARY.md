@@ -1,6 +1,6 @@
 # AstraBridge Project Summary
 
-Last updated: 2026-07-17
+Last updated: 2026-07-27
 
 ## Current Product State
 
@@ -27,6 +27,10 @@ Current product facts:
 
 - Canonical document registry: [DOCUMENT_REGISTRY.md](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.md)
 - Current execution plan: [ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md) (`active`)
+- Conditional open-source developer-product upgrade plan: [ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md) (`active` only when explicitly requested; it does not replace the default stability queue)
+- Open-source foundation decision record: [OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md](/D:/AstraBridge/docs/OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md) (license, private security-reporting route, and maintainer-contact decisions remain owner-gated)
+- Public positioning and claim matrix: [OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md](/D:/AstraBridge/docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md) (authoritative wording and evidence status for public product claims)
+- Documented no-provider onboarding: [NO_KEY_FIRST_TEN_MINUTES.md](/D:/AstraBridge/docs/NO_KEY_FIRST_TEN_MINUTES.md) (local-canonical clean-clone fixture evidence; no provider or coding-route claim; public documentation/release integration remains open)
 - Repository normalization record: [ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md](/D:/AstraBridge/PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md) (`complete`)
 - Repository rules: [AGENTS.md](/D:/AstraBridge/AGENTS.md)
 - Repository governance: [REPO_GOVERNANCE.md](/D:/AstraBridge/docs/REPO_GOVERNANCE.md)

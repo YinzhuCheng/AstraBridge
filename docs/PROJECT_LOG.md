@@ -705,6 +705,51 @@ policy before dispatch, and make cancellation converge under late-result races.
 - No private evidence, logs, caches, provider records, credentials, or
   preserved validation outputs were deleted.
 
+## 2026-07-27
+
+### Request
+
+- The user asked to find the enhanced multi-round scripted handoff-plan skill
+  and use it to persist AstraBridge's upgrade plan for becoming an open-source
+  developer product.
+
+### Changes
+
+- Read and applied the enhanced scripted durable-handoff-plan contract and the
+  project-memory governance workflow.
+- Added the conditional execution queue
+  `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`.
+  It keeps the product-stability queue as the default mainline and turns the
+  intended positioning into bounded work: public foundation, truthful claims,
+  no-key onboarding, flagship coding-agent and GUI/code examples, provider
+  authority surface, extension/contribution paths, release evidence, and a
+  developer-preview decision.
+- Registered the new conditional queue, the completed provider-adaptation
+  upgrade handoff, and the existing Codex-core multi-provider execution
+  contract in the canonical document registry. Updated the human registry,
+  repository governance, and project summary to match the new queue boundary.
+- The owner must still select a license before any root `LICENSE` file or
+  license-specific public claim can be added. No credentials, provider calls,
+  external writes, artifacts, or user changes were removed.
+
+### Validation And Sources
+
+- `python C:\Users\cyz19\.codex\skills\durable-handoff-plan-scripted\scripts\validate_plan_contract.py PLAN\ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md` passed.
+- `python scripts\repo_governance_check.py --repo .` passed with 0 errors and
+  0 warnings after registry coverage was restored.
+- `scripts/recent_context.py` is not present in this repository, so current
+  context was verified from `AGENTS.md`, the document registry,
+  `docs/PROJECT_SUMMARY.md`, `docs/PROJECT_LOG.md`, the release and security
+  guidance, and the completed provider-adaptation records.
+- No external sources or assets were introduced.
+
+### Next Entry Point
+
+- Step 1, `OSS-FOUNDATION-01`, in
+  `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`:
+  audit the exact public foundation gap and create the license/community
+  decision record without selecting a license on the owner's behalf.
+
 ### 2026-07-17 - Step 5 Provider Admission / Backpressure / Retry / Breaker
 
 - Completed Step 5 of `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md`.
@@ -769,3 +814,151 @@ policy before dispatch, and make cancellation converge under late-result races.
 - No external assets were added.
 - No private evidence, logs, caches, provider records, credentials, or
   preserved validation outputs were deleted.
+
+## 2026-07-27 - Open-Source Productization Step 1
+
+### Request
+
+- Continue the active open-source developer-productization plan and complete
+  its next bounded step.
+
+### Changes
+
+- Added `docs/OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md`, which inventories
+  the missing public foundation, evaluates `Apache-2.0` and `MPL-2.0`,
+  recommends a route without selecting it, and records the owner decisions
+  required before a public preview.
+- Added transparent pre-preview `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and
+  `SECURITY.md` files. They map safe participation and disclosure behavior but
+  do not invent a private reporting contact or contribution license.
+- Updated `README.md` and the canonical registry/governance surfaces to expose
+  the foundation state. The governance checker now deliberately recognizes the
+  standard public root documents as registry-controlled documentation.
+
+### Validation And Sources
+
+- `python scripts\repo_governance_check.py --repo .` passed with 0 errors and
+  0 warnings.
+- The scripted plan validator passed before Step 1. Root inventory confirms
+  the three public policy files exist and no root license exists.
+- `git diff --check` produced no content-format failure; it reported only
+  CRLF conversion warnings from the existing dirty worktree.
+- Sources inspected: local repository and Git remote metadata, the existing
+  README/security/release/product guidance, the [Apache-2.0 text](https://spdx.org/licenses/Apache-2.0.html), the [MPL-2.0 text](https://www.mozilla.org/en-US/MPL/2.0/), and Mozilla's [MPL FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/).
+- No external assets, provider calls, credentials, or external writes were
+  introduced.
+
+### Unresolved And Next Entry Point
+
+- License choice, copyright-holder confirmation, private security reporting,
+  and conduct-enforcement contact remain owner-gated release blockers.
+- Next: Step 2, `OSS-POSITION-02`, in
+  `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`.
+
+## 2026-07-27 - Open-Source Productization Step 2
+
+### Request
+
+- Continue the active plan by completing the evidence-qualified public
+  positioning and claim-matrix step.
+
+### Changes
+
+- Added `docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md` with public
+  proposition, audiences, exact evidence labels, material claims, owners, and
+  next validation gates.
+- Rewrote the public README introduction and Product Brief around a
+  developer-first, evidence-qualified multi-provider coding-agent story, and
+  added the corresponding public-claim boundary to `docs/ARCHITECTURE.md`.
+- Registered the new matrix and refreshed the document-registry counts and
+  project-summary entry points.
+
+### Validation And Sources
+
+- `python -m unittest tests.test_provider_reference_cohort
+  tests.test_agent_orchestration_file_format` passed 9 focused deterministic
+  tests; three selected `TaskGraphApiTests` passed for TypeScript fixture round
+  trip, supported generated export, and safe unsupported-export blocking.
+- `python scripts\repo_governance_check.py --repo .` passed with 0 errors and
+  0 warnings. Ports 4181 and 8826 had no listening AstraBridge process before
+  or after the focused tests.
+- Preserved a secret-free command/result record at
+  `PRIVATE/open-source-productization/reports/step2-positioning-evidence-20260727.md`.
+- No external assets, provider calls, credentials, or external writes were
+  introduced.
+
+### Unresolved And Next Entry Point
+
+- License and private reporting decisions remain release blockers. The no-key
+  route remains documented-only until it has clean-user evidence.
+- Next: Step 3, `OSS-ONBOARDING-03`, in
+  `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`.
+
+## 2026-07-27 - Open-Source Productization Step 3
+
+### Request
+
+- Continue the active open-source productization plan by proving a no-key
+  first-ten-minutes path rather than performing any provider-backed smoke.
+
+### Changes
+
+- Added `docs/NO_KEY_FIRST_TEN_MINUTES.md`, a Windows PowerShell clean-user
+  route that uses `npm.cmd`, redirected application/runtime/Codex roots, the
+  standard `4181` Desktop / `8826` sidecar pairing, and one fixture-backed
+  beginner project.
+- Updated the README, demo runbook, product brief, public claim matrix,
+  registry, project summary, and governance inventory so public wording calls
+  this deterministic fixture evidence rather than provider compatibility.
+- Repaired an onboarding-path UI defect: the task-graph template modal now
+  renders through a React portal, so its instantiate action remains clickable
+  while the inspector is open.
+- Preserved attempted-clone artifacts, screenshots, two 3-worker/22-artifact
+  fixture runs, and a secret-free evidence report under `PRIVATE/**`.
+- Corrected the sidecar package manifest by moving `jsonschema` to runtime
+  dependencies and refreshing `uv.lock`, then created scoped local candidate
+  `7737d36c51346ef6126d497aa8d48004448e966e` without staging unrelated dirty
+  provider-adaptation work.
+- Fast-forwarded the local canonical `codex/near-term-runtime-isolation` branch
+  to that verified four-file revision. The remaining Step 3 work is a separate
+  public-documentation transaction, not a package or fixture repair.
+
+### Validation And Evidence
+
+- The first local-clone browser fixture completed `npm.cmd ci` in 21 seconds;
+  browser-driven project creation, template instantiation, and fixture
+  execution all completed without a provider route. Its global-Python sidecar
+  launch makes it UI/fixture evidence rather than clean-clone package proof.
+- A pristine clone installed its declared sidecar dependencies but failed
+  `import jsonschema` before server launch. The current-source fresh venv
+  imported the sidecar after the manifest repair; focused source-registry and
+  catalog tests passed 12/12 and `pip check` passed.
+- A fresh clone of the scoped local candidate completed `npm.cmd ci`, 91
+  focused task-graph tests, a production build, editable sidecar installation,
+  sidecar import, and `pip check`. Its real browser route created a `.abproj`
+  project, instantiated the fixture graph, and completed with 3 workers and 22
+  artifacts while the UI remained missing-key/review-only. Browser requests and
+  listener connections were loopback-only; owned test processes were reaped.
+- Browser request-host audit observed only `127.0.0.1`; the UI remained in its
+  missing-key/review-only state.
+- `npm.cmd run test -- src/features/runtime/TaskGraphWorkspace.test.tsx`
+  passed 91 tests; `npm.cmd run build` passed with the existing chunk-size
+  warning; `python scripts\repo_governance_check.py --repo .` passed with 0
+  errors and 0 warnings.
+- The quick local gate preserved a non-green result only because the unrelated
+  shell-module budget audit reports existing overruns in `runtime_service.py`,
+  `task_service.py`, and `App.tsx`; governance, secret scan, and contract
+  boundary audit passed first. See
+  `PRIVATE/open-source-productization/validation/step3-local-gate-20260727/`.
+
+### Unresolved And Next Entry Point
+
+- This route does not verify a public release installer, live model behavior,
+  tool authority, a provider credential path, coding-route eligibility, or a
+  public published-clone install until the prepared documentation transaction
+  is integrated on top of canonical revision
+  `7737d36c51346ef6126d497aa8d48004448e966e`.
+- License, copyright, private reporting, and conduct-contact decisions remain
+  owner-gated developer-preview blockers.
+- Next: remain on Step 3, `OSS-ONBOARDING-03`, in
+  `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`.

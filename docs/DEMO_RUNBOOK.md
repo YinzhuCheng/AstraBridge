@@ -1,6 +1,6 @@
 # AstraBridge Demo Runbook
 
-Last updated: 2026-06-25
+Last updated: 2026-07-27
 
 ## Purpose
 
@@ -22,6 +22,12 @@ Expected focus:
 - runtime workflow visibility
 - browser and dogfood automation
 - artifact locations
+
+For the documented no-key path, use
+[No-Key First Ten Minutes](NO_KEY_FIRST_TEN_MINUTES.md). It has deterministic
+project, task-graph, and fixture evidence but makes no provider-backed or
+release-ready clean-clone claim until its sidecar dependency-manifest gate is
+published.
 
 ### 2. Key-backed demo
 
@@ -50,6 +56,10 @@ Never print, paste, screenshot, or commit plaintext keys.
 - Generated catalog is active
 - At least one primary lane is healthy for a key-backed run
 
+The verified no-key browser path specifically uses Desktop `127.0.0.1:4181`
+with sidecar `127.0.0.1:8826`. A custom browser origin needs matching CORS
+configuration and is outside that no-key path.
+
 Recommended lanes:
 
 - Primary: `deepseek/deepseek-v4-pro`
@@ -72,14 +82,15 @@ python -m astrabridge_sidecar.server --serve --port 8826 --seed-root D:\AstraBri
 
 ```powershell
 cd D:\AstraBridge\apps\astrabridge-desktop
-npm run build
-cmd /c npm run preview -- --host 127.0.0.1 --port 4181
+npm.cmd run build
+npm.cmd run preview -- --host 127.0.0.1 --port 4181
 ```
 
 ### Optional isolated demo roots
 
 ```powershell
 $env:ASTRABRIDGE_APPDATA='D:\AstraBridge\PRIVATE\demo-runs\current\AppData'
+$env:ASTRABRIDGE_RUNTIME_ROOT='D:\AstraBridge\PRIVATE\demo-runs\current\Runtime'
 $env:ASTRABRIDGE_CODEX_HOME='D:\AstraBridge\PRIVATE\demo-runs\current\CodexHome'
 ```
 
@@ -390,6 +401,8 @@ Preferred local artifact root:
 - Some provider health and metadata refresh behavior may depend on current upstream availability.
 - A no-key demo proves workflow readiness, not provider correctness.
 - A key-backed demo proves only the lanes actually exercised in that run.
+- The verified no-key route uses the standard `4181` Desktop origin and `8826`
+  sidecar port; custom origins require an explicit CORS configuration.
 
 ## Troubleshooting
 

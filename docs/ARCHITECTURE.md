@@ -1,6 +1,23 @@
 # Architecture
 
-Last updated: 2026-06-25
+Last updated: 2026-07-27
+
+## Public Product Boundary
+
+Public product wording must follow
+[OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md](OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md).
+The core coding-runtime integration, external provider routes, and
+GUI/code-facing orchestration contracts are distinct evidence layers:
+
+- Codex CLI/app-server runtime patterns are integrated through AstraBridge-owned
+  isolation, task, permission, and policy boundaries; this is not an official
+  Codex App or official account-login path.
+- External provider/model/endpoint routes are evidence-qualified and cannot
+  acquire tool or coding-route authority from an OpenAI-compatible transport
+  response alone.
+- A deterministic graph import/export or code fixture result proves only its
+  stated subset. It does not prove universal GUI/code parity or live provider
+  behavior.
 
 ## Core Layers
 

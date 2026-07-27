@@ -133,6 +133,13 @@ NEGATIVE_OR_GUARDRAIL_WORDS = {
 
 ALLOWED_PRIVATE_TRACKED = {"PRIVATE/README.md"}
 DOCUMENT_REGISTRY_PATH = "docs/DOCUMENT_REGISTRY.json"
+PUBLIC_ROOT_DOCUMENTS = {
+    "AGENTS.md",
+    "README.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+    "SECURITY.md",
+}
 DOCUMENT_REGISTRY_REQUIRED_FIELDS = {
     "path",
     "status",
@@ -235,7 +242,7 @@ def read_text(path: Path) -> str:
 
 def expected_document_registry_paths(repo: Path) -> set[str]:
     paths: set[str] = set()
-    for rel in {"AGENTS.md", "README.md", DOCUMENT_REGISTRY_PATH}:
+    for rel in PUBLIC_ROOT_DOCUMENTS | {DOCUMENT_REGISTRY_PATH}:
         if (repo / rel).is_file():
             paths.add(rel)
     docs_root = repo / "docs"
