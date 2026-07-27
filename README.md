@@ -88,6 +88,11 @@ isolated project and runs a deterministic task-graph fixture; it does not
 prove live provider behavior, coding-route compatibility, or a release-installer
 experience.
 
+For a bounded coding-agent example with a visible approval gate, artifacts,
+failure, and recovery, see
+[Flagship Coding-Agent Reference](docs/FLAGSHIP_CODING_AGENT_REFERENCE.md).
+It is deterministic no-provider evidence, not a live coding-provider smoke.
+
 ## Demo Modes
 
 ### No-key demo
@@ -134,6 +139,7 @@ and [SECURITY.md](SECURITY.md).
 - [Asset Sources](/D:/AstraBridge/docs/ASSET_SOURCES.md)
 - [Demo Runbook](/D:/AstraBridge/docs/DEMO_RUNBOOK.md)
 - [No-Key First Ten Minutes](/D:/AstraBridge/docs/NO_KEY_FIRST_TEN_MINUTES.md)
+- [Flagship Coding-Agent Reference](docs/FLAGSHIP_CODING_AGENT_REFERENCE.md)
 - [Security And Isolation](/D:/AstraBridge/docs/SECURITY_AND_ISOLATION.md)
 - [Product Positioning And Claim Matrix](/D:/AstraBridge/docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md)
 - [Release Checklist](/D:/AstraBridge/docs/RELEASE_CHECKLIST.md)

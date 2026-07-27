@@ -244,21 +244,21 @@ Before ending an execution turn under this plan, an agent must:
 ## Current Progress
 
 - Current status: in progress
-- Completed steps: Step 0, Create and Register the Scripted Productization Plan; Step 1, Establish the Public Open-Source Foundation; Step 2, Publish the Positioning, Scope, and Claim-Evidence Matrix; Step 3, Deliver the No-Key First-Ten-Minutes Path.
-- Current step: Step 4, Build the Flagship Coding-Agent Reference Workflow.
-- Next step: Step 4, Build the Flagship Coding-Agent Reference Workflow, beginning with an evidence-led selection of one bounded deterministic coding scenario that can be inspected through the completed no-key route.
+- Completed steps: Step 0, Create and Register the Scripted Productization Plan; Step 1, Establish the Public Open-Source Foundation; Step 2, Publish the Positioning, Scope, and Claim-Evidence Matrix; Step 3, Deliver the No-Key First-Ten-Minutes Path; Step 4, Build the Flagship Coding-Agent Reference Workflow.
+- Current step: Step 5, Publish the Provider Truthfulness and Authority Surface.
+- Next step: Step 5, Publish the Provider Truthfulness and Authority Surface, beginning with an evidence-led audit of the existing reference-provider catalog, authority records, and public claim boundary.
 - Last updated: 2026-07-27
 
 ## Current Work Unit
 
-- ID: OSS-FLAGSHIP-04
-- Goal: Build a bounded, source-inspectable coding-agent workflow that exposes task state, permission decisions, artifacts, and recovery without implying an unverified provider-backed route.
-- Inputs: `docs/NO_KEY_FIRST_TEN_MINUTES.md`, `docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md`, deterministic task-graph fixtures, existing project/task/permission contracts, and the Step 3 clean-clone evidence.
-- Expected output: One flagship reference project and secret-free evidence packet that a developer can inspect or run through the documented no-key route, plus evidence-qualified public wording.
-- Acceptance check: The selected workflow demonstrates a non-trivial coding-agent value loop with visible task state, permission boundary, artifact outputs, and recovery behavior; its source and UI paths have named owners; and its public claim remains within deterministic no-key evidence unless a separately authorized provider lane is proven.
-- Validation command(s): `python C:\Users\cyz19\.codex\skills\durable-handoff-plan-scripted\scripts\validate_plan_contract.py PLAN\ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`; focused workflow tests and build selected from the audited scenario; `python scripts\repo_governance_check.py --repo .`; and a preserved no-key fixture or explicit bounded failure record.
+- ID: OSS-PROVIDER-TRUTH-05
+- Goal: Publish a source-backed provider authority surface that lets a developer distinguish metadata, deterministic checks, reduced-authority routes, and unproven coding-route behavior.
+- Inputs: `docs/PROVIDER_MODEL_COMPATIBILITY_RUNBOOK.md`, `docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md`, current catalog/reference-cohort tests, provider contracts, and existing authority/evidence records.
+- Expected output: One public provider truthfulness and authority view for the current reference-provider families, with named owners, evidence levels, explicit non-claims, and handoff links for any defect that belongs to the default stability queue.
+- Acceptance check: A developer can tell which route facts are documented, deterministically checked, reduced-authority, blocked, or unknown; the view has no credential and no unauthorized smoke claim; and Kimi K3 is described only at its actual evidence level.
+- Validation command(s): `python C:\Users\cyz19\.codex\skills\durable-handoff-plan-scripted\scripts\validate_plan_contract.py PLAN\ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`; focused provider/catalog/authority tests selected from the audited source; `python scripts\repo_governance_check.py --repo .`; and a secret-safe source/evidence audit.
 - Status: queued
-- Next action: Audit existing deterministic task-graph fixtures and project/task examples, then select one bounded coding scenario that visibly exercises project, task, permission, artifact, and recovery concepts without invoking a provider.
+- Next action: Audit the existing public provider runbook, reference cohort, catalog contracts, and authority records, then choose the smallest public matrix or route card that preserves all current evidence boundaries without invoking a provider.
 ## Execution Steps
 
 ### 0. Create and Register the Scripted Productization Plan
@@ -388,7 +388,7 @@ Acceptance criteria:
   named owners and evidence.
 - The workflow's public wording matches the claim-evidence matrix.
 
-Status: not started
+Status: completed
 
 ### 5. Publish the Provider Truthfulness and Authority Surface
 
@@ -640,3 +640,13 @@ Status: not started
 - Blockers: No Step 3 acceptance blocker remains. The existing quick-gate shell-module budget overruns in `runtime_service.py`, `task_service.py`, and `App.tsx` were not changed here. License, copyright-holder, private security-reporting, conduct-contact, and release/installer decisions remain owner-gated preview or release blockers, not no-key source-clone blockers.
 - Route change: The supported claim is now a deterministic, exact-source clean-clone no-provider route. It remains separate from release-installer proof, live provider behavior, tool authority, model/coding-route compatibility, and any provider credential path.
 - Next step: Step 4, `OSS-FLAGSHIP-04`, beginning with a bounded deterministic coding-scenario audit.
+
+### 2026-07-27 - Step 4
+
+- Completed: Added the bounded Task-Title Guard flagship coding-agent reference. It uses the existing Code Fix / Test / Review graph to make task state, the approval-gated code-change boundary, artifacts, a deliberate failed run, and retry recovery inspectable without a provider credential.
+- Files changed: `examples/flagship-coding-agent-reference/`, `scripts/run_flagship_coding_agent_reference.py`, `apps/astrabridge-sidecar/tests/test_flagship_coding_agent_reference.py`, `docs/FLAGSHIP_CODING_AGENT_REFERENCE.md`, README/claim-matrix/registry/governance/project-summary entry points, `docs/PROJECT_LOG.md`, this plan, and secret-free `PRIVATE/open-source-productization/` evidence.
+- Evidence inspected: The runner's isolated .abproj workspace and evidence packet; the expected seed failure and recovered passing check; source-owned task/graph/recovery contracts; and an in-app-browser project that instantiated the four-node Code Fix / Test / Review graph, completed Fixture Run with 4 workers and 28 artifacts, and displayed ask plus filesystem_write_gate for Apply Code Fix.
+- Validation: The runner recorded zero provider calls, dry-run pass, injected failure, and completed retry_failed_nodes recovery; focused sidecar test passed; TaskGraphWorkspace passed 91 tests; Desktop build passed with the existing large-chunk warning; editable sidecar install and pip check passed; repository governance passed with 0 errors and 0 warnings; scripted-plan validation passed before this completion update. Browser console errors were empty. Owned local test processes were reaped and no listener remained on 4181, 4182, 8826, or 8827.
+- Blockers: No Step 4 acceptance blocker remains. The reference intentionally does not prove a live provider response, coding-route eligibility, autonomous write authority, tool authority, release-installer behavior, or a published distribution. Existing quick-gate shell-module budget overruns remain outside this step. A deep evidence path initially reached the Windows artifact-path limit; the runner now uses a short internal workspace path and passes its focused regression test.
+- Route change: The public story now has one named deterministic coding-agent reference rather than relying on a generic graph fixture. The declared route snapshot is metadata-only and does not change any provider authority or trigger a provider call.
+- Next step: Step 5, OSS-PROVIDER-TRUTH-05, beginning with the current reference-provider authority and evidence audit.

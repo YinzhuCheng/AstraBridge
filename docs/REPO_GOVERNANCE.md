@@ -70,6 +70,7 @@ Three execution plans are classified `active`:
 | `docs/OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md` | reference | Current evidence-backed open-source foundation decision record. |
 | `docs/NO_KEY_FIRST_TEN_MINUTES.md` | reference | Documented no-provider onboarding route, bounded current-source fixture evidence, and clean-clone dependency gate. |
 | `docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md` | reference | Current evidence-qualified public positioning and material-claim matrix. |
+| `docs/FLAGSHIP_CODING_AGENT_REFERENCE.md` | reference | Deterministic no-provider code-fix/test/review reference with task, approval, artifact, failure, and recovery evidence. |
 | `docs/HANDOFF.md` | reference | Handoff guidance for future agents/operators. |
 | `docs/LEGACY_CLEANUP_AUDIT.md` | reference | Current classification of legacy residue. |
 | `docs/INTERFACE_GOVERNANCE.md` | reference | Current interface status, evidence, replacement, and cleanup rules. |
@@ -83,7 +84,7 @@ Three execution plans are classified `active`:
 | `PLAN/CAPABILITY_REAL_SCENARIO_DOGFOOD_PLAN.md` | complete | Completed 24-step dogfood record; preserved evidence. |
 | `PLAN/FIVE_CAPABILITY_REAL_SCENARIO_EXECUTION_PLAN.md` | superseded | Superseded by the completed 24-step dogfood record. |
 
-The full 122-entry inventory lives in the canonical registry. Do not infer status for an unlisted future file; add it to the registry before treating it as guidance or an execution queue.
+The full 123-entry inventory lives in the canonical registry. Do not infer status for an unlisted future file; add it to the registry before treating it as guidance or an execution queue.
 
 ## Local Governance Gate
 

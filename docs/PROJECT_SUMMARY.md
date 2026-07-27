@@ -31,6 +31,7 @@ Current product facts:
 - Open-source foundation decision record: [OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md](/D:/AstraBridge/docs/OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md) (license, private security-reporting route, and maintainer-contact decisions remain owner-gated)
 - Public positioning and claim matrix: [OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md](/D:/AstraBridge/docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md) (authoritative wording and evidence status for public product claims)
 - Documented no-provider onboarding: [NO_KEY_FIRST_TEN_MINUTES.md](/D:/AstraBridge/docs/NO_KEY_FIRST_TEN_MINUTES.md) (exact-source local-canonical clean-clone fixture evidence at `c8988fef6f1139ac056fadb68e395122ee59254a`; no provider, coding-route, or release-installer claim)
+- Flagship coding-agent reference: [FLAGSHIP_CODING_AGENT_REFERENCE.md](FLAGSHIP_CODING_AGENT_REFERENCE.md) (deterministic no-provider code-fix/test/review workflow with visible task, approval, artifact, failure, and recovery evidence)
 - Repository normalization record: [ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md](/D:/AstraBridge/PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md) (`complete`)
 - Repository rules: [AGENTS.md](/D:/AstraBridge/AGENTS.md)
 - Repository governance: [REPO_GOVERNANCE.md](/D:/AstraBridge/docs/REPO_GOVERNANCE.md)

@@ -105,6 +105,8 @@ Reference documents include:
 - the current open-source foundation decision record for licensing, contribution, security, and maintainer choices;
 - the documented no-provider first-ten-minutes route, its bounded
   current-source fixture evidence, and its clean-clone dependency gate;
+- the flagship deterministic no-provider coding-agent reference, including
+  task, approval, artifact, failure, and recovery evidence;
 - the current open-source product positioning and material-claim matrix;
 - interface governance for HTTP, SSE, payload, provider metadata, CLI/launcher, MCP, and compatibility shims;
 - multimodal contracts, official-source pack, exposure gates, maintenance runbook, and rollout/rollback policy;
@@ -152,12 +154,12 @@ When adding or changing a guiding document or execution plan:
 
 ## Current Counts
 
-As verified on 2026-07-27, the registry contains 122 entries:
+As verified on 2026-07-27, the registry contains 123 entries:
 
 | Status | Count |
 | --- | ---: |
 | `active` | 18 |
 | `complete` | 27 |
-| `reference` | 55 |
+| `reference` | 56 |
 | `superseded` | 21 |
 | `archived` | 1 |

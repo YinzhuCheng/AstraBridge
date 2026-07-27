@@ -1,0 +1,9 @@
+--- before/task_title.py
++++ expected/task_title.py
+@@
+ def normalize_task_title(value: str) -> str:
+-    return value.strip()
++    title = value.strip()
++    if not title:
++        raise ValueError("Task title must contain visible text.")
++    return title

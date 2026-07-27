@@ -1,0 +1,100 @@
+{
+  "schema_version": "astrabridge-flagship-coding-agent-reference-v1",
+  "reference_id": "bounded-task-title-guard",
+  "title": "Bounded Task-Title Guard: Plan / Fix / Test / Review",
+  "template_id": "code_fix_test_review",
+  "execution_mode": "deterministic_fixture",
+  "task": {
+    "project_name": "Flagship Coding Agent Reference",
+    "title": "Reject whitespace-only task titles without changing valid-title behavior",
+    "task_context": "A local seed project accepts whitespace-only task titles. Scope the fix to the title normalizer, preserve valid titles, run the declared check, and send the patch plus test evidence to review.",
+    "seed_project": "examples/flagship-coding-agent-reference/before",
+    "expected_patch": "examples/flagship-coding-agent-reference/expected/task_title.patch",
+    "expected_test_command": "python task_title_checks.py"
+  },
+  "route_snapshot": {
+    "profiles": [
+      {
+        "profile_id": "qwen-default",
+        "provider_id": "qwen",
+        "model": "qwen3-coder-plus"
+      },
+      {
+        "profile_id": "deepseek-default",
+        "provider_id": "deepseek",
+        "model": "deepseek-coder"
+      },
+      {
+        "profile_id": "kimi-default",
+        "provider_id": "kimi",
+        "model": "kimi-k2.6"
+      }
+    ],
+    "models": [
+      {
+        "id": "qwen/qwen3-coder-plus",
+        "provider": "qwen",
+        "native_model": "qwen3-coder-plus"
+      },
+      {
+        "id": "deepseek/deepseek-coder",
+        "provider": "deepseek",
+        "native_model": "deepseek-coder"
+      },
+      {
+        "id": "kimi/kimi-k2.6",
+        "provider": "kimi",
+        "native_model": "kimi-k2.6"
+      }
+    ]
+  },
+  "visible_boundaries": {
+    "task_state": {
+      "owner": "TaskService",
+      "evidence": "created task, task graph, and run references persisted in the isolated .abproj workspace"
+    },
+    "permission_boundary": {
+      "owner": "TaskGraphContract",
+      "evidence": "node_code_fix declares filesystem_write_gate and requires_human_approval"
+    },
+    "artifacts": {
+      "owner": "TaskService fixture runtime",
+      "evidence": "exported orchestration graph, fixture manifests, summaries, reports, and per-node bundles"
+    },
+    "recovery": {
+      "owner": "TaskService recover_graph_run",
+      "evidence": "a failed planning node is retried in a new completed run while the failed-run manifest remains preserved"
+    }
+  },
+  "fixture": {
+    "failure_injection": {
+      "node_id": "node_plan_fix",
+      "behavior": "failed"
+    },
+    "recovery": {
+      "strategy": "retry_failed_nodes",
+      "node_behaviors": {
+        "node_plan_fix": "completed"
+      }
+    },
+    "expected_statuses": {
+      "dry_run": "pass",
+      "failure": "failed",
+      "recovery": "completed"
+    },
+    "expected_artifacts": [
+      "fix plan",
+      "bounded code diff",
+      "test report",
+      "review report",
+      "run manifest",
+      "recovery report"
+    ]
+  },
+  "claims": {
+    "provider_calls": "none",
+    "code_write_authority": "declared and approval-gated; this fixture never performs a provider-backed write",
+    "supported_evidence": "deterministic source, task-state, artifact, failure, and recovery evidence",
+    "unsupported_evidence": "live provider behavior, autonomous write authority, release-installer behavior, and coding-route eligibility"
+  }
+}

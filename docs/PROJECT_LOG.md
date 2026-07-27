@@ -968,3 +968,53 @@ policy before dispatch, and make cancellation converge under late-result races.
   owner-gated developer-preview blockers.
 - Step 3 is complete. Next: Step 4, `OSS-FLAGSHIP-04`, in
   `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`.
+
+## 2026-07-27 - Open-Source Productization Step 4
+
+### Request
+
+- Advance the scripted developer-product plan by turning an existing
+  deterministic code-fix/test/review capability into the first inspectable
+  flagship coding-agent reference without using a provider credential.
+
+### Changes
+
+- Added a bounded Task-Title Guard scenario, seed project, expected patch,
+  deterministic runner, and focused sidecar regression test.
+- The runner creates an isolated .abproj project, validates declared local
+  route metadata without a provider call, records the approval-gated
+  code-change boundary, exports its graph, injects a Plan Fix failure, and
+  verifies retry recovery.
+- Shortened the runner's internal evidence workspace name after a deep
+  Windows evidence path reached the task-graph artifact-path limit.
+- Added the public flagship reference guide; linked it from the README,
+  project summary, claim matrix, registry, and governance inventory.
+- Preserved secret-free deterministic and UI evidence under
+  PRIVATE/open-source-productization.
+
+### Validation And Evidence
+
+- The focused runner test passed; the final runner packet recorded zero
+  provider calls, dry-run pass, one expected seed failure, a recovered passing
+  check, failed fixture injection, and completed retry_failed_nodes recovery.
+- Desktop TaskGraphWorkspace passed 91 tests and the production build passed
+  with the existing large-chunk warning. The isolated editable sidecar install
+  and pip check passed.
+- In the Codex in-app browser, a new isolated project instantiated Code Fix /
+  Test / Review, stayed visibly missing-key, completed Fixture Run with four
+  workers and 28 artifacts, and showed ask plus filesystem_write_gate for
+  Apply Code Fix. Browser console errors were empty.
+- Repository governance passed with 0 errors and 0 warnings. The scripted
+  handoff-plan validator passed before the completion update. Owned local
+  Desktop, sidecar, and terminal-browser processes were reaped; listener
+  ports 4181, 4182, 8826, and 8827 were clear afterward.
+
+### Unresolved And Next Entry Point
+
+- This reference is deterministic no-provider evidence only. It does not
+  establish live provider behavior, coding-route eligibility, autonomous
+  write or tool authority, release-installer behavior, or a published
+  distribution.
+- Existing quick-gate shell-module budget overruns remain outside this step.
+- Step 4 is complete. Next: Step 5, OSS-PROVIDER-TRUTH-05, in
+  PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md.
