@@ -41,6 +41,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 import { Bot, Eye, Lock, Search, ShieldCheck, Unlock, Wrench } from "lucide-react";
 
@@ -5098,7 +5099,8 @@ export function TaskGraphWorkspace({
           {copy.inspector}
         </button>
       </div>
-      {templateBrowserOpen ? (
+      {templateBrowserOpen && typeof document !== "undefined"
+        ? createPortal(
         <div
           className="modal-scrim task-graph-template-browser-scrim"
           onClick={closeTemplateBrowser}
@@ -5361,8 +5363,10 @@ export function TaskGraphWorkspace({
               </div>
             </div>
           </div>
-        </div>
-      ) : null}
+        </div>,
+        document.body,
+      )
+        : null}
       {inspectorExpanded ? (
         <TaskGraphInspectorModal
           dialogRef={inspectorDialogRef}

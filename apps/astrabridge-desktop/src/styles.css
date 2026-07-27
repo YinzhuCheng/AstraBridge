@@ -9159,7 +9159,9 @@ body.resizing .task-graph-panel-resize-handle::after {
 }
 
 .task-graph-template-browser-scrim {
-  z-index: 39;
+  /* The template picker is a modal decision point, so it must sit above the
+     task-graph inspector scrim (z-index: 40) and its palette overlays. */
+  z-index: 90;
 }
 
 .task-graph-template-browser {
