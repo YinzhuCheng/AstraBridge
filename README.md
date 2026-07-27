@@ -85,8 +85,8 @@ http://127.0.0.1:4181/?astrabridge_launch=dogfood&sidecar=http://127.0.0.1:8826&
 For the documented no-provider onboarding route, follow
 [No-Key First Ten Minutes](docs/NO_KEY_FIRST_TEN_MINUTES.md). It creates an
 isolated project and runs a deterministic task-graph fixture; it does not
-prove live provider behavior or, until its dependency-manifest gate is
-published, a release-ready clean-clone experience.
+prove live provider behavior, coding-route compatibility, or a release-installer
+experience.
 
 ## Demo Modes
 

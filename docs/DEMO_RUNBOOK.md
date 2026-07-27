@@ -25,9 +25,8 @@ Expected focus:
 
 For the documented no-key path, use
 [No-Key First Ten Minutes](NO_KEY_FIRST_TEN_MINUTES.md). It has deterministic
-project, task-graph, and fixture evidence but makes no provider-backed or
-release-ready clean-clone claim until its sidecar dependency-manifest gate is
-published.
+exact-source clean-clone project, task-graph, and fixture evidence, but makes
+no provider-backed or release-installer claim.
 
 ### 2. Key-backed demo
 

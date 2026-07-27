@@ -920,8 +920,9 @@ policy before dispatch, and make cancellation converge under late-result races.
   `7737d36c51346ef6126d497aa8d48004448e966e` without staging unrelated dirty
   provider-adaptation work.
 - Fast-forwarded the local canonical `codex/near-term-runtime-isolation` branch
-  to that verified four-file revision. The remaining Step 3 work is a separate
-  public-documentation transaction, not a package or fixture repair.
+  to that verified four-file revision, then added a scoped public-documentation
+  transaction at `c8988fef6f1139ac056fadb68e395122ee59254a` without staging
+  unrelated provider-adaptation work.
 
 ### Validation And Evidence
 
@@ -950,15 +951,20 @@ policy before dispatch, and make cancellation converge under late-result races.
   `task_service.py`, and `App.tsx`; governance, secret scan, and contract
   boundary audit passed first. See
   `PRIVATE/open-source-productization/validation/step3-local-gate-20260727/`.
+- A fresh clone of the scoped public-documentation revision repeated the
+  `npm.cmd ci`, 91-test, build, editable-install/import, `pip check`, and
+  browser fixture checks. It created a `.abproj` project, remained visibly
+  missing-key/review-only, and completed `Supervisor / Worker / Synthesizer`
+  Fixture Run with 3 workers and 22 artifacts. All recorded browser requests
+  were loopback-only; owned test processes were stopped after the run.
 
 ### Unresolved And Next Entry Point
 
 - This route does not verify a public release installer, live model behavior,
   tool authority, a provider credential path, coding-route eligibility, or a
-  public published-clone install until the prepared documentation transaction
-  is integrated on top of canonical revision
-  `7737d36c51346ef6126d497aa8d48004448e966e`.
+  published distribution. It is exact-source deterministic clean-clone
+  evidence for `c8988fef6f1139ac056fadb68e395122ee59254a`.
 - License, copyright, private reporting, and conduct-contact decisions remain
   owner-gated developer-preview blockers.
-- Next: remain on Step 3, `OSS-ONBOARDING-03`, in
+- Step 3 is complete. Next: Step 4, `OSS-FLAGSHIP-04`, in
   `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`.

@@ -1,8 +1,9 @@
 # AstraBridge No-Key First Ten Minutes
 
-Status: deterministic no-provider onboarding route; its technical clean-clone
-repair is integrated into the local canonical branch, while public-documentation
-and release integration remain gates.
+Status: deterministic no-provider onboarding route; an exact-source
+clean-clone proof is recorded for local canonical revision
+`c8988fef6f1139ac056fadb68e395122ee59254a`. It is not a release-installer or
+provider-compatibility claim.
 
 Last verified: 2026-07-27
 
@@ -18,20 +19,18 @@ The first useful state is a local `Project -> Task` workspace with a
 fixture route is deterministic and remains separate from any future
 provider-backed coding-agent proof. A fresh, isolated virtual environment for
 the current source checkout imports the sidecar and passes the focused source
-registry/catalog tests. A clean clone of revision
-`7737d36c51346ef6126d497aa8d48004448e966e`, now the local canonical branch
-head, also installed its declared
-sidecar dependencies, started from that virtual environment, and completed the
-browser fixture. The public documentation transaction and published release
-source still need to include the same route before this becomes a public
-release-ready clean-clone claim.
+registry/catalog tests. A clean clone of local canonical revision
+`c8988fef6f1139ac056fadb68e395122ee59254a` includes this documentation,
+installed its declared sidecar dependencies, started from that virtual
+environment, and completed the browser fixture. That is exact-source
+deterministic onboarding evidence, not a claim about a distributed installer
+or any live provider route.
 
 ## Prerequisites
 
 - A source revision that includes the sidecar's current runtime dependency
-  manifest, including `jsonschema`. The local canonical branch now includes
-  `7737d36c51346ef6126d497aa8d48004448e966e`; public documentation and release
-  source still need their scoped integration before public use.
+  manifest, including `jsonschema`. The recorded source-clone evidence is for
+  local canonical revision `c8988fef6f1139ac056fadb68e395122ee59254a`.
 - Windows PowerShell, Python 3.11+, Node.js 22+, and npm available as
   `npm.cmd`.
 - No configured provider key and no provider credential exported into the
@@ -43,9 +42,8 @@ The 2026-07-27 evidence run used Windows, Python `3.11.15`, Node
 
 ## 1. Clone And Install
 
-Replace the placeholder with the repository URL when the current local
-canonical revision and this documentation transaction have been integrated into
-the published revision.
+Replace the placeholder with the repository URL or owner-approved mirror that
+contains this document and the current runtime dependency manifest.
 
 ```powershell
 git clone <AstraBridge-repository-url> AstraBridge
@@ -53,15 +51,9 @@ Set-Location AstraBridge\apps\astrabridge-desktop
 npm.cmd ci --no-audit --no-fund
 ```
 
-For the preserved local validation, the same revision remains available by its
-candidate branch name:
-
-```powershell
-git clone --branch codex/oss-onboarding-clean-clone-candidate --single-branch <AstraBridge-repository-url> AstraBridge
-```
-
-Do not use that branch name as a public installation instruction until the
-documentation transaction reaches the canonical published source.
+For the preserved exact-source validation, use the canonical branch or commit
+made available by the project owner; the evidence revision is
+`c8988fef6f1139ac056fadb68e395122ee59254a`.
 
 `npm.cmd` is intentional: on the validated Windows PowerShell environment,
 the `npm.ps1` shim was blocked by execution policy while `npm.cmd` worked.
@@ -152,10 +144,9 @@ editable sidecar installation, `pip check`, and the full browser fixture with
 3 workers and 22 artifacts. Browser requests and the listener connection audit
 were loopback-only.
 
-The repair has been fast-forwarded into the local canonical branch, but it is
-not a published release. Integrate this documentation transaction and repeat
-the route from the published source before claiming a public fresh-clone
-experience.
+The route is proven for the exact source revision above, but it is not a
+published release installer. Repeat it for any distributed release artifact
+before making an installer or broad public fresh-install claim.
 
 The preserved, secret-free evidence is under
 `PRIVATE/open-source-productization/reports/step3-no-key-onboarding-20260727.md`

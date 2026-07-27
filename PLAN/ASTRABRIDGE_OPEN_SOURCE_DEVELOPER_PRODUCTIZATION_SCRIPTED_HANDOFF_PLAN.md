@@ -244,22 +244,21 @@ Before ending an execution turn under this plan, an agent must:
 ## Current Progress
 
 - Current status: in progress
-- Completed steps: Step 0, Create and Register the Scripted Productization Plan; Step 1, Establish the Public Open-Source Foundation; Step 2, Publish the Positioning, Scope, and Claim-Evidence Matrix.
-- Current step: Step 3, Deliver the No-Key First-Ten-Minutes Path.
-- Next step: Step 3, Deliver the No-Key First-Ten-Minutes Path, by creating the scoped public-documentation transaction on top of local canonical revision `7737d36c51346ef6126d497aa8d48004448e966e` without absorbing unrelated dirty work.
+- Completed steps: Step 0, Create and Register the Scripted Productization Plan; Step 1, Establish the Public Open-Source Foundation; Step 2, Publish the Positioning, Scope, and Claim-Evidence Matrix; Step 3, Deliver the No-Key First-Ten-Minutes Path.
+- Current step: Step 4, Build the Flagship Coding-Agent Reference Workflow.
+- Next step: Step 4, Build the Flagship Coding-Agent Reference Workflow, beginning with an evidence-led selection of one bounded deterministic coding scenario that can be inspected through the completed no-key route.
 - Last updated: 2026-07-27
 
 ## Current Work Unit
 
-- ID: OSS-ONBOARDING-03
-- Goal: Let a clean developer environment reach a useful, inspectable AstraBridge state without a provider account or private local setup.
-- Inputs: `docs/NO_KEY_FIRST_TEN_MINUTES.md`, `apps/astrabridge-sidecar/pyproject.toml`, `apps/astrabridge-sidecar/uv.lock`, the current deterministic task-graph fixture, and the preserved Step 3 environment and browser evidence.
-- Expected output: One cloneable no-key onboarding path with isolated application/runtime/Codex roots, a sidecar virtual-environment install, a fixture-backed `.abproj` project, and a sanitized reproducibility transcript.
-- Acceptance check: A pristine clone of the documented source revision installs its declared sidecar runtime dependencies, starts the sidecar from an isolated virtual environment, and reaches the documented fixture-complete state with no key, private file, undocumented account, or global-Python source ambiguity.
-- Validation command(s): `python C:\Users\cyz19\.codex\skills\durable-handoff-plan-scripted\scripts\validate_plan_contract.py PLAN\ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`; a pristine-clone `python -m venv` plus editable sidecar install/import; the focused fixture UI test/build; `python scripts\repo_governance_check.py --repo .`; and `python scripts\run_local_gate.py --quick` or a preserved concrete non-green record.
-- Status: in progress
-- Next action: Build a scoped Step 1–3 public-documentation transaction on top of `7737d36c51346ef6126d497aa8d48004448e966e`, explicitly excluding unrelated provider-adaptation files that share current registry documents; then clone that exact revision and rerun the no-key route.
-
+- ID: OSS-FLAGSHIP-04
+- Goal: Build a bounded, source-inspectable coding-agent workflow that exposes task state, permission decisions, artifacts, and recovery without implying an unverified provider-backed route.
+- Inputs: `docs/NO_KEY_FIRST_TEN_MINUTES.md`, `docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md`, deterministic task-graph fixtures, existing project/task/permission contracts, and the Step 3 clean-clone evidence.
+- Expected output: One flagship reference project and secret-free evidence packet that a developer can inspect or run through the documented no-key route, plus evidence-qualified public wording.
+- Acceptance check: The selected workflow demonstrates a non-trivial coding-agent value loop with visible task state, permission boundary, artifact outputs, and recovery behavior; its source and UI paths have named owners; and its public claim remains within deterministic no-key evidence unless a separately authorized provider lane is proven.
+- Validation command(s): `python C:\Users\cyz19\.codex\skills\durable-handoff-plan-scripted\scripts\validate_plan_contract.py PLAN\ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`; focused workflow tests and build selected from the audited scenario; `python scripts\repo_governance_check.py --repo .`; and a preserved no-key fixture or explicit bounded failure record.
+- Status: queued
+- Next action: Audit existing deterministic task-graph fixtures and project/task examples, then select one bounded coding scenario that visibly exercises project, task, permission, artifact, and recovery concepts without invoking a provider.
 ## Execution Steps
 
 ### 0. Create and Register the Scripted Productization Plan
@@ -365,7 +364,7 @@ Acceptance criteria:
 - The onboarding transcript names operating-system, toolchain, duration, and
   any remaining known limitation.
 
-Status: blocked
+Status: completed
 
 ### 4. Build the Flagship Coding-Agent Reference Workflow
 
@@ -632,3 +631,12 @@ Status: not started
 - Blockers: The Step 1–3 public docs and registry currently share dirty files with unrelated multi-provider-adaptation documentation. A separate scoped documentation transaction must be constructed before this exact public route can be cloned as a self-contained repository revision; this is an integration task, not a remaining packaging failure.
 - Route change: The active work unit changes from technical package repair to source-controlled public documentation integration, while retaining the same clean-clone acceptance check.
 - Next step: Continue Step 3, `OSS-ONBOARDING-03`, by assembling and validating the scoped public-documentation transaction on current local canonical HEAD.
+
+### 2026-07-27 - Step 3 public-documentation clean-clone completion
+
+- Files changed: Created the scoped public-documentation transaction `c8988fef6f1139ac056fadb68e395122ee59254a` on top of the four-file package/UI repair; it contains the public foundation, positioning, no-key guide, governance/registry, and plan sources without absorbing the unrelated provider-adaptation dirty work. This completion record advances Step 3 and queues Step 4.
+- Evidence inspected: A fresh clone of that exact revision, a new isolated sidecar virtual environment, the documented Desktop `127.0.0.1:4181` and sidecar `127.0.0.1:8826` route, the visible missing-key/review-only state, a created `.abproj` project, and the browser request and listener audit.
+- Validation: The scripted plan validator and repository governance check passed with 0 errors and 0 warnings; `npm.cmd ci`, 91 focused task-graph tests, and production build passed (with the existing large-chunk warning); editable sidecar install, `import jsonschema; import astrabridge_sidecar.server`, and `pip check` passed. Browser automation instantiated `Supervisor / Worker / Synthesizer` and completed Fixture Run with 3 workers and 22 artifacts. Requests were loopback-only. Screenshot: `output/playwright/open-source-productization-step3-20260727/10-public-docs-clean-clone-fixture-complete.png`. Owned test processes were stopped and no listener remained on 4181, 8826, 4182, or 8827.
+- Blockers: No Step 3 acceptance blocker remains. The existing quick-gate shell-module budget overruns in `runtime_service.py`, `task_service.py`, and `App.tsx` were not changed here. License, copyright-holder, private security-reporting, conduct-contact, and release/installer decisions remain owner-gated preview or release blockers, not no-key source-clone blockers.
+- Route change: The supported claim is now a deterministic, exact-source clean-clone no-provider route. It remains separate from release-installer proof, live provider behavior, tool authority, model/coding-route compatibility, and any provider credential path.
+- Next step: Step 4, `OSS-FLAGSHIP-04`, beginning with a bounded deterministic coding-scenario audit.
