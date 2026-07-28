@@ -10,7 +10,7 @@ This document is the current source of truth for AstraBridge repository hygiene.
 
 - AstraBridge projects use `.abproj` files plus workspace-local `.astrabridge/` state.
 - The desktop app, sidecar, provider catalog, runtime lanes, and project services are AstraBridge-owned surfaces.
-- OpenAI is a normal API-key provider. Official OpenAI account login is not an AstraBridge product path.
+- OpenAI is a normal API key provider. Official OpenAI account login is not an AstraBridge product path.
 - Legacy `.lcr*`, `.codexproj`, `.codex-shell`, and official-login references are allowed only as guardrails, historical evidence, negative tests, or documented compatibility shims.
 
 ## Protected Artifacts
@@ -43,11 +43,12 @@ Use these statuses when describing plan and documentation files:
 
 The registry owns document status, replacement, archive policy, and execution activation. Historical progress text inside a plan does not override the registry. Every superseded entry must name a replacement, and every archived entry must name a replacement or explicit historical purpose.
 
-Three execution plans are classified `active`:
+Two execution plans are classified `active`:
 
 - `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md` is the current default queue.
 - `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md` is conditional and activates only when the user explicitly asks to implement or advance capability runtime.
-- `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md` is conditional and activates only when the user explicitly asks to create or advance the open-source developer-product upgrade lane.
+
+`PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md` is complete. Its public-preview follow-up is owner-gated by [DEVELOPER_PREVIEW_READINESS_DECISION.md](DEVELOPER_PREVIEW_READINESS_DECISION.md); it must not be reopened as an active release queue.
 
 ## Bootstrap Document Inventory
 
@@ -69,7 +70,14 @@ Three execution plans are classified `active`:
 | `docs/ARCHITECTURE.md` | reference | Current architecture and user mental model. |
 | `docs/OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md` | reference | Current evidence-backed open-source foundation decision record. |
 | `docs/NO_KEY_FIRST_TEN_MINUTES.md` | reference | Documented no-provider onboarding route, bounded current-source fixture evidence, and clean-clone dependency gate. |
+| `docs/DEVELOPER_PREVIEW_BASELINE.md` | reference | Bounded source-evaluation, deterministic staging/update rehearsal, safety/support boundary, and explicit public-release blocker record. |
+| `docs/DEVELOPER_PREVIEW_READINESS_DECISION.md` | reference | Current DG-OSS-04 public developer-preview pause decision with scorecard, non-claims, and owner-gated foundation-clearance unit. |
+| `docs/PUBLIC_QUALITY_RELIABILITY_DOSSIER.md` | reference | Failure-first public quality dossier with machine-checked evidence cards, reproducibility paths, owners, limits, and non-pass ledger. |
 | `docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md` | reference | Current evidence-qualified public positioning and material-claim matrix. |
+| `docs/PROVIDER_TRUTH_AND_AUTHORITY_SURFACE.md` | reference | Public route-level matrix separating declared metadata, deterministic evidence, reduced authority, deferred live smoke, and stability handoff for the four-provider reference cohort. |
+| `docs/GUI_CODE_ORCHESTRATION_PARITY.md` | reference | Public deterministic native GUI/code/runtime parity reference for Code Fix / Test / Review, with source ownership and explicit transform limits. |
+| `docs/EXTENSION_AND_FIRST_CONTRIBUTION_SURFACE.md` | reference | Public supported/experimental/internal/deferred extension classification with a bounded provider-free candidate first-contribution example. |
+| `docs/CONTRIBUTOR_FEEDBACK_PROTOCOL.md` | reference | Pre-preview safe feedback-template, provider-free cohort, routing, and future-only maintainer-response protocol; public intake remains pending. |
 | `docs/FLAGSHIP_CODING_AGENT_REFERENCE.md` | reference | Deterministic no-provider code-fix/test/review reference with task, approval, artifact, failure, and recovery evidence. |
 | `docs/HANDOFF.md` | reference | Handoff guidance for future agents/operators. |
 | `docs/LEGACY_CLEANUP_AUDIT.md` | reference | Current classification of legacy residue. |
@@ -77,14 +85,14 @@ Three execution plans are classified `active`:
 | `docs/archive/LEGACY_COMPATIBILITY_SHIMS.md` | archived | Compatibility shim inventory and do-not-revive list. |
 | `PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md` | complete | Completed normalization record. |
 | `PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md` | active | Capability runtime follow-on plan when requested. |
-| `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md` | active | Conditional public onboarding, contributor adoption, extension readiness, and developer-preview productization queue. |
+| `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md` | complete | Completed public onboarding, contributor adoption, extension readiness, and evidence-bound developer-preview pause decision record. |
 | `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md` | active | Current default multi-provider, A2A, orchestration, update, and release-stability queue. |
 | `PLAN/ASTRABRIDGE_STABILITY_PROTOCOL_AND_AGENT_RUNTIME_EXECUTION_PLAN.md` | complete | Completed 22-step stability/protocol/runtime implementation baseline. |
 | `PLAN/ASTRABRIDGE_STANDARDIZATION_UI_LIVE_DOGFOOD_EXECUTION_PLAN.md` | superseded | Preserved prior UI/live-dogfood execution record. |
 | `PLAN/CAPABILITY_REAL_SCENARIO_DOGFOOD_PLAN.md` | complete | Completed 24-step dogfood record; preserved evidence. |
 | `PLAN/FIVE_CAPABILITY_REAL_SCENARIO_EXECUTION_PLAN.md` | superseded | Superseded by the completed 24-step dogfood record. |
 
-The full 123-entry inventory lives in the canonical registry. Do not infer status for an unlisted future file; add it to the registry before treating it as guidance or an execution queue.
+The full 132-entry inventory lives in the canonical registry. Do not infer status for an unlisted future file; add it to the registry before treating it as guidance or an execution queue.
 
 ## Local Governance Gate
 

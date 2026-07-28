@@ -12,7 +12,7 @@ Current product facts:
 - Normal workspace state: `.astrabridge/`
 - User-visible navigation model: `Project -> Task`
 - Runtime `thread_id` values are internal execution-lane identifiers, not left-sidebar user work units
-- OpenAI is treated as a normal API-key provider, not as an official account-login path
+- OpenAI is treated as a normal API key provider, not as an official account-login path
 - `PRIVATE/**` is local-only and must not be pushed
 
 ## Core Directories
@@ -27,10 +27,17 @@ Current product facts:
 
 - Canonical document registry: [DOCUMENT_REGISTRY.md](/D:/AstraBridge/docs/DOCUMENT_REGISTRY.md)
 - Current execution plan: [ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md) (`active`)
-- Conditional open-source developer-product upgrade plan: [ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md) (`active` only when explicitly requested; it does not replace the default stability queue)
+- Completed open-source developer-productization record: [ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md) (all 11 steps complete; DG-OSS-04 pauses public preview and hands owner-gated clearance to the readiness decision)
 - Open-source foundation decision record: [OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md](/D:/AstraBridge/docs/OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md) (license, private security-reporting route, and maintainer-contact decisions remain owner-gated)
 - Public positioning and claim matrix: [OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md](/D:/AstraBridge/docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md) (authoritative wording and evidence status for public product claims)
+- Provider truth and authority surface: [PROVIDER_TRUTH_AND_AUTHORITY_SURFACE.md](/D:/AstraBridge/docs/PROVIDER_TRUTH_AND_AUTHORITY_SURFACE.md) (current route-level metadata, deterministic evidence, reduced-authority posture, and escalation boundary for Qwen, DeepSeek, Kimi K3, and GLM)
+- GUI/code orchestration parity: [GUI_CODE_ORCHESTRATION_PARITY.md](/D:/AstraBridge/docs/GUI_CODE_ORCHESTRATION_PARITY.md) (public deterministic native JSON-to-GUI-to-runtime proof for Code Fix / Test / Review, with source ownership and explicit non-claims)
+- Extension and first-contribution surface: [EXTENSION_AND_FIRST_CONTRIBUTION_SURFACE.md](/D:/AstraBridge/docs/EXTENSION_AND_FIRST_CONTRIBUTION_SURFACE.md) (supported/experimental/internal/deferred classification and a bounded provider-free candidate skill example; no auto-enable, live route, or pre-license merge claim)
+- Contributor feedback protocol: [CONTRIBUTOR_FEEDBACK_PROTOCOL.md](/D:/AstraBridge/docs/CONTRIBUTOR_FEEDBACK_PROTOCOL.md) (prepared local templates, two independent provider-free candidate rehearsals, and future-only response activation; public intake remains pending)
 - Documented no-provider onboarding: [NO_KEY_FIRST_TEN_MINUTES.md](/D:/AstraBridge/docs/NO_KEY_FIRST_TEN_MINUTES.md) (exact-source local-canonical clean-clone fixture evidence at `c8988fef6f1139ac056fadb68e395122ee59254a`; no provider, coding-route, or release-installer claim)
+- Developer preview baseline: [DEVELOPER_PREVIEW_BASELINE.md](/D:/AstraBridge/docs/DEVELOPER_PREVIEW_BASELINE.md) (source evaluation plus deterministic staging/update rehearsal evidence; public installer, security/contact, legal, support, and distribution claims remain explicitly blocked)
+- Developer preview readiness decision: [DEVELOPER_PREVIEW_READINESS_DECISION.md](/D:/AstraBridge/docs/DEVELOPER_PREVIEW_READINESS_DECISION.md) (DG-OSS-04 branch C: public preview is paused pending owner-gated legal, private-reporting, support, and distribution evidence)
+- Public quality and reliability dossier: [PUBLIC_QUALITY_RELIABILITY_DOSSIER.md](/D:/AstraBridge/docs/PUBLIC_QUALITY_RELIABILITY_DOSSIER.md) (seven machine-checked public evidence cards with a four-card non-pass ledger for provider authority, candidate extension, security/support, and release state)
 - Flagship coding-agent reference: [FLAGSHIP_CODING_AGENT_REFERENCE.md](FLAGSHIP_CODING_AGENT_REFERENCE.md) (deterministic no-provider code-fix/test/review workflow with visible task, approval, artifact, failure, and recovery evidence)
 - Repository normalization record: [ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md](/D:/AstraBridge/PLAN/ACTIVE_REPOSITORY_NORMALIZATION_EXECUTION.md) (`complete`)
 - Repository rules: [AGENTS.md](/D:/AstraBridge/AGENTS.md)

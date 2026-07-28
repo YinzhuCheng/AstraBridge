@@ -37,6 +37,10 @@ defines the current technical boundary. In particular, AstraBridge must not
 persist plaintext provider credentials, official Codex configuration, or raw
 secret-bearing transport data in project state, logs, screenshots, or reports.
 
+For the currently demonstrated source-evaluation and deterministic packaging
+scope, read [the developer preview baseline](docs/DEVELOPER_PREVIEW_BASELINE.md).
+It does not create a private reporting route or authorize a public release.
+
 The future public route must use the same redaction standard and must not ask a
 reporter to send secrets as proof of impact.
 

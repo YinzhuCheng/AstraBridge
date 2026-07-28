@@ -11,6 +11,12 @@ redacted evidence, reviewing documentation, or discussing an extension idea.
 Read [the open-source foundation decision record](docs/OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md)
 before opening a contribution discussion.
 
+Use the [Contributor Feedback Protocol](docs/CONTRIBUTOR_FEEDBACK_PROTOCOL.md)
+to inspect the prepared local feedback templates and rehearse one bounded,
+provider-free first-contribution path. Its `pending_public_intake` status does
+not open an issue tracker, create a response promise, or permit merge-ready
+external code.
+
 ## Before You Share Anything
 
 - Never include API credentials, cookies, authorization headers, vault data,
@@ -63,6 +69,15 @@ The existing [verification matrix](docs/VERIFICATION_MATRIX.md) and
 [release checklist](docs/RELEASE_CHECKLIST.md) define broader test and
 promotion requirements. Do not claim a live provider route is verified merely
 because a no-key demo, a metadata refresh, or a transport response passed.
+
+## Bounded Extension Rehearsal
+
+Before license and public intake decisions are complete, use the
+[Extension and First-Contribution Surface](docs/EXTENSION_AND_FIRST_CONTRIBUTION_SURFACE.md)
+to make a proposal or reproduce one finite extension path. Its candidate
+read-only skill example provides a local lint/compile/dry-run route with an
+explicit authority-widening failure case. It is not an auto-enabled plugin,
+live-provider route, or permission to submit merge-ready external code.
 
 ## Design Boundaries to Preserve
 

@@ -1,8 +1,13 @@
 # AstraBridge Release Checklist
 
-Last updated: 2026-07-06
+Last updated: 2026-07-27
 
 This checklist is the product-ready gate for a local AstraBridge preview build. It is written as an operator checklist, not just a developer reminder list.
+
+For the current pre-release distinction between documented source evaluation,
+deterministic package/update rehearsal, and an unapproved public release, see
+[Developer Preview Baseline](DEVELOPER_PREVIEW_BASELINE.md). A passing local
+sub-gate does not by itself make this complete or authorize distribution.
 
 ## Scope
 

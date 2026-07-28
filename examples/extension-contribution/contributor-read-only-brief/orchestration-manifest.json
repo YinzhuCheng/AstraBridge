@@ -1,0 +1,138 @@
+{
+  "schema_version": "astrabridge-skill-to-graph-manifest-v1",
+  "skill_id": "example.contributor-read-only-brief",
+  "version": "0.1.0",
+  "kind": "orchestration_skill",
+  "status": "candidate",
+  "metadata": {
+    "display_name": "Contributor Read-Only Brief",
+    "description": "A bounded read-only candidate extension that reuses one canonical supervisor-worker-synthesizer graph.",
+    "tags": ["contributor", "read-only", "candidate", "bounded"],
+    "owners": ["open-source-productization"],
+    "notes": ["Example only: neither discovery nor validation grants trust, enablement, live authority, or productized status."]
+  },
+  "resolution": {
+    "mode": "builtin_template",
+    "graph_template_ref": "supervisor_worker_synthesizer",
+    "graph_schema_version": "astrabridge-agent-orchestration-graph-v1",
+    "parameter_schema": {
+      "type": "object",
+      "properties": {
+        "task_goal": {"type": "string", "minLength": 1, "maxLength": 1200},
+        "constraints": {"type": "array", "items": {"type": "string", "maxLength": 240}, "maxItems": 8},
+        "worker_scope": {"type": "string", "minLength": 1, "maxLength": 1200}
+      },
+      "required": ["task_goal"],
+      "additionalProperties": false
+    },
+    "bindings": [
+      {"parameter": "task_goal", "graph_path": "input.task_context", "required": true},
+      {"parameter": "constraints", "graph_path": "input.constraints", "required": false},
+      {"parameter": "worker_scope", "graph_path": "nodes.node_worker.prompt", "required": false}
+    ]
+  },
+  "prompt": {
+    "mode": "reference",
+    "template_ref": "prompt.example_contributor_read_only_brief.v1",
+    "variables_schema": {
+      "type": "object",
+      "properties": {
+        "task_goal": {"type": "string"},
+        "constraints": {"type": "array"},
+        "worker_scope": {"type": "string"}
+      },
+      "required": ["task_goal"],
+      "additionalProperties": false
+    }
+  },
+  "contracts": {
+    "input": {
+      "schema_ref": "schema.example_contributor_brief_input",
+      "required_message_parts": ["text"],
+      "artifact_specs": []
+    },
+    "output": {
+      "schema_ref": "schema.synthesis_result",
+      "required_message_parts": ["machine_result", "human_summary", "artifact_ref"],
+      "artifact_specs": [
+        {"kind": "run_summary", "id": "contribution_brief"}
+      ]
+    }
+  },
+  "policies": {
+    "routing": {
+      "selection_mode": "bounded_pool",
+      "allowed_provider_ids": ["qwen"],
+      "allowed_model_ids": ["qwen3.7-plus", "qwen3-coder-plus"],
+      "fallback_mode": "deny",
+      "required_capabilities": ["text", "structured_json"]
+    },
+    "mcp": {
+      "preset_ids": ["astrabridge_workspace"],
+      "tool_rules": [
+        {"server": "astrabridge_workspace", "tools": ["astrabridge_workspace_read_file"], "approval_mode": "allow", "effect_class": "read_only", "max_calls": 4}
+      ],
+      "approval_mode": "ask",
+      "loopback_allowed": true
+    },
+    "communication": {
+      "history_mode": "latest_summary_only",
+      "artifact_mode": "required_output_only",
+      "exclude_private_memory": true,
+      "include_machine_results": true,
+      "include_human_summaries": true,
+      "allow_direct_teammate_messages": false
+    },
+    "subagent": {
+      "isolation_mode": "lane",
+      "max_turns": 4,
+      "allow_nested_subagents": false,
+      "allow_direct_teammate_messages": false
+    },
+    "budget": {
+      "max_total_agents": 3,
+      "max_parallel_agents": 1,
+      "max_total_tokens": 30000,
+      "max_provider_calls": 1,
+      "max_retries": 0,
+      "provider_concurrency": [
+        {"provider_id": "qwen", "max_active_agents": 1}
+      ],
+      "model_concurrency": [
+        {"provider_id": "qwen", "model_id": "qwen3.7-plus", "max_active_agents": 1},
+        {"provider_id": "qwen", "model_id": "qwen3-coder-plus", "max_active_agents": 1}
+      ]
+    },
+    "approval": {
+      "default_mode": "ask",
+      "risky_effects_require_approval": ["provider_call", "file_write", "install", "external_write", "side_effect"]
+    },
+    "a2a": {
+      "external_enabled": false,
+      "allowed_card_refs": [],
+      "minimum_trust_level": "workspace_trusted",
+      "gateway_required": true
+    }
+  },
+  "composition": {
+    "allow_runtime_nesting": false,
+    "max_expansion_depth": 1,
+    "template_refs": []
+  },
+  "compatibility": {
+    "graph_schema_version": "astrabridge-agent-orchestration-graph-v1",
+    "min_runtime_version": "0.1.0",
+    "legacy_sources": ["astrabridge-task-graph-v1"],
+    "migration_notes": ["A candidate manifest reuses the canonical graph; it does not introduce a parallel scheduler, plugin install path, or automatic enablement."]
+  },
+  "evidence": {
+    "required_level": "candidate",
+    "fixture_ref": "fixture.example_contributor_read_only_brief",
+    "artifact_root": "PRIVATE/open-source-productization/extension-example/"
+  },
+  "extensions": {
+    "classification": "experimental_candidate",
+    "first_contribution_scope": "manifest-and-documentation-only",
+    "template_id": "supervisor_worker_synthesizer"
+  }
+}

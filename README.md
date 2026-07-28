@@ -7,7 +7,7 @@ app-owned provider routing, and isolated runtime paths instead of official
 Codex user state.
 
 It is not the official Codex App. OpenAI, DeepSeek, Kimi, Qwen, Yunwu, and
-other compatible backends are treated as evidence-qualified API-key provider
+other compatible backends are treated as evidence-qualified API key provider
 lanes with separate model metadata, adapter policy, health checks, route
 authority, and local project state. A compatible endpoint is not automatically
 a verified coding-agent route.
@@ -29,6 +29,26 @@ Read [the product positioning and claim matrix](docs/OPEN_SOURCE_PRODUCT_POSITIO
 for the exact evidence level behind each statement. In particular, the current
 Qwen, DeepSeek, Kimi K3, and GLM reference routes are review-only,
 reduced-authority lanes; they are not autonomous or default coding routes.
+For the exact metadata, deterministic evidence, authority posture, and
+promotion boundary for each route, read the
+[Provider Truth and Authority Surface](docs/PROVIDER_TRUTH_AND_AUTHORITY_SURFACE.md).
+For the bounded native workflow that can be inspected in both source and the
+Desktop Task Graph, read [GUI / Code Orchestration Parity](docs/GUI_CODE_ORCHESTRATION_PARITY.md).
+For the current supported/experimental/internal/deferred extension boundary
+and one provider-free candidate example, read [Extension and First-Contribution
+Surface](docs/EXTENSION_AND_FIRST_CONTRIBUTION_SURFACE.md).
+For the exact distinction between a usable no-key source route, deterministic
+package/update rehearsal, and an unapproved public installer, read the
+[Developer Preview Baseline](docs/DEVELOPER_PREVIEW_BASELINE.md).
+For one failure-first index across the public onboarding, workflow, provider,
+orchestration, extension, security, and release evidence, read the
+[Public Quality and Reliability Dossier](docs/PUBLIC_QUALITY_RELIABILITY_DOSSIER.md).
+The current DG-OSS-04 decision is [pause for a public developer preview](docs/DEVELOPER_PREVIEW_READINESS_DECISION.md): local evidence remains usable, but no license, private reporting, public intake, or distribution claim is enabled.
+For prepared local feedback templates, a bounded first-contribution rehearsal,
+and the future-only response activation conditions, read the
+[Contributor Feedback Protocol](docs/CONTRIBUTOR_FEEDBACK_PROTOCOL.md). It
+remains `pending_public_intake`; it does not create a public support channel
+or accept external code.
 
 ## Product Facts
 
@@ -41,8 +61,11 @@ reduced-authority lanes; they are not autonomous or default coding routes.
 - User navigation: `Project -> Task`; runtime `thread_id` values remain
   internal execution-lane identifiers
 - Graph authoring: deterministic tested subsets support canonical import,
-  dry-run, fixture run, export, reload, and re-import; public GUI/code parity
-  evidence is still being expanded
+  dry-run, fixture run, export, reload, and re-import; the bounded
+  Code Fix / Test / Review reference has public GUI/code parity evidence
+- First extension: a provider-free candidate skill manifest can be validated
+  against a canonical graph; it remains explicit, untrusted, and not
+  auto-enabled
 - Official OpenAI account login is not a product path
 - Legacy `.lcrproj`, `.lcr`, `.codexproj`, and `.codex-shell` are not normal product paths
 
@@ -139,6 +162,10 @@ and [SECURITY.md](SECURITY.md).
 - [Asset Sources](/D:/AstraBridge/docs/ASSET_SOURCES.md)
 - [Demo Runbook](/D:/AstraBridge/docs/DEMO_RUNBOOK.md)
 - [No-Key First Ten Minutes](/D:/AstraBridge/docs/NO_KEY_FIRST_TEN_MINUTES.md)
+- [Developer Preview Baseline](/D:/AstraBridge/docs/DEVELOPER_PREVIEW_BASELINE.md)
+- [Developer Preview Readiness Decision](/D:/AstraBridge/docs/DEVELOPER_PREVIEW_READINESS_DECISION.md)
+- [Public Quality And Reliability Dossier](/D:/AstraBridge/docs/PUBLIC_QUALITY_RELIABILITY_DOSSIER.md)
+- [Contributor Feedback Protocol](/D:/AstraBridge/docs/CONTRIBUTOR_FEEDBACK_PROTOCOL.md)
 - [Flagship Coding-Agent Reference](docs/FLAGSHIP_CODING_AGENT_REFERENCE.md)
 - [Security And Isolation](/D:/AstraBridge/docs/SECURITY_AND_ISOLATION.md)
 - [Product Positioning And Claim Matrix](/D:/AstraBridge/docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md)

@@ -1,0 +1,76 @@
+{
+  "schema_version": "astrabridge-contributor-feedback-cohort-v1",
+  "cohort_id": "pre-preview-first-contribution-cohort",
+  "status": "pre_preview_rehearsal",
+  "mode": "deterministic_provider_free",
+  "response_contract": {
+    "current_intake_status": "pending_public_intake",
+    "activation_conditions": [
+      "A project license and contribution terms are selected.",
+      "A private vulnerability-reporting route and private conduct-reporting route are configured and verified.",
+      "A maintainer explicitly enables public feedback intake."
+    ],
+    "activation_disposition_target": "Within 7 calendar days after public intake is explicitly activated, record acknowledged, needs-info, accepted-for-design, declined, or blocked.",
+    "current_boundary": "This is a future activation expectation, not a current public support promise or private contact."
+  },
+  "template_files": [
+    {
+      "template_id": "issue-feedback",
+      "path": ".github/ISSUE_TEMPLATE/issue-feedback.md",
+      "route": "non-sensitive general feedback"
+    },
+    {
+      "template_id": "bug-reproduction",
+      "path": ".github/ISSUE_TEMPLATE/bug-reproduction.md",
+      "route": "non-security reproducible defect"
+    },
+    {
+      "template_id": "feature-proposal",
+      "path": ".github/ISSUE_TEMPLATE/feature-proposal.md",
+      "route": "bounded product discussion"
+    },
+    {
+      "template_id": "documentation-evidence",
+      "path": ".github/ISSUE_TEMPLATE/documentation-evidence.md",
+      "route": "public claim or evidence correction"
+    },
+    {
+      "template_id": "first-contribution-proposal",
+      "path": ".github/ISSUE_TEMPLATE/first-contribution-proposal.md",
+      "route": "pre-license first-task rehearsal"
+    }
+  ],
+  "task_candidates": [
+    {
+      "task_id": "candidate-skill-validation",
+      "owner": "skill-orchestration",
+      "source_path": "examples/extension-contribution/contributor-read-only-brief/orchestration-manifest.json",
+      "validation_command": "python scripts/run_first_contribution_extension_example.py --output-root <empty-root>",
+      "scope": "manifest-and-documentation-only"
+    },
+    {
+      "task_id": "quality-evidence-correction",
+      "owner": "open-source-productization",
+      "source_path": "docs/PUBLIC_QUALITY_RELIABILITY_DOSSIER.md",
+      "validation_command": "python scripts/run_public_quality_reliability_dossier.py --help",
+      "scope": "claim, evidence-date, reproduction-path, owner, or limitation correction only"
+    },
+    {
+      "task_id": "redacted-bug-reproduction",
+      "owner": "runtime-or-task-graph-owner",
+      "source_path": ".github/ISSUE_TEMPLATE/bug-reproduction.md",
+      "validation_command": "python scripts/repo_governance_check.py --repo .",
+      "scope": "non-security redacted reproduction with no provider call"
+    }
+  ],
+  "independent_rehearsals": [
+    {
+      "rehearsal_id": "candidate-skill-a",
+      "task_id": "candidate-skill-validation"
+    },
+    {
+      "rehearsal_id": "candidate-skill-b",
+      "task_id": "candidate-skill-validation"
+    }
+  ]
+}

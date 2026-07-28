@@ -1018,3 +1018,346 @@ policy before dispatch, and make cancellation converge under late-result races.
 - Existing quick-gate shell-module budget overruns remain outside this step.
 - Step 4 is complete. Next: Step 5, OSS-PROVIDER-TRUTH-05, in
   PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md.
+
+## 2026-07-27 - Open-Source Productization Step 5
+
+### Request
+
+- Publish a truthful, developer-readable provider authority surface before any
+  provider-backed upgrade or smoke claim.
+
+### Changes
+
+- Added `docs/PROVIDER_TRUTH_AND_AUTHORITY_SURFACE.md` with exact Qwen,
+  DeepSeek, Kimi K3, and GLM route cards. It separates declared modality,
+  advertised context, transport, and normalized reasoning metadata from
+  deterministic checks and current route authority.
+- Added a focused source-backed regression test that derives the public rows
+  from the current catalog/profile and provider-free reference cohort.
+- Linked the surface from the public README, project summary, registry, and
+  governance inventory.
+
+### Validation And Evidence
+
+- The deterministic four-provider cohort passed with no network or provider
+  calls: all four routes are `documented` plus deterministic `pass`, while
+  `verified=0`, `partial=0`, `reduced_authority=4`, `blocked=0`, and
+  `deferred=0`. Its live-smoke status remains `deferred`.
+- The focused provider/catalog/authority suite passed 35 tests; repository
+  governance passed with 0 errors and 0 warnings; the focused source,
+  document, and evidence secret scan passed.
+- Preserved the secret-free cohort report under
+  `PRIVATE/agentic-update-pipeline/runs/oss-provider-truth-20260727/`.
+
+### Unresolved And Next Entry Point
+
+- No external route is promoted: every current reference route remains
+  `review_only` / `reduced_authority` at `no_tools` / `ask` pending its exact
+  `execution_route_adapter_dry_run`, then separately authorized smoke and
+  later promotion gates. Kimi K3 receives no bypass.
+- Step 5 is complete. Next: Step 6, `OSS-GUI-CODE-06`, in
+  `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`.
+
+## 2026-07-27 - Open-Source Productization Step 6
+
+### Request
+
+- Prove the product's GUI-and-code orchestration claim with one bounded,
+  provider-free workflow rather than a visual-only demo.
+
+### Changes
+
+- Added [GUI / Code Orchestration Parity](GUI_CODE_ORCHESTRATION_PARITY.md),
+  including canonical source/GUI/runtime representations, source ownership,
+  explicit detach/export behavior, reproducibility commands, owners, and
+  non-claims.
+- Added a deterministic parity runner and focused regression test for the
+  checked-in four-node Code Fix / Test / Review graph.
+- Repaired task-graph synchronization so an unchanged machine-result schema
+  retains its authored canonical schema reference instead of being silently
+  renamed during a source -> GUI -> export cycle.
+- Updated the README, claim matrix, registry, governance inventory, and
+  project summary; preserved generated semantic, browser, screenshot, and
+  focused secret-scan evidence under
+  `PRIVATE/open-source-productization/validation/step6-gui-code-parity-20260727/`.
+
+### Validation And Evidence
+
+- The deterministic runner imported native source JSON into an isolated
+  source-owned task graph, blocked direct GUI mutation as
+  `graph_source_owned`, passed dry-run, completed fixture run, and completed
+  export/re-import with `no_change` and zero changes. It recorded no provider
+  or network calls.
+- The in-app browser opened the generated `.abproj`, clicked **Task Graph**,
+  rendered `Plan Fix`, `Apply Code Fix`, `Run Tests`, and `Review Result`,
+  showed the source-owned banner, and exposed the selected node's ports and
+  `ask` permission state. Browser console errors were empty.
+- The focused parity/file-format suites, Desktop Task Graph test, and Desktop
+  production build passed. The broader task-graph HTTP API suite reported nine
+  initial tests as `ok` and then hung in its large HTTP integration test; its
+  owned loopback process was stopped after a bounded wait and the exact
+  default-stability handoff is preserved under the Step 6 validation root.
+  Scripted handoff-plan validation and governance passed; the linked public
+  evidence set passed the focused secret scan with zero findings.
+
+### Unresolved And Next Entry Point
+
+- The proof is intentionally limited to the native supported subset. It does
+  not establish live provider behavior, tool authority, autonomous code
+  writes, source-file write-back, or lossless conversion for arbitrary GUI or
+  external workflow formats.
+- A broad scan of the incidental isolated runtime tree finds generic
+  token-shaped examples in copied skill documentation; that raw diagnostic
+  tree is preserved but is not public proof. The exact linked evidence bundle
+  is clean.
+- The full task-graph HTTP API suite must be diagnosed under the default
+  stability queue before it can be claimed as a complete suite pass; this does
+  not invalidate the Step 6-specific deterministic parity proof.
+- Step 6 is complete. Next: Step 7, `OSS-EXTENSION-CONTRIB-07`, in
+  `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`.
+
+## 2026-07-27 - Open-Source Productization Step 7
+
+### Request
+
+- Establish a safe first extension/contribution surface without advertising
+  private runtime internals, automatic trust, or a pre-license public intake
+  path as stable product APIs.
+
+### Changes
+
+- Added [Extension and First-Contribution Surface](EXTENSION_AND_FIRST_CONTRIBUTION_SURFACE.md),
+  a public classification of supported native graph authoring, experimental
+  candidate skills/plugins/presets/metadata/adapters, internal runtime and
+  transport surfaces, and deferred marketplace/public-intake paths.
+- Added a copyable read-only candidate skill example under
+  `examples/extension-contribution/contributor-read-only-brief/`, a
+  deterministic validation runner, and a focused regression test.
+- Linked the contribution route from `CONTRIBUTING.md`, README, claim matrix,
+  registry, governance inventory, and project summary.
+
+### Validation And Evidence
+
+- The candidate manifest resolved to the existing
+  `supervisor_worker_synthesizer` graph and passed canonical lint, compile,
+  and dry-run. The preserved evidence records zero provider, network, MCP, or
+  agent-execution calls.
+- A deliberately out-of-allowlist `glm/glm-5.2` request returned structured
+  `requested_route_widens_*_allowlist` blockers. Candidate lifecycle and
+  uncertain route/preset conditions remain warnings, not promotion signals.
+- Focused candidate/skill/preset/registry/file-format suites passed 26 tests;
+  the Desktop extensions inventory panel passed 21 tests. Governance and the
+  scripted plan validator passed; the focused source and evidence secret scan
+  had zero findings.
+
+### Unresolved And Next Entry Point
+
+- DG-OSS-03 selected the experimental-labeled route. The documented native
+  graph subset is supported only to its present evidence boundary; skills,
+  plugins, presets, provider metadata, and loss-aware external adapters are
+  not promoted to automatic/live/stable public APIs.
+- License/contribution terms, private reporting contacts, public marketplace,
+  automatic third-party execution, live provider qualification, and broad
+  external merge-ready intake remain owner-gated or deferred.
+- Step 7 is complete. Next: Step 8, `OSS-RELEASE-08`, in
+  `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`.
+
+## 2026-07-27 - Open-Source Productization Step 8
+
+### Request
+
+- Make the install, release, security, privacy, support, and recovery baseline
+  runnable without creating an unauthorized release, publishing private
+  contacts, or turning package rehearsal into a public-installer claim.
+
+### Changes
+
+- Added [Developer Preview Baseline](DEVELOPER_PREVIEW_BASELINE.md), a public
+  source-evaluation/install/support/recovery guide that lists the exact tested
+  boundary, non-sensitive report contents, data-flow rules, five release
+  blockers, and their owners.
+- Added `scripts/run_developer_preview_baseline_check.py` and a focused
+  regression test. The script aggregates passing release-readiness and isolated
+  Windows update-rehearsal summaries into a compact, secret-free evidence
+  packet and always classifies the public release as `blocked` until the owner
+  gates are resolved.
+- Linked the baseline from the README, security policy, release checklist,
+  claim matrix, registry, governance inventory, and project summary.
+
+### Validation And Evidence
+
+- `PRIVATE/rr8/step8rr/reports/summary.json` passed all six release-identity,
+  staging, and updater checks for `0.1.0`; both staged inventories contained
+  904 files.
+- `PRIVATE/wu8/step8wu/windows-update-rehearsal/summary.json` passed the
+  isolated `canary` clean-bundle, update transaction, rollback, and four
+  transaction-recovery scenarios. This remains deterministic rehearsal
+  evidence, not a public update-service assertion.
+- The new aggregator emitted `demonstrated` source evaluation, passing package
+  and update evidence, five named blockers, zero provider calls, and zero
+  network calls. The resulting secret-free evidence and scans are preserved
+  under `PRIVATE/open-source-productization/validation/step8-preview-baseline-20260727/`.
+- Focused baseline, release-identity, governance-check, and app-hardening
+  suites passed 2, 10, 14, and 6 tests respectively. Repository governance
+  and both focused secret scans passed with zero errors/warnings/findings.
+
+### Unresolved And Next Entry Point
+
+- A public release remains blocked by license/contribution terms, private
+  vulnerability reporting, private conduct reporting, safe public
+  support/triage, and authorized signing/distribution. No provider call,
+  installer publication, external contact, or private credential was used.
+- A first release-readiness run used an overly deep Windows artifact root and
+  hit `FileNotFoundError` while staging generated Desktop files. The failed
+  artifact is preserved; the short-root retry passed and the workaround is
+  documented. The release owner must resolve path-length hardening before an
+  installer release rather than hiding it as an install claim.
+- Step 8 is complete. Next: Step 9, `OSS-QUALITY-09`, in
+  `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`.
+
+## 2026-07-27 - Open-Source Productization Step 9
+
+### Request
+
+- Build a public quality and reliability evidence dossier that presents current
+  passing evidence, failures, reduced-authority states, warning gates, and
+  release blockers without exposing private logs or turning a local check into
+  a broad product claim.
+
+### Changes
+
+- Added [Public Quality and Reliability Dossier](PUBLIC_QUALITY_RELIABILITY_DOSSIER.md)
+  and its machine-readable JSON source. It contains seven claim cards with an
+  evidence class, result date, reproduction source, owner, limitation, and
+  public failure-detection path.
+- Added a deterministic dossier aggregator and focused regression test. The
+  aggregator consumes fresh secret-free evidence inputs and rejects an attempt
+  to hide the public-release blocker; it emits a separate negative ledger.
+- Linked the dossier from the README, project summary, claim matrix,
+  developer-preview baseline, registry, and governance inventory.
+
+### Validation And Evidence
+
+- Fresh local evidence for the flagship workflow, GUI/code parity, candidate
+  extension, four-provider reference cohort, preview baseline, and hardening
+  scan produced 7 cards: 3 `pass` or `demonstrated` cards and 4
+  `reduced_authority`, `warning_gated`, or `blocked` cards.
+- The negative ledger explicitly includes the provider cohort, first extension
+  candidate, security/privacy boundary, and package/update baseline. It also
+  surfaces the prior broader Task Graph HTTP-suite hang and Windows
+  deep-artifact-path failure as qualification gaps rather than using focused
+  checks as substitutes.
+- Dossier tests passed 2/2. Related flagship, GUI/code, extension, provider,
+  preview-baseline, release-identity, app-hardening, and governance tests
+  passed. Repository governance and both focused secret scans had zero
+  errors/warnings/findings. Evidence is preserved at `PRIVATE/qd9/` and
+  `PRIVATE/agentic-update-pipeline/runs/qd9-provider-20260727/`.
+
+### Unresolved And Next Entry Point
+
+- No authority or release state changed: external routes remain reduced
+  authority, the extension remains candidate/warning-gated, private reporting
+  and public support are unconfigured, and public distribution remains blocked.
+  The full Task Graph HTTP integration gap and release-artifact path-length
+  hardening must not be hidden by this dossier.
+- Step 9 is complete. Next: Step 10, `OSS-COMMUNITY-10`, in
+  `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`.
+
+## 2026-07-27 - Open-Source Productization Step 10
+
+### Request
+
+- Establish a safe contributor feedback and first-contribution protocol without
+  opening public intake, inventing a private contact, accepting external code,
+  or calling a provider.
+
+### Changes
+
+- Added five local GitHub-compatible issue templates and disabled blank issues.
+  Each template carries secret-redaction, non-security, pre-preview, and scope
+  boundaries rather than presenting an open support promise.
+- Added [Contributor Feedback Protocol](CONTRIBUTOR_FEEDBACK_PROTOCOL.md), a
+  public reference for safe templates, owner routing, three candidate tasks,
+  two independent provider-free rehearsals, future-only response activation,
+  and lightweight decision records for provider, orchestration, and public
+  claim changes.
+- Added a deterministic cohort runner and focused test. It runs the existing
+  read-only candidate twice in separate roots, requires the authority-widening
+  block, and records zero provider and network calls.
+- Linked the protocol through contribution, preview, foundation, claim-matrix,
+  README, project-summary, registry, and governance entry points. Retained
+  evidence examples now use the `PRIVATE/.../reports/...` artifact bucket.
+
+### Validation And Evidence
+
+- Final cohort evidence at `PRIVATE/c10-final-20260727/reports/` reports five
+  templates, three bounded candidates, two independent successful rehearsals,
+  `pending_public_intake`, zero provider calls, and zero network calls.
+- Focused cohort, extension-example, repository-governance, and app-hardening
+  suites passed 2, 1, 14, and 6 tests. Repository governance passed with zero
+  errors/warnings; final app-hardening and focused orchestration secret scans
+  reported zero findings.
+- An initial hardening scan correctly rejected the first diagnostic output
+  because it was not stored under a permitted artifact bucket. The diagnostic
+  remains preserved at `PRIVATE/c10-rerun-20260727/`; the final governed rerun
+  uses `PRIVATE/c10-final-20260727/reports/` and passed without exceptions.
+
+### Unresolved And Next Entry Point
+
+- This creates no active public issue tracker, support SLA, private reporting
+  route, named maintainer, license, contribution terms, external code intake,
+  provider authority, or distribution approval. All remain explicit gates.
+- Step 10 is complete. Next: Step 11, `OSS-CLOSURE-11`, in
+  `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`.
+
+## 2026-07-27 - Open-Source Productization Step 11
+
+### Request
+
+- Close the developer-preview readiness decision with current evidence, an
+  honest go/dogfood/pause outcome, explicit non-claims, named owners, and one
+  unambiguous next action without publishing or enabling any external path.
+
+### Changes
+
+- Added [Developer Preview Readiness Decision](DEVELOPER_PREVIEW_READINESS_DECISION.md),
+  a failure-visible public dossier that applies DG-OSS-04 and records mandatory
+  branch C `pause` for a public preview.
+- Added a deterministic readiness evaluator and focused regression coverage.
+  It joins the fresh preview-baseline packet, current quality manifest, and
+  pre-preview contributor cohort; it fails if a release blocker is omitted or
+  cohort evidence claims active public intake.
+- Corrected the preview-baseline aggregate's stale pre-Step-10 support action:
+  safe templates are now recognized as prepared but still disabled pending
+  legal, private-reporting, triage, repository-host, and distribution gates.
+- Completed and retired the open-source productization plan as an active queue.
+  The only follow-up is `OSS-FOUNDATION-CLEARANCE-01`, an owner-gated unit in
+  the readiness decision rather than a hidden agent release task.
+
+### Validation And Evidence
+
+- Fresh `PRIVATE/c11-final-20260727/reports/` evidence reports a passing
+  source/package/update baseline, seven quality cards with four visible
+  non-pass cards, and `DG-OSS-04 / pause / C` with zero provider or network
+  calls.
+- Readiness, baseline, quality-dossier, contributor, extension, provider,
+  GUI/code, flagship, release-identity, governance, and hardening focused
+  suites passed. Repository governance, app-hardening scan, and focused secret
+  scan all returned zero errors/warnings/findings.
+- A broad secret-pattern scan initially flagged safe hyphenated provider-
+  credential prose in two governance documents. Both were changed to equivalent
+  plain-language wording;
+  the final scan passed. The failed scan report is preserved as a diagnostic
+  in the final private evidence root.
+
+### Unresolved And Next Entry Point
+
+- Public preview is intentionally paused: license/contribution terms, private
+  vulnerability reporting, private conduct reporting, public triage ownership,
+  and authorized distribution remain owner-gated. Provider authority,
+  extension stability, broader Task Graph HTTP integration, and Windows
+  path-length limits retain their documented boundaries.
+- The 11-step productization plan is complete. Do not resume it. After explicit
+  owner authority, start only `OSS-FOUNDATION-CLEARANCE-01` in
+  [Developer Preview Readiness Decision](DEVELOPER_PREVIEW_READINESS_DECISION.md),
+  then run a new readiness evaluation.

@@ -243,22 +243,22 @@ Before ending an execution turn under this plan, an agent must:
 
 ## Current Progress
 
-- Current status: in progress
-- Completed steps: Step 0, Create and Register the Scripted Productization Plan; Step 1, Establish the Public Open-Source Foundation; Step 2, Publish the Positioning, Scope, and Claim-Evidence Matrix; Step 3, Deliver the No-Key First-Ten-Minutes Path; Step 4, Build the Flagship Coding-Agent Reference Workflow.
-- Current step: Step 5, Publish the Provider Truthfulness and Authority Surface.
-- Next step: Step 5, Publish the Provider Truthfulness and Authority Surface, beginning with an evidence-led audit of the existing reference-provider catalog, authority records, and public claim boundary.
+- Current status: complete
+- Completed steps: Step 0, Create and Register the Scripted Productization Plan; Step 1, Establish the Public Open-Source Foundation; Step 2, Publish the Positioning, Scope, and Claim-Evidence Matrix; Step 3, Deliver the No-Key First-Ten-Minutes Path; Step 4, Build the Flagship Coding-Agent Reference Workflow; Step 5, Publish the Provider Truthfulness and Authority Surface; Step 6, Prove the GUI-and-Code Orchestration Story; Step 7, Establish the Extension and First-Contribution Surface; Step 8, Make the Install, Release, Security, and Support Baseline Runnable; Step 9, Build the Public Quality and Reliability Evidence Dossier; Step 10, Establish the Contributor Flywheel and Feedback Protocol; Step 11, Close the Developer-Preview Readiness Decision.
+- Current step: Step 11, Close the Developer-Preview Readiness Decision (completed with DG-OSS-04 branch C `pause`).
+- Next step: Owner-gated `OSS-FOUNDATION-CLEARANCE-01` in `docs/DEVELOPER_PREVIEW_READINESS_DECISION.md`; preserve this completed plan and do not resume it as a public-release queue without current owner evidence.
 - Last updated: 2026-07-27
 
 ## Current Work Unit
 
-- ID: OSS-PROVIDER-TRUTH-05
-- Goal: Publish a source-backed provider authority surface that lets a developer distinguish metadata, deterministic checks, reduced-authority routes, and unproven coding-route behavior.
-- Inputs: `docs/PROVIDER_MODEL_COMPATIBILITY_RUNBOOK.md`, `docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md`, current catalog/reference-cohort tests, provider contracts, and existing authority/evidence records.
-- Expected output: One public provider truthfulness and authority view for the current reference-provider families, with named owners, evidence levels, explicit non-claims, and handoff links for any defect that belongs to the default stability queue.
-- Acceptance check: A developer can tell which route facts are documented, deterministically checked, reduced-authority, blocked, or unknown; the view has no credential and no unauthorized smoke claim; and Kimi K3 is described only at its actual evidence level.
-- Validation command(s): `python C:\Users\cyz19\.codex\skills\durable-handoff-plan-scripted\scripts\validate_plan_contract.py PLAN\ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`; focused provider/catalog/authority tests selected from the audited source; `python scripts\repo_governance_check.py --repo .`; and a secret-safe source/evidence audit.
-- Status: queued
-- Next action: Audit the existing public provider runbook, reference cohort, catalog contracts, and authority records, then choose the smallest public matrix or route card that preserves all current evidence boundaries without invoking a provider.
+- ID: OSS-CLOSURE-11
+- Goal: Produce a candid developer-preview readiness decision from the completed foundation, product, onboarding, quality, release, and contributor evidence without changing product authority, contacting maintainers, or hiding a blocker.
+- Inputs: `docs/OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md`, `docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md`, `docs/NO_KEY_FIRST_TEN_MINUTES.md`, `docs/FLAGSHIP_CODING_AGENT_REFERENCE.md`, `docs/PROVIDER_TRUTH_AND_AUTHORITY_SURFACE.md`, `docs/GUI_CODE_ORCHESTRATION_PARITY.md`, `docs/EXTENSION_AND_FIRST_CONTRIBUTION_SURFACE.md`, `docs/DEVELOPER_PREVIEW_BASELINE.md`, `docs/PUBLIC_QUALITY_RELIABILITY_DOSSIER.md`, `docs/CONTRIBUTOR_FEEDBACK_PROTOCOL.md`, `docs/RELEASE_CHECKLIST.md`, and DG-OSS-04.
+- Expected output: A concise readiness dossier and decision record with a truthful go, continue-dogfood, or pause verdict; evidence, limitations, named owner gates, date, explicit non-claims, and one unambiguous next execution unit or complete-plan closure.
+- Acceptance check: The decision explicitly applies DG-OSS-04, preserves dissenting and negative evidence, names every unresolved release-blocking legal/security/privacy/support/distribution gate, and either proves every required go condition or records a non-go verdict without erasing prior work.
+- Validation command(s): `python C:\Users\cyz19\.codex\skills\durable-handoff-plan-scripted\scripts\validate_plan_contract.py PLAN\ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`; focused readiness-dossier, governance, and secret-scan checks; `python scripts\repo_governance_check.py --repo .`; and evidence-source rechecks required by the chosen DG-OSS-04 verdict.
+- Status: completed
+- Next action: Preserve this completed evidence-and-decision record. The next action is owner-gated `OSS-FOUNDATION-CLEARANCE-01` in `docs/DEVELOPER_PREVIEW_READINESS_DECISION.md`; it requires explicit legal, reporting, triage, and distribution authority before any new readiness evaluation.
 ## Execution Steps
 
 ### 0. Create and Register the Scripted Productization Plan
@@ -415,7 +415,7 @@ Acceptance criteria:
 - Any discovered core route defect is handed to the canonical stability plan
   with an exact evidence link and next work unit.
 
-Status: not started
+Status: completed
 
 ### 6. Prove the GUI-and-Code Orchestration Story
 
@@ -441,7 +441,7 @@ Acceptance criteria:
 - The reference workflow has reproducible evidence rather than a visual-only
   promise.
 
-Status: not started
+Status: completed
 
 ### 7. Establish the Extension and First-Contribution Surface
 
@@ -465,7 +465,7 @@ Acceptance criteria:
   undocumented accounts, or hidden source edits.
 - Unsupported internal APIs are not presented as stable contributor contracts.
 
-Status: not started
+Status: completed
 
 ### 8. Make the Install, Release, Security, and Support Baseline Runnable
 
@@ -491,7 +491,7 @@ Acceptance criteria:
 - Any release-blocking defect has an explicit owner and is not buried in a
   general known-limitations list.
 
-Status: not started
+Status: completed
 
 ### 9. Build the Public Quality and Reliability Evidence Dossier
 
@@ -517,7 +517,7 @@ Acceptance criteria:
 - The evidence does not contain credentials, private request payloads, or
   information that weakens security boundaries.
 
-Status: not started
+Status: completed
 
 ### 10. Establish the Contributor Flywheel and Feedback Protocol
 
@@ -542,7 +542,7 @@ Acceptance criteria:
 - The project has a documented way to evolve public claims and experimental
   extension surfaces without breaking contributor trust.
 
-Status: not started
+Status: completed
 
 ### 11. Close the Developer-Preview Readiness Decision
 
@@ -571,7 +571,7 @@ Acceptance criteria:
 - A non-go verdict preserves the work, names the concrete blocker, and leaves
   one unambiguous next execution unit without erasing evidence.
 
-Status: not started
+Status: completed
 
 ## Progress Log
 
@@ -650,3 +650,75 @@ Status: not started
 - Blockers: No Step 4 acceptance blocker remains. The reference intentionally does not prove a live provider response, coding-route eligibility, autonomous write authority, tool authority, release-installer behavior, or a published distribution. Existing quick-gate shell-module budget overruns remain outside this step. A deep evidence path initially reached the Windows artifact-path limit; the runner now uses a short internal workspace path and passes its focused regression test.
 - Route change: The public story now has one named deterministic coding-agent reference rather than relying on a generic graph fixture. The declared route snapshot is metadata-only and does not change any provider authority or trigger a provider call.
 - Next step: Step 5, OSS-PROVIDER-TRUTH-05, beginning with the current reference-provider authority and evidence audit.
+
+### 2026-07-27 - Step 5
+
+- Completed: Published `docs/PROVIDER_TRUTH_AND_AUTHORITY_SURFACE.md`, a source-backed public route surface that separates catalog/profile metadata, provider-free deterministic checks, runtime authority, deferred live smoke, named owners, explicit non-claims, and default-stability handoff.
+- Files changed: `docs/PROVIDER_TRUTH_AND_AUTHORITY_SURFACE.md`, `apps/astrabridge-sidecar/tests/test_provider_truth_authority_surface.py`, `README.md`, `docs/PROJECT_SUMMARY.md`, `docs/DOCUMENT_REGISTRY.json`, `docs/DOCUMENT_REGISTRY.md`, `docs/REPO_GOVERNANCE.md`, and this plan. The deterministic cohort evidence was preserved at `PRIVATE/agentic-update-pipeline/runs/oss-provider-truth-20260727/`.
+- Evidence inspected: Current generated catalog and provider profiles; `providers/reference_cohort.py`; `tests/test_provider_reference_cohort.py`; `docs/PROVIDER_MODEL_COMPATIBILITY_RUNBOOK.md`; the public claim matrix; and the Codex-core multi-provider execution contract. The four exact routes are `qwen/qwen3.7-plus`, `deepseek/deepseek-v4-pro`, `kimi/kimi-k3`, and `glm/glm-5.2`.
+- Validation: The provider-free cohort runner passed with zero provider/network calls and `verified=0`, `partial=0`, `reduced_authority=4`, `blocked=0`, `deferred=0`; its live smoke is `deferred`. `python -m unittest tests.test_provider_truth_authority_surface tests.test_provider_reference_cohort tests.test_provider_catalog_contract tests.test_execution_route_contract tests.test_runtime_route_admission tests.test_provider_semantic_conformance_corpus` passed 35 tests. `python scripts\repo_governance_check.py --repo .` passed with 0 errors and 0 warnings. Focused document/test/artifact secret scan passed.
+- Blockers: No Step 5 publication blocker remains. The surface intentionally does not establish endpoint-specific live context or modality behavior, live reasoning behavior, tool or write authority, provider-backed smoke, coding-route verification, or default-route eligibility. No defect requiring a default-stability handoff was discovered.
+- Route change: The public route record now exposes the two independent axes: all four routes are `documented` plus deterministic `pass`, but remain `review_only` / `reduced_authority` with `no_tools` / `ask` and the exact next gate `execution_route_adapter_dry_run`. Kimi K3 receives no bypass.
+- Next step: Step 6, `OSS-GUI-CODE-06`, beginning with a bounded canonical workflow and its GUI/code/runtime parity audit.
+
+### 2026-07-27 - Step 6
+
+- Completed: Added the public `docs/GUI_CODE_ORCHESTRATION_PARITY.md` reference and deterministic native JSON -> Desktop Task Graph -> runtime -> native JSON proof for `graph_code_fix_review_v1` / `code_fix_test_review`. The proof retains graph structure, ports, contracts, policy, schema registry, task state, and the `filesystem_write_gate` / `ask` boundary across the supported path.
+- Files changed: `scripts/run_gui_code_orchestration_parity.py`, `apps/astrabridge-sidecar/tests/test_gui_code_orchestration_parity.py`, `apps/astrabridge-sidecar/astrabridge_sidecar/task_service.py`, `docs/GUI_CODE_ORCHESTRATION_PARITY.md`, `README.md`, `docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md`, `docs/DOCUMENT_REGISTRY.json`, `docs/DOCUMENT_REGISTRY.md`, `docs/REPO_GOVERNANCE.md`, `docs/PROJECT_SUMMARY.md`, `docs/PROJECT_LOG.md`, and this plan. Secret-free deterministic and in-app-browser evidence is preserved under `PRIVATE/open-source-productization/validation/step6-gui-code-parity-20260727/`.
+- Evidence inspected: The checked-in Code Fix / Test / Review JSON; task-graph import/export and source-ownership contracts; generated source graph, runtime manifest, GUI surface, and `no_change` diff; the Desktop in-app Task Graph showing the four declared nodes and source-owned banner; node inspector ports/permission state; screenshots; and an empty browser error log.
+- Validation: The deterministic runner recorded `code_to_gui=pass`, dry-run `pass`, fixture run `completed`, source-owned direct GUI edit `graph_source_owned`, native round trip `no_change` / 0 changes, zero provider calls, and no network call. Focused sidecar suites `test_gui_code_orchestration_parity` and `test_agent_orchestration_file_format` passed 7 tests; `TaskGraphWorkspace.test.tsx` passed 91 tests and the Desktop production build passed. The broader `test_task_graph_api` suite reported nine initial tests as `ok` but hung in `test_http_api_lists_templates_instantiates_graph_and_updates_node_and_edge`; its process and loopback listener were reaped after a bounded wait, and the exact default-stability handoff is preserved at `PRIVATE/open-source-productization/validation/step6-gui-code-parity-20260727/task-graph-api-http-hang-handoff.md`. The scripted-plan validator and `python scripts\repo_governance_check.py --repo .` passed with 0 governance errors/warnings. The focused public evidence secret scan passed with 0 findings; `git diff --check` reported no content-format error (only existing CRLF conversion warnings). Owned loopback test processes were stopped and ports 4181, 8826, and 8827 were clear afterward.
+- Blockers: No Step 6 acceptance blocker remains: its canonical parity proof and dedicated regressions pass. The HTTP-suite hang has been handed to the default stability queue rather than absorbed into this productization step. A broad scan of the entire isolated runtime directory also reports token-shaped examples from copied runtime skill documentation, so that incidental directory is preserved for diagnostics but is not treated as a public evidence bundle; the exact linked JSON/Markdown evidence set passed the focused scan with 0 findings. This reference intentionally does not prove live provider behavior, tool authority, autonomous file writes, source-file write-back, or lossless conversion for arbitrary GUI graphs or external formats.
+- Route change: Equivalent machine-result schemas now retain their authored canonical schema reference during task-graph synchronization; only an actual schema change receives a generated node-local reference. This repairs a real source -> GUI -> export semantic-drift defect without widening policy or authority.
+- Next step: Step 7, `OSS-EXTENSION-CONTRIB-07`, beginning with an extension-point and first-contribution stability/ownership audit.
+
+### 2026-07-27 - Step 7
+
+- Completed: Published `docs/EXTENSION_AND_FIRST_CONTRIBUTION_SURFACE.md`, which classifies native graph-source authoring, candidate skills, plugin/preset flows, provider metadata, loss-aware external adapters, runtime internals, and deferred public-intake surfaces. Added a copyable `example.contributor-read-only-brief` candidate manifest that binds one existing canonical graph and a deterministic runner/test that proves its contract without a provider credential.
+- Files changed: `examples/extension-contribution/contributor-read-only-brief/SKILL.md`, `examples/extension-contribution/contributor-read-only-brief/orchestration-manifest.json`, `scripts/run_first_contribution_extension_example.py`, `apps/astrabridge-sidecar/tests/test_first_contribution_extension_example.py`, `docs/EXTENSION_AND_FIRST_CONTRIBUTION_SURFACE.md`, `CONTRIBUTING.md`, `README.md`, `docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md`, `docs/DOCUMENT_REGISTRY.json`, `docs/DOCUMENT_REGISTRY.md`, `docs/REPO_GOVERNANCE.md`, `docs/PROJECT_SUMMARY.md`, `docs/PROJECT_LOG.md`, and this plan. Secret-free evidence is preserved under `PRIVATE/open-source-productization/validation/step7-first-contribution-extension-20260727/`.
+- Evidence inspected: Current contribution policy; extension architecture and boundary rules; skill-to-graph schema/resolver; existing candidate skill manifests; plugin/skill registry and project-preset contracts; native graph file-format examples; provider authority surface; and the generated candidate evidence showing warning-preserving validation plus a fail-closed provider/model widening request.
+- Validation: The first-contribution runner recorded `validation=pass` for canonical lint/compile/dry-run, candidate lifecycle warnings, zero provider/network/MCP/agent calls, and a `blocked` `glm/glm-5.2` request with `requested_route_widens_*_allowlist` blockers. Focused suites passed: `test_first_contribution_extension_example` (1), `test_skill_orchestration_validation` (7), `test_codex_plugin_skill_project_presets` (5), `test_codex_plugin_skill_registry_contract` (7), `test_agent_orchestration_file_format` (6), and Desktop `PluginSkillInventoryPanel.test.tsx` (21). Registry JSON contains 128 entries / 60 references. `python scripts\repo_governance_check.py --repo .` passed with 0 errors and 0 warnings; focused secret scan found 0 findings; `git diff --check` reported no content-format error (only existing CRLF conversion warnings).
+- Decision gate: DG-OSS-03 selected **B**. The native graph subset remains publicly supported only within its current evidence boundary; candidate skill, plugin/preset, provider-metadata, and external-adapter surfaces are useful but explicitly experimental, while runtime/transport internals are internal and public marketplace/intake is deferred. The public guide preserves compatibility and migration warnings rather than promoting any candidate to a stable/live API.
+- Blockers: No Step 7 acceptance blocker remains. License/contribution terms, private security/conduct contacts, plugin marketplace, automatic third-party execution, live provider qualification, and broad external code intake remain explicit deferred or owner-gated preview/release constraints, not concealed extension promises. The project-memory helper `scripts/recent_context.py` referenced by the local memory-governance skill is absent; current summary/log were inspected directly instead.
+- Route change: The first contribution is now a finite candidate-manifest rehearsal that reuses a canonical graph and fails closed on authority widening, rather than asking newcomers to modify plugin installation, provider transport, or runtime internals. This preserves the pre-license contribution boundary while giving developers an executable artifact.
+- Next step: Step 8, `OSS-RELEASE-08`, beginning with an install/release/security/support baseline evidence audit.
+
+### 2026-07-27 - Step 8
+
+- Completed: Published `docs/DEVELOPER_PREVIEW_BASELINE.md` and a deterministic `scripts/run_developer_preview_baseline_check.py` evidence aggregator. The public baseline separates the usable no-key source route, release-identity/staging proof, and isolated Windows update-transaction rehearsal from an unapproved public installer or release claim.
+- Files changed: `docs/DEVELOPER_PREVIEW_BASELINE.md`, `scripts/run_developer_preview_baseline_check.py`, `apps/astrabridge-sidecar/tests/test_developer_preview_baseline.py`, `README.md`, `SECURITY.md`, `docs/RELEASE_CHECKLIST.md`, `docs/OPEN_SOURCE_PRODUCT_POSITIONING_AND_CLAIM_MATRIX.md`, registry/governance/project-summary entry points, `docs/PROJECT_LOG.md`, and this plan. Secret-free aggregate evidence is preserved at `PRIVATE/open-source-productization/validation/step8-preview-baseline-20260727/`.
+- Evidence inspected: `PRIVATE/rr8/step8rr/reports/summary.json` passed release version `0.1.0`, all six binding/staging/updater checks, and two equal 904-file staged inventories. `PRIVATE/wu8/step8wu/windows-update-rehearsal/summary.json` passed the isolated `canary` clean-bundle, update transaction, rollback, and four-scenario recovery matrix. The no-key source evidence remains bounded to its exact local revision and no provider call was made for this step.
+- Validation: The baseline aggregator emitted `demonstrated` source evaluation, `pass` package contract, `pass` update rehearsal, and `blocked` public release with five named owner gates. Focused baseline tests passed 2/2; release-identity tests passed 10/10; governance-script tests passed 14/14; app-hardening secret-scan tests passed 6/6; `python scripts\repo_governance_check.py --repo .` passed with 0 errors and 0 warnings; focused orchestration and app-hardening scans reported 0 findings.
+- Blockers: Public release remains blocked by license/contribution terms, private vulnerability reporting, private conduct reporting, public support/issue triage, and authorized distribution. A first readiness attempt under a deeply nested artifact root hit a Windows `FileNotFoundError` while staging generated Desktop files; the failed artifact is preserved, a short-root retry passed, and the public baseline documents the workaround.
+- Release-owner follow-up: Path-length hardening for `scripts/run_release_readiness_gate.py` remains required before an installer release; use the preserved Step 8 evidence and documented short-root workaround, but do not treat that workaround as published-installer proof.
+- Route change: The release story is now a machine-checked pre-preview baseline with explicit blocked status and owners, rather than a broad checklist that could be mistaken for release authorization.
+- Next step: Step 9, `OSS-QUALITY-09`, beginning with a claim-by-claim public quality and reliability evidence inventory.
+
+### 2026-07-27 - Step 9
+
+- Completed: Added `docs/PUBLIC_QUALITY_RELIABILITY_DOSSIER.md` plus its machine-readable `docs/PUBLIC_QUALITY_RELIABILITY_DOSSIER.json`, deterministic aggregator `scripts/run_public_quality_reliability_dossier.py`, and focused regression test. The dossier exposes seven evidence cards and repeats all four non-pass cards in a failure-first ledger rather than relying on a feature list.
+- Files changed: `docs/PUBLIC_QUALITY_RELIABILITY_DOSSIER.md`, `docs/PUBLIC_QUALITY_RELIABILITY_DOSSIER.json`, `scripts/run_public_quality_reliability_dossier.py`, `apps/astrabridge-sidecar/tests/test_public_quality_reliability_dossier.py`, README/claim-matrix/developer-preview-baseline/registry/governance/project-summary entry points, `docs/PROJECT_LOG.md`, and this plan. Fresh secret-free evidence is preserved under `PRIVATE/qd9/` and the deterministic provider cohort under `PRIVATE/agentic-update-pipeline/runs/qd9-provider-20260727/`.
+- Evidence inspected: Fresh flagship, GUI/code parity, extension-candidate, four-provider cohort, preview-baseline, and app-hardening-scan inputs produced a dossier with 7 cards, 3 positive deterministic cards, and 4 explicit `reduced_authority`, `warning_gated`, or `blocked` cards. The negative ledger includes the four-provider cohort, candidate extension, security/privacy boundary, and package/update baseline. It also records the prior Task Graph HTTP integration hang and Windows deep-artifact-path failure as qualification gaps rather than claiming a broad suite or installer pass.
+- Validation: The actual aggregator rerun passed with `cards=7` and `negative_cards=4`; focused dossier tests passed 2/2. Related source evidence tests passed: flagship 1/1, GUI/code parity 1/1, extension candidate 1/1, provider truth 3/3, provider reference cohort 3/3, preview baseline 2/2, release identity 10/10, app-hardening scan 6/6, and repository-governance checks 14/14. `python scripts\repo_governance_check.py --repo .` passed with 0 errors and 0 warnings; app-hardening and focused orchestration secret scans reported 0 findings.
+- Blockers: The dossier proves no new release or authority state. The same four public non-pass cards remain intentionally visible: external provider routes are reduced-authority, the first extension is warning-gated, public security/support prerequisites are blocked, and public release/distribution is blocked. The broader Task Graph HTTP suite and Windows artifact-path hardening remain qualification gaps owned outside this dossier.
+- Route change: Quality evidence is now a source- and test-checked contract that fails if a release blocker is hidden, rather than a static narrative that could silently drift from current evidence.
+- Next step: Step 10, `OSS-COMMUNITY-10`, beginning with safe repository-host feedback templates and an independently reproducible first-contribution cohort.
+
+### 2026-07-27 - Step 10
+
+- Completed: Added five local GitHub-compatible feedback templates, disabled blank issues, and published `docs/CONTRIBUTOR_FEEDBACK_PROTOCOL.md`. The protocol defines redaction, routing, future-only maintainer response conditions, a lightweight decision-record route, and a finite pre-preview first-contribution cohort.
+- Files changed: `.github/ISSUE_TEMPLATE/config.yml`, five `.github/ISSUE_TEMPLATE/*.md` templates, `examples/contributor-feedback-cohort/`, `scripts/run_contributor_feedback_cohort_rehearsal.py`, `apps/astrabridge-sidecar/tests/test_contributor_feedback_cohort_rehearsal.py`, `docs/CONTRIBUTOR_FEEDBACK_PROTOCOL.md`, `CONTRIBUTING.md`, `README.md`, `docs/DEVELOPER_PREVIEW_BASELINE.md`, `docs/OPEN_SOURCE_FOUNDATION_DECISION_RECORD.md`, the claim matrix, registry/governance/project-summary entry points, `docs/PROJECT_LOG.md`, and this plan. Final secret-free evidence is preserved in `PRIVATE/c10-final-20260727/reports/`.
+- Evidence inspected: The repository initially had only promotion workflows under `.github/` and no issue templates; foundation, security, conduct, preview, extension, quality, and provider evidence all remained pre-license/reduced-authority. The cohort manifest selects three bounded candidates and validates the existing read-only candidate twice in independent roots.
+- Validation: The final provider-free rehearsal passed with 5 templates and 2 independent passes; focused cohort, extension-example, repository-governance, and app-hardening tests passed 2, 1, 14, and 6 tests respectively. `python scripts\repo_governance_check.py --repo .` passed with 0 errors and 0 warnings. Final app-hardening and focused orchestration secret scans reported 0 findings. The scripted plan validator passed before this plan update.
+- Blockers: Public intake remains `pending_public_intake`. A license and contribution terms, configured private vulnerability and conduct-reporting routes, an explicit maintainer/triage owner, repository-host enablement, and authorized distribution still block public preview/release claims. The first app-hardening scan rejected a non-bucketed diagnostic root; it is preserved under `PRIVATE/c10-rerun-20260727/`, and the final evidence was rerun under the governed `reports/` bucket without weakening the scan.
+- Route change: The retained-evidence examples now require a `PRIVATE/.../reports/...` output root, making the cohort compatible with the existing artifact-governance policy instead of relying on a convention not enforced by the validation scan.
+- Next step: Step 11, `OSS-CLOSURE-11`, beginning with the DG-OSS-04 readiness decision and a candid go, dogfood, or pause verdict.
+
+### 2026-07-27 - Step 11
+
+- Completed: Added `docs/DEVELOPER_PREVIEW_READINESS_DECISION.md`, deterministic `scripts/run_developer_preview_readiness_decision.py`, and focused regression coverage. The evaluator binds the quality ledger, fresh preview baseline, contributor cohort, and current policies to DG-OSS-04. It selected mandatory branch C `pause`, preserved a 3-positive/4-non-pass quality scorecard, and names `OSS-FOUNDATION-CLEARANCE-01` as the single owner-gated follow-up.
+- Files changed: `docs/DEVELOPER_PREVIEW_READINESS_DECISION.md`, `scripts/run_developer_preview_readiness_decision.py`, `apps/astrabridge-sidecar/tests/test_developer_preview_readiness_decision.py`, `scripts/run_developer_preview_baseline_check.py`, its focused baseline test, README/preview/quality/foundation/claim-matrix/registry/governance/project-summary entry points, `docs/PROJECT_LOG.md`, and this plan. Final secret-free evidence is preserved under `PRIVATE/c11-final-20260727/reports/`.
+- Evidence inspected: Root license inventory, foundation decision record, current security/conduct/contribution policies, contributor cohort, preview baseline, seven-card quality dossier, provider truth surface, GUI/code proof, extension boundary, release checklist, and the preserved release/update evidence. The current root still has no `LICENSE`, `LICENSE.md`, or `LICENSE.txt`; no private vulnerability or conduct route is configured; contributor intake remains `pending_public_intake`; and public release is explicitly blocked by five named owners.
+- Validation: Fresh baseline evidence reported source `demonstrated`, package/update `pass`, and public release `blocked`; a fresh quality aggregation reported 7 cards / 4 non-pass cards; the readiness evaluator reported `DG-OSS-04 / pause / C`, zero provider calls, and zero network calls. Focused readiness, baseline, quality-dossier, contributor, extension, provider-truth, GUI/code, flagship, and release-identity suites passed 4, 2, 2, 2, 1, 3, 1, 1, and 10 tests. Repository-governance and app-hardening suites passed 14 and 6 tests; governance, app-hardening scan, and focused secret scan finished with 0 errors, warnings, or findings.
+- Blockers: Public developer preview remains paused. Legal license/contribution terms, private vulnerability reporting, private conduct reporting, explicit public triage ownership/host enablement, and authorized distribution are owner-gated prerequisites. Provider routes remain reduced-authority; the extension remains warning-gated; the broader Task Graph HTTP integration and Windows deep-path gaps remain visible qualification limits. These are preserved non-go evidence, not unfinished plan steps.
+- Route change: The preview-baseline aggregator's stale Step 10 wording now acknowledges the prepared templates and correctly treats their activation as a remaining owner gate. Documentation-only hyphenated provider-credential terminology that triggered the broad secret-pattern scanner was changed to equivalent plain-language wording; the final scan confirms no secret-like content.
+- Next step: This plan is complete. Follow only `OSS-FOUNDATION-CLEARANCE-01` in `docs/DEVELOPER_PREVIEW_READINESS_DECISION.md` after explicit owner authority; then run a new readiness evaluation rather than reopening this completed plan.

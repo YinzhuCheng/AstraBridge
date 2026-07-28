@@ -1,0 +1,196 @@
+{
+  "schema_version": "astrabridge-public-quality-reliability-dossier-v1",
+  "status": "current_pre_preview",
+  "last_verified": "2026-07-27",
+  "purpose": "Public claim-level quality evidence. Every card names its evidence class, result date, reproduction sources, owner, limitation, and visible non-pass boundary.",
+  "cards": [
+    {
+      "claim_id": "no_key_source_evaluation",
+      "claim": "A new developer can reach one useful Project -> Task fixture state from the recorded source revision without a provider credential.",
+      "evidence_classification": "deterministic_evidence",
+      "result_state": "demonstrated",
+      "result_date": "2026-07-27",
+      "owners": ["open-source-productization", "task-graph"],
+      "reproduction": {
+        "public_sources": [
+          "docs/NO_KEY_FIRST_TEN_MINUTES.md"
+        ],
+        "artifact_contract": "A clean local source checkout produces an isolated .abproj workspace, fixture-run artifacts, and browser-visible task graph state.",
+        "test_command": "Follow docs/NO_KEY_FIRST_TEN_MINUTES.md exactly; its recorded proof is for the named source revision."
+      },
+      "known_limitations": [
+        "The proof is for one exact source revision and Windows toolchain.",
+        "It does not prove a public installer, live provider/model behavior, tool authority, or coding-route eligibility."
+      ],
+      "failure_visibility": {
+        "status": "bounded",
+        "public_location": "docs/NO_KEY_FIRST_TEN_MINUTES.md#evidence-and-limits",
+        "how_to_detect": "The guide requires an isolated no-key path and names the failed earlier dependency attempt plus the exact non-claims."
+      }
+    },
+    {
+      "claim_id": "flagship_coding_workflow",
+      "claim": "A bounded code-fix/test/review workflow exposes task state, approval-gated write semantics, a deliberate failure, and retry recovery without a provider credential.",
+      "evidence_classification": "deterministic_evidence",
+      "result_state": "pass",
+      "result_date": "2026-07-27",
+      "owners": ["open-source-productization", "task-graph", "astrabridge-sidecar"],
+      "reproduction": {
+        "public_sources": [
+          "docs/FLAGSHIP_CODING_AGENT_REFERENCE.md",
+          "scripts/run_flagship_coding_agent_reference.py",
+          "apps/astrabridge-sidecar/tests/test_flagship_coding_agent_reference.py"
+        ],
+        "artifact_contract": "The runner emits a secret-free evidence packet with dry-run, expected fixture failure, blocked downstream nodes, and recovered fixture run.",
+        "test_command": "python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_flagship_coding_agent_reference.py"
+      },
+      "known_limitations": [
+        "It is not a live provider response, authorized coding route, autonomous code write, tool-authority, or installer proof."
+      ],
+      "failure_visibility": {
+        "status": "expected_failure_exercised",
+        "public_location": "docs/FLAGSHIP_CODING_AGENT_REFERENCE.md#what-it-demonstrates",
+        "how_to_detect": "The evidence packet must contain a failed fixture run before the retry-recovery pass."
+      }
+    },
+    {
+      "claim_id": "four_provider_reference_routes",
+      "claim": "Qwen, DeepSeek, Kimi K3, and GLM route metadata and deterministic adapter contracts are inspectable without being promoted to coding-route authority.",
+      "evidence_classification": "documented_and_deterministic",
+      "result_state": "reduced_authority",
+      "result_date": "2026-07-27",
+      "owners": ["open-source-productization", "provider-compatibility", "provider-adaptation"],
+      "reproduction": {
+        "public_sources": [
+          "docs/PROVIDER_TRUTH_AND_AUTHORITY_SURFACE.md",
+          "apps/astrabridge-sidecar/astrabridge_sidecar/providers/reference_cohort.py",
+          "apps/astrabridge-sidecar/tests/test_provider_truth_authority_surface.py",
+          "apps/astrabridge-sidecar/tests/test_provider_reference_cohort.py"
+        ],
+        "artifact_contract": "The cohort emits a secret-free route report with provider_calls_attempted=false, network_calls_attempted=false, and per-route authority state.",
+        "test_command": "python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_provider_truth_authority_surface.py"
+      },
+      "known_limitations": [
+        "All four current routes remain review_only, no_tools, ask, and reduced_authority.",
+        "Live provider smoke, tool contract, coding-route verification, and default-route eligibility remain deferred."
+      ],
+      "failure_visibility": {
+        "status": "reduced_authority",
+        "public_location": "docs/PROVIDER_TRUTH_AND_AUTHORITY_SURFACE.md#current-reference-route-cards",
+        "how_to_detect": "Each route card shows review_only / reduced_authority and the exact next evidence gate."
+      }
+    },
+    {
+      "claim_id": "gui_code_orchestration_parity",
+      "claim": "One native Code Fix / Test / Review graph round-trips through the GUI/runtime subset with source ownership and approval boundaries preserved.",
+      "evidence_classification": "deterministic_evidence",
+      "result_state": "pass",
+      "result_date": "2026-07-27",
+      "owners": ["open-source-productization", "agent-orchestration", "task-graph", "astrabridge-desktop"],
+      "reproduction": {
+        "public_sources": [
+          "docs/GUI_CODE_ORCHESTRATION_PARITY.md",
+          "scripts/run_gui_code_orchestration_parity.py",
+          "apps/astrabridge-sidecar/tests/test_gui_code_orchestration_parity.py"
+        ],
+        "artifact_contract": "The runner emits source graph, GUI surface, runtime manifest, semantic diff, and secret-free evidence with no_change round-trip status.",
+        "test_command": "python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_gui_code_orchestration_parity.py"
+      },
+      "known_limitations": [
+        "Only the named native JSON graph and supported subset are covered.",
+        "It does not prove universal graph conversion, source-file write-back, live provider behavior, autonomous writes, or tool authority.",
+        "The broader task-graph HTTP API suite previously hung in test_http_api_lists_templates_instantiates_graph_and_updates_node_and_edge; this card claims only the focused parity evidence while the default stability owner retains that integration gap."
+      ],
+      "failure_visibility": {
+        "status": "bounded_with_pending_http_integration_gap",
+        "public_location": "docs/GUI_CODE_ORCHESTRATION_PARITY.md#explicit-boundaries-and-non-claims",
+        "how_to_detect": "Unsupported transformations must report loss or reject; direct source-owned GUI edits are expected to block. The dossier also records the unresolved broader HTTP-suite hang rather than claiming a full suite pass."
+      }
+    },
+    {
+      "claim_id": "first_extension_candidate",
+      "claim": "A newcomer can validate one bounded candidate skill manifest and see authority widening fail closed.",
+      "evidence_classification": "deterministic_evidence",
+      "result_state": "warning_gated",
+      "result_date": "2026-07-27",
+      "owners": ["open-source-productization", "skill-orchestration", "extensions"],
+      "reproduction": {
+        "public_sources": [
+          "docs/EXTENSION_AND_FIRST_CONTRIBUTION_SURFACE.md",
+          "scripts/run_first_contribution_extension_example.py",
+          "apps/astrabridge-sidecar/tests/test_first_contribution_extension_example.py"
+        ],
+        "artifact_contract": "The runner emits lint/compile/dry-run results, lifecycle warnings, and a structured blocked allowlist-widening request without provider, MCP, or agent execution.",
+        "test_command": "python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_first_contribution_extension_example.py"
+      },
+      "known_limitations": [
+        "The example remains experimental candidate status and preserves lifecycle and route warnings.",
+        "It does not enable a plugin, install a skill, qualify a provider, grant tool/write authority, or permit merge-ready external code."
+      ],
+      "failure_visibility": {
+        "status": "warning_gated",
+        "public_location": "docs/EXTENSION_AND_FIRST_CONTRIBUTION_SURFACE.md#the-bounded-first-extension-example",
+        "how_to_detect": "The report records candidate warnings and blocks a request outside the manifest allowlist."
+      }
+    },
+    {
+      "claim_id": "security_and_privacy_boundary",
+      "claim": "AstraBridge's source and preview evidence retain explicit isolation, credential-redaction, and sensitive-reporting boundaries.",
+      "evidence_classification": "current_contract_and_scan",
+      "result_state": "blocked",
+      "result_date": "2026-07-27",
+      "owners": ["security", "open-source-productization", "repository-governance"],
+      "reproduction": {
+        "public_sources": [
+          "SECURITY.md",
+          "CODE_OF_CONDUCT.md",
+          "docs/SECURITY_AND_ISOLATION.md",
+          "docs/DEVELOPER_PREVIEW_BASELINE.md",
+          "scripts/app_hardening_secret_scan.py",
+          "apps/astrabridge-sidecar/tests/test_app_hardening_secret_scan.py"
+        ],
+        "artifact_contract": "The hardening scan reports only aggregate counts and findings; public evidence must remain secret-free.",
+        "test_command": "python scripts/app_hardening_secret_scan.py --repo . --public-doc docs/DEVELOPER_PREVIEW_BASELINE.md"
+      },
+      "known_limitations": [
+        "No private vulnerability-reporting route, supported-version policy, or private conduct-reporting route is configured for a public preview."
+      ],
+      "failure_visibility": {
+        "status": "release_blocked",
+        "public_location": "SECURITY.md#preview-release-gate",
+        "how_to_detect": "The security and conduct policies explicitly state the missing private routes instead of inventing a contact."
+      }
+    },
+    {
+      "claim_id": "package_and_update_baseline",
+      "claim": "Release identity, deterministic staging, and an isolated Windows update transaction can be reproduced locally without being misrepresented as a published installer.",
+      "evidence_classification": "deterministic_evidence",
+      "result_state": "blocked",
+      "result_date": "2026-07-27",
+      "owners": ["release", "open-source-productization", "security"],
+      "reproduction": {
+        "public_sources": [
+          "docs/DEVELOPER_PREVIEW_BASELINE.md",
+          "docs/RELEASE_CHECKLIST.md",
+          "scripts/run_release_readiness_gate.py",
+          "scripts/run_windows_update_rehearsal.py",
+          "scripts/run_developer_preview_baseline_check.py",
+          "apps/astrabridge-sidecar/tests/test_release_identity.py",
+          "apps/astrabridge-sidecar/tests/test_developer_preview_baseline.py"
+        ],
+        "artifact_contract": "The gates emit release-readiness, update-rehearsal, and compact baseline evidence with the public_release result fixed to blocked until owner gates resolve.",
+        "test_command": "python -m unittest discover -s apps/astrabridge-sidecar/tests -p test_release_identity.py"
+      },
+      "known_limitations": [
+        "No public binary, signed distribution, live update service, or supported-version table exists.",
+        "License/contribution terms, private reporting contacts, safe support intake, and authorized distribution remain release blockers.",
+        "Deep Windows artifact roots can exceed the staging path-length limit; use documented short roots until the release owner hardens that path."
+      ],
+      "failure_visibility": {
+        "status": "public_release_blocked",
+        "public_location": "docs/DEVELOPER_PREVIEW_BASELINE.md#explicit-release-blockers-and-owners",
+        "how_to_detect": "The baseline aggregator emits public_release=blocked plus five named owner gates."
+      }
+    }
+  ]
+}

@@ -37,9 +37,8 @@ Do not use file modification time, filename wording, or an old progress paragrap
 | --- | --- | --- | --- |
 | [ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md) | Current default queue | `product-stability-interoperability` | Multi-provider control, external A2A interoperability, GUI/code orchestration parity, signed updates, CI, and release closure. |
 | [CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md](/D:/AstraBridge/PLAN/CAPABILITY_RUNTIME_IMPLEMENTATION_PLAN.md) | Only when the user explicitly requests capability-runtime implementation or advancement | `capability-runtime` | Remaining capability-runtime implementation beginning at its recorded Step 2. |
-| [ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md](/D:/AstraBridge/PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md) | Only when the user explicitly requests AstraBridge open-source developer-product upgrades | `open-source-productization` | Public onboarding, contributor adoption, extension readiness, evidence-qualified positioning, and developer-preview closure. |
 
-These activation conditions do not conflict: both conditional queues are dormant unless the user explicitly invokes their scope, and neither replaces the default stability queue. The prior UI/live-dogfood queue and the completed stability/protocol/runtime plan remain preserved as historical implementation evidence. All other execution plans are `complete` or `superseded` in the registry.
+The capability queue is dormant unless the user explicitly invokes its scope and does not replace the default stability queue. The completed open-source developer-productization plan is preserved as evidence; its public-preview follow-up is the owner-gated [Developer Preview Readiness Decision](DEVELOPER_PREVIEW_READINESS_DECISION.md), not a new active release queue. The prior UI/live-dogfood queue and the completed stability/protocol/runtime plan remain preserved as historical implementation evidence. All other execution plans are `complete` or `superseded` in the registry.
 
 ## Active Policy And Memory
 
@@ -75,6 +74,8 @@ The following are finished records and must not be reopened as active queues:
 - Agent orchestration productization, foundational task graph, canvas dogfood, GUI/runtime handoff, and dynamic workflow productization
 - Multimodal adapter/update implementation
 - Provider/model compatibility foundation, residual-risk repair, capability/reasoning validation, and exhaustive smoke
+- Codex-core multi-provider adaptation upgrade, including the Kimi K3 reference-model record and reduced-authority cohort evidence: `PLAN/ASTRABRIDGE_MULTI_PROVIDER_ADAPTATION_UPGRADE_HANDOFF_PLAN.md`
+- Open-source developer productization and its evidence-bound public-preview pause decision: `PLAN/ASTRABRIDGE_OPEN_SOURCE_DEVELOPER_PRODUCTIZATION_SCRIPTED_HANDOFF_PLAN.md`
 - Agentic update pipeline
 - Skill-first multi-provider agent orchestration, MCP surface, canonical skill-to-graph boundary, and bounded authoring/operator runbooks
 - Capability UI, multimodal drift, and plugin/skill gap snapshots whose findings were consumed by later surface maps, runbooks, or completed implementation
@@ -102,12 +103,34 @@ Reference documents include:
 - runtime rollout, migration, rollback-readback, and maintenance runbooks;
 - Agent Graph contracts, maintenance runbooks, canvas UX targets, internal contracts, and surface maps;
 - capability runtime, automation, kernel, plugin/skill, and provider compatibility contracts or surface maps;
+- the Codex-core multi-provider execution, authority, and route-admission contract produced by the completed provider-adaptation slice;
 - the current open-source foundation decision record for licensing, contribution, security, and maintainer choices;
 - the documented no-provider first-ten-minutes route, its bounded
   current-source fixture evidence, and its clean-clone dependency gate;
+- the developer-preview baseline, which keeps source evaluation and
+  deterministic staging/update rehearsal distinct from public release,
+  security-contact, support, legal, and distribution claims;
+- the DG-OSS-04 developer-preview readiness decision, including its mandatory
+  pause verdict, failure-visible scorecard, public non-claims, and one
+  owner-gated foundation-clearance unit;
+- the public quality and reliability dossier, whose machine-checked cards and
+  negative ledger make reduced-authority, warning-gated, and release-blocked
+  evidence as visible as passing deterministic checks;
 - the flagship deterministic no-provider coding-agent reference, including
   task, approval, artifact, failure, and recovery evidence;
 - the current open-source product positioning and material-claim matrix;
+- the public provider truth and authority surface, separating declared
+  metadata, deterministic checks, reduced-authority routes, deferred smoke,
+  and the stability-handoff boundary;
+- the public native GUI/code orchestration parity reference, including
+  source ownership, deterministic runtime evidence, and explicit one-way
+  transform limits;
+- the public extension and first-contribution surface, including its
+  supported/experimental/internal/deferred classification and bounded
+  provider-free candidate example;
+- the pre-preview contributor feedback protocol, including local secret-safe
+  templates, a finite provider-free cohort rehearsal, routing rules, and a
+  future-only maintainer-response activation condition;
 - interface governance for HTTP, SSE, payload, provider metadata, CLI/launcher, MCP, and compatibility shims;
 - multimodal contracts, official-source pack, exposure gates, maintenance runbook, and rollout/rollback policy;
 - dogfood task pools and evidence summaries;
@@ -154,12 +177,12 @@ When adding or changing a guiding document or execution plan:
 
 ## Current Counts
 
-As verified on 2026-07-27, the registry contains 123 entries:
+As verified on 2026-07-27, the registry contains 132 entries:
 
 | Status | Count |
 | --- | ---: |
-| `active` | 18 |
-| `complete` | 27 |
-| `reference` | 56 |
+| `active` | 17 |
+| `complete` | 29 |
+| `reference` | 64 |
 | `superseded` | 21 |
 | `archived` | 1 |

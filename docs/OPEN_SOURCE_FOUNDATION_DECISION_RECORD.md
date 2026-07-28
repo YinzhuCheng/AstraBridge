@@ -79,7 +79,8 @@ Before a public developer preview, the maintainer must record all of these:
 | `CONTRIBUTING.md` | Present as a transparent preparation guide. | Replace the pre-license code-PR gate with final contribution terms after license selection. |
 | `CODE_OF_CONDUCT.md` | Present as a conduct policy with no invented private contact. | Publish and test a private enforcement route before opening broad contributor intake. |
 | `SECURITY.md` | Present as a pre-preview security policy that explicitly says no private reporting route is configured yet. | Configure a real private reporting route, add its exact instructions, and verify the route before public preview. |
-| `.github/ISSUE_TEMPLATE/` | Not created in this step. | Step 10 owns safe bug, feature, documentation, and first-task templates. |
+| `.github/ISSUE_TEMPLATE/` and [Contributor Feedback Protocol](CONTRIBUTOR_FEEDBACK_PROTOCOL.md) | Prepared as local pre-preview templates with blank issues disabled, explicit redaction prompts, routing rules, and a future-only response expectation. | Do not enable public intake until the license, private security/conduct routes, named triage owner, and repository-host settings are all explicitly verified. |
+| [Developer Preview Readiness Decision](DEVELOPER_PREVIEW_READINESS_DECISION.md) | DG-OSS-04 currently records a mandatory public-preview `pause` verdict. | Complete the named owner-gated foundation and distribution evidence before reconsidering the decision. |
 | Maintainer roster / governance | Not published in this step. | Publish only after the owner decides the named maintainers, review expectations, and contact surface. |
 
 ## Non-Negotiable Safety Rules
