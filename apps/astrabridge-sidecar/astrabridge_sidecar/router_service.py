@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .model_catalog import effective_model_record, known_context_window, model_catalog_entry
-from .providers import classify_runtime_failure, get_provider_profile, resolve_provider_id, summarize_response_diagnostics
+from .providers import classify_runtime_failure, get_provider_profile, resolve_execution_route, resolve_provider_id, summarize_response_diagnostics
 from .providers.transports import (
     ChatCompletionsTransport as RegistryChatCompletionsTransport,
     ProviderTransport as RegistryProviderTransport,
@@ -442,6 +442,8 @@ class RouterService:
         response.close()
         raw = json.loads(body.decode("utf-8") or "{}")
         normalized = adapter.normalize_response(raw, payload)
+        semantic_conformance = self._semantic_conformance(adapter, chosen)
+        semantic_conformance["response_observation"] = adapter.response_semantic_status(normalized)
         diagnostics = summarize_response_diagnostics(normalized)
         self._record(
             "responses_completed",
@@ -453,6 +455,7 @@ class RouterService:
                 "request": redact_sensitive(payload),
                 "upstream_request": redact_sensitive(upstream_payload),
                 "response_diagnostics": diagnostics,
+                "semantic_response_status": semantic_conformance["response_observation"].get("status"),
             },
         )
         return {
@@ -462,9 +465,12 @@ class RouterService:
                 "model": chosen.get("model"),
                 "wire_api": chosen.get("wire_api"),
                 "adapter_profile": chosen.get("adapter_profile"),
+                "execution_backend": chosen.get("execution_backend"),
+                "execution_route_status": chosen.get("execution_route_status"),
             },
             "adapter": adapter.describe(),
             "normalized": normalized,
+            "semantic_conformance": semantic_conformance,
         }
 
     def _resolve_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -481,13 +487,13 @@ class RouterService:
                     continue
                 if str(item.get("id") or "") in {raw_model, canonical_model}:
                     provider = self._provider_by_id(str(item.get("provider") or raw_provider_id))
-                    return {**provider, "model": native_model, "adapter_profile": item.get("adapter_profile")}
+                    return self._route_bound_profile(provider, model=item, native_model=native_model)
         family_match: dict[str, Any] | None = None
         for profile in self._router_profiles():
             if not profile.get("enabled", True):
                 continue
             if str(profile.get("provider_id") or "").strip() == raw_provider_id and str(profile.get("model") or "").strip() == native_model:
-                return profile
+                return self._route_bound_profile(profile, model={}, native_model=native_model)
             if (
                 family_match is None
                 and provider_family
@@ -496,8 +502,53 @@ class RouterService:
             ):
                 family_match = profile
         if family_match is not None:
-            return family_match
+            return self._route_bound_profile(family_match, model={}, native_model=native_model)
         raise RuntimeError(f"No router profile matches model {raw_model}.")
+
+    def _route_bound_profile(
+        self,
+        provider: dict[str, Any],
+        *,
+        model: dict[str, Any],
+        native_model: str,
+    ) -> dict[str, Any]:
+        provider_id = str(provider.get("provider_id") or provider.get("id") or model.get("provider") or "").strip()
+        model_record = {
+            **provider,
+            **model,
+            "id": str(model.get("id") or f"{provider_id}/{native_model}"),
+            "provider": str(model.get("provider") or provider_id),
+            "native_model": str(model.get("native_model") or native_model),
+            "adapter_profile": model.get("adapter_profile") or provider.get("adapter_profile"),
+        }
+        evidence = model.get("execution_route_evidence")
+        if not isinstance(evidence, dict):
+            evidence = provider.get("execution_route_evidence")
+        route = resolve_execution_route(
+            model_record,
+            provider=provider,
+            evidence=dict(evidence) if isinstance(evidence, dict) else None,
+        )
+        driver = dict(route.get("driver") or {})
+        authority = dict(route.get("authority") or {})
+        tool_mode = dict(route.get("tool_mode") or {})
+        return {
+            **provider,
+            "model": native_model,
+            "adapter_profile": model_record.get("adapter_profile"),
+            "configured_execution_backend": str(
+                driver.get("configured_id")
+                or provider.get("execution_backend")
+                or provider.get("runtime_backend")
+                or "app_server"
+            ),
+            "execution_backend": str(driver.get("execution_id") or "preview_review"),
+            "execution_route": route,
+            "execution_route_status": str(driver.get("admission") or "review_only"),
+            "authority_tier": str(authority.get("effective_tier") or "C"),
+            "declared_authority_tier": str(authority.get("declared_tier") or "C"),
+            "tool_mode": str(tool_mode.get("effective") or "review_only"),
+        }
 
     def _router_profiles(self) -> list[dict[str, Any]]:
         if self._router_config is not None:
@@ -514,6 +565,7 @@ class RouterService:
                             "model": item.get("default_model"),
                             "wire_api": item.get("adapter_type"),
                             "adapter_profile": item.get("adapter_profile"),
+                            "execution_backend": item.get("runtime_backend") or item.get("execution_backend"),
                             "env_key": item.get("env_key"),
                             "auth_mode": item.get("auth_mode"),
                             "secret_ref": item.get("auth_key_ref"),
@@ -674,6 +726,8 @@ class RouterService:
             else []
         )
         self._validate_request_shape(profile, payload)
+        self._validate_execution_route_request(profile, payload)
+        adapter.validate_semantic_request(payload)
         upstream_payload = adapter.upstream_payload(payload)
         return profile, adapter, warnings, upstream_payload
 
@@ -691,16 +745,59 @@ class RouterService:
         if provider_family == "kimi":
             self._validate_kimi_request_shape(profile, payload)
 
+    def _validate_execution_route_request(self, profile: dict[str, Any], payload: dict[str, Any]) -> None:
+        """Prevent a review/proposal route from acquiring a tool surface.
+
+        The Router still permits plain-text review requests on an unverified
+        provider route. It must not forward an active tool definition merely
+        because a caller supplied one; that would turn ProviderProfile defaults
+        into implicit execution authority before route evidence exists.
+        """
+
+        tool_mode = str(profile.get("tool_mode") or "review_only").strip().lower()
+        if tool_mode not in {"review_only", "propose_only"}:
+            return
+        tools = payload.get("tools")
+        has_tools = bool(tools) if isinstance(tools, (list, tuple, dict)) else bool(tools)
+        # A provider-specific preview can contain a tool_choice hint without
+        # tool definitions (for example to validate a fixed request shape).
+        # That is not an executable tool surface. Definitions are the boundary
+        # that would let an unverified route issue a callable action.
+        if not has_tools:
+            return
+        admission = str(profile.get("execution_route_status") or "review_only")
+        raise ValueError(
+            f"Execution route is {admission} with {tool_mode} tool policy; "
+            "model-and-endpoint route evidence is required before forwarding tool calls."
+        )
+
     def _validate_kimi_request_shape(self, profile: dict[str, Any], payload: dict[str, Any]) -> None:
         raw_model = str(payload.get("model") or profile.get("model") or "").strip()
         native_model = raw_model.split("/", 1)[1] if "/" in raw_model else raw_model
-        if native_model not in {"kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"}:
+        if native_model not in {"kimi-k3", "kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"}:
             return
         reasoning_effort = self._effective_reasoning_effort(profile, payload)
+        if native_model == "kimi-k3" and reasoning_effort == "off":
+            raise ValueError("kimi-k3 is always-thinking and does not support reasoning effort 'off'; use low, high, or xhigh.")
         if native_model in {"kimi-k2.7-code", "kimi-k2.7-code-highspeed"} and reasoning_effort == "off":
             raise ValueError(f"{native_model} does not support reasoning effort 'off'; use low, medium, high, or xhigh.")
         if _contains_non_data_image_reference(payload.get("input")):
             raise ValueError("Kimi image inputs must use base64 data URLs or localImage paths; remote image URLs are not supported.")
+        if native_model == "kimi-k3":
+            temperature = _optional_float(payload.get("temperature"))
+            if temperature is not None and abs(temperature - 1.0) > 0.000001:
+                raise ValueError("kimi-k3 only supports temperature=1.0; omit the field to use the provider-fixed value.")
+            top_p = _optional_float(payload.get("top_p"))
+            if top_p is not None and abs(top_p - 0.95) > 0.000001:
+                raise ValueError("kimi-k3 only supports top_p=0.95; omit the field to use the provider-fixed value.")
+            n = _optional_int(payload.get("n"))
+            if n is not None and n != 1:
+                raise ValueError("kimi-k3 only supports n=1.")
+            for field in ("presence_penalty", "frequency_penalty"):
+                penalty = _optional_float(payload.get(field))
+                if penalty is not None and abs(penalty) > 0.000001:
+                    raise ValueError(f"kimi-k3 only supports {field}=0; omit the field to use the provider-fixed value.")
+            return
         thinking_restricted = native_model in {"kimi-k2.7-code", "kimi-k2.7-code-highspeed"} or reasoning_effort != "off"
         if not thinking_restricted:
             return
@@ -736,6 +833,9 @@ class RouterService:
             "provider": provider_id,
             "model": payload.get("model"),
             "adapter": adapter.describe(),
+            "execution_route": dict(profile.get("execution_route") or {}),
+            "execution_route_status": str(profile.get("execution_route_status") or "review_only"),
+            "semantic_conformance": self._semantic_conformance(adapter, profile),
             "warnings": warnings,
             "upstream_payload": redact_sensitive(upstream_payload),
             "usage_signal": usage_not_available(
@@ -747,6 +847,27 @@ class RouterService:
                 pricing=self._model_usage_pricing(provider_id, model_id),
             ),
         }
+
+    @staticmethod
+    def _semantic_conformance(adapter: RegistryProviderTransport, profile: dict[str, Any]) -> dict[str, Any]:
+        contract = adapter.semantic_conformance_contract()
+        route_status = str(profile.get("execution_route_status") or "review_only")
+        admitted = route_status in {"verified_non_default", "default_eligible"}
+        route = dict(profile.get("execution_route") or {})
+        evidence = dict(route.get("evidence") or {})
+        contract["execution_route"] = {
+            "status": route_status,
+            "driver": str(profile.get("execution_backend") or "preview_review"),
+            "authority_tier": str(profile.get("authority_tier") or "C"),
+            "evidence_state": str(evidence.get("effective_state") or "documented"),
+            "coding_agent_semantics": "admitted" if admitted else "review_only",
+            "action": (
+                "The route has current coding-route evidence; native tool policy and task admission still apply."
+                if admitted
+                else "Do not treat protocol/text success as coding-agent readiness; record exact model-and-endpoint route evidence first."
+            ),
+        }
+        return contract
 
     def reasoning_warnings(self, payload: dict[str, Any]) -> list[str]:
         reasoning = payload.get("reasoning")
@@ -826,9 +947,13 @@ class RouterService:
         provider_id, model_id = self._provider_and_model_from_payload(payload)
         parsed_preview: dict[str, Any] | None = None
         preview_warnings: list[str] = []
+        semantic_conformance: dict[str, Any] | None = None
         try:
             parsed_preview = self.preview_payload(payload)
             preview_warnings = list(parsed_preview.get("warnings") or [])
+            semantic_conformance = (
+                dict(parsed_preview.get("semantic_conformance") or {}) if isinstance(parsed_preview, dict) else None
+            )
             diagnostics: dict[str, Any] | None = None
             failure_notice: dict[str, Any] | None = None
             response_excerpt = ""
@@ -852,9 +977,19 @@ class RouterService:
             else:
                 completed = self.complete_response(payload)
                 normalized = completed["normalized"]
+                semantic_conformance = dict(completed.get("semantic_conformance") or {})
                 usage = getattr(normalized, "usage", None)
                 diagnostics = summarize_response_diagnostics(normalized, text_limit=1200)
                 response_excerpt = str(diagnostics.get("text_excerpt") or "")[:1200]
+                response_observation = dict(semantic_conformance.get("response_observation") or {})
+                if str(response_observation.get("status") or "") == "blocked":
+                    ok = False
+                    failure_notice = self._failure_notice_payload(
+                        "semantic output is empty: " + str(response_observation.get("action") or "provider response was not semantically usable"),
+                        provider_id=provider_id,
+                        model_id=model_id,
+                    )
+                    response_excerpt = self._failure_excerpt(failure_notice, fallback=response_excerpt)
             usage_reason = None
             if usage is None:
                 usage_reason = "stream_health_usage_not_extracted" if stream and ok else "provider_response_usage_not_reported"
@@ -868,6 +1003,7 @@ class RouterService:
                 "preview": (parsed_preview or {}).get("upstream_payload") or {},
                 "preview_warnings": preview_warnings,
                 "warnings": preview_warnings,
+                "semantic_conformance": semantic_conformance,
                 "response_excerpt": response_excerpt,
                 "response_diagnostics": diagnostics,
                 "usage_signal": normalize_usage_signal(
@@ -903,6 +1039,7 @@ class RouterService:
                 "preview": (parsed_preview or {}).get("upstream_payload") or {},
                 "preview_warnings": preview_warnings,
                 "warnings": preview_warnings,
+                "semantic_conformance": semantic_conformance,
                 "response_excerpt": self._failure_excerpt(failure_notice, fallback=str(exc)[:1200]),
                 "response_diagnostics": None,
                 "failure_notice": failure_notice,

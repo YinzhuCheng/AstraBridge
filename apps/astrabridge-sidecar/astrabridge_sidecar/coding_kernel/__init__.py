@@ -1,12 +1,23 @@
 from .context_budget import (
     CONTEXT_BUDGET_SCHEMA_VERSION,
+    CONTEXT_BUDGET_POLICY_SCHEMA_VERSION,
+    AttachmentModalityEstimate,
     ContextBudgetReport,
     ContextSection,
     ContextSectionEstimate,
     build_context_budget,
     clip_text_to_tokens,
+    estimate_attachment_modality_tokens,
     estimate_text_tokens,
     estimate_tool_schema_tokens,
+    normalize_context_budget_policy,
+    selected_text_by_section,
+)
+from .context_compaction import (
+    CONTEXT_COMPACTION_HANDOFF_SCHEMA_VERSION,
+    NEUTRAL_COMPACTION_SUMMARY_SCHEMA_VERSION,
+    build_context_compaction_handoff_contract,
+    compact_context_compaction_handoff_contract,
 )
 from .edit_executor import EditExecutor, EditRequest, PreparedEdit, available_operations_for_request, request_from_payload
 from .edit_strategy import EditStrategyDecision, classify_edit_size, select_edit_strategy
@@ -23,6 +34,10 @@ from .turn_loop import NativeCodingTurnLoop, NativeTurnResult, RuntimeToolFacade
 __all__ = [
     "CODING_EVENT_SCHEMA_VERSION",
     "CONTEXT_BUDGET_SCHEMA_VERSION",
+    "CONTEXT_BUDGET_POLICY_SCHEMA_VERSION",
+    "CONTEXT_COMPACTION_HANDOFF_SCHEMA_VERSION",
+    "NEUTRAL_COMPACTION_SUMMARY_SCHEMA_VERSION",
+    "AttachmentModalityEstimate",
     "CodingEvent",
     "ContextBudgetReport",
     "ContextSection",
@@ -36,14 +51,19 @@ __all__ = [
     "EditStrategyDecision",
     "available_operations_for_request",
     "build_context_budget",
+    "build_context_compaction_handoff_contract",
     "classify_edit_size",
     "clip_text_to_tokens",
+    "compact_context_compaction_handoff_contract",
     "edit_operation_to_coding_event",
     "estimate_text_tokens",
+    "estimate_attachment_modality_tokens",
     "estimate_tool_schema_tokens",
+    "normalize_context_budget_policy",
     "project_handoff_event_to_coding_events",
     "project_turn_to_coding_events",
     "request_from_payload",
     "select_edit_strategy",
+    "selected_text_by_section",
     "task_refs_from_coding_events",
 ]

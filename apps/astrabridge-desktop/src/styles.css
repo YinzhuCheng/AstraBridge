@@ -6060,6 +6060,82 @@ body.resizing .resize-handle::before {
   width: min(560px, 100%);
 }
 
+.route-admission-dialog {
+  width: min(600px, calc(100vw - 2rem));
+  display: grid;
+  gap: var(--ui-space-control, 0.5rem);
+}
+
+.route-admission-summary {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.route-admission-effective,
+.route-admission-fallback {
+  margin: 0;
+  padding: 0.5rem 0.625rem;
+  border-left: 2px solid var(--stroke);
+  background: color-mix(in srgb, var(--shell-surface) 82%, var(--text) 4%);
+  color: var(--muted);
+  font-size: var(--ui-text-meta, 0.75rem);
+  line-height: 1.45;
+}
+
+.route-admission-reasons {
+  display: grid;
+  gap: 0.36rem;
+  margin: 0;
+  padding-left: 1.2rem;
+  line-height: 1.45;
+}
+
+.route-admission-tag-warning {
+  color: var(--warning, #8a5a00);
+}
+
+.route-admission-tag-danger {
+  color: var(--danger);
+}
+
+.route-admission-actions {
+  margin-top: 0.25rem;
+}
+
+.composer-route-status {
+  max-width: 15rem;
+  overflow: hidden;
+  padding: 0.26rem 0.48rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-route-status-ok {
+  border-color: color-mix(in srgb, var(--success) 48%, var(--line));
+  color: var(--success);
+}
+
+.composer-route-status-info {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
+}
+
+.composer-route-status-warning {
+  border-color: color-mix(in srgb, var(--warning) 52%, var(--line));
+  color: var(--warning);
+}
+
+.composer-route-status-danger {
+  border-color: color-mix(in srgb, var(--danger) 52%, var(--line));
+  color: var(--danger);
+}
+
 .modal-actions-wrap {
   flex-wrap: wrap;
 }

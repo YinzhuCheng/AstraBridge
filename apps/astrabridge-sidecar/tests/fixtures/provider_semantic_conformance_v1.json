@@ -1,0 +1,356 @@
+{
+  "schema_version": "astrabridge-provider-semantic-conformance-v1",
+  "cases": [
+    {
+      "provider_id": "qwen",
+      "model_id": "qwen/qwen3.7-plus",
+      "native_model": "qwen3.7-plus",
+      "adapter": "qwen_responses",
+      "wire_api": "responses",
+      "reasoning_semantics": "enable_thinking",
+      "stream_mode": "provider_passthrough",
+      "image_attachments": "supported",
+      "request": {
+        "model": "qwen/qwen3.7-plus",
+        "instructions": "Return a concise final answer after inspecting the tool result.",
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Inspect README.md."
+              }
+            ]
+          },
+          {
+            "type": "function_call",
+            "id": "call-qwen-read",
+            "call_id": "call-qwen-read",
+            "name": "read_file",
+            "arguments": "{\"path\":\"README.md\"}"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "call-qwen-read",
+            "output": "# AstraBridge"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "read_file",
+              "description": "Read one workspace file.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "reasoning": {
+          "effort": "low"
+        },
+        "stream": true
+      },
+      "upstream_response": {
+        "id": "resp-qwen-conformance",
+        "object": "response",
+        "status": "completed",
+        "output": [
+          {
+            "id": "reasoning-qwen-conformance",
+            "type": "reasoning",
+            "summary": [
+              "Inspecting the supplied tool result."
+            ],
+            "content": [
+              "Inspecting the supplied tool result."
+            ]
+          },
+          {
+            "id": "message-qwen-conformance",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "README.md identifies AstraBridge."
+              }
+            ]
+          },
+          {
+            "id": "function-qwen-conformance",
+            "type": "function_call",
+            "call_id": "call-qwen-next",
+            "name": "read_file",
+            "arguments": "{\"path\":\"PLAN.md\"}"
+          }
+        ]
+      },
+      "expected_text": "README.md identifies AstraBridge.",
+      "expected_tool_name": "read_file",
+      "error_message": "429 rate limit retry-after: 0",
+      "expected_error_category": "rate_limit"
+    },
+    {
+      "provider_id": "deepseek",
+      "model_id": "deepseek/deepseek-v4-pro",
+      "native_model": "deepseek-v4-pro",
+      "adapter": "deepseek_chat",
+      "wire_api": "chat",
+      "reasoning_semantics": "thinking_and_reasoning_effort",
+      "stream_mode": "normalized_chat_sse",
+      "image_attachments": "blocked",
+      "request": {
+        "model": "deepseek/deepseek-v4-pro",
+        "instructions": "Return a concise final answer after inspecting the tool result.",
+        "input": [
+          {
+            "role": "user",
+            "content": "Inspect README.md."
+          },
+          {
+            "type": "function_call",
+            "call_id": "call-deepseek-read",
+            "name": "read_file",
+            "arguments": "{\"path\":\"README.md\"}"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "call-deepseek-read",
+            "output": "# AstraBridge"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "read_file",
+              "description": "Read one workspace file.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "reasoning": {
+          "effort": "low"
+        },
+        "stream": true
+      },
+      "upstream_response": {
+        "id": "chat-deepseek-conformance",
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": "README.md identifies AstraBridge.",
+              "reasoning_content": "Inspecting the supplied tool result.",
+              "tool_calls": [
+                {
+                  "id": "call-deepseek-next",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"PLAN.md\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "expected_text": "README.md identifies AstraBridge.",
+      "expected_tool_name": "read_file",
+      "error_message": "429 rate limit retry-after: 0",
+      "expected_error_category": "rate_limit"
+    },
+    {
+      "provider_id": "kimi",
+      "model_id": "kimi/kimi-k3",
+      "native_model": "kimi-k3",
+      "adapter": "kimi_chat",
+      "wire_api": "chat",
+      "reasoning_semantics": "kimi_k3_reasoning_effort_or_chat_thinking",
+      "stream_mode": "normalized_chat_sse",
+      "image_attachments": "supported",
+      "request": {
+        "model": "kimi/kimi-k3",
+        "instructions": "Return a concise final answer after inspecting the tool result.",
+        "input": [
+          {
+            "role": "user",
+            "content": "Inspect README.md."
+          },
+          {
+            "type": "function_call",
+            "call_id": "call-kimi-read",
+            "name": "read_file",
+            "arguments": "{\"path\":\"README.md\"}"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "call-kimi-read",
+            "output": "# AstraBridge"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "read_file",
+              "description": "Read one workspace file.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "reasoning": {
+          "effort": "low"
+        },
+        "stream": true
+      },
+      "upstream_response": {
+        "id": "chat-kimi-conformance",
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": "README.md identifies AstraBridge.",
+              "reasoning_content": "Inspecting the supplied tool result.",
+              "tool_calls": [
+                {
+                  "id": "call-kimi-next",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"PLAN.md\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "expected_text": "README.md identifies AstraBridge.",
+      "expected_tool_name": "read_file",
+      "error_message": "429 rate limit retry-after: 0",
+      "expected_error_category": "rate_limit"
+    },
+    {
+      "provider_id": "glm",
+      "model_id": "glm/glm-5.2",
+      "native_model": "glm-5.2",
+      "adapter": "glm_chat",
+      "wire_api": "chat",
+      "reasoning_semantics": "reasoning_effort",
+      "stream_mode": "normalized_chat_sse",
+      "image_attachments": "blocked",
+      "request": {
+        "model": "glm/glm-5.2",
+        "instructions": "Return a concise final answer after inspecting the tool result.",
+        "input": [
+          {
+            "role": "user",
+            "content": "Inspect README.md."
+          },
+          {
+            "type": "function_call",
+            "call_id": "call-glm-read",
+            "name": "read_file",
+            "arguments": "{\"path\":\"README.md\"}"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "call-glm-read",
+            "output": "# AstraBridge"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "read_file",
+              "description": "Read one workspace file.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "reasoning": {
+          "effort": "low"
+        },
+        "stream": true
+      },
+      "upstream_response": {
+        "id": "chat-glm-conformance",
+        "choices": [
+          {
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": "README.md identifies AstraBridge.",
+              "reasoning_content": "Inspecting the supplied tool result.",
+              "tool_calls": [
+                {
+                  "id": "call-glm-next",
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"PLAN.md\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "expected_text": "README.md identifies AstraBridge.",
+      "expected_tool_name": "read_file",
+      "error_message": "429 rate limit retry-after: 0",
+      "expected_error_category": "rate_limit"
+    }
+  ]
+}

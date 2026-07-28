@@ -170,7 +170,7 @@ unit rather than expanding documentation indefinitely.
 - Completed steps: Step 0, Create Durable Hardening Handoff Plan
 - Current step: Step 1, Freeze Product Boundary And Stability Closure Contract
 - Next step: Step 1, Freeze Product Boundary And Stability Closure Contract
-- Last updated: 2026-07-19
+- Last updated: 2026-07-27
 
 ## Current Work Unit
 
@@ -180,17 +180,20 @@ unit rather than expanding documentation indefinitely.
 - Inputs:
   `PLAN/ASTRABRIDGE_PRODUCT_STABILITY_AND_INTEROPERABILITY_EXECUTION_PLAN.md`,
   `PLAN/AGENT_ORCHESTRATION_GRAPH_CONTRACT.md`,
+  `PLAN/ASTRABRIDGE_MULTI_PROVIDER_ADAPTATION_UPGRADE_HANDOFF_PLAN.md`,
   `docs/PROVIDER_MODEL_COMPATIBILITY_RUNBOOK.md`,
-  `docs/AGENTIC_UPDATE_PIPELINE_RUNBOOK.md`, and the relevant sidecar/desktop
-  owner files.
+  `docs/AGENTIC_UPDATE_PIPELINE_RUNBOOK.md`,
+  `PRIVATE/provider-compatibility/reports/step13-adaptation-upgrade-closure-20260727.md`,
+  and the relevant sidecar/desktop owner files.
 - Expected output: A short contract artifact or plan update that locks the
   non-negotiable boundaries for MCP, internal envelopes, A2A, canonical graph
   ownership, provider downgrade semantics, and upgrade tracks.
 - Acceptance check: A future agent can point to one explicit source that says
   what must not be violated while hardening the product.
 - Status: queued
-- Next action: Draft and land the stability closure contract, then update this
-  plan to Step 2.
+- Next action: Draft and land the stability closure contract using the incoming
+  adaptation evidence as a hard provider-truthfulness constraint, then update
+  this plan to Step 2.
 
 ## Execution Steps
 
@@ -511,3 +514,27 @@ Status: not started
   internal agent-delivery ABI, explicit A2A boundary, one canonical graph, and
   track-separated rollback-safe upgrades.
 - Next step: Step 1, Freeze Product Boundary And Stability Closure Contract.
+
+### 2026-07-27 - Incoming Adaptation Upgrade Closure Evidence
+
+- Evidence received:
+  `PLAN/ASTRABRIDGE_MULTI_PROVIDER_ADAPTATION_UPGRADE_HANDOFF_PLAN.md`,
+  `PRIVATE/provider-compatibility/reports/step13-adaptation-upgrade-closure-20260727.md`,
+  `PRIVATE/agentic-update-pipeline/runs/step13-provider-capability-closure-20260727-r2/`,
+  and
+  `PRIVATE/agentic-update-pipeline/runs/step13-four-provider-reference-cohort-closure-20260727-r1/`.
+- What it proves: the adaptation slice now has exact-route contracts for
+  Qwen, DeepSeek, Kimi K3, and GLM; deterministic conformance, neutral
+  handoff, receipt, fallback, context, route-promotion, and runtime-admission
+  regressions pass; the provider capability gate passes without network or
+  provider calls; and Kimi K3 follows the shared promotion lifecycle without
+  a Kimi-only bypass.
+- Truthfulness boundary: the four selected external routes remain
+  `documented` / `review_only` / `reduced_authority` until route-specific
+  adapter dry-run and explicitly authorized provider smoke evidence exist.
+  This incoming evidence does not verify, recommend, default, or automatically
+  fallback any external route.
+- Parent impact: no parent numbered step is marked complete by this handoff.
+  Step 1 remains the exact next work unit and must encode the above downgrade,
+  evidence-binding, and supervised-promotion constraints in the product
+  closure contract before broader hardening work resumes.

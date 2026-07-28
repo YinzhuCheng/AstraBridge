@@ -10,6 +10,9 @@ class DeepSeekChatTransport(ChatCompletionsTransport):
     def describe(self) -> str:
         return "deepseek_chat"
 
+    def reasoning_control_semantics(self) -> str:
+        return "thinking_and_reasoning_effort"
+
     def build_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         upstream_payload = super().build_request(payload)
         merged_messages = self._merge_reasoning_content_into_assistant_messages(list(upstream_payload.get("messages") or []))

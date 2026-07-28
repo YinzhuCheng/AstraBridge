@@ -634,7 +634,11 @@ def _render_report_md(
             )
         lines.append("")
     lines.extend(["### Lane Exposure Projection", ""])
-    for entry in list(matrix.get("entries") or [])[:80]:
+    # The matrix is deliberately bounded by the selected catalog, so omitting
+    # a tail slice from the operator report can hide a real model/capability
+    # lane even though it exists in the machine-readable artifact. Keep the
+    # Markdown projection complete as well as the JSON matrix.
+    for entry in list(matrix.get("entries") or []):
         lane = dict(dict(entry.get("runtime_normalized_contract") or {}).get("multimodal_lane") or {})
         lines.append(
             f"- `{entry.get('entry_id')}` capability=`{lane.get('capability_id')}` exposure=`{lane.get('exposure_state')}` "

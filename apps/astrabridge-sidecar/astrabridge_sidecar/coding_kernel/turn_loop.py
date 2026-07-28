@@ -9,6 +9,7 @@ from ..providers.ir import NormalizedResponse, ToolCall
 from ..providers.tooling.model_authority import AuthorityAssessment, assess_model_authority
 from ..providers.tooling import summarize_tool_output, tool_output_char_limit
 from ..security import redact_sensitive
+from ..tool_action_ledger import ToolActionValidationError, is_side_effecting_tool, validate_side_effect_arguments
 
 
 NATIVE_KERNEL_SYSTEM_PROMPT = (
@@ -155,7 +156,17 @@ class RuntimeToolFacade:
         return definitions
 
     def execute(self, call: ToolCall) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
-        arguments = self._tool_arguments(call)
+        try:
+            arguments = self._tool_arguments(call)
+        except (ToolActionValidationError, ValueError) as exc:
+            result = {
+                "ok": False,
+                "status": "repairable",
+                "repairable": True,
+                "error": str(exc),
+                "tool_event_verified": True,
+            }
+            return {}, result, [], self._tool_item(call, {}, result)
         name = call.name
         if name == "review_status":
             result = self._project_tools.review_status()
@@ -170,17 +181,17 @@ class RuntimeToolFacade:
         elif name == "create_checkpoint":
             if self._authority.tier != "A":
                 raise ValueError("The selected model is not allowed to create checkpoints through the native kernel.")
-            result = self._project_tools.create_checkpoint(arguments)
+            result = self._project_tools.create_checkpoint(self._checkpoint_payload(arguments, tool_call_id=call.id))
         elif name == "read_file":
             result = self._project_tools.read_file(str(arguments.get("path") or ""))
         elif name == "run_command":
             if self._authority.tier != "A":
                 raise ValueError("The selected model is not allowed to execute commands through the native kernel.")
-            result = self._project_tools.run_command(self._command_payload(arguments))
+            result = self._project_tools.run_command(self._command_payload(arguments, tool_call_id=call.id))
         elif name == "run_tests":
             if self._authority.tier != "A":
                 raise ValueError("The selected model is not allowed to execute test commands through the native kernel.")
-            result = self._project_tools.run_tests(self._command_payload(arguments))
+            result = self._project_tools.run_tests(self._command_payload(arguments, tool_call_id=call.id))
         elif name == "edit_preview":
             if self._authority.tier not in {"A", "B"}:
                 raise ValueError("The selected model is not allowed to preview edits through the native kernel.")
@@ -188,7 +199,7 @@ class RuntimeToolFacade:
         elif name == "edit_apply":
             if self._authority.tier != "A":
                 raise ValueError("The selected model is not allowed to apply workspace edits through the native kernel.")
-            result = self._project_tools.edit_apply(self._edit_payload(arguments))
+            result = self._project_tools.edit_apply(self._edit_payload(arguments, tool_call_id=call.id))
         else:
             raise ValueError(f"Unsupported native kernel tool: {name}")
         tool_item = self._tool_item(call, arguments, result)
@@ -225,6 +236,8 @@ class RuntimeToolFacade:
             payload = {
                 "save": result.get("save") or result.get("manifest"),
                 "path": result.get("path"),
+                "error": result.get("error"),
+                "action_receipt": self._safe_action_receipt(result),
             }
             return json.dumps(redact_sensitive(payload), ensure_ascii=False)
         if name in {"run_command", "run_tests"}:
@@ -237,6 +250,8 @@ class RuntimeToolFacade:
                 "exit_code": result.get("exit_code"),
                 "approved": result.get("approved"),
                 "output": output,
+                "error": result.get("error"),
+                "action_receipt": self._safe_action_receipt(result),
             }
             return json.dumps(redact_sensitive(payload), ensure_ascii=False)
         if name == "review_diff":
@@ -259,6 +274,8 @@ class RuntimeToolFacade:
                 "preview": preview,
                 "checkpoint": result.get("checkpoint"),
                 "verification": result.get("verification"),
+                "error": result.get("error"),
+                "action_receipt": self._safe_action_receipt(result),
             }
             return json.dumps(redact_sensitive(payload), ensure_ascii=False)
         payload = redact_sensitive(result)
@@ -302,20 +319,27 @@ class RuntimeToolFacade:
             raise ValueError(f"Invalid native tool arguments for {call.name}: {exc}") from exc
         if not isinstance(parsed, dict):
             raise ValueError(f"Native tool arguments for {call.name} must be a JSON object.")
+        if is_side_effecting_tool(call.name):
+            return validate_side_effect_arguments(call.name, parsed)
         return parsed
 
-    def _edit_payload(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _edit_payload(self, arguments: dict[str, Any], *, tool_call_id: str | None = None) -> dict[str, Any]:
         payload = {
             "profile_id": self._profile_id,
             "provider_id": self._provider_id,
             "model": self._model_id,
+            "thread_id": self._thread_id,
+            "turn_id": self._turn_id,
         }
-        for key in ("path", "content", "search", "replace", "count"):
-            if key in arguments and arguments.get(key) not in {None, ""}:
+        if tool_call_id:
+            payload["tool_call_id"] = tool_call_id
+            payload["action_source"] = "native_model_tool"
+        for key in ("path", "content", "search", "replace", "count", "edits", "operation"):
+            if key in arguments and arguments.get(key) is not None and arguments.get(key) != "":
                 payload[key] = arguments.get(key)
         return payload
 
-    def _command_payload(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _command_payload(self, arguments: dict[str, Any], *, tool_call_id: str) -> dict[str, Any]:
         payload = {
             "profile_id": self._profile_id,
             "provider_id": self._provider_id,
@@ -323,10 +347,27 @@ class RuntimeToolFacade:
             "permission_mode": self._permission_mode,
             "thread_id": self._thread_id,
             "turn_id": self._turn_id,
+            "tool_call_id": tool_call_id,
+            "action_source": "native_model_tool",
         }
         for key in ("command", "cwd", "timeout_seconds"):
-            if key in arguments and arguments.get(key) not in {None, ""}:
+            if key in arguments and arguments.get(key) is not None and arguments.get(key) != "":
                 payload[key] = arguments.get(key)
+        return payload
+
+    def _checkpoint_payload(self, arguments: dict[str, Any], *, tool_call_id: str) -> dict[str, Any]:
+        payload = {
+            "profile_id": self._profile_id,
+            "provider_id": self._provider_id,
+            "model": self._model_id,
+            "permission_mode": self._permission_mode,
+            "thread_id": self._thread_id,
+            "turn_id": self._turn_id,
+            "tool_call_id": tool_call_id,
+            "action_source": "native_model_tool",
+        }
+        if "description" in arguments and arguments.get("description") not in {None, ""}:
+            payload["description"] = arguments.get("description")
         return payload
 
     def _tool_item(self, call: ToolCall, arguments: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -373,12 +414,15 @@ class RuntimeToolFacade:
             preview = dict(result.get("preview") or {})
             summary["diff_excerpt"] = str(preview.get("diff") or "")[:800]
             summary["changed"] = preview.get("changed")
+        receipt = self._safe_action_receipt(result)
+        if receipt is not None:
+            summary["action_receipt"] = receipt
         return {
             "type": "dynamicToolCall",
             "id": f"tool-{call.id}",
             "namespace": "astrabridge_native",
             "tool": call.name,
-            "status": "completed",
+            "status": "repairable" if result.get("repairable") else "completed",
             "success": bool(result.get("ok", True)),
             "arguments": redact_sensitive(arguments),
             "codingEventPayload": redact_sensitive(summary),
@@ -390,9 +434,23 @@ class RuntimeToolFacade:
             ],
         }
 
+    def _safe_action_receipt(self, result: dict[str, Any]) -> dict[str, Any] | None:
+        receipt = result.get("action_receipt")
+        if not isinstance(receipt, dict):
+            return None
+        return {
+            "receipt_id": receipt.get("receipt_id"),
+            "idempotency_key": receipt.get("idempotency_key"),
+            "state": receipt.get("state"),
+            "outcome": receipt.get("outcome"),
+            "recovery_required": bool(receipt.get("recovery_required")),
+        }
+
     def _extra_items_for_result(self, call: ToolCall, result: dict[str, Any]) -> list[dict[str, Any]]:
         if call.name not in {"edit_preview", "edit_apply"}:
             if call.name in {"run_command", "run_tests"}:
+                if result.get("repairable"):
+                    return []
                 return [
                     {
                         "type": "commandExecution",
@@ -451,6 +509,7 @@ class NativeCodingTurnLoop:
         permission_mode: str,
         collaboration_mode: str | None,
         context_mode: str,
+        prepared_inputs: list[dict[str, Any]] | None = None,
     ) -> NativeTurnResult:
         provider_id = str(profile.get("provider_id") or "openai").strip() or "openai"
         model_id = str(model or profile.get("model") or "").strip()
@@ -475,7 +534,7 @@ class NativeCodingTurnLoop:
         started_at = int(__import__("time").time() * 1000)
         existing_thread = dict(self._runtime._read_native_thread(thread_id) or {})  # noqa: SLF001
         history = list(existing_thread.get("native_history") or [])
-        user_inputs = self._runtime._build_user_inputs(  # noqa: SLF001
+        user_inputs = list(prepared_inputs) if prepared_inputs is not None else self._runtime._build_user_inputs(  # noqa: SLF001
             text,
             attachments,
             thread_id=thread_id,

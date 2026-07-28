@@ -10,6 +10,7 @@ from ..security import redact_sensitive
 from .artifacts import ensure_agentic_update_run_layout
 from .contracts import assert_secret_free_agentic_update_payload, validate_update_proposal
 from .provider_smoke import provider_smoke_report_blocks_promotion, run_agentic_update_provider_smoke
+from .route_promotion import RouteSmokeRunner, route_promotion_dry_run, run_route_promotion_provider_smoke
 
 
 AGENTIC_UPDATE_VALIDATION_REPORT_SCHEMA_VERSION = "astrabridge-agentic-update-validation-report-v1"
@@ -51,6 +52,31 @@ GATE_COMMANDS: dict[str, dict[str, Any]] = {
     "capability_smoke": {
         "kind": "provider_smoke",
         "command": ["POST", "/api/runtime/capability-smoke"],
+        "cwd": ".",
+    },
+    "execution_route_dry_run": {
+        "kind": "route_dry_run",
+        "command": ["internal", "execution-route-dry-run"],
+        "cwd": ".",
+    },
+    "execution_route_provider_smoke": {
+        "kind": "route_provider_smoke",
+        "command": ["POST", "/api/runtime/execution-route-smoke"],
+        "cwd": ".",
+    },
+    "execution_route_tool_contract": {
+        "kind": "route_provider_smoke",
+        "command": ["POST", "/api/runtime/execution-route-tool-contract-smoke"],
+        "cwd": ".",
+    },
+    "execution_route_coding_smoke": {
+        "kind": "route_provider_smoke",
+        "command": ["POST", "/api/runtime/execution-route-coding-smoke"],
+        "cwd": ".",
+    },
+    "execution_route_default_review": {
+        "kind": "route_provider_smoke",
+        "command": ["POST", "/api/runtime/execution-route-default-review"],
         "cwd": ".",
     },
     "codex_kernel_probe": {
@@ -133,6 +159,11 @@ VALIDATION_REQUIREMENT_GATES = {
     "codex_kernel_smoke": "codex_kernel_smoke",
     "manual_review": "manual_review",
     "rollback_plan_review": "rollback_plan_review",
+    "execution_route_dry_run": "execution_route_dry_run",
+    "execution_route_provider_smoke": "execution_route_provider_smoke",
+    "execution_route_tool_contract": "execution_route_tool_contract",
+    "execution_route_coding_smoke": "execution_route_coding_smoke",
+    "execution_route_default_review": "execution_route_default_review",
 }
 
 CommandRunner = Callable[[list[str], Path], dict[str, Any]]
@@ -152,6 +183,7 @@ def run_agentic_update_validation_gates(
     capability_route_records: dict[str, Any] | None = None,
     provider_runtime: Any | None = None,
     credential_status: dict[str, Any] | None = None,
+    route_smoke_runner: RouteSmokeRunner | None = None,
 ) -> dict[str, Any]:
     workspace = Path(workspace_root).resolve()
     layout = ensure_agentic_update_run_layout(workspace, run_id)
@@ -181,6 +213,7 @@ def run_agentic_update_validation_gates(
                 capability_route_records=capability_route_records,
                 provider_runtime=provider_runtime,
                 credential_status=credential_status,
+                route_smoke_runner=route_smoke_runner,
             )
         )
     next_fix_targets = _next_fix_targets(gates)
@@ -245,6 +278,7 @@ def _run_gate(
     capability_route_records: dict[str, Any] | None,
     provider_runtime: Any | None,
     credential_status: dict[str, Any] | None,
+    route_smoke_runner: RouteSmokeRunner | None,
 ) -> dict[str, Any]:
     definition = dict(GATE_COMMANDS[gate_id])
     gate = {
@@ -260,12 +294,25 @@ def _run_gate(
         "reasons": [],
         "warnings": [],
         "blocks_promotion": True,
+        "evidence_mode": "not_run",
     }
     if gate_id in fixture_results:
         return _gate_from_fixture_result(gate, fixture_results[gate_id])
     if mode == "dry_run":
-        gate.update({"status": "skipped", "reasons": ["dry_run_validation_does_not_execute_gates"], "blocks_promotion": True})
+        gate.update({"status": "skipped", "reasons": ["dry_run_validation_does_not_execute_gates"], "blocks_promotion": True, "evidence_mode": "dry_run"})
         return gate
+    if definition["kind"] == "route_dry_run":
+        return _run_route_dry_run_gate(workspace=workspace, run_id=run_id, proposal=proposal, gate=gate)
+    if definition["kind"] == "route_provider_smoke":
+        return _run_route_provider_smoke_gate(
+            workspace=workspace,
+            run_id=run_id,
+            proposal=proposal,
+            gate=gate,
+            mode=mode,
+            provider_authorized=provider_authorized,
+            route_smoke_runner=route_smoke_runner,
+        )
     if definition["kind"] == "internal":
         return _run_internal_gate(gate, proposal)
     if definition["kind"] == "manual":
@@ -276,7 +323,7 @@ def _run_gate(
             gate.update({"status": "skipped", "reasons": ["dry_run_validation_does_not_execute_gates"], "blocks_promotion": True})
             return gate
         if mode == "provider_backed" and not provider_authorized:
-            gate.update({"status": "skipped", "reasons": ["provider_calls_not_authorized"], "blocks_promotion": True})
+            gate.update({"status": "skipped", "reasons": ["provider_calls_not_authorized"], "blocks_promotion": True, "evidence_mode": "dry_run"})
             return gate
         smoke_mode = "provider" if mode == "provider_backed" else "dry_run"
         return _run_provider_smoke_gate(
@@ -292,7 +339,7 @@ def _run_gate(
             credential_status=credential_status,
         )
     if not execute_commands:
-        gate.update({"status": "skipped", "reasons": ["command_execution_disabled"], "blocks_promotion": True})
+        gate.update({"status": "skipped", "reasons": ["command_execution_disabled"], "blocks_promotion": True, "evidence_mode": "not_run"})
         return gate
     return _run_command_gate(workspace, gate, command_runner=command_runner)
 
@@ -333,6 +380,7 @@ def _run_provider_smoke_gate(
             "reasons": _smoke_gate_reasons(report, blocks=blocks),
             "warnings": list(report.get("warnings") or []),
             "blocks_promotion": blocks,
+            "evidence_mode": "provider" if smoke_mode == "provider" else "dry_run",
             "provider_smoke_report": {
                 "schema_version": report.get("schema_version"),
                 "run_id": report.get("run_id"),
@@ -344,6 +392,114 @@ def _run_provider_smoke_gate(
         }
     )
     return gate
+
+
+def _run_route_dry_run_gate(
+    *,
+    workspace: Path,
+    run_id: str,
+    proposal: dict[str, Any],
+    gate: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        report = route_promotion_dry_run(proposal)
+    except Exception as exc:  # noqa: BLE001 - malformed route records are validation evidence.
+        gate.update(
+            {
+                "status": "fail",
+                "reasons": [_safe_text(str(exc) or exc.__class__.__name__)],
+                "blocks_promotion": True,
+                "evidence_mode": "internal",
+            }
+        )
+        return gate
+    artifact_path = _write_route_promotion_gate_artifact(workspace, run_id, str(gate.get("gate_id") or "execution_route_dry_run"), report)
+    blocks = str(report.get("status") or "") != "pass"
+    gate.update(
+        {
+            "status": "pass" if not blocks else "fail",
+            "reasons": _route_promotion_gate_reasons(report),
+            "blocks_promotion": blocks,
+            "evidence_mode": "internal",
+            "route_promotion_report": {
+                "schema_version": report.get("schema_version"),
+                "kind": report.get("kind"),
+                "status": report.get("status"),
+                "record_count": len(list(report.get("record_results") or [])),
+                "artifact_path": str(artifact_path),
+            },
+        }
+    )
+    return gate
+
+
+def _run_route_provider_smoke_gate(
+    *,
+    workspace: Path,
+    run_id: str,
+    proposal: dict[str, Any],
+    gate: dict[str, Any],
+    mode: str,
+    provider_authorized: bool,
+    route_smoke_runner: RouteSmokeRunner | None,
+) -> dict[str, Any]:
+    gate_id = str(gate.get("gate_id") or "execution_route_provider_smoke")
+    if mode != "provider_backed":
+        gate.update(
+            {
+                "status": "skipped",
+                "reasons": ["route_provider_smoke_requires_provider_backed_validation"],
+                "blocks_promotion": True,
+                "evidence_mode": "dry_run",
+            }
+        )
+        return gate
+    report = run_route_promotion_provider_smoke(
+        proposal,
+        gate_id=gate_id,
+        allow_provider_calls=provider_authorized,
+        route_smoke_runner=route_smoke_runner,
+    )
+    artifact_path = _write_route_promotion_gate_artifact(workspace, run_id, gate_id, report)
+    blocks = str(report.get("status") or "") != "pass"
+    gate.update(
+        {
+            "status": "pass" if not blocks else ("skipped" if not provider_authorized else "blocked"),
+            "reasons": _route_promotion_gate_reasons(report),
+            "warnings": list(report.get("warnings") or []),
+            "blocks_promotion": blocks,
+            "evidence_mode": "provider" if bool(report.get("provider_calls_attempted")) else "dry_run",
+            "route_promotion_report": {
+                "schema_version": report.get("schema_version"),
+                "kind": report.get("kind"),
+                "status": report.get("status"),
+                "record_count": len(list(report.get("record_results") or [])),
+                "artifact_path": str(artifact_path),
+            },
+        }
+    )
+    return gate
+
+
+def _write_route_promotion_gate_artifact(workspace: Path, run_id: str, gate_id: str, report: dict[str, Any]) -> Path:
+    safe_gate_id = "".join(character if character.isalnum() or character in {"-", "_", "."} else "-" for character in gate_id)
+    artifact_path = ensure_agentic_update_run_layout(workspace, run_id)["subdirectories"]["route-promotion"]
+    path = Path(artifact_path) / "validation" / f"{safe_gate_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    assert_secret_free_agentic_update_payload(report, label="agentic_update_route_promotion_validation")
+    write_json(path, report)
+    return path
+
+
+def _route_promotion_gate_reasons(report: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    for result in list(report.get("record_results") or []):
+        if not isinstance(result, dict):
+            continue
+        if str(result.get("status") or "") == "pass":
+            continue
+        reasons.extend(_safe_text(str(item)) for item in list(result.get("reasons") or []) if str(item).strip())
+    return _dedupe(reasons)
 
 
 def _smoke_gate_status(report: dict[str, Any], *, blocks: bool) -> str:
@@ -384,7 +540,7 @@ def _run_internal_gate(gate: dict[str, Any], proposal: dict[str, Any]) -> dict[s
     except Exception as exc:  # noqa: BLE001 - validation reports failures as data.
         gate.update({"status": "fail", "reasons": [_safe_text(str(exc) or exc.__class__.__name__)], "blocks_promotion": True})
         return gate
-    gate.update({"status": "pass", "blocks_promotion": False})
+    gate.update({"status": "pass", "blocks_promotion": False, "evidence_mode": "internal"})
     return gate
 
 
@@ -404,6 +560,7 @@ def _run_command_gate(workspace: Path, gate: dict[str, Any], *, command_runner: 
             "stderr_excerpt": _safe_text(str(result.get("stderr") or "")),
             "status": "pass" if exit_code == 0 else "fail",
             "blocks_promotion": exit_code != 0,
+            "evidence_mode": "command",
         }
     )
     if exit_code != 0:
@@ -425,6 +582,7 @@ def _gate_from_fixture_result(gate: dict[str, Any], value: Any) -> dict[str, Any
             "reasons": [_safe_text(str(item)) for item in list(payload.get("reasons") or [])],
             "warnings": [_safe_text(str(item)) for item in list(payload.get("warnings") or [])],
             "blocks_promotion": bool(payload.get("blocks_promotion", status in {"fail", "blocked", "partial"})),
+            "evidence_mode": "fixture",
         }
     )
     return gate
@@ -509,6 +667,10 @@ def _next_action_for_gate(gate_id: str, reasons: list[str]) -> str:
         return "Run provider compatibility smoke after explicit provider-call authorization."
     if gate_id == "capability_smoke":
         return "Run capability smoke after explicit provider-call authorization."
+    if gate_id == "execution_route_dry_run":
+        return "Fix the route subject or evidence binding, then rerun the secret-free route dry-run."
+    if gate_id in {"execution_route_provider_smoke", "execution_route_tool_contract", "execution_route_coding_smoke", "execution_route_default_review"}:
+        return "Run the exact route-bound provider smoke after explicit authorization and attach the returned evidence references."
     if gate_id == "manual_review":
         return "Complete manual review and attach approval evidence before promotion."
     return "Inspect the validation report and rerun after resolving the recorded reason."
@@ -558,12 +720,15 @@ def _update_proposal_validation(proposal_path: Path, report: dict[str, Any]) -> 
     proposal["validation_result"] = {
         "schema_version": "astrabridge-agentic-update-validation-result-v1",
         "status": report["status"],
+        "mode": report.get("mode"),
         "gates": [
             {
                 "gate_id": gate.get("gate_id"),
                 "status": gate.get("status"),
                 "blocks_promotion": gate.get("blocks_promotion"),
+                "evidence_mode": gate.get("evidence_mode"),
                 "reasons": list(gate.get("reasons") or []),
+                "route_promotion_report": dict(gate.get("route_promotion_report") or {}),
             }
             for gate in list(report.get("gates") or [])
         ],

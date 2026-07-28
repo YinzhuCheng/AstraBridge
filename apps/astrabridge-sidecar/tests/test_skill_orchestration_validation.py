@@ -43,6 +43,13 @@ PARAMETERS = {
         "smoke_cases": ["catalog"],
         "promotion_owner": "owner",
     },
+    "agentic-update-pipeline": {
+        "update_goal": "Discover official provider changes and produce proposal-only evidence.",
+        "provider_ids": ["qwen", "deepseek", "kimi", "glm"],
+        "model_ids": ["qwen3.7-plus", "deepseek-v4-pro", "kimi-k3", "glm-5.2"],
+        "smoke_cases": ["provider-free proposal validation"],
+        "promotion_owner": "manual-review",
+    },
     "astrabridge-multimodal-capability-adapter": {
         "task_goal": "Adapt one image request.",
         "capability_id": "vision.analyze",
@@ -87,13 +94,13 @@ class SkillOrchestrationValidationTests(unittest.TestCase):
         self.assertEqual(dry_run["checks"]["dry_run"]["status"], "pass")
         self.assertIn("Graph digest", render_skill_orchestration_report_markdown(lint))
 
-    def test_provider_smoke_dry_run_preserves_existing_manual_gate_blocker(self) -> None:
+    def test_provider_smoke_dry_run_accepts_long_lived_manual_gate_without_executing_it(self) -> None:
         report = dry_run_skill_orchestration(
             "astrabridge-provider-update-smoke",
             PARAMETERS["astrabridge-provider-update-smoke"],
         )
-        self.assertEqual(report["status"], "blocked")
-        self.assertTrue(any("timeout" in item.lower() for item in report["blockers"]))
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["blockers"], [])
         self.assertEqual(report["resolution"]["provenance"]["live_provider_calls"], 0)
 
     def test_missing_unknown_and_secret_parameters_fail_closed_without_echoing_values(self) -> None:

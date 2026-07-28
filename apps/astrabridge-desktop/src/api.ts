@@ -80,6 +80,7 @@ import type {
   RuntimeEnvironment,
   RuntimeEvent,
   RuntimeModal,
+  RuntimeRouteAdmission,
   RuntimeSupervisorState,
   AgentOrchestrationGraphExportResponse,
   AgentOrchestrationGraphImportResponse,
@@ -1547,8 +1548,10 @@ export const api = {
   llmManagerSaveUserProfile: (payload: { username?: string; display_name?: string; avatar_path?: string }) =>
     jsonRequest<{ profile: NonNullable<LlmManagerSession["profile"]>; session: LlmManagerSession }>("/api/llm-manager/users/profile", payload),
   llmManagerKeys: () => request<LlmManagerKeysResponse>("/api/llm-manager/keys"),
-  llmManagerSaveKey: (payload: { key_id?: string; provider_id: string; label: string; env_key?: string; secret: string; enabled?: boolean; make_default?: boolean }) =>
-    jsonRequest<{ key: LlmManagerKeysResponse["keys"][number]; keys: LlmManagerKeysResponse["keys"] }>("/api/llm-manager/keys/save", payload),
+  llmManagerSaveKey: (payload: { key_id?: string; provider_id: string; label: string; env_key?: string; platform_id?: string; secret: string; enabled?: boolean; make_default?: boolean }) =>
+    jsonRequest<{ key: LlmManagerKeysResponse["keys"][number]; keys: LlmManagerKeysResponse["keys"]; platform?: Record<string, string> | null }>("/api/llm-manager/keys/save", payload),
+  llmManagerBindKeyPlatform: (payload: { provider_id: string; key_id?: string; platform_id: string }) =>
+    jsonRequest<{ key: LlmManagerKeysResponse["keys"][number]; keys: LlmManagerKeysResponse["keys"]; platform: Record<string, string> }>("/api/llm-manager/keys/platform", payload),
   llmManagerDeleteKey: (keyId: string) => jsonRequest<LlmManagerKeysResponse & { deleted: string }>("/api/llm-manager/keys/delete", { key_id: keyId }),
   llmManagerTestKey: (payload: { provider_id?: string; key_id?: string; model_id?: string; stream?: boolean }) =>
     jsonRequest<{ ok: boolean; result: RouterTestResult; key: LlmManagerKeysResponse["keys"][number]; keys: LlmManagerKeysResponse["keys"] }>("/api/llm-manager/keys/test", payload),
@@ -1725,6 +1728,7 @@ export const api = {
     task_id?: string;
     name?: string;
     operation_id?: string;
+    confirm_route_degradation?: boolean;
   }) => jsonRequest<ThreadReadResponse>("/api/runtime/threads/create", payload).then(normalizeThreadReadResponse),
   beginThreadCreate: (payload: {
     profile_id: string;
@@ -1733,6 +1737,7 @@ export const api = {
     permission_mode: PermissionMode;
     name?: string;
     operation_id: string;
+    confirm_route_degradation?: boolean;
   }) =>
     jsonRequest<ThreadCreateRecoveryResponse>("/api/runtime/threads/create/start", payload, { timeoutMs: THREAD_CREATE_RECEIPT_TIMEOUT_MS }).then((response) => ({
       ...response,
@@ -1752,6 +1757,7 @@ export const api = {
     effort?: string;
     permission_mode: PermissionMode;
     name?: string;
+    confirm_route_degradation?: boolean;
   }) => jsonRequest<ThreadReadResponse>("/api/runtime/threads/fork", payload).then(normalizeThreadReadResponse),
   renameThread: (threadId: string, name: string, profileId?: string) =>
     jsonRequest<{ thread: { thread_id: string; name: string } }>("/api/runtime/threads/rename", {
@@ -1796,7 +1802,21 @@ export const api = {
     collaboration_mode?: CollaborationMode;
     context_mode?: ContextMode;
     execution_policy?: TurnExecutionPolicy;
+    confirm_route_degradation?: boolean;
   }) => jsonRequest<TurnStartResponse>("/api/runtime/turns/start", payload, { timeoutMs: 120000 }),
+  runtimeRouteAdmission: (payload: {
+    thread_id?: string;
+    profile_id?: string;
+    model?: string;
+    effort?: string;
+    permission_mode?: PermissionMode;
+    collaboration_mode?: CollaborationMode;
+    context_mode?: ContextMode;
+    execution_policy?: TurnExecutionPolicy;
+    attachments?: AttachmentDraft[];
+    confirm_route_degradation?: boolean;
+    operation?: "turn_start" | "thread_create" | "thread_fork";
+  }) => jsonRequest<RuntimeRouteAdmission>("/api/runtime/route-admission", payload),
   interruptTurn: (threadId: string, turnId: string, profileId?: string) =>
     jsonRequest<{ interrupt: unknown }>("/api/runtime/turns/interrupt", {
       thread_id: threadId,

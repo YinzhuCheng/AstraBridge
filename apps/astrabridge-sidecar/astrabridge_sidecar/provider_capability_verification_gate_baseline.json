@@ -1,6 +1,6 @@
 {
   "schema_version": "astrabridge-provider-capability-verification-gate-v1",
-  "updated_at": "2026-07-06T15:00:00+09:00",
+  "updated_at": "2026-07-27T00:00:00+09:00",
   "notes": [
     "This baseline records the currently accepted dry-run non-pass cases for the provider capability verification gate.",
     "Unexpected preview blockers or new conflicting capability cases should fail the gate.",
@@ -16,6 +16,11 @@
       "case_id": "preview-kimi-kimi-k2.7-code-highspeed-off_probe",
       "allowed_statuses": ["blocked"],
       "note": "Kimi highspeed code models do not currently support an off reasoning-effort probe."
+    },
+    {
+      "case_id": "preview-kimi-kimi-k3-off_probe",
+      "allowed_statuses": ["blocked"],
+      "note": "Kimi K3 is always-thinking and rejects the off reasoning-effort probe."
     }
   ],
   "allowed_problem_capability_cases": [

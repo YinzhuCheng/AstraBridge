@@ -1,6 +1,6 @@
 from typing import Any
 
-from .base import ChatCompletionsTransport, ProviderTransport, ResponsesTransport
+from .base import ChatCompletionsTransport, ProviderTransport, ResponsesTransport, SEMANTIC_CONFORMANCE_SCHEMA_VERSION
 from .deepseek import DeepSeekChatTransport
 from .moonshot_kimi import KimiChatTransport
 from .openai_chat import OpenAIChatTransport
@@ -40,6 +40,7 @@ __all__ = [
     "ProviderTransport",
     "QwenResponsesTransport",
     "ResponsesTransport",
+    "SEMANTIC_CONFORMANCE_SCHEMA_VERSION",
     "WIRE_API_FALLBACK_TRANSPORTS",
     "transport_class_for_profile",
 ]

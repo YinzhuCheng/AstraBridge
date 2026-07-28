@@ -31,6 +31,7 @@ class CapabilityRegistryTests(unittest.TestCase):
         self.assertIn("qwen3-vl-plus", qwen_models)
         self.assertIn("kimi-k2.6", kimi_models)
         self.assertIn("kimi-k2.7-code", kimi_models)
+        self.assertIn("kimi-k3", kimi_models)
         self.assertIn("image", qwen_models["qwen3.7-plus"]["input_modalities"])
         self.assertEqual(qwen_models["qwen3.7-plus"]["source"], "catalog_default_model")
         self.assertEqual(qwen_models["qwen3-vl-plus"]["source"], "catalog_model")

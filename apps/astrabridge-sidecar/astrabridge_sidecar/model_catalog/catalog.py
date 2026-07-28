@@ -85,6 +85,7 @@ CONFIGURED_MODEL_RUNTIME_OVERRIDE_FIELDS = {
     "effective_context_window_percent",
     "auto_compact_token_limit",
     "tool_output_token_limit",
+    "context_budget_policy",
     "temperature_default",
     "temperature_ui_min",
     "temperature_ui_max",
@@ -444,6 +445,13 @@ def resolved_runtime_provider_contract_fields(model: dict[str, Any]) -> dict[str
     web_capabilities = resolved_web_capability_fields(model, mcp_fallback_to_smoke=True)
     workflow_contract = resolved_workflow_contract_fields(model, modalities_default=",".join(input_modalities))
     context_compaction_support = dict(model.get("context_compaction_support") or {})
+    context_budget_policy = dict(model.get("context_budget_policy") or {})
+    advertised_context_window_status = str(context_budget_policy.get("advertised_context_window_status") or "advertised").strip().lower()
+    if advertised_context_window_status not in {"advertised", "verified", "unknown"}:
+        advertised_context_window_status = "advertised"
+    endpoint_budget_status = str(context_budget_policy.get("endpoint_overhead_status") or "conservative").strip().lower()
+    if endpoint_budget_status not in {"verified", "conservative", "unknown"}:
+        endpoint_budget_status = "conservative"
     manual_compact_status = str(context_compaction_support.get("manual_compact") or WORKFLOW_CONTRACT_DEFAULTS["manual_compact"])
     auto_compact_status = str(context_compaction_support.get("auto_compact") or WORKFLOW_CONTRACT_DEFAULTS["auto_compact"])
     compact_summary_quality_status = str(
@@ -515,6 +523,9 @@ def resolved_runtime_provider_contract_fields(model: dict[str, Any]) -> dict[str
             "effective_context_budget_tokens": effective_context_budget_tokens,
             "auto_compact_token_limit": auto_compact_token_limit,
             "tool_output_token_limit": tool_output_token_limit,
+            "advertised_context_window_status": advertised_context_window_status,
+            "verified_usable_coding_context_tokens": None,
+            "usable_coding_context_status": "requires_endpoint_preflight",
         },
         "capability_metadata": {
             "reasoning_effort": {
@@ -550,6 +561,8 @@ def resolved_runtime_provider_contract_fields(model: dict[str, Any]) -> dict[str
             },
             "context_window": {
                 "declared_context_window": context_window,
+                "advertised_context_window_tokens": context_window,
+                "advertised_context_window_status": advertised_context_window_status,
                 "effective_context_window_percent": effective_context_window_percent,
                 "effective_context_budget_tokens": effective_context_budget_tokens,
                 "auto_compact_token_limit": auto_compact_token_limit,
@@ -566,6 +579,19 @@ def resolved_runtime_provider_contract_fields(model: dict[str, Any]) -> dict[str
                 "preflight_budgeting_status": "budgeted_before_send",
                 "automatic_request_truncation": False,
                 "provider_rejection_category": "context_window_limit",
+                "endpoint_budget_status": endpoint_budget_status,
+                "verified_usable_coding_context_tokens": None,
+                "usable_coding_context_status": "requires_endpoint_preflight",
+                "context_budget_policy": {
+                    "schema_version": str(context_budget_policy.get("schema_version") or "astrabridge-context-budget-policy-v1"),
+                    "endpoint_protocol_overhead_tokens": _optional_positive_int(
+                        context_budget_policy.get("endpoint_protocol_overhead_tokens")
+                    ),
+                    "output_reserve_tokens": _optional_positive_int(context_budget_policy.get("output_reserve_tokens")),
+                    "reasoning_artifact_policy": str(
+                        context_budget_policy.get("reasoning_artifact_policy") or "neutral_summary_only"
+                    ),
+                },
             },
             "vision": {
                 "input_modalities": input_modalities,
@@ -724,6 +750,36 @@ def model_catalog_entry(
         configured_model,
         require_image_input_verified=True,
     )
+    execution_route = dict(configured_model.get("execution_route") or {})
+    execution_driver = dict(execution_route.get("driver") or {})
+    execution_authority = dict(execution_route.get("authority") or {})
+    execution_evidence = dict(execution_route.get("evidence") or {})
+    execution_route_default_eligible = bool(execution_route.get("default_route_eligible"))
+    execution_route_blockers = _unique_strings(
+        [
+            *[str(item).strip() for item in list(execution_evidence.get("reasons") or []) if str(item or "").strip()],
+            *([] if execution_route_default_eligible else ["execution_route_not_default_eligible"]),
+        ]
+    )
+    execution_warning = str(configured_model.get("execution_route_warning") or "").strip()
+    if execution_warning and execution_warning not in ui_warnings:
+        ui_warnings.append(execution_warning)
+    effective_default_route_verified = bool(default_route.get("verified", False)) and execution_route_default_eligible
+    effective_default_multimodal_route_verified = (
+        bool(default_multimodal_route.get("verified", False)) and execution_route_default_eligible
+    )
+    effective_default_route_blockers = _unique_strings(
+        [
+            *[str(item).strip() for item in list(default_route.get("reasons") or []) if str(item or "").strip()],
+            *execution_route_blockers,
+        ]
+    )
+    effective_default_multimodal_route_blockers = _unique_strings(
+        [
+            *[str(item).strip() for item in list(default_multimodal_route.get("reasons") or []) if str(item or "").strip()],
+            *execution_route_blockers,
+        ]
+    )
     web_capabilities = resolved_web_capability_fields(configured_model)
     runtime_provider_contract = resolved_runtime_provider_contract_fields(
         {
@@ -809,6 +865,16 @@ def model_catalog_entry(
         "ui_warnings": ui_warnings,
         "authority_tier": authority.tier,
         "authority_reason": authority.reason,
+        "execution_route": execution_route,
+        "execution_route_status": str(execution_driver.get("admission") or "review_only"),
+        "execution_route_driver": str(execution_driver.get("execution_id") or "preview_review"),
+        "execution_route_configured_driver": str(execution_driver.get("configured_id") or "app_server"),
+        "execution_route_authority_tier": str(execution_authority.get("effective_tier") or "C"),
+        "execution_route_declared_authority_tier": str(execution_authority.get("declared_tier") or authority.tier),
+        "execution_route_evidence_state": str(execution_evidence.get("effective_state") or "documented"),
+        "execution_route_verification_status": str(execution_evidence.get("verification_status") or "missing"),
+        "execution_route_blockers": execution_route_blockers,
+        "execution_route_default_eligible": execution_route_default_eligible,
         "parallel_tool_call_status": authority.parallel_tool_call_status,
         "command_execution_status": authority.command_execution_status,
         "command_execution_note": authority.command_execution_note,
@@ -831,14 +897,14 @@ def model_catalog_entry(
         "last_verified_at": configured_model.get("last_verified_at"),
         "verification_notes": configured_model.get("verification_notes") or "",
         "catalog_version": configured_model.get("catalog_version"),
-        "default_route_verified": bool(default_route.get("verified", False)),
-        "default_route_status": str(default_route.get("status") or "warning_gated"),
-        "default_route_blockers": list(default_route.get("reasons") or []),
-        "default_multimodal_route_verified": bool(default_multimodal_route.get("verified", False)),
-        "default_multimodal_route_status": str(default_multimodal_route.get("status") or "warning_gated"),
-        "default_multimodal_route_blockers": list(default_multimodal_route.get("reasons") or []),
-        "recommended": bool(configured_model.get("recommended", False)) and bool(default_route.get("verified", False)),
-        "default_for_provider": bool(configured_model.get("default_for_provider", False)) and bool(default_route.get("verified", False)),
+        "default_route_verified": effective_default_route_verified,
+        "default_route_status": "verified" if effective_default_route_verified else "warning_gated",
+        "default_route_blockers": effective_default_route_blockers,
+        "default_multimodal_route_verified": effective_default_multimodal_route_verified,
+        "default_multimodal_route_status": "verified" if effective_default_multimodal_route_verified else "warning_gated",
+        "default_multimodal_route_blockers": effective_default_multimodal_route_blockers,
+        "recommended": bool(configured_model.get("recommended", False)) and effective_default_route_verified,
+        "default_for_provider": bool(configured_model.get("default_for_provider", False)) and effective_default_route_verified,
         "deprecated": bool(configured_model.get("deprecated", False)),
         "deprecated_after": configured_model.get("deprecated_after"),
         "confidence": configured_model.get("confidence"),
@@ -998,6 +1064,14 @@ def _optional_positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return result
 
 
 def _provider_model_sort_key(item: dict[str, Any]) -> tuple[int, int, int]:

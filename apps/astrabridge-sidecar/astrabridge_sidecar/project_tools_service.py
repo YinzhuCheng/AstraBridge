@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .common import WORKSPACE_STATE_DIRNAME, now_iso, path_for_host
+from .common import WORKSPACE_STATE_DIRNAME, new_id, now_iso, path_for_host
 from .coding_kernel import (
     EditExecutor,
     available_operations_for_request,
@@ -20,6 +20,11 @@ from .coding_kernel import (
 from .providers import get_provider_profile
 from .providers.ir import NormalizedResponse, ToolCall
 from .security import classify_command, redact_sensitive, resolve_under
+from .tool_action_ledger import (
+    ToolActionReceiptLedger,
+    reject_unvalidated_raw_wrapper,
+    validate_side_effect_arguments,
+)
 
 
 TEXT_EXTENSIONS = {
@@ -93,6 +98,7 @@ class ProjectToolsService:
         self._profiles = profiles
         self._router_config = router_config
         self._task_conversation = task_conversation
+        self._tool_action_ledgers: dict[str, ToolActionReceiptLedger] = {}
 
     def review_status(self) -> dict[str, Any]:
         root = self._workspace_root()
@@ -247,8 +253,23 @@ class ProjectToolsService:
     def create_checkpoint(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._checkpoints is None:
             raise ValueError("Checkpoint service is not available.")
-        request = dict(payload or {})
+        request = self._materialize_tool_action_payload(dict(payload or {}))
+        root = self._workspace_root()
         context = self._edit_context(request, target_exists=False)
+        action_arguments = self._side_effect_arguments("create_checkpoint", request)
+        ledger, envelope, authorized, authorization_reason = self._tool_action_envelope(
+            root=root,
+            tool_name="create_checkpoint",
+            action_arguments=action_arguments,
+            payload=request,
+            context=context,
+        )
+        if not authorized:
+            receipt = ledger.record_terminal(envelope, reason=authorization_reason)
+            return self._blocked_tool_action_result(authorization_reason, receipt)
+        admission = ledger.admit(envelope)
+        if admission["decision"] != "execute":
+            return self._checkpoint_receipt_result(admission)
         thread_name = "Current thread"
         if self._tasks is not None:
             active = self._tasks.active_provider_thread(include_missing_fallback=True) or {}
@@ -260,34 +281,50 @@ class ProjectToolsService:
             "provider": context.get("provider_id") or "",
             "model": context.get("model_id") or "",
         }
-        response = self._checkpoints.create(save_payload, system=bool(request.get("system")))
-        manifest = (response.get("save") or response.get("manifest") or response) if isinstance(response, dict) else {}
-        if isinstance(manifest, dict) and self._tasks is not None:
-            try:
-                self._tasks.record_checkpoint(manifest)
-                self._tasks.record_coding_events(
-                    [
-                        {
-                            "event_id": f"checkpoint:{manifest.get('save_id') or 'unknown'}",
-                            "task_id": context.get("task_id"),
-                            "visible_thread_id": context.get("visible_thread_id"),
-                            "execution_thread_id": context.get("execution_thread_id"),
-                            "provider_id": context.get("provider_id"),
-                            "model_id": context.get("model_id"),
-                            "event_type": "checkpoint_created",
-                            "timestamp": manifest.get("created_at") or now_iso(),
-                            "payload": {
-                                "save_id": manifest.get("save_id"),
-                                "description": manifest.get("description") or manifest.get("default_description"),
-                            },
-                            "redaction_status": "secret_free",
-                            "source": "sidecar",
-                        }
-                    ]
-                )
-            except Exception:
-                pass
-        return response
+        try:
+            response = self._checkpoints.create(save_payload, system=bool(request.get("system")))
+            manifest = (response.get("save") or response.get("manifest") or response) if isinstance(response, dict) else {}
+            if isinstance(manifest, dict) and self._tasks is not None:
+                try:
+                    self._tasks.record_checkpoint(manifest)
+                    self._tasks.record_coding_events(
+                        [
+                            {
+                                "event_id": f"checkpoint:{manifest.get('save_id') or 'unknown'}",
+                                "task_id": context.get("task_id"),
+                                "visible_thread_id": context.get("visible_thread_id"),
+                                "execution_thread_id": context.get("execution_thread_id"),
+                                "provider_id": context.get("provider_id"),
+                                "model_id": context.get("model_id"),
+                                "event_type": "checkpoint_created",
+                                "timestamp": manifest.get("created_at") or now_iso(),
+                                "payload": {
+                                    "save_id": manifest.get("save_id"),
+                                    "description": manifest.get("description") or manifest.get("default_description"),
+                                },
+                                "redaction_status": "secret_free",
+                                "source": "sidecar",
+                            }
+                        ]
+                    )
+                except Exception:
+                    pass
+            result = {
+                "ok": True,
+                "status": "completed",
+                "applied": True,
+                "checkpoint_save_id": (manifest.get("save_id") if isinstance(manifest, dict) else None),
+            }
+            receipt = ledger.complete(envelope, result=result)
+            output = dict(response) if isinstance(response, dict) else {"save": manifest}
+            output.update({"ok": True, "status": "completed", "action_receipt": receipt})
+            return output
+        except Exception:
+            ledger.interrupt(
+                envelope,
+                reason="Checkpoint creation was interrupted after action admission; effect status is unknown.",
+            )
+            raise
 
     def prepare_release_workflow_demo(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         root = self._workspace_root()
@@ -600,8 +637,214 @@ class ProjectToolsService:
     def _workspace_root(self) -> Path:
         return self._projects.require_workspace_root().resolve()
 
+    def tool_action_receipt(self, idempotency_key: str) -> dict[str, Any] | None:
+        """Return the durable, secret-free receipt for a side-effect action."""
+
+        return self._tool_action_ledger(self._workspace_root()).receipt(idempotency_key)
+
+    def tool_action_receipts_for_lineage(
+        self,
+        *,
+        task_id: str | None = None,
+        visible_thread_id: str | None = None,
+        execution_thread_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Expose the ledger's narrow retry/handoff admission view."""
+
+        return self._tool_action_ledger(self._workspace_root()).receipt_references_for_lineage(
+            task_id=task_id,
+            visible_thread_id=visible_thread_id,
+            execution_thread_id=execution_thread_id,
+            turn_id=turn_id,
+        )
+
+    def resolve_tool_action_recovery(self, idempotency_key: str, *, resolution: str) -> dict[str, Any]:
+        """Record an explicit recovery decision before replaying an interrupted action."""
+
+        return self._tool_action_ledger(self._workspace_root()).resolve_recovery(
+            idempotency_key,
+            resolution=resolution,
+        )
+
+    def _side_effect_arguments(self, tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        # Context fields such as profile, thread, and permission mode are
+        # trusted service metadata, not executable tool arguments. Reject the
+        # repair wrapper before selecting the strict action schema fields.
+        reject_unvalidated_raw_wrapper(payload, tool_name=tool_name)
+        fields_by_tool = {
+            "create_checkpoint": ("description",),
+            "edit_apply": ("path", "content", "search", "replace", "count", "edits", "operation"),
+            "run_command": ("command", "cwd", "timeout_seconds"),
+            "run_tests": ("command", "cwd", "timeout_seconds"),
+        }
+        fields = fields_by_tool.get(tool_name)
+        if fields is None:
+            raise ValueError(f"Unsupported side-effect tool: {tool_name}")
+        arguments = {field: payload[field] for field in fields if field in payload}
+        return validate_side_effect_arguments(tool_name, arguments)
+
+    def _materialize_tool_action_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Give one direct request a stable local call id without mutating it."""
+
+        request = dict(payload)
+        if not str(request.get("tool_call_id") or request.get("call_id") or "").strip():
+            request["tool_call_id"] = str(request.get("idempotency_key") or new_id("ui-action"))
+        return request
+
+    def _tool_action_ledger(self, root: Path) -> ToolActionReceiptLedger:
+        key = str(root.resolve())
+        ledger = self._tool_action_ledgers.get(key)
+        if ledger is None:
+            ledger = ToolActionReceiptLedger(root)
+            self._tool_action_ledgers[key] = ledger
+        return ledger
+
+    def _tool_action_envelope(
+        self,
+        *,
+        root: Path,
+        tool_name: str,
+        action_arguments: dict[str, Any],
+        payload: dict[str, Any],
+        context: dict[str, Any],
+        authority_decision: str | None = None,
+        authority_reason: str | None = None,
+    ) -> tuple[ToolActionReceiptLedger, dict[str, Any], bool, str]:
+        source = self._tool_action_source(payload)
+        tier = str((context.get("model_record") or {}).get("authority_tier") or "unknown").strip().upper()
+        tier = tier if tier in {"A", "B", "C", "D"} else "unknown"
+        authorized = source != "native_model_tool" or tier == "A"
+        denied_reason = "" if authorized else "Selected model lacks tier-A native tool authority."
+        decision = authority_decision or ("native_tool_authorized" if source == "native_model_tool" else "user_direct_authorized")
+        if not authorized:
+            decision = "authority_denied"
+        authority = {
+            "tier": tier,
+            "decision": decision,
+            "permission_mode": context.get("permission_mode") or payload.get("permission_mode") or "auto",
+            "reason": authority_reason or denied_reason or None,
+        }
+        ledger = self._tool_action_ledger(root)
+        envelope = ledger.build_envelope(
+            tool_name=tool_name,
+            arguments=action_arguments,
+            lineage=self._tool_action_lineage(payload, context),
+            authority=authority,
+            workspace=self._tool_action_workspace(root),
+            idempotency_key=str(payload.get("idempotency_key") or "") or None,
+            source=source,
+        )
+        return ledger, envelope, authorized, denied_reason
+
+    def _tool_action_source(self, payload: dict[str, Any]) -> str:
+        return "native_model_tool" if str(payload.get("action_source") or "").strip() == "native_model_tool" else "user_direct"
+
+    def _tool_action_lineage(self, payload: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        tool_call_id = str(payload.get("tool_call_id") or payload.get("call_id") or "").strip()
+        if not tool_call_id:
+            # A direct user/API request is a new intent unless it supplies an
+            # explicit idempotency key. Model calls always carry a call id.
+            tool_call_id = str(payload.get("idempotency_key") or new_id("ui-action"))
+        return {
+            "task_id": context.get("task_id"),
+            "visible_thread_id": context.get("visible_thread_id") or payload.get("thread_id"),
+            "execution_thread_id": context.get("execution_thread_id") or payload.get("thread_id"),
+            "turn_id": context.get("turn_id") or payload.get("turn_id"),
+            "tool_call_id": tool_call_id,
+        }
+
+    def _tool_action_workspace(self, root: Path) -> dict[str, Any]:
+        head = self._run(["git", "-C", str(root), "rev-parse", "HEAD"], timeout=5)
+        status = self._run(
+            ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all", "--", "."],
+            timeout=8,
+        )
+        # Git output can include file names. Keep only a digest in the receipt.
+        workspace_basis = "\n".join(
+            [
+                str(head.get("stdout") or "").strip(),
+                str(status.get("stdout") or ""),
+                "head-ok" if head.get("ok") else "head-unavailable",
+                "status-ok" if status.get("ok") else "status-unavailable",
+            ]
+        )
+        checkpoint_version = "none"
+        if self._checkpoints is not None:
+            try:
+                saves = list((self._checkpoints.list_saves() or {}).get("saves") or [])
+                checkpoint_version = str((saves[0] or {}).get("save_id") or "none") if saves else "none"
+            except Exception:
+                checkpoint_version = "unavailable"
+        return {
+            "workspace_version": hashlib.sha256(workspace_basis.encode("utf-8")).hexdigest(),
+            "checkpoint_version": checkpoint_version,
+        }
+
+    def _blocked_tool_action_result(self, reason: str, receipt: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": reason,
+            "tool_event_verified": True,
+            "action_receipt": receipt,
+        }
+
+    def _admitted_receipt_result(self, admission: dict[str, Any], *, base: dict[str, Any]) -> dict[str, Any]:
+        decision = str(admission.get("decision") or "")
+        receipt = dict(admission.get("receipt") or {})
+        if decision == "recovery_required":
+            return {
+                **base,
+                "ok": False,
+                "status": "recovery_required",
+                "error": "The previous action outcome is unknown. Resolve its receipt before retrying.",
+                "already_executed": False,
+                "tool_event_verified": True,
+                "action_receipt": receipt,
+            }
+        result = dict(receipt.get("result") or {})
+        return {
+            **base,
+            "ok": bool(result.get("ok")),
+            "status": "duplicate",
+            "already_executed": True,
+            "tool_event_verified": True,
+            "action_receipt": receipt,
+            "receipt_result": result,
+        }
+
+    def _checkpoint_receipt_result(self, admission: dict[str, Any]) -> dict[str, Any]:
+        receipt = dict(admission.get("receipt") or {})
+        result = dict(receipt.get("result") or {})
+        checkpoint_save_id = result.get("checkpoint_save_id")
+        base = {
+            "save": {"save_id": checkpoint_save_id} if checkpoint_save_id else {},
+            "path": None,
+        }
+        return self._admitted_receipt_result(admission, base=base)
+
+    def _edit_receipt_result(self, admission: dict[str, Any], *, prepared, decision, executor: EditExecutor) -> dict[str, Any]:
+        receipt = dict(admission.get("receipt") or {})
+        receipt_result = dict(receipt.get("result") or {})
+        checkpoint_save_id = receipt_result.get("checkpoint_save_id")
+        base = {
+            "mode": "apply",
+            "applied": bool(receipt_result.get("applied")),
+            "no_op": not bool(receipt_result.get("applied")),
+            "path": prepared.relative_path,
+            "strategy": decision.to_dict(),
+            "preview": prepared.preview_payload(),
+            "checkpoint": {"save_id": checkpoint_save_id} if checkpoint_save_id else None,
+            "verification": executor.verification_hook(prepared),
+        }
+        return self._admitted_receipt_result(admission, base=base)
+
     def _edit_operation(self, payload: dict[str, Any], *, apply: bool) -> dict[str, Any]:
+        if apply:
+            payload = self._materialize_tool_action_payload(payload)
         root = self._workspace_root()
+        action_arguments = self._side_effect_arguments("edit_apply", payload) if apply else None
         request = request_from_payload(payload)
         executor = EditExecutor(root)
         target_exists = executor.target_exists(request.path)
@@ -622,10 +865,40 @@ class ProjectToolsService:
         prepared = executor.prepare(request, operation=decision.selected_operation)
         checkpoint = None
         applied = False
-        if apply and prepared.changed and decision.selected_operation != "propose_only":
-            checkpoint = self._create_edit_checkpoint(prepared, context)
-            executor.apply(prepared)
-            applied = True
+        ledger = None
+        envelope = None
+        if apply:
+            ledger, envelope, authorized, authorization_reason = self._tool_action_envelope(
+                root=root,
+                tool_name="edit_apply",
+                action_arguments=action_arguments or {},
+                payload=payload,
+                context=context,
+            )
+            if not authorized:
+                receipt = ledger.record_terminal(envelope, reason=authorization_reason)
+                return {
+                    **self._blocked_tool_action_result(authorization_reason, receipt),
+                    "mode": "apply",
+                    "applied": False,
+                    "no_op": not prepared.changed,
+                    "path": prepared.relative_path,
+                    "strategy": decision.to_dict(),
+                    "preview": prepared.preview_payload(),
+                    "checkpoint": None,
+                    "verification": executor.verification_hook(prepared),
+                }
+            admission = ledger.admit(envelope)
+            if admission["decision"] != "execute":
+                return self._edit_receipt_result(admission, prepared=prepared, decision=decision, executor=executor)
+            try:
+                if prepared.changed and decision.selected_operation != "propose_only":
+                    checkpoint = self._create_edit_checkpoint(prepared, context)
+                    executor.apply(prepared)
+                    applied = True
+            except Exception:
+                ledger.interrupt(envelope, reason="Edit application was interrupted after action admission; effect status is unknown.")
+                raise
         verification = executor.verification_hook(prepared, checkpoint=checkpoint)
         event_payload = {
             "event_id": f"edit:{hashlib.sha1(f'{prepared.relative_path}:{prepared.operation}:{prepared.changed}:{prepared.added_lines}:{prepared.removed_lines}'.encode('utf-8')).hexdigest()[:16]}",
@@ -659,7 +932,7 @@ class ProjectToolsService:
                 pass
         if apply and applied:
             self._record_edit_event(event)
-        return {
+        result = {
             "ok": True,
             "mode": "apply" if apply else "preview",
             "applied": applied,
@@ -671,6 +944,9 @@ class ProjectToolsService:
             "verification": verification,
             "event": event,
         }
+        if apply and ledger is not None and envelope is not None:
+            result["action_receipt"] = ledger.complete(envelope, result=result)
+        return result
 
     def _create_edit_checkpoint(self, prepared, context: dict[str, Any]) -> dict[str, Any] | None:
         if self._checkpoints is None:
@@ -698,48 +974,141 @@ class ProjectToolsService:
             return
 
     def _command_operation(self, payload: dict[str, Any], *, test_mode: bool) -> dict[str, Any]:
+        payload = self._materialize_tool_action_payload(payload)
         context = self._command_context(payload)
-        command = str(payload.get("command") or "").strip()
-        if not command:
-            raise ValueError("command is required.")
-        timeout_seconds = int(payload.get("timeout_seconds") or (120 if test_mode else 60))
+        root = self._workspace_root()
+        tool_name = "run_tests" if test_mode else "run_command"
+        action_arguments = self._side_effect_arguments(tool_name, payload)
+        command = str(action_arguments.get("command") or "").strip()
+        timeout_seconds = int(action_arguments.get("timeout_seconds") or (120 if test_mode else 60))
         timeout_seconds = max(1, min(timeout_seconds, 300))
-        cwd = self._command_cwd(str(payload.get("cwd") or "").strip())
+        cwd = self._command_cwd(str(action_arguments.get("cwd") or "").strip())
         classification = classify_command(command, str(cwd))
-        approval = self._command_approval(command=command, cwd=cwd, classification=classification, context=context, test_mode=test_mode)
-        if approval.get("decision") not in {"accept", "acceptForSession"}:
+        ledger, pending_envelope, authorized, authorization_reason = self._tool_action_envelope(
+            root=root,
+            tool_name=tool_name,
+            action_arguments=action_arguments,
+            payload=payload,
+            context=context,
+            authority_decision="command_approval_pending",
+        )
+        base = {
+            "approved": False,
+            "command": command,
+            "cwd": str(cwd),
+            "exit_code": None,
+            "output": "",
+            "classification": classification,
+            "test_mode": test_mode,
+        }
+        if not authorized:
+            receipt = ledger.record_terminal(pending_envelope, reason=authorization_reason)
             result = {
+                **self._blocked_tool_action_result(authorization_reason, receipt),
+                **base,
+                "approval": {"decision": "blocked", "reason": "model_authority"},
+            }
+            self._record_command_event(result, context=context)
+            return result
+        try:
+            approval = self._command_approval(command=command, cwd=cwd, classification=classification, context=context, test_mode=test_mode)
+        except Exception:
+            receipt = ledger.record_retryable(
+                pending_envelope,
+                reason="Command approval was unavailable before execution; the action may be retried safely.",
+            )
+            if str(receipt.get("state") or "") in {"executing", "interrupted", "recovery_required"}:
+                result = self._admitted_receipt_result(
+                    {"decision": "recovery_required", "receipt": receipt},
+                    base={**base, "approval": {"decision": "unavailable"}},
+                )
+                self._record_command_event(result, context=context)
+                return result
+            result = {
+                **base,
                 "ok": False,
-                "status": "cancelled",
-                "approved": False,
+                "status": "retryable",
+                "error": "Command approval was unavailable before execution.",
+                "approval": {"decision": "unavailable"},
+                "tool_event_verified": True,
+                "action_receipt": receipt,
+            }
+            self._record_command_event(result, context=context)
+            return result
+        if approval.get("decision") not in {"accept", "acceptForSession"}:
+            _ledger, approval_envelope, _authorized, _reason = self._tool_action_envelope(
+                root=root,
+                tool_name=tool_name,
+                action_arguments=action_arguments,
+                payload=payload,
+                context=context,
+                authority_decision="user_approval_required",
+                authority_reason="Command execution requires explicit user approval.",
+            )
+            receipt = ledger.record_approval_required(
+                approval_envelope,
+                reason="Command execution requires explicit user approval.",
+            )
+            if str(receipt.get("state") or "") in {"executing", "interrupted", "recovery_required"}:
+                result = self._admitted_receipt_result(
+                    {"decision": "recovery_required", "receipt": receipt},
+                    base={**base, "approval": approval},
+                )
+                self._record_command_event(result, context=context)
+                return result
+            result = {
+                **base,
+                "ok": False,
+                "status": "approval_required",
+                "output": "Command execution was declined.",
+                "approval": approval,
+                "tool_event_verified": True,
+                "action_receipt": receipt,
+            }
+            self._record_command_event(result, context=context)
+            return result
+        _ledger, accepted_envelope, _authorized, _reason = self._tool_action_envelope(
+            root=root,
+            tool_name=tool_name,
+            action_arguments=action_arguments,
+            payload=payload,
+            context=context,
+            authority_decision="command_approval_accepted",
+        )
+        admission = ledger.admit(accepted_envelope)
+        if admission["decision"] != "execute":
+            result = self._admitted_receipt_result(
+                admission,
+                base={**base, "approval": approval, "approved": True},
+            )
+            self._record_command_event(result, context=context)
+            return result
+        try:
+            completed = self._run_shell_command(command, cwd=cwd, timeout_seconds=timeout_seconds)
+            output = "\n".join(part for part in [completed.get("stdout") or "", completed.get("stderr") or ""] if part).strip()
+            timed_out = bool(completed.get("timed_out"))
+            status = "timed_out" if timed_out else ("completed" if completed.get("returncode") == 0 else "failed")
+            result = {
+                "ok": completed.get("returncode") == 0,
+                "status": status,
+                "approved": True,
                 "command": command,
                 "cwd": str(cwd),
-                "exit_code": None,
-                "output": "Command execution was declined.",
+                "exit_code": completed.get("returncode"),
+                "output": redact_sensitive(output)[:20000],
+                "timed_out": timed_out,
                 "classification": classification,
                 "approval": approval,
                 "test_mode": test_mode,
                 "tool_event_verified": True,
             }
-            self._record_command_event(result, context=context)
-            return result
-        completed = self._run_shell_command(command, cwd=cwd, timeout_seconds=timeout_seconds)
-        output = "\n".join(part for part in [completed.get("stdout") or "", completed.get("stderr") or ""] if part).strip()
-        status = "completed" if completed.get("returncode") == 0 else "failed"
-        result = {
-            "ok": completed.get("returncode") == 0,
-            "status": status,
-            "approved": True,
-            "command": command,
-            "cwd": str(cwd),
-            "exit_code": completed.get("returncode"),
-            "output": redact_sensitive(output)[:20000],
-            "timed_out": bool(completed.get("timed_out")),
-            "classification": classification,
-            "approval": approval,
-            "test_mode": test_mode,
-            "tool_event_verified": True,
-        }
+            result["action_receipt"] = ledger.complete(accepted_envelope, result=result)
+        except Exception:
+            ledger.interrupt(
+                accepted_envelope,
+                reason="Command execution was interrupted after action admission; effect status is unknown.",
+            )
+            raise
         self._record_command_event(result, context=context)
         return result
 
@@ -747,10 +1116,12 @@ class ProjectToolsService:
         edit_context = self._edit_context(payload, target_exists=False)
         task = self._tasks.current_task() if self._tasks is not None else None
         active_provider_thread = self._tasks.active_provider_thread(include_missing_fallback=True) if self._tasks is not None else None
+        task_settings = dict((task or {}).get("composer_settings") or {}) if isinstance(task, dict) else {}
         permission_mode = str(
             payload.get("permission_mode")
             or (active_provider_thread or {}).get("permission_mode")
-            or (task.get("composer_settings") or {}).get("permission_mode") if isinstance(task, dict) else ""
+            or task_settings.get("permission_mode")
+            or ""
         ).strip().lower() or "auto"
         return {
             **edit_context,

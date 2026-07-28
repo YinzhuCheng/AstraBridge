@@ -1727,6 +1727,16 @@ export type RouterModelEntry = {
   default_multimodal_route_verified?: boolean;
   default_multimodal_route_status?: string;
   default_multimodal_route_blockers?: string[];
+  execution_route_status?: string;
+  execution_route_driver?: string;
+  execution_route_configured_driver?: string;
+  execution_route_authority_tier?: "A" | "B" | "C" | "D" | string;
+  execution_route_declared_authority_tier?: "A" | "B" | "C" | "D" | string;
+  execution_route_evidence_state?: string;
+  execution_route_verification_status?: string;
+  execution_route_blockers?: string[];
+  execution_route_warning?: string | null;
+  execution_route_default_eligible?: boolean;
   source_urls?: string[];
   source_status?: string;
   recommended?: boolean;
@@ -1867,6 +1877,7 @@ export type LlmManagerKey = {
   provider_id: string;
   label: string;
   env_key: string;
+  platform_id?: string | null;
   fingerprint: string;
   enabled: boolean;
   last_test_status?: "pass" | "fail" | string | null;
@@ -3430,6 +3441,61 @@ export type TurnStartResponse = {
   background_start?: boolean;
   warning?: string;
   attachment_diagnostics?: AttachmentDiagnostics;
+  route_admission?: RuntimeRouteAdmission;
+};
+
+export type RuntimeRouteAdmissionReason = {
+  code: string;
+  message: string;
+};
+
+export type RuntimeRouteAdmission = {
+  schema_version: string;
+  status: "admitted" | "confirmation_required" | "blocked" | string;
+  presentation_state?: "codex_native" | "provider_native" | "provider_app_server" | "preview_review" | "reduced_authority" | "blocked" | "fallback_available" | "legacy_unqualified" | string;
+  requested?: {
+    provider_id?: string | null;
+    model_id?: string | null;
+    execution_policy?: string;
+    permission_mode?: string;
+    context_mode?: string;
+    reasoning_effort?: string | null;
+    input_modalities?: string[];
+  };
+  effective?: {
+    execution_driver?: string;
+    execution_backend?: string;
+    authority_tier?: string;
+    declared_authority_tier?: string;
+    tool_mode?: string;
+    execution_policy?: string;
+    permission_mode?: string;
+    context_mode?: string;
+    reasoning_effort?: string | null;
+    input_modalities?: string[];
+  };
+  route?: {
+    route_id?: string | null;
+    admission?: string;
+    configured_driver?: string;
+    execution_driver?: string;
+    evidence_state?: string;
+    verification_status?: string;
+    default_route_eligible?: boolean;
+    blockers?: string[];
+  };
+  degradation?: {
+    active?: boolean;
+    requires_confirmation?: boolean;
+    confirmed?: boolean;
+    reasons?: RuntimeRouteAdmissionReason[];
+  };
+  fallback?: {
+    status?: string;
+    target_models?: string[];
+    automatic_fallback?: boolean;
+    message?: string;
+  };
 };
 export type GoalResponse = { goal: ThreadGoal | null };
 

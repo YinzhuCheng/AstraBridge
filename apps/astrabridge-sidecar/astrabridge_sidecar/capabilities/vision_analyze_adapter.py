@@ -406,11 +406,17 @@ class QwenVisionAnalyzeAdapter(ChatVisionAnalyzeAdapter):
 
 
 class KimiVisionAnalyzeAdapter(ChatVisionAnalyzeAdapter):
-    def __init__(self, *, api_key: str | None = None, post_fn: Callable[..., Any] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        post_fn: Callable[..., Any] | None = None,
+    ) -> None:
         super().__init__(
             provider_id="kimi",
-            base_url="https://api.moonshot.cn/v1",
-            default_model="kimi-k2.6",
+            base_url=base_url or os.environ.get("KIMI_BASE_URL") or "https://api.moonshot.cn/v1",
+            default_model="kimi-k3",
             api_key=api_key,
             env_key="KIMI_API_KEY",
             env_key_aliases=("MOONSHOT_API_KEY",),

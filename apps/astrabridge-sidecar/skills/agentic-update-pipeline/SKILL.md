@@ -52,7 +52,22 @@ Expected run artifacts:
 - `rollback/rollback-manifest.json`
 - `secret-scan/secret-scan-report.json`
 
-Until sidecar update APIs land, call the Python helpers directly from tests or one-off Python snippets. After the proposal-only service exists, prefer these API shapes and verify their implementation before calling them: `POST /api/agentic-updates/start`, `GET /api/agentic-updates/{run_id}/status`, `GET /api/agentic-updates/{run_id}/result`, and `GET /api/agentic-updates/runs`.
+Prefer the implemented sidecar proposal surface for app-owned runs: `POST /api/agentic-updates/start`, `GET /api/agentic-updates/{run_id}/status`, `GET /api/agentic-updates/{run_id}/result`, and `GET /api/agentic-updates/runs`. Direct Python helpers remain appropriate for focused tests and preserved diagnostic runs.
+
+The adjacent `orchestration-manifest.json` resolves this skill to the built-in `provider_update_smoke_gate` graph. Resolve, lint, compile, and dry-run that manifest before live execution. Its defaults remain proposal-only; provider calls and promotion stay behind explicit manual gates.
+
+## Official Documentation Indexes
+
+- Prefer a provider's official `llms.txt` or equivalent machine-readable documentation index when registered.
+- Follow only bounded, same-origin Markdown links selected by update relevance. Keep discovery depth at one and respect the run-wide source cap.
+- Do not weaken redirect, private-address, content-type, decompression, or response-size guards to accommodate stale HTML URLs. Update the stable source seed or use the provider's machine-readable index instead.
+- Kimi has two independent official platform scopes. Discover both `https://platform.kimi.com/docs/llms.txt` and `https://platform.kimi.ai/docs/llms.txt`, retain each source record's `platform_id`, and propagate it through discovery and proposal provenance. Its parser merges model-list, model-guide, reasoning-effort, modality, pricing, and deprecation evidence into one candidate per native model.
+- Kimi native reasoning values and Codex-visible efforts are separate. For a model declaring native `low/high/max`, preserve native values and propose the Codex mapping `low->low`, `high->high`, `xhigh->max`.
+- Kimi China credentials from `platform.kimi.com` use `https://api.moonshot.cn/v1`; international credentials from `platform.kimi.ai` use `https://api.moonshot.ai/v1`. Never rewrite, fall back, or retry a credential against the other scope. Persist the non-secret platform binding on managed key records and align the provider endpoint before an authorized smoke.
+- Kimi K3 uses top-level `reasoning_effort` and no K2 `thinking` object on both official API scopes. Treat K2 request shaping as a separate compatibility branch.
+- A new reasoning request field or mapping is an adapter requirement, not metadata-only work. Keep it at `requires_adapter_review` until transport tests and authorized provider smoke pass.
+- DeepSeek uses canonical official HTML URLs with trailing slashes and a bounded provider-specific HTML parser. GLM uses `https://docs.z.ai/llms.txt` plus same-origin Markdown and a provider-specific Markdown parser.
+- Qwen's official Alibaba Cloud surface does not currently expose a registered machine-readable documentation index in this pipeline. Keep its existing bounded official HTML parser path; do not invent or follow a non-official index.
 
 ## Workflow Routing
 
@@ -62,9 +77,10 @@ Use for new model ids, context windows, modalities, pricing, deprecation, defaul
 
 1. Run discovery with official provider sources or fixtures.
 2. Parse source packs with `parse_agentic_update_source_pack`.
-3. Diff with `build_agentic_update_diff`.
-4. Keep new capabilities conservative until validation passes.
-5. Treat metadata-only changes as proposal-only unless `apply_mode` and approval allow isolated apply.
+3. Merge evidence by provider/native model; reject weak family-name and unknown-model noise before diffing.
+4. Diff with `build_agentic_update_diff`.
+5. Keep new capabilities conservative until validation passes.
+6. Treat metadata-only changes as proposal-only unless `apply_mode` and approval allow isolated apply.
 
 ### Provider Adapter Or Capability Routes
 
@@ -123,6 +139,8 @@ Run focused validation for the touched surface from `apps/astrabridge-sidecar`:
 .\.venv\Scripts\python.exe -m unittest tests.test_agentic_update_discovery tests.test_agentic_update_parsers tests.test_agentic_update_diffing
 .\.venv\Scripts\python.exe -m unittest tests.test_agentic_update_kernel_candidates tests.test_provider_source_registry
 ```
+
+For deterministic four-provider parser coverage without network access or provider keys, run `scripts/run_four_provider_fixture_coverage.py` with an explicit workspace root and run id. Preserve its source pack, parser output, and `validation/four-provider-coverage.json` report.
 
 Run `py_compile` for any edited Python modules. For desktop UI update surfaces added later, also run the relevant `npm test` or `tsc --noEmit` command from `apps/astrabridge-desktop`.
 

@@ -98,6 +98,7 @@ import { QueuedInstructionQueue } from "./features/runtime/QueuedInstructionQueu
 import { RuntimeKernelStatusPanel } from "./features/runtime/RuntimeKernelStatusPanel";
 import { McpToolDiagnosticsPanel } from "./features/runtime/McpToolDiagnosticsPanel";
 import { RuntimeActivityRow } from "./features/runtime/RuntimeActivityRow";
+import { RouteAdmissionDialog } from "./features/runtime/RouteAdmissionDialog";
 import { mergeComposerCatalogModels } from "./features/runtime/composerModelCatalog";
 import { imageAttachmentRouteState } from "./features/runtime/attachmentRoute";
 import { TaskGraphWorkspace } from "./features/runtime/TaskGraphWorkspace";
@@ -161,6 +162,7 @@ import { evaluateLaunchIsolation } from "./features/runtime/launchIsolation";
 import { normalizeRuntimeActivity } from "./features/runtime/runtimeActivity";
 import { summarizeTaskInspectorEvidence } from "./features/runtime/taskInspectorEvidence";
 import { modelAuthorityState } from "./features/runtime/modelAuthorityNotice";
+import { modelRouteAdmissionState } from "./features/runtime/routeAdmissionPresentation";
 import { contextGuardLevel, extractProposedPlanText, hasUnsafeWindowsWrite, parsePlanCard, readsExplosiveAstraBridgeLog } from "./features/runtime/planRendering";
 import { resolveRecoveryComposerPatch } from "./features/runtime/runtimeRecoveryPlan";
 import { formatResponseDiagnostics, summarizeResponseDiagnosticsInline } from "./features/runtime/responseDiagnostics";
@@ -225,6 +227,7 @@ import type {
   RuntimeActivityState,
   RuntimeDiffSummary,
   RuntimeModal,
+  RuntimeRouteAdmission,
   RuntimeSupervisorState,
   SidebarProjectNode,
   SidebarTaskNode,
@@ -257,6 +260,11 @@ type ComposerWorkflowMode = "default" | "goal" | "plan";
 type ComposerExecutionPolicy = TurnExecutionPolicy;
 type VoiceRecorderState = "idle" | "recording" | "transcribing";
 type ThreadCreateRecovery = { operationId: string; profileId: string };
+type RouteAdmissionPrompt = {
+  admission: RuntimeRouteAdmission;
+  text: string;
+  attachments: AttachmentDraft[];
+};
 const THREAD_CREATE_RECOVERY_MAX_ATTEMPTS = 12;
 const THREAD_CREATE_RECOVERY_DELAY_MS = 750;
 type QueuedInstruction = {
@@ -6136,6 +6144,7 @@ function AppShell({ bootstrapProject = null }: { bootstrapProject?: ProjectFile 
   const [topMenuOpen, setTopMenuOpen] = useState<string | null>(null);
   const [sendStage, setSendStage] = useState<string | null>(null);
   const [sendFailure, setSendFailure] = useState<string | null>(null);
+  const [routeAdmissionPrompt, setRouteAdmissionPrompt] = useState<RouteAdmissionPrompt | null>(null);
   const runtimeErrorsByTurnRef = useRef<Record<string, string>>({});
   const [executionHostDraft, setExecutionHostDraft] = useState<ExecutionHost>((project.ui_preferences.execution_host as ExecutionHost) ?? "windows");
   const [wslDistroDraft, setWslDistroDraft] = useState(project.ui_preferences.wsl_distro ?? "");
@@ -8714,6 +8723,10 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
     );
   }, [activeProfile?.provider_id, activeSettings.model, mergedComposerCatalogModels]);
   const activeModelAuthority = useMemo(() => modelAuthorityState(activeModelEntry), [activeModelEntry]);
+  const activeModelRouteAdmission = useMemo(
+    () => modelRouteAdmissionState(activeModelEntry, locale),
+    [activeModelEntry, locale],
+  );
   const speechTranscribeRoute = useMemo(
     () => (routerConfig.data?.capability_routes ?? []).find((route) => route.capability_id === "speech.transcribe") ?? null,
     [routerConfig.data?.capability_routes],
@@ -8769,6 +8782,7 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
   const rawAuthorityWarnings = activeModelAuthority?.notices ?? [];
   const authorityWarnings = rawAuthorityWarnings.map((notice) => localizedAuthorityNotice(locale, notice));
   const capabilityWarnings = [
+    ...(activeModelRouteAdmission?.notice ? [activeModelRouteAdmission.notice] : []),
     ...authorityWarnings,
     ...(imageAttachmentUnsupported ? [t(locale, "capability_warning_image")] : []),
     ...(mcpUnverified ? [t(locale, "capability_warning_mcp")] : []),
@@ -9830,15 +9844,75 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
     });
   }
 
-  async function submitTurnText(text: string, draftAttachments: AttachmentDraft[] = []) {
+  function routeAdmissionFromError(error: unknown) {
+    if (!(error instanceof ApiRequestError)) return null;
+    const admission = error.data?.route_admission;
+    return admission && typeof admission === "object" ? admission as RuntimeRouteAdmission : null;
+  }
+
+  function routeAdmissionFailureMessage(admission: RuntimeRouteAdmission) {
+    const reason = admission.degradation?.reasons?.find((item) => item.message)?.message;
+    if (reason) return reason;
+    return locale === "zh-CN" ? "当前模型线路不满足本轮请求的执行条件。" : "The selected model route does not satisfy this turn's execution requirements.";
+  }
+
+  async function preflightRouteAdmission(
+    settings: ReturnType<typeof currentComposerSettings>,
+    draftAttachments: AttachmentDraft[],
+    text: string,
+    confirmRouteDegradation: boolean,
+  ) {
+    const admission = await api.runtimeRouteAdmission({
+      thread_id: sendTargetThreadId ?? selectedThreadId ?? undefined,
+      profile_id: settings.profile_id ?? undefined,
+      model: settings.model ?? undefined,
+      effort: settings.reasoning_effort ?? undefined,
+      permission_mode: settings.permission_mode,
+      collaboration_mode: settings.collaboration_mode,
+      execution_policy: composerExecutionPolicy,
+      attachments: draftAttachments,
+      confirm_route_degradation: confirmRouteDegradation,
+      operation: sendTargetThreadId ? "turn_start" : "thread_create",
+    });
+    if (admission.status === "admitted") return admission;
+    setRouteAdmissionPrompt({ admission, text, attachments: draftAttachments });
+    setSendStage(null);
+    if (admission.status === "blocked") setSendFailure(routeAdmissionFailureMessage(admission));
+    return null;
+  }
+
+  async function submitTurnText(
+    text: string,
+    draftAttachments: AttachmentDraft[] = [],
+    { confirmRouteDegradation = false }: { confirmRouteDegradation?: boolean } = {},
+  ) {
     setSendFailure(null);
     const trimmedText = text.trim();
     if (!trimmedText && draftAttachments.length === 0) return false;
+    const settings = currentComposerSettings();
+    try {
+      const admission = await preflightRouteAdmission(
+        settings,
+        draftAttachments,
+        trimmedText,
+        confirmRouteDegradation,
+      );
+      if (!admission) return false;
+    } catch (error) {
+      const admission = routeAdmissionFromError(error);
+      if (admission) {
+        setRouteAdmissionPrompt({ admission, text: trimmedText, attachments: draftAttachments });
+        setSendStage(null);
+        setSendFailure(admission.status === "blocked" ? routeAdmissionFailureMessage(admission) : null);
+        return false;
+      }
+      setSendFailure(describeSendError(locale === "zh-CN" ? "检查执行线路" : "route preflight", error));
+      return false;
+    }
     if (!sendTargetThreadId) {
       const threadStage = t(locale, "send_stage_thread");
       const turnStage = sendStageWithAttachments(locale, t(locale, "send_stage_turn"), draftAttachments);
       let currentStage = threadStage;
-      const settings = currentComposerSettings();
       try {
         setSendStage(currentStage);
         const operationId = newThreadCreateOperationId();
@@ -9856,6 +9930,7 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
           permission_mode: settings.permission_mode,
           task_id: selectedTaskId,
           operation_id: operationId,
+          confirm_route_degradation: confirmRouteDegradation,
         });
         if (selectedTaskId && created.task?.task_id && created.task.task_id !== selectedTaskId) {
           setSendFailure(locale === "zh-CN"
@@ -9877,18 +9952,25 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
           permission_mode: settings.permission_mode,
           collaboration_mode: settings.collaboration_mode,
           execution_policy: composerExecutionPolicy,
+          confirm_route_degradation: confirmRouteDegradation,
         });
         const pendingNotice = result.background_start ? attachmentPendingNotice(locale, result.attachment_diagnostics, result.warning) : "";
         setSendStage(pendingNotice || null);
         return true;
       } catch (error) {
+        const admission = routeAdmissionFromError(error);
+        if (admission) {
+          setRouteAdmissionPrompt({ admission, text: trimmedText, attachments: draftAttachments });
+          setSendFailure(admission.status === "blocked" ? routeAdmissionFailureMessage(admission) : null);
+          setSendStage(null);
+          return false;
+        }
         setSendFailure(describeSendError(currentStage, error));
         setSendStage(null);
         return false;
       }
     }
       const turnStage = sendStageWithAttachments(locale, t(locale, "send_stage_turn"), draftAttachments);
-      const settings = currentComposerSettings();
       try {
         setSendStage(turnStage);
         const result = await startTurn.mutateAsync({
@@ -9901,11 +9983,19 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
         permission_mode: settings.permission_mode,
         collaboration_mode: settings.collaboration_mode,
         execution_policy: composerExecutionPolicy,
+        confirm_route_degradation: confirmRouteDegradation,
       });
       const pendingNotice = result.background_start ? attachmentPendingNotice(locale, result.attachment_diagnostics, result.warning) : "";
       setSendStage(pendingNotice || null);
       return true;
     } catch (error) {
+      const admission = routeAdmissionFromError(error);
+      if (admission) {
+        setRouteAdmissionPrompt({ admission, text: trimmedText, attachments: draftAttachments });
+        setSendFailure(admission.status === "blocked" ? routeAdmissionFailureMessage(admission) : null);
+        setSendStage(null);
+        return false;
+      }
       setSendFailure(describeSendError(turnStage, error));
       setSendStage(null);
       return false;
@@ -11474,8 +11564,17 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
                   <option key={value} value={value}>
                     {value}
                   </option>
-                ))}
-              </select>
+                  ))}
+                </select>
+              {activeModelRouteAdmission ? (
+                <span
+                  className={`composer-route-status composer-route-status-${activeModelRouteAdmission.tone}`}
+                  data-testid="composer-route-status"
+                  title={activeModelRouteAdmission.notice || activeModelRouteAdmission.label}
+                >
+                  {activeModelRouteAdmission.label}
+                </span>
+              ) : null}
               <button
                 type="button"
                 className={`voice-transcribe-button compact-action voice-transcribe-${voiceRecorderState} ${speechTranscribeReady ? "" : "voice-transcribe-needs-setup"}`}
@@ -11505,6 +11604,7 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
                   disabled={
                     imageAttachmentUnsupported ||
                     Boolean(activeModelAuthority?.sendBlocked) ||
+                    Boolean(activeModelRouteAdmission?.sendBlocked) ||
                     sidebarSelectionBusy ||
                     (!composerText.trim() && sendableAttachments.length === 0) ||
                     startTurn.isPending ||
@@ -11672,6 +11772,21 @@ const taskGraphRequestedRunIntentRef = useRef<TaskGraphRequestedRunIntent | null
               permissionMode: activeSettings.permission_mode,
             })
           }
+        />
+      ) : null}
+      {routeAdmissionPrompt ? (
+        <RouteAdmissionDialog
+          admission={routeAdmissionPrompt.admission}
+          locale={locale}
+          onCancel={() => {
+            setRouteAdmissionPrompt(null);
+            setSendStage(null);
+          }}
+          onConfirm={() => {
+            const pending = routeAdmissionPrompt;
+            setRouteAdmissionPrompt(null);
+            void submitTurnText(pending.text, pending.attachments, { confirmRouteDegradation: true });
+          }}
         />
       ) : null}
       {modal ? <ModalHost modal={modal} locale={locale} queryClient={queryClient} /> : null}

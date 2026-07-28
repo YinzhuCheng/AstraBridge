@@ -68,10 +68,10 @@ Agents may reasonably adjust specific substeps, implementation details, file pat
 ## Current Progress
 
 - Current status: Complete
-- Completed steps: 0. Create Durable Plan; 1. Baseline Inventory And Existing Surface Map; 2. Update Run Contract And Schema; 3. Artifact Layout And Rollback Manifest Design; 4. Provider Source Registry Hardening; 5. Discovery Runner; 6. Provider Parser Interface And Fixtures; 7. Codex Kernel Candidate Discovery; 8. Diff And Risk Classification Engine; 9. Agentic Update Skill Scaffold; 10. Proposal-Only Sidecar Service; 11. Desktop Proposal Review UI; 12. Isolated Apply Engine For Metadata-Only Changes; 13. Code-Change Proposal And Worktree Boundary; 14. Validation Gate Orchestrator; 15. Provider-Backed Smoke Integration; 16. Codex Kernel Verify Candidate Flow; 17. Automation Scheduler Integration; 18. End-To-End Fixture Dogfood; 19. Provider Pilot With User-Selected Scope; 20. Final Runbook, Release Checklist, And Promotion Policy
-- Current step: Complete
-- Next step: None
-- Last updated: 2026-07-06
+- Completed steps: 0. Create Durable Plan; 1. Baseline Inventory And Existing Surface Map; 2. Update Run Contract And Schema; 3. Artifact Layout And Rollback Manifest Design; 4. Provider Source Registry Hardening; 5. Discovery Runner; 6. Provider Parser Interface And Fixtures; 7. Codex Kernel Candidate Discovery; 8. Diff And Risk Classification Engine; 9. Agentic Update Skill Scaffold; 10. Proposal-Only Sidecar Service; 11. Desktop Proposal Review UI; 12. Isolated Apply Engine For Metadata-Only Changes; 13. Code-Change Proposal And Worktree Boundary; 14. Validation Gate Orchestrator; 15. Provider-Backed Smoke Integration; 16. Codex Kernel Verify Candidate Flow; 17. Automation Scheduler Integration; 18. End-To-End Fixture Dogfood; 19. Provider Pilot With User-Selected Scope; 20. Final Runbook, Release Checklist, And Promotion Policy; 21. Official Documentation Index Discovery And Kimi Proposal Closure; 22. Four-Provider Parser Coverage, Kimi K3 Transport Closure, And Skill-Orchestration Entry Point; 23. Kimi Regional Platform Binding And Managed-Key Verification
+- Current step: 23. Kimi Regional Platform Binding And Managed-Key Verification
+- Next step: None. Start a new scoped plan for any later provider promotion, capability smoke, or UI expansion.
+- Last updated: 2026-07-26
 
 ## Execution Steps
 
@@ -460,7 +460,115 @@ Acceptance criteria:
 
 Status: completed
 
+### 21. Official Documentation Index Discovery And Kimi Proposal Closure
+
+Goal: Repair the evidence-proved gap between fetching provider pages and producing a safe model proposal, using Kimi as the first live official-document pilot without updating the active model catalog.
+
+Main actions:
+
+- Add bounded discovery of same-origin machine-readable provider documents from an official `llms.txt` index while retaining the existing redirect, content-type, response-size, and secret-redaction boundaries.
+- Replace stale Kimi HTML entry points with stable provider-level machine-readable sources; do not hard-code Kimi K3 into the model seed catalog.
+- Add a conservative Kimi parser that can merge official model-list, model-guide, reasoning-effort, modality, pricing, and deprecation evidence into one candidate per native model.
+- Represent native reasoning levels and Codex-to-provider effort mapping separately, and force adapter review when official docs require a request mapping that the current transport may not implement.
+- Exercise the desktop-facing proposal-only service against fixtures and the live official Kimi documentation. Preserve both the failing baseline and repaired run artifacts.
+
+Acceptance criteria:
+
+- Fixture tests prove index expansion is same-origin, depth-limited, source-limited, deterministic, and unable to follow private, external, or untrusted links.
+- Kimi fixtures produce one merged `kimi/kimi-k3` candidate with official context-window, modality, native reasoning/default, Codex reasoning mapping, pricing, source provenance, and unverified capability claims; no duplicate K3 proposals are emitted.
+- The proposal-only sidecar path classifies the K3 transport requirement as `requires_adapter_review` or stricter, attempts no provider call, applies no change, and leaves `changed_paths` empty.
+- A live official-doc proposal-only run discovers K3 through the official documentation index and preserves a reviewable proposal without changing the current catalog, provider profile, or transport.
+- Focused updater tests, Python compilation, diff checks, and a secret scan pass; the plan and skill/runbook state the next entry point.
+
+Status: completed
+
+### 22. Four-Provider Parser Coverage, Kimi K3 Transport Closure, And Skill-Orchestration Entry Point
+
+Goal: Extend the repaired official-document proposal closure from Kimi to DeepSeek, Qwen, and GLM, and make the update skill directly launchable through AstraBridge's skill-backed orchestration surface.
+
+Main actions:
+
+- Add official-source fixtures and provider-specific parsers for DeepSeek and GLM, and reconcile Qwen with the shared index/Markdown discovery path where upstream supports it.
+- Promote the already-proposed Kimi K3 official contract into the built-in catalog/profile/transport with K3-specific reasoning-effort normalization and request-shape tests; retain K2-specific behavior as a separate compatibility branch.
+- Add an orchestration manifest or equivalent supported skill entry point that invokes proposal-first discovery, bounded validation, and a manual promotion gate from inside AstraBridge.
+- Run provider-free four-provider fixture coverage and preserve a coverage report. Because the user separately authorized the managed Kimi provider call in this round, resume the existing `astra` vault through Windows Credential Manager without reading the Desktop key file and run exactly one bounded K3 smoke after local validation; preserve only sanitized evidence.
+
+Acceptance criteria:
+
+- All four managed open-model provider families can produce deterministic, source-backed proposals without provider keys.
+- Kimi K3 is present in the built-in catalog/profile with the official context, modalities, and Codex-to-native reasoning mapping; its transport sends top-level `reasoning_effort`, omits the K2 `thinking` object, and is covered by request-shape tests.
+- The AstraBridge skill registry can resolve, lint, compile, and dry-run the update skill entry point.
+- The existing `astra` session resumes via `windows_credential_manager_resume` without reading `key.txt`; one explicitly authorized Kimi K3 smoke is recorded without secrets. All other provider-backed calls, applies, and promotions remain behind the existing explicit authorization and manual gate.
+
+Status: completed
+
+### 23. Kimi Regional Platform Binding And Managed-Key Verification
+
+Goal: Correct the single-platform Kimi assumption exposed by the user's `platform.kimi.com` key, without weakening the completed K3 transport or secret-handling boundaries.
+
+Main actions:
+
+- Represent the China (`platform.kimi.com` + `api.moonshot.cn`) and international (`platform.kimi.ai` + `api.moonshot.ai`) Kimi platforms as distinct credential scopes while retaining one `kimi` provider family.
+- Stop automatically migrating the official China endpoint to the international endpoint; preserve an explicitly configured platform and document both official source indexes.
+- Bind the user's existing managed Kimi key to `platform.kimi.com` without printing or duplicating its secret, route it to the `.cn` API, and run exactly one non-stream K3 text smoke.
+- Preserve sanitized evidence, focused tests, secret scan, and process hygiene.
+
+Acceptance criteria:
+
+- Provider metadata and tests describe both official platform/endpoint pairs, and router configuration no longer rewrites one official region into the other.
+- The managed key record can retain a non-secret Kimi platform binding, and the active provider endpoint matches that binding.
+- One authorized `.cn` K3 smoke is recorded without secret material; no `.ai` retry or other provider call occurs.
+- Focused tests, compilation, diff checks, evidence secret scan, and end-of-round process audit pass.
+
+Status: completed
+
 ## Progress Log
+
+### 2026-07-26 - Step 23 Plan Review And Regional Route Correction
+
+- Evidence trigger: The user's Kimi key was confirmed to originate from `platform.kimi.com`. Its fingerprint exactly matches the encrypted managed-vault entry, but the completed Step 22 runtime had migrated the provider to `api.moonshot.ai`, producing the documented cross-platform `401 Invalid Authentication` failure.
+- Route correction: Preserve the completed K3 model/transport work, add explicit regional platform binding, stop cross-region endpoint migration, bind this managed key to the China platform, and verify K3 once against `api.moonshot.cn`.
+- Safety boundary: Desktop secret contents remain memory-only; no raw key, header, or credential-bearing payload may be printed or written.
+- Next step: Complete Step 23 implementation and validation in this execution round.
+
+### 2026-07-26 - Step 23 Completion
+
+- Completed: Added an explicit Kimi platform-binding layer for the independent China (`platform.kimi.com` / `api.moonshot.cn`) and international (`platform.kimi.ai` / `api.moonshot.ai`) credential scopes. Removed cross-region endpoint migration, made catalog refresh preserve the configured Kimi scope, registered both official documentation indexes, and propagated `platform_id` through discovery records and parsed proposal source references. The project update skill and runbook now require platform-aware Kimi discovery and forbid cross-region credential fallback.
+- Managed-key verification: Resumed `managed_user/astra` through `windows_credential_manager_resume`, bound the existing redacted Kimi key record to `platform.kimi.com`, and aligned the active provider to `https://api.moonshot.cn/v1`. Ran exactly one authorized non-stream `kimi-k3` text smoke; it returned HTTP 200 with `ok`. No retry, `.ai` fallback, other-provider call, apply, promotion, or install occurred.
+- Evidence: `PRIVATE/agentic-update-pipeline/runs/step23-kimi-com-managed-20260726/` contains the sanitized managed smoke and secret-scan report. `PRIVATE/agentic-update-pipeline/runs/step23-four-provider-regional-coverage-20260726/` contains deterministic provider-free Qwen, DeepSeek, Kimi K3, and GLM parser coverage plus skill orchestration validation. Kimi proposal provenance in the fixture run retains `platform.kimi.com`.
+- Security: No raw key, authorization header, or Desktop secret content was written to project artifacts. Managed health and router latest-test persistence now redact reasoning text while retaining structural diagnostics, token counts, and non-replayable state; the current smoke, health history, and router evidence were redacted in place. The final durable-artifact scan found zero high-confidence credential findings and zero unredacted reasoning fields. Four source-pattern findings were pre-existing handler/test fixtures already present in `HEAD`; this step introduced none.
+- Files changed: Kimi platform, provider registry, router configuration, managed-key manager, server API, official source registry, discovery/parser provenance, vision default endpoint, desktop API/types, project update skill and fixture runner, model-source reference, focused tests, public runbook, and this plan. Existing Step 21/22 dirty-worktree changes and unrelated user artifacts were preserved.
+- Validation: Final focused regression passed 100 tests. Python compilation and desktop TypeScript `tsc --noEmit` passed. Four-provider offline coverage passed. Skill-creator validation passed, and the update manifest passed lint, compile, dry-run, and combined validation with zero provider/MCP/agent calls. `git diff --check` passed with line-ending notices only. End-of-round cleanup found no clearly stale AstraBridge wrappers and zero known AstraBridge listeners.
+- Blockers: None.
+- Next step: None for this completed plan. Any later capability-level K3 validation (image/video, tools, or long context), provider promotion, or UI workflow expansion should use a new explicit scope and authorization.
+
+### 2026-07-26 - Step 22 Completion
+
+- Completed: Replaced the DeepSeek and GLM generic parser stubs with provider-specific official-document parsers. DeepSeek now uses canonical trailing-slash official URLs while retaining strict redirect controls; its parser extracts current V4 models, context, pricing, deprecation aliases, thinking mode, tool support, and `reasoning_effort` mapping. GLM now uses the official Z.AI `llms.txt` index and bounded same-origin Markdown; its strong-reference filter rejects path/architecture false positives such as `glm-5-turbo-model` and `glm-0`. Qwen remains on its existing official Alibaba Cloud HTML parser because no upstream machine-readable index is registered.
+- Kimi K3 closure: Added `kimi-k3` to the built-in profile, generated catalog, router metadata, vision capability route, and request-shape validation with the official `.ai` endpoint, 1,048,576-token context, text/image/video input, native `low/high/max`, Codex `low/high/xhigh`, and K3-specific top-level `reasoning_effort`. The K3 transport omits K2 `thinking`, preserves `tool_choice=required`, converts the output limit to `max_completion_tokens`, and omits fixed sampling fields. Existing K2 behavior remains in a separate compatibility branch. Router configuration now migrates only the old built-in Kimi endpoint and adds missing catalog-preferred models without overwriting custom endpoints or the user's configured default model.
+- Self-upgrade entry and evidence: Added the skill orchestration manifest plus a reusable provider-free four-provider fixture runner. The manifest resolves to the built-in provider update/smoke/manual-gate graph and passes resolve, lint, compile, dry-run, and combined validation with zero provider/MCP/agent calls. Fixed the graph's zero-timeout manual gate so dry-run can validate it without executing it. `LlmApiManagerService.test_key()` now persists sanitized, recoverable health evidence for future managed-key smoke results.
+- Managed account and smoke: Resumed `managed_user/astra` through `windows_credential_manager_resume` with five redacted managed-key records and did not read a Desktop key file. Ran exactly one authorized non-stream Kimi K3 text smoke. It returned `fail`; no retry occurred. The previous `test_key()` implementation preserved only the final status, so the provider failure detail is recorded as unavailable. K3 remains provider-unverified even though the local interface, metadata, migration, and request shape are complete.
+- Evidence: `PRIVATE/agentic-update-pipeline/runs/step22-four-provider-coverage-20260726-r2/` passed deterministic provider-free coverage for Qwen, DeepSeek, Kimi, and GLM. The accepted DeepSeek run `step22-live-deepseek-proposal-20260726-r4` fetched 7/7 official sources and parsed four current/compatibility models; V4 Flash/Pro include the official decimal 1,000,000-token context, three price fields, tool support, native `high/max`, and the Codex effort mapping. The first DeepSeek run and intermediate repairs are preserved as diagnostics for fragmented table/reasoning evidence. The accepted GLM run `step22-live-glm-proposal-20260726-r2` fetched 20/20 official sources, parsed 16 strong-reference models, and removed both false positives found in the preserved first GLM diagnostic run. Managed smoke, skill-validation, and secret-scan evidence are under `step22-four-provider-kimi-managed-20260726/`.
+- Files changed: Provider discovery/parser/catalog/profile/transport/router/managed-health modules under `apps/astrabridge-sidecar/astrabridge_sidecar/`; `apps/astrabridge-sidecar/skills/agentic-update-pipeline/` including the new manifest and fixture runner; the provider-update graph example; focused parser, discovery, catalog, transport, capability, managed-vault, and orchestration tests; `docs/AGENTIC_UPDATE_PIPELINE_RUNBOOK.md`; and this plan. Existing Step 21 changes in the same dirty worktree were preserved.
+- Validation: Final focused regression passed 85 tests. Python compilation passed for all touched runtime modules and the new fixture runner. The skill-creator quick validation passed. Skill orchestration resolve/lint/compile/dry-run/validate passed with zero live calls. `git diff --check` passed with line-ending notices only. The durable artifact scan covered 23 accepted-run files and found zero high-confidence credential findings; the touched-file scan reported only three synthetic secret-rejection fixture files. End-of-round process cleanup found no clearly stale AstraBridge wrappers and zero known AstraBridge listeners.
+- Blockers: None for Step 22 or this plan. Kimi K3 provider verification is intentionally not claimed because the one authorized smoke failed and its old-path failure detail was not recoverable.
+- Next step: None in this completed plan. If the user later authorizes another K3 smoke, first confirm account entitlement/balance outside the updater, then run one managed test and inspect the newly persisted sanitized health record.
+
+### 2026-07-26 - Step 21 Plan Review And Baseline
+
+- Evidence review: The prior plan claimed completion, but the live Kimi proposal-only baseline `mechanism-baseline-kimi-20260726` fetched zero usable sources: 6 stale paths were rejected after redirects, 2 HTML responses exceeded the bounded response size, and 2 requests timed out. The parser consequently emitted zero candidates. Code inspection also showed that only Qwen had a provider-specific official-doc parser; Kimi, DeepSeek, and GLM remained generic stubs.
+- Route revision: Reopened the plan with Step 21 as the active bounded work unit. The official Kimi docs advertise a same-origin `llms.txt` index and machine-readable Markdown pages, so the repair will retain strict network boundaries and discover bounded canonical documents from that index instead of weakening redirect or oversized-response safeguards.
+- Preserved evidence: `PRIVATE/agentic-update-pipeline/runs/mechanism-baseline-kimi-20260726/`.
+- Next step: Complete Step 21 implementation, fixture/API validation, and live proposal-only Kimi dogfood; then enter Step 22.
+
+### 2026-07-26 - Step 21 Completion
+
+- Completed: Added bounded one-level discovery from official `llms.txt` indexes, restricted expansion to deterministic same-origin Markdown links under the run-wide source limit, and retained the existing redirect, private-address, content-type, decompression, response-size, and secret-redaction guards. Replaced stale Kimi HTML seeds with the official documentation index and canonical Markdown sources. Added a provider-specific Kimi parser that merges model-list, guide, reasoning-effort, modality, pricing, deprecation, and provenance evidence per native model; rejects weak family-name and tool-message noise; reconciles warnings after later evidence fills a field; and preserves native reasoning separately from the Codex-visible mapping. Extended diffing so a new reasoning request field or effort mapping becomes `requires_adapter_review` rather than a metadata-only change. Updated the project skill and public runbook while keeping the skill candidly described as an instruction/API handoff surface until Step 22 adds its orchestration manifest.
+- Files changed: `apps/astrabridge-sidecar/astrabridge_sidecar/model_catalog/source_registry.py`, `apps/astrabridge-sidecar/astrabridge_sidecar/agentic_updates/discovery.py`, `apps/astrabridge-sidecar/astrabridge_sidecar/agentic_updates/parsers.py`, `apps/astrabridge-sidecar/astrabridge_sidecar/agentic_updates/diffing.py`, `apps/astrabridge-sidecar/astrabridge_sidecar/agentic_updates/__init__.py`, `apps/astrabridge-sidecar/tests/test_provider_source_registry.py`, `apps/astrabridge-sidecar/tests/test_agentic_update_discovery.py`, `apps/astrabridge-sidecar/tests/test_agentic_update_parsers.py`, `apps/astrabridge-sidecar/tests/test_agentic_update_service.py`, `apps/astrabridge-sidecar/skills/agentic-update-pipeline/SKILL.md`, `docs/AGENTIC_UPDATE_PIPELINE_RUNBOOK.md`, and this plan.
+- Evidence: Preserved the failing baseline `mechanism-baseline-kimi-20260726` and all repair iterations. The accepted live run is `PRIVATE/agentic-update-pipeline/runs/mechanism-repaired-kimi-20260726-r5/`: all 20 bounded official sources passed; the parser emitted 18 model candidates and exactly one `kimi/kimi-k3` candidate; K3 records a 1,048,576-token context window, text/image/video input, native `low/high/max` with native default `max`, Codex `low/high/xhigh` with default `xhigh`, `xhigh->max`, parsed-unvalidated USD pricing, and unverified capability claims. Its only K3 diff is `requires_adapter_review` with adapter review, transport tests, and provider compatibility smoke still required. The run remained `proposal_only`, attempted no provider call/install/code change, applied nothing, and left the active catalog, provider profile, and transport unchanged. The r4 run is preserved as a diagnostic showing why a direct service harness must inject the current model snapshot before interpreting additions.
+- Validation: `py_compile` passed for all five touched Python modules. The final regression passed 64 tests: 39 registry/discovery/parser/diff/contract/artifact tests and 25 proposal-service tests. The skill-creator `quick_validate.py` check passed, and `git diff --check` passed with only line-ending notices. The r5 durable-artifact secret scan checked seven artifact files and found zero findings. A stricter touched-file scan found only three pre-existing synthetic redaction fixtures (`Authorization: Bearer abc...` and `api_key=secret-value`) in tests; they are intentionally fake inputs used to prove sanitization, not credentials.
+- Blockers: None for Step 21. Real provider smoke remains intentionally unattempted because this run did not authorize provider calls.
+- Next step: Enter Step 22. Implement deterministic official-source parsers and fixtures for DeepSeek and GLM, reconcile Qwen with shared machine-readable discovery where available, then add, lint, compile, and dry-run the AstraBridge skill-orchestration entry point without provider calls or promotion.
 
 ### 2026-07-06 - Post-completion Qwen Provider Smoke Follow-up
 

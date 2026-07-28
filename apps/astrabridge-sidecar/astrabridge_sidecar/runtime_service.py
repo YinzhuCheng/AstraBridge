@@ -23,7 +23,16 @@ from typing import Any
 
 from .agent_orchestration_compiler import compile_agent_orchestration_graph
 from .app_server_client import AppServerClient, JsonRpcError, app_server_command
-from .coding_kernel import project_turn_to_coding_events
+from .coding_kernel import (
+    ContextSection,
+    build_context_budget,
+    build_context_compaction_handoff_contract,
+    compact_context_compaction_handoff_contract,
+    estimate_tool_schema_tokens,
+    normalize_context_budget_policy,
+    project_turn_to_coding_events,
+    selected_text_by_section,
+)
 from .common import WORKSPACE_STATE_DIRNAME, append_jsonl, new_id, now_iso, read_json, write_json
 from .codex_kernel_probe import discover_codex_binary_and_version, resolve_codex_binary_metadata
 from .codex_kernel_snapshot import build_codex_kernel_probe_snapshot, observe_protocol_features
@@ -57,7 +66,24 @@ from .model_catalog import (
 )
 from .mcp_broker_service import McpBrokerService
 from .profile_service import ProfileService
-from .providers import HistoryProjector, NeutralMessage, ReasoningArtifact, classify_runtime_failure
+from .providers import (
+    REASONING_ARTIFACT_PROVENANCE_SCHEMA_VERSION,
+    REASONING_ARTIFACT_REPLAY_SCOPE,
+    REASONING_ARTIFACT_RETENTION,
+    HistoryProjector,
+    NeutralMessage,
+    ReasoningArtifact,
+    build_neutral_transcript,
+    build_turn_transition,
+    classify_runtime_failure,
+    compact_turn_transition,
+    complete_turn_transition,
+    get_provider_profile,
+    legacy_runtime_route_admission,
+    normalize_endpoint_identity,
+    resolve_runtime_route_admission,
+    assert_turn_transition_admitted,
+)
 from .providers.transports import transport_class_for_profile
 from .providers.transports.base import transport_signature_for_class
 from .mcp_node_policy import (
@@ -142,6 +168,37 @@ def _is_astrabridge_web_tool(tool: str) -> bool:
 
 class _GraphDurablePause(RuntimeError):
     """Preserve durable graph state without finalizing a failure."""
+
+
+class ContextBudgetPreflightError(ValueError):
+    """A request cannot safely enter a provider route with its current context."""
+
+    def __init__(self, report: dict[str, Any], message: str) -> None:
+        super().__init__(message)
+        self.report = dict(report or {})
+
+
+class RuntimeRouteAdmissionError(ValueError):
+    """A selected model route cannot start without an explicit safe posture."""
+
+    def __init__(self, admission: dict[str, Any], *, operation: str) -> None:
+        self.admission = deepcopy(dict(admission or {}))
+        self.operation = str(operation or "runtime_start")
+        status = str(self.admission.get("status") or "blocked").strip() or "blocked"
+        reasons = list(dict(self.admission.get("degradation") or {}).get("reasons") or [])
+        first_reason = next(
+            (
+                str(dict(item).get("message") or "").strip()
+                for item in reasons
+                if isinstance(item, dict) and str(dict(item).get("message") or "").strip()
+            ),
+            "The selected model route is not admitted for this task start.",
+        )
+        if status == "confirmation_required":
+            message = f"Route confirmation is required before {self.operation}: {first_reason}"
+        else:
+            message = f"Route admission blocked {self.operation}: {first_reason}"
+        super().__init__(message)
 
 
 class _GraphDispatchCrashBeforeExternalCall(_GraphDurablePause):
@@ -1759,16 +1816,34 @@ class RuntimeService:
         task_id: str | None = None,
         name: str | None = None,
         operation_id: str | None = None,
+        confirm_route_degradation: bool = False,
         _operation_started: bool = False,
     ) -> dict[str, Any]:
+        profile, route_admission = self._admit_runtime_route(
+            profile,
+            thread_id=None,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            execution_policy="standard",
+            context_mode="default",
+            attachments=[],
+            confirm_degradation=confirm_route_degradation,
+        )
+        route_admission = self._admission_for_operation(route_admission, operation="thread_create")
+        self._assert_runtime_route_admitted(route_admission, operation="thread_create")
+        effective_model = str(profile.get("model") or model or "").strip() or None
+        effective_effort = str(dict(route_admission.get("effective") or {}).get("reasoning_effort") or effort or "").strip() or None
+        effective_permission_mode = str(dict(route_admission.get("effective") or {}).get("permission_mode") or permission_mode or "ask").strip()
+        effective_policy = str(dict(route_admission.get("effective") or {}).get("execution_policy") or "standard").strip()
         if not _operation_started:
             normalized_operation_id = self._normalize_thread_create_operation_id(operation_id)
             operation, should_start = self._begin_thread_create_operation(
                 normalized_operation_id,
                 profile=profile,
-                model=model,
-                effort=effort,
-                permission_mode=permission_mode,
+                model=effective_model,
+                effort=effective_effort,
+                permission_mode=effective_permission_mode,
                 name=name,
             )
             if not should_start:
@@ -1780,12 +1855,13 @@ class RuntimeService:
                     try:
                         response = self.create_thread(
                             profile,
-                            model=model,
-                            effort=effort,
-                            permission_mode=permission_mode,
+                            model=effective_model,
+                            effort=effective_effort,
+                            permission_mode=effective_permission_mode,
                             task_id=task_id,
                             name=name,
                             operation_id=normalized_operation_id,
+                            confirm_route_degradation=confirm_route_degradation,
                             _operation_started=True,
                         )
                     finally:
@@ -1807,12 +1883,13 @@ class RuntimeService:
                 try:
                     return self.create_thread(
                         profile,
-                        model=model,
-                        effort=effort,
-                        permission_mode=permission_mode,
+                        model=effective_model,
+                        effort=effective_effort,
+                        permission_mode=effective_permission_mode,
                         task_id=task_id,
                         name=name,
                         operation_id=operation_id,
+                        confirm_route_degradation=confirm_route_degradation,
                         _operation_started=True,
                     )
                 finally:
@@ -1820,7 +1897,12 @@ class RuntimeService:
                     self._runtime_thread_start_in_progress = False
         runtime_status = self._prepare_runtime(profile, require_secret=True)
         client = self._runtime_request_client(runtime_status)
-        params = self._thread_start_params(profile=profile, model=model, permission_mode=permission_mode)
+        params = self._thread_start_params(
+            profile=profile,
+            model=effective_model,
+            permission_mode=effective_permission_mode,
+            include_dynamic_tools=effective_policy != NO_TOOLS_EXECUTION_POLICY,
+        )
         try:
             result = client.request("thread/start", params, timeout=THREAD_START_TIMEOUT_SECONDS)
         except TimeoutError as exc:
@@ -1843,13 +1925,21 @@ class RuntimeService:
                 "name": thread.get("name"),
                 "profile_id": profile.get("profile_id"),
                 "provider_id": profile.get("provider_id"),
-                "model": model or profile.get("model"),
-                "reasoning_effort": effort or profile.get("reasoning_effort"),
-                "permission_mode": permission_mode,
+                "model": effective_model or profile.get("model"),
+                "reasoning_effort": effective_effort or profile.get("reasoning_effort"),
+                "permission_mode": effective_permission_mode,
+                "execution_route_status": route_admission.get("status"),
+                "execution_route_driver": dict(route_admission.get("effective") or {}).get("execution_driver"),
             },
         )
         if self._tasks is not None:
-            task_settings = self._task_thread_settings(profile, model, effort, permission_mode, name=thread.get("name"))
+            task_settings = self._task_thread_settings(
+                profile,
+                effective_model,
+                effective_effort,
+                effective_permission_mode,
+                name=thread.get("name"),
+            )
             if str(task_id or "").strip():
                 self._tasks.bind_thread_to_task_id(
                     task_id=str(task_id),
@@ -1860,13 +1950,23 @@ class RuntimeService:
                 )
             else:
                 self._tasks.create_task(name or thread.get("name") or "New task", thread_id=thread_id, settings=task_settings)
-        self._update_project_runtime_defaults(profile, model, effort)
-        self._record_event({"type": "thread_created", "thread_id": thread_id, "runtime": runtime_status})
+        self._update_project_runtime_defaults(profile, effective_model, effective_effort, route_admission=route_admission)
+        self._record_event(
+            {
+                "type": "thread_created",
+                "thread_id": thread_id,
+                "runtime": runtime_status,
+                "route_admission": deepcopy(route_admission),
+            }
+        )
         try:
-            return self.read_thread(profile, thread_id)
+            return {**self.read_thread(profile, thread_id), "route_admission": route_admission}
         except Exception as exc:
             self._record_event({"type": "thread_read_after_create_fallback", "thread_id": thread_id, "error": str(exc)})
-            return {"thread": self._decorate_thread({**thread, "id": thread_id, "turns": list(thread.get("turns") or [])})}
+            return {
+                "thread": self._decorate_thread({**thread, "id": thread_id, "turns": list(thread.get("turns") or [])}),
+                "route_admission": route_admission,
+            }
 
     def recover_thread_create(self, profile: dict[str, Any], *, operation_id: str) -> dict[str, Any]:
         normalized_operation_id = self._normalize_thread_create_operation_id(operation_id)
@@ -1914,6 +2014,7 @@ class RuntimeService:
         permission_mode: str,
         name: str | None = None,
         operation_id: str | None = None,
+        confirm_route_degradation: bool = False,
     ) -> dict[str, Any]:
         """Start a user-requested thread without holding the HTTP response open.
 
@@ -1922,13 +2023,29 @@ class RuntimeService:
         ``recover_thread_create``; this prevents a timeout from starting a second
         provider thread.
         """
+        profile, route_admission = self._admit_runtime_route(
+            profile,
+            thread_id=None,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            execution_policy="standard",
+            context_mode="default",
+            attachments=[],
+            confirm_degradation=confirm_route_degradation,
+        )
+        route_admission = self._admission_for_operation(route_admission, operation="thread_create_receipt")
+        self._assert_runtime_route_admitted(route_admission, operation="thread_create_receipt")
+        effective_model = str(profile.get("model") or model or "").strip() or None
+        effective_effort = str(dict(route_admission.get("effective") or {}).get("reasoning_effort") or effort or "").strip() or None
+        effective_permission_mode = str(dict(route_admission.get("effective") or {}).get("permission_mode") or permission_mode or "ask").strip()
         normalized_operation_id = self._normalize_thread_create_operation_id(operation_id)
         operation, should_start = self._begin_thread_create_operation(
             normalized_operation_id,
             profile=profile,
-            model=model,
-            effort=effort,
-            permission_mode=permission_mode,
+            model=effective_model,
+            effort=effective_effort,
+            permission_mode=effective_permission_mode,
             name=name,
         )
         if should_start:
@@ -1937,11 +2054,12 @@ class RuntimeService:
                 self._complete_thread_create_operation,
                 kwargs={
                     "profile": dict(profile),
-                    "model": model,
-                    "effort": effort,
-                    "permission_mode": permission_mode,
+                    "model": effective_model,
+                    "effort": effective_effort,
+                    "permission_mode": effective_permission_mode,
                     "name": name,
                     "operation_id": normalized_operation_id,
+                    "confirm_route_degradation": confirm_route_degradation,
                 },
             )
             worker.name = f"astrabridge-thread-create-{normalized_operation_id[-12:]}"
@@ -1954,8 +2072,9 @@ class RuntimeService:
                 "operation_id": normalized_operation_id,
                 "status": "pending",
                 "retry_after_ms": 1500,
+                "route_admission": route_admission,
             }
-        return self.recover_thread_create(profile, operation_id=normalized_operation_id)
+        return {**self.recover_thread_create(profile, operation_id=normalized_operation_id), "route_admission": route_admission}
 
     def _complete_thread_create_operation(
         self,
@@ -1966,6 +2085,7 @@ class RuntimeService:
         permission_mode: str,
         name: str | None,
         operation_id: str,
+        confirm_route_degradation: bool = False,
     ) -> None:
         self._record_event(
             {
@@ -1994,6 +2114,7 @@ class RuntimeService:
                     permission_mode=permission_mode,
                     name=name,
                     operation_id=operation_id,
+                    confirm_route_degradation=confirm_route_degradation,
                     _operation_started=True,
                 )
             finally:
@@ -2099,6 +2220,7 @@ class RuntimeService:
         effort: str | None,
         permission_mode: str,
         name: str | None = None,
+        confirm_route_degradation: bool = False,
     ) -> dict[str, Any]:
         if not getattr(self._runtime_operation_local, "in_thread_start", False):
             with self._runtime_operation_lock:
@@ -2112,17 +2234,40 @@ class RuntimeService:
                         effort=effort,
                         permission_mode=permission_mode,
                         name=name,
+                        confirm_route_degradation=confirm_route_degradation,
                     )
                 finally:
                     self._runtime_operation_local.in_thread_start = False
                     self._runtime_thread_start_in_progress = False
         if not thread_id.strip():
             raise ValueError("thread_id is required.")
+        profile, route_admission = self._admit_runtime_route(
+            profile,
+            thread_id=thread_id,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            execution_policy="standard",
+            context_mode="default",
+            attachments=[],
+            confirm_degradation=confirm_route_degradation,
+        )
+        route_admission = self._admission_for_operation(route_admission, operation="thread_fork")
+        self._assert_runtime_route_admitted(route_admission, operation="thread_fork", thread_id=thread_id)
+        effective_model = str(profile.get("model") or model or "").strip() or None
+        effective_effort = str(dict(route_admission.get("effective") or {}).get("reasoning_effort") or effort or "").strip() or None
+        effective_permission_mode = str(dict(route_admission.get("effective") or {}).get("permission_mode") or permission_mode or "ask").strip()
+        effective_policy = str(dict(route_admission.get("effective") or {}).get("execution_policy") or "standard").strip()
         runtime_status = self._prepare_runtime(profile, require_secret=True)
         client = self._ensure_client(runtime_status)
         params = {
             "threadId": thread_id,
-            **self._thread_start_params(profile=profile, model=model, permission_mode=permission_mode),
+            **self._thread_start_params(
+                profile=profile,
+                model=effective_model,
+                permission_mode=effective_permission_mode,
+                include_dynamic_tools=effective_policy != NO_TOOLS_EXECUTION_POLICY,
+            ),
         }
         try:
             result = client.request("thread/fork", params, timeout=THREAD_FORK_TIMEOUT_SECONDS)
@@ -2146,25 +2291,43 @@ class RuntimeService:
                 "name": thread.get("name"),
                 "profile_id": profile.get("profile_id"),
                 "provider_id": profile.get("provider_id"),
-                "model": model or profile.get("model"),
-                "reasoning_effort": effort or profile.get("reasoning_effort"),
-                "permission_mode": permission_mode,
+                "model": effective_model or profile.get("model"),
+                "reasoning_effort": effective_effort or profile.get("reasoning_effort"),
+                "permission_mode": effective_permission_mode,
+                "execution_route_status": route_admission.get("status"),
+                "execution_route_driver": dict(route_admission.get("effective") or {}).get("execution_driver"),
             },
         )
         if self._tasks is not None:
             self._tasks.bind_thread(
                 thread_id=fork_id,
-                settings=self._task_thread_settings(profile, model, effort, permission_mode, name=thread.get("name")),
+                settings=self._task_thread_settings(
+                    profile,
+                    effective_model,
+                    effective_effort,
+                    effective_permission_mode,
+                    name=thread.get("name"),
+                ),
                 role="fork",
                 make_active=True,
             )
-        self._update_project_runtime_defaults(profile, model, effort)
-        self._record_event({"type": "thread_forked", "thread_id": fork_id, "from_thread_id": thread_id})
+        self._update_project_runtime_defaults(profile, effective_model, effective_effort, route_admission=route_admission)
+        self._record_event(
+            {
+                "type": "thread_forked",
+                "thread_id": fork_id,
+                "from_thread_id": thread_id,
+                "route_admission": deepcopy(route_admission),
+            }
+        )
         try:
-            return self.read_thread(profile, fork_id)
+            return {**self.read_thread(profile, fork_id), "route_admission": route_admission}
         except Exception as exc:
             self._record_event({"type": "thread_read_after_fork_fallback", "thread_id": fork_id, "error": str(exc)})
-            return {"thread": self._decorate_thread({**thread, "id": fork_id, "turns": list(thread.get("turns") or [])})}
+            return {
+                "thread": self._decorate_thread({**thread, "id": fork_id, "turns": list(thread.get("turns") or [])}),
+                "route_admission": route_admission,
+            }
 
     def rename_thread(self, profile: dict[str, Any], thread_id: str, name: str) -> dict[str, Any]:
         if not thread_id.strip():
@@ -2248,6 +2411,27 @@ class RuntimeService:
         turn_execution_policy = self._graph_worker_turn_execution_policy(tool_policy)
         allowed_mcp_tool_names, allow_browser_smoke = self._graph_worker_dynamic_tool_filter(tool_policy)
         effective_permission_mode = "ask" if turn_execution_policy == NO_TOOLS_EXECUTION_POLICY else requested_permission_mode
+        profile, route_admission = self._admit_runtime_route(
+            profile,
+            thread_id=clean_parent_thread_id or None,
+            model=effective_model,
+            effort=effective_effort,
+            permission_mode=effective_permission_mode,
+            execution_policy=turn_execution_policy,
+            context_mode="default",
+            attachments=[],
+            confirm_degradation=False,
+        )
+        route_admission = self._admission_for_operation(route_admission, operation="graph_worker_start")
+        self._assert_runtime_route_admitted(route_admission, operation="graph_worker_start", thread_id=clean_parent_thread_id or None)
+        effective_model = str(profile.get("model") or effective_model or "").strip() or None
+        effective_admission = dict(route_admission.get("effective") or {})
+        effective_effort = str(effective_admission.get("reasoning_effort") or effective_effort or "").strip() or None
+        effective_permission_mode = str(effective_admission.get("permission_mode") or effective_permission_mode or "ask").strip()
+        turn_execution_policy = self._normalize_turn_execution_policy(
+            str(effective_admission.get("execution_policy") or turn_execution_policy)
+        )
+        effective_execution_backend = str(effective_admission.get("execution_backend") or effective_execution_backend or "app_server").strip()
         runtime_contract = self._graph_worker_runtime_contract(
             profile=profile,
             node=node,
@@ -2261,6 +2445,7 @@ class RuntimeService:
             subagent_policy=normalized_subagent_policy,
             tool_policy=tool_policy,
         )
+        runtime_contract["route_admission"] = deepcopy(route_admission)
         runtime_status = self._prepare_runtime(profile, require_secret=True)
         client = self._ensure_client(runtime_status)
 
@@ -3233,6 +3418,7 @@ class RuntimeService:
                     if str(group.get("group_id") or "").strip()
                 ],
                 "model_capability_snapshots": model_capability_snapshots,
+                "dispatch_control": deepcopy(dispatch_limits),
                 "budget": budget_snapshot,
                 "runtime_guardrails": runtime_guardrails,
                 "communication_isolation": communication_isolation,
@@ -4553,6 +4739,7 @@ class RuntimeService:
                                     "attempt_provider_id": attempt_provider_id,
                                     "delay_seconds": delay_seconds,
                                     "finished_at": finished_at,
+                                    "failure_notice": deepcopy(failure_notice or {}),
                                 }
                             else:
                                 completion_status = (
@@ -4866,6 +5053,15 @@ class RuntimeService:
                                 "node_id": node_id,
                                 "attempt_count": next_attempt_count,
                                 "worker_thread_id": str(worker.get("thread_id") or "").strip() or None,
+                            },
+                            transition_context={
+                                "trigger": "graph_retry",
+                                "failure_notice": deepcopy(dict(retry_next_attempt.get("failure_notice") or {})),
+                                "graph_run_id": run_id,
+                                "graph_node_id": node_id,
+                                "attempt_count": next_attempt_count,
+                                "retry_delay_seconds": float(retry_next_attempt.get("delay_seconds") or 0.0),
+                                "retry_policy": "graph_live_retry",
                             },
                         )
                         retry_execution_thread_id = str(retry_turn_result.get("thread_id") or worker.get("thread_id") or "").strip()
@@ -8590,6 +8786,217 @@ class RuntimeService:
         self._record_event({"type": "goal_cleared", "thread_id": thread_id})
         return {"goal": None}
 
+    def _build_turn_transition_for_start(
+        self,
+        *,
+        source_thread_id: str,
+        profile: dict[str, Any],
+        model: str | None,
+        effort: str | None,
+        execution_backend: str | None,
+        context_mode: str,
+        transition_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build the secret-free admission record before a lane can start.
+
+        The local action ledger is intentionally queried by lineage instead of
+        by the next provider's tool-call ID: a fallback provider must not be
+        able to make an interrupted source action look new merely by assigning
+        a different call ID.
+        """
+
+        source_settings = self._task_thread_entry(source_thread_id)
+        if not source_settings and source_thread_id:
+            try:
+                source_settings = self._thread_settings_for(source_thread_id)
+            except Exception:  # noqa: BLE001 - transition admission stays conservative without cache metadata
+                source_settings = {}
+        task_id = ""
+        if self._tasks is not None:
+            try:
+                task_id = str((self._tasks.current_task() or {}).get("task_id") or "").strip()
+            except Exception:  # noqa: BLE001 - no task ownership means no extra receipt narrowing
+                task_id = ""
+        target_model = str(model or profile.get("model") or "").strip()
+        target_provider = str(profile.get("provider_id") or source_settings.get("provider_id") or "").strip().lower()
+        target_backend = self._normalize_execution_backend(execution_backend or profile.get("execution_backend"))
+        source = {
+            "thread_id": source_thread_id,
+            "profile_id": source_settings.get("profile_id") or profile.get("profile_id"),
+            "provider_id": source_settings.get("provider_id") or target_provider,
+            "model_id": source_settings.get("model") or target_model,
+            "reasoning_effort": source_settings.get("reasoning_effort") or effort or profile.get("reasoning_effort"),
+            "execution_backend": source_settings.get("execution_backend") or target_backend,
+        }
+        target = {
+            "thread_id": None,
+            "profile_id": profile.get("profile_id"),
+            "provider_id": target_provider,
+            "model_id": target_model,
+            "reasoning_effort": effort or profile.get("reasoning_effort"),
+            "execution_backend": target_backend,
+        }
+        receipt_references: list[dict[str, Any]] = []
+        receipt_reader = getattr(self._project_tools, "tool_action_receipts_for_lineage", None)
+        if callable(receipt_reader):
+            try:
+                result = receipt_reader(
+                    task_id=task_id or None,
+                    visible_thread_id=source_thread_id or None,
+                    execution_thread_id=source_thread_id or None,
+                )
+                receipt_references = [dict(item) for item in list(result or []) if isinstance(item, dict)]
+            except Exception as exc:  # noqa: BLE001 - unreadable durable receipt state fails closed
+                self._record_event(
+                    {
+                        "type": "turn_transition_receipt_query_failed",
+                        "thread_id": source_thread_id,
+                        "error_type": type(exc).__name__,
+                    }
+                )
+                receipt_references = [
+                    {
+                        "receipt_id": "receipt-ledger-unavailable",
+                        "idempotency_key": "ledger-unavailable",
+                        "action_id": "action-ledger-unavailable",
+                        "tool_name": "unknown",
+                        "state": "recovery_required",
+                        "recovery_required": True,
+                        "lineage": {
+                            "task_id": task_id or None,
+                            "visible_thread_id": source_thread_id or None,
+                            "execution_thread_id": source_thread_id or None,
+                            "turn_id": None,
+                            "tool_call_id": None,
+                        },
+                    }
+                ]
+        context = dict(transition_context or {})
+        failure_notice = context.get("failure_notice")
+        if not isinstance(failure_notice, dict):
+            failure_notice = context.get("failure") if isinstance(context.get("failure"), dict) else None
+        return build_turn_transition(
+            source=source,
+            target=target,
+            trigger=str(context.get("trigger") or "turn_start"),
+            failure_notice=dict(failure_notice or {}),
+            receipt_references=receipt_references,
+            target_route=self._turn_transition_target_route(
+                provider_id=target_provider,
+                model_id=target_model,
+                execution_backend=target_backend,
+            ),
+            context_mode=context_mode,
+            retry={
+                "attempt_count": context.get("attempt_count"),
+                "delay_seconds": context.get("retry_delay_seconds"),
+                "retry_policy": context.get("retry_policy"),
+            },
+        )
+
+    def _turn_transition_target_route(
+        self,
+        *,
+        provider_id: str,
+        model_id: str,
+        execution_backend: str,
+    ) -> dict[str, Any]:
+        route = {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "execution_backend": execution_backend,
+            "admission": "not_recorded",
+            "verification_status": "not_recorded",
+            "accepted": True,
+            "basis": "runtime_configuration_observed",
+        }
+        if self._router_config is None or not provider_id or not model_id:
+            return route
+        try:
+            configured = next(
+                (
+                    dict(item)
+                    for item in self._router_config.models()
+                    if str(item.get("id") or "").strip() == f"{provider_id}/{model_id}"
+                    or (
+                        str(item.get("provider") or item.get("provider_id") or "").strip().lower() == provider_id
+                        and str(item.get("native_model") or "").strip() == model_id
+                    )
+                ),
+                None,
+            )
+        except Exception as exc:  # noqa: BLE001 - route metadata remains advisory when unavailable
+            self._record_event(
+                {
+                    "type": "turn_transition_route_lookup_failed",
+                    "provider_id": provider_id,
+                    "model": model_id,
+                    "error_type": type(exc).__name__,
+                }
+            )
+            return route
+        if not configured:
+            return route
+        admission = str(configured.get("execution_route_status") or "not_recorded").strip()
+        verification = str(configured.get("execution_route_verification_status") or "not_recorded").strip()
+        # Step 8 records configured admission without promoting a review-only
+        # route to a stronger claim.  Only an explicit configured block stops a
+        # lane here; broader runtime-route enforcement remains its own step.
+        explicit_block = admission.lower() in {"blocked", "disabled", "rejected", "unavailable"}
+        return {
+            **route,
+            "admission": admission,
+            "verification_status": verification,
+            "accepted": not explicit_block,
+            "basis": "configured_execution_route",
+        }
+
+    def _assert_turn_transition_admitted(
+        self,
+        transition: dict[str, Any],
+        *,
+        source_thread_id: str,
+        phase: str,
+    ) -> None:
+        try:
+            assert_turn_transition_admitted(transition)
+        except RuntimeError:
+            self._record_event(
+                {
+                    "type": "turn_transition_blocked",
+                    "thread_id": source_thread_id,
+                    "phase": phase,
+                    "turn_transition": compact_turn_transition(transition),
+                }
+            )
+            raise
+        if bool(transition.get("record_required")):
+            self._record_event(
+                {
+                    "type": "turn_transition_preflight",
+                    "thread_id": source_thread_id,
+                    "phase": phase,
+                    "turn_transition": compact_turn_transition(transition),
+                }
+            )
+
+    @staticmethod
+    def _complete_turn_transition(
+        transition: dict[str, Any] | None,
+        *,
+        target_thread_id: str,
+        reused_existing: bool,
+        completion_status: str,
+    ) -> dict[str, Any] | None:
+        if not isinstance(transition, dict):
+            return None
+        return complete_turn_transition(
+            transition,
+            target_thread_id=target_thread_id,
+            reused_existing=reused_existing,
+            completion_status=completion_status,
+        )
+
     def start_turn(
         self,
         profile: dict[str, Any],
@@ -8607,6 +9014,8 @@ class RuntimeService:
         token_budget_objective: str | None = None,
         mcp_tool_policy_snapshot: dict[str, Any] | None = None,
         mcp_tool_policy_context: dict[str, Any] | None = None,
+        transition_context: dict[str, Any] | None = None,
+        confirm_route_degradation: bool = False,
     ) -> dict[str, Any]:
         if not getattr(self._runtime_operation_local, "in_start_turn", False):
             with self._runtime_operation_lock:
@@ -8628,6 +9037,8 @@ class RuntimeService:
                         token_budget_objective=token_budget_objective,
                         mcp_tool_policy_snapshot=mcp_tool_policy_snapshot,
                         mcp_tool_policy_context=mcp_tool_policy_context,
+                        transition_context=transition_context,
+                        confirm_route_degradation=confirm_route_degradation,
                     )
                 finally:
                     self._runtime_operation_local.in_start_turn = False
@@ -8637,6 +9048,25 @@ class RuntimeService:
             raise ValueError("thread_id is required.")
         normalized_context_mode = self._normalize_context_mode(context_mode)
         normalized_execution_policy = self._normalize_turn_execution_policy(execution_policy)
+        profile, route_admission = self._admit_runtime_route(
+            profile,
+            thread_id=requested_thread_id,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            execution_policy=normalized_execution_policy,
+            context_mode=normalized_context_mode,
+            attachments=attachments,
+            confirm_degradation=confirm_route_degradation,
+        )
+        self._assert_runtime_route_admitted(route_admission, operation="turn_start", thread_id=requested_thread_id)
+        model = str(profile.get("model") or model or "").strip() or None
+        effective_admission = dict(route_admission.get("effective") or {})
+        if str(effective_admission.get("reasoning_effort") or "").strip():
+            effort = str(effective_admission.get("reasoning_effort") or "").strip()
+        normalized_execution_policy = self._normalize_turn_execution_policy(
+            str(effective_admission.get("execution_policy") or normalized_execution_policy)
+        )
         allowed_mcp_tool_names = None
         allow_browser_smoke = True
         if isinstance(mcp_tool_policy_snapshot, dict) and mcp_tool_policy_snapshot:
@@ -8646,7 +9076,11 @@ class RuntimeService:
                 for item in list(dict(mcp_tool_policy_snapshot).get("allowed_tool_classes") or [])
                 if str(item or "").strip()
             }
-        effective_permission_mode = "ask" if normalized_execution_policy == NO_TOOLS_EXECUTION_POLICY else permission_mode
+        effective_permission_mode = str(
+            effective_admission.get("permission_mode")
+            or ("ask" if normalized_execution_policy == NO_TOOLS_EXECUTION_POLICY else permission_mode)
+            or "ask"
+        ).strip()
         execution_backend = self._thread_execution_backend(requested_thread_id, profile)
         if normalized_execution_policy == PATCH_ONLY_EXECUTION_POLICY and not self._supports_patch_only_execution_policy(profile, execution_backend):
             self._record_event(
@@ -8663,12 +9097,26 @@ class RuntimeService:
                 "Patch-only execution is unavailable for this runtime. AstraBridge blocked the turn rather than silently allowing shell edits. "
                 "Use Standard execution with approvals, or choose a runtime that advertises verified native patch-only enforcement."
             )
+        turn_transition = self._build_turn_transition_for_start(
+            source_thread_id=requested_thread_id,
+            profile=profile,
+            model=model,
+            effort=effort,
+            execution_backend=execution_backend,
+            context_mode=normalized_context_mode,
+            transition_context=transition_context,
+        )
+        self._assert_turn_transition_admitted(
+            turn_transition,
+            source_thread_id=requested_thread_id,
+            phase="turn_start_preflight",
+        )
         if execution_backend == "native_kernel":
             if token_budget is not None:
                 raise ValueError(
                     "Token-budget-enforced task-graph turns require the App Server execution backend."
                 )
-            return self._start_native_turn(
+            native_result = self._start_native_turn(
                 profile,
                 thread_id=requested_thread_id,
                 text=text,
@@ -8678,7 +9126,9 @@ class RuntimeService:
                 permission_mode=effective_permission_mode,
                 collaboration_mode=collaboration_mode,
                 context_mode=normalized_context_mode,
+                turn_transition=turn_transition,
             )
+            return {**native_result, "route_admission": route_admission}
         runtime_status = self._prepare_runtime(profile, require_secret=True)
         self._assert_attachment_route_supported(
             attachments or [],
@@ -8741,6 +9191,7 @@ class RuntimeService:
                     include_dynamic_tools=normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY,
                     allowed_mcp_tool_names=allowed_mcp_tool_names,
                     allow_browser_smoke=allow_browser_smoke,
+                    turn_transition=turn_transition,
                 )
             else:
                 prepared_thread_id, prepared_handoff = self._ensure_provider_thread_for_turn(
@@ -8755,6 +9206,7 @@ class RuntimeService:
                     include_dynamic_tools=normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY,
                     allowed_mcp_tool_names=allowed_mcp_tool_names,
                     allow_browser_smoke=allow_browser_smoke,
+                    turn_transition=turn_transition,
                 )
             if normalized_context_mode == "minimal_visual" and self._tasks is not None:
                 guard_state = self._context_guard_state(prepared_thread_id)
@@ -8778,6 +9230,7 @@ class RuntimeService:
                         include_dynamic_tools=normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY,
                         allowed_mcp_tool_names=allowed_mcp_tool_names,
                         allow_browser_smoke=allow_browser_smoke,
+                        turn_transition=turn_transition,
                     )
             self._raise_if_context_guard_blocks_turn(active_client, prepared_thread_id)
             return prepared_thread_id, prepared_handoff
@@ -8830,6 +9283,15 @@ class RuntimeService:
                 }
             )
             raise ValueError(f"Attachment preparation failed: {self._attachment_failure_message(exc)}") from exc
+        inputs, context_budget_report = self._apply_context_budget_preflight(
+            inputs,
+            profile=profile,
+            runtime_status=runtime_status,
+            model=model,
+            thread_id=effective_thread_id,
+            attachments=attachments or [],
+            context_mode=normalized_context_mode,
+        )
         attachment_diagnostics = self._attachment_diagnostics(
             attachments or [],
             prepared_inputs=inputs,
@@ -8877,11 +9339,35 @@ class RuntimeService:
                 execution_policy=normalized_execution_policy,
                 runtime_status=runtime_status,
                 attachments=attachments or [],
+                context_budget_report=context_budget_report,
+                turn_transition=turn_transition,
+                route_admission=route_admission,
             )
         except JsonRpcError as exc:
             if not self._is_thread_not_found_error(exc):
                 raise
             self._mark_provider_thread_missing(effective_thread_id, reason="turn_start_thread_missing")
+            turn_transition = self._build_turn_transition_for_start(
+                source_thread_id=effective_thread_id,
+                profile=profile,
+                model=model,
+                effort=effort,
+                execution_backend=execution_backend,
+                context_mode=normalized_context_mode,
+                transition_context={
+                    "trigger": "turn_start_thread_missing",
+                    "failure_notice": classify_runtime_failure(
+                        "provider thread missing during turn/start",
+                        current_provider=str(profile.get("provider_id") or ""),
+                        current_model=str(model or profile.get("model") or ""),
+                    ).to_payload(),
+                },
+            )
+            self._assert_turn_transition_admitted(
+                turn_transition,
+                source_thread_id=effective_thread_id,
+                phase="turn_start_thread_recovery",
+            )
             effective_thread_id, handoff_event = self._recover_missing_provider_thread(
                 client,
                 missing_thread_id=effective_thread_id,
@@ -8894,6 +9380,7 @@ class RuntimeService:
                 include_dynamic_tools=normalized_execution_policy != NO_TOOLS_EXECUTION_POLICY,
                 allowed_mcp_tool_names=allowed_mcp_tool_names,
                 allow_browser_smoke=allow_browser_smoke,
+                turn_transition=turn_transition,
             )
             try:
                 inputs = self._build_user_inputs(
@@ -8925,6 +9412,15 @@ class RuntimeService:
                     }
                 )
                 raise ValueError(f"Attachment preparation failed: {self._attachment_failure_message(exc)}") from exc
+            inputs, context_budget_report = self._apply_context_budget_preflight(
+                inputs,
+                profile=profile,
+                runtime_status=runtime_status,
+                model=model,
+                thread_id=effective_thread_id,
+                attachments=attachments or [],
+                context_mode=normalized_context_mode,
+            )
             attachment_diagnostics = self._attachment_diagnostics(
                 attachments or [],
                 prepared_inputs=inputs,
@@ -8951,6 +9447,9 @@ class RuntimeService:
                     execution_policy=normalized_execution_policy,
                     runtime_status=runtime_status,
                     attachments=attachments or [],
+                    context_budget_report=context_budget_report,
+                    turn_transition=turn_transition,
+                    route_admission=route_admission,
                 )
         except RuntimeError as exc:
             if not self._is_app_server_transport_error(exc):
@@ -8994,9 +9493,11 @@ class RuntimeService:
                 "reasoning_effort": effort or profile.get("reasoning_effort"),
                 "permission_mode": effective_permission_mode,
                 "collaboration_mode": collaboration_mode or "default",
+                "execution_route_status": route_admission.get("status"),
+                "execution_route_driver": dict(route_admission.get("effective") or {}).get("execution_driver"),
             },
         )
-        self._update_project_runtime_defaults(profile, model, effort)
+        self._update_project_runtime_defaults(profile, model, effort, route_admission=route_admission)
         self._record_event(
             {
                 "type": "turn_started_request",
@@ -9005,8 +9506,11 @@ class RuntimeService:
                 "runtime": runtime_status,
                 "attachments": self._attachment_event_items(attachments or []),
                 "attachment_diagnostics": attachment_diagnostics,
+                "context_budget_report": context_budget_report,
                 "collaboration_mode": collaboration_mode or "default",
                 "context_mode": normalized_context_mode,
+                "turn_transition": compact_turn_transition(turn_transition),
+                "route_admission": deepcopy(route_admission),
             }
         )
         self._record_execution_policy_started(
@@ -9014,11 +9518,20 @@ class RuntimeService:
             turn_id=str(turn.get("id") or ""),
             policy=normalized_execution_policy,
         )
+        completed_transition = self._complete_turn_transition(
+            turn_transition,
+            target_thread_id=effective_thread_id,
+            reused_existing=bool((handoff_event or {}).get("reused_existing", True)),
+            completion_status="turn_start_accepted",
+        )
         return {
             "turn": turn,
             "thread_id": effective_thread_id,
             "handoff": handoff_event,
             "attachment_diagnostics": attachment_diagnostics,
+            "context_budget_report": context_budget_report,
+            "turn_transition": compact_turn_transition(completed_transition),
+            "route_admission": route_admission,
         }
 
     def verify_app_server_image_transport(
@@ -9972,8 +10485,289 @@ class RuntimeService:
         hint = self._tasks.visible_provider_thread_id(include_missing_fallback=True)
         return str(hint or clean_thread_id).strip()
 
+    def route_admission(
+        self,
+        profile: dict[str, Any],
+        *,
+        thread_id: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        permission_mode: str | None = None,
+        execution_policy: str | None = None,
+        context_mode: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        confirm_degradation: bool = False,
+        operation: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the exact, side-effect-free route posture for a task start."""
+
+        _effective_profile, admission = self._admit_runtime_route(
+            profile,
+            thread_id=thread_id,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            execution_policy=execution_policy,
+            context_mode=context_mode,
+            attachments=attachments,
+            confirm_degradation=confirm_degradation,
+        )
+        return self._admission_for_operation(admission, operation=operation)
+
+    def _admit_runtime_route(
+        self,
+        profile: dict[str, Any],
+        *,
+        thread_id: str | None,
+        model: str | None,
+        effort: str | None,
+        permission_mode: str | None,
+        execution_policy: str | None,
+        context_mode: str | None,
+        attachments: list[dict[str, Any]] | None,
+        confirm_degradation: bool,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Bind the admission contract to the exact selected model.
+
+        ``ProfileService`` owns endpoint/auth defaults, while the router catalog
+        owns model route proof.  This method deliberately overlays the exact
+        selected model before either runtime preparation or thread creation can
+        observe it; a profile's previous model proof cannot leak to a newly
+        selected sibling model.
+        """
+
+        effective_profile, model_contract_present = self._profile_for_runtime_model(profile, model)
+        if self._router_config is None:
+            legacy_thread_backend = self._legacy_thread_backend_for_admission(
+                effective_profile,
+                thread_id=thread_id,
+            )
+            if legacy_thread_backend:
+                effective_profile["execution_backend"] = legacy_thread_backend
+        source_provider = self._source_provider_for_route_admission(thread_id)
+        has_explicit_route_contract = isinstance(effective_profile.get("execution_route"), dict) or isinstance(
+            effective_profile.get("execution_route_evidence"), dict
+        )
+        if self._router_config is None and not has_explicit_route_contract:
+            admission = legacy_runtime_route_admission(
+                effective_profile,
+                requested_model=effective_profile.get("model"),
+                requested_effort=effort,
+                requested_permission_mode=permission_mode,
+                requested_execution_policy=execution_policy,
+                requested_context_mode=context_mode,
+            )
+        else:
+            admission = resolve_runtime_route_admission(
+                effective_profile,
+                requested_model=effective_profile.get("model"),
+                requested_effort=effort,
+                requested_permission_mode=permission_mode,
+                requested_execution_policy=execution_policy,
+                requested_context_mode=context_mode,
+                attachments=list(attachments or []),
+                source_provider_id=source_provider,
+                native_kernel_enabled=self._native_kernel_enabled(),
+                confirm_degradation=confirm_degradation,
+                model_contract_present=model_contract_present,
+            )
+        effective_profile["_runtime_route_admission"] = deepcopy(admission)
+        return effective_profile, admission
+
+    def _legacy_thread_backend_for_admission(
+        self,
+        profile: dict[str, Any],
+        *,
+        thread_id: str | None,
+    ) -> str | None:
+        """Reuse an embedded thread's host only for its exact same route.
+
+        Isolated callers predating RouterConfigService can retain native
+        threads.  This is not a route-evidence bypass: the inherited host is
+        considered only when provider and native model match exactly, and it
+        never affects a configured production route or default eligibility.
+        """
+
+        clean_thread_id = str(thread_id or "").strip()
+        if not clean_thread_id:
+            return None
+        settings = self._task_thread_entry(clean_thread_id)
+        if not settings:
+            cache = self._read_thread_cache()
+            settings = dict((cache.get("by_id") or {}).get(clean_thread_id) or {})
+        source_provider = str(settings.get("provider_id") or "").strip().lower()
+        target_provider = str(profile.get("provider_id") or "").strip().lower()
+        source_model = str(settings.get("model") or "").strip()
+        target_model = str(profile.get("model") or "").strip()
+        if "/" in source_model:
+            source_provider_hint, source_model = [part.strip() for part in source_model.split("/", 1)]
+            source_provider = source_provider or source_provider_hint.lower()
+        if not source_provider or not target_provider or source_provider != target_provider:
+            return None
+        if not source_model or not target_model or source_model != target_model:
+            return None
+        backend = self._normalize_execution_backend(settings.get("execution_backend"))
+        return backend if backend == "native_kernel" else None
+
+    def _profile_for_runtime_model(
+        self,
+        profile: dict[str, Any],
+        model: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Return a local profile copy with the requested model's facts.
+
+        This is intentionally not a persistence migration.  A profile stays a
+        provider/endpoint choice; the effective model contract exists only for
+        this request and is discarded after the runtime call.
+        """
+
+        effective = deepcopy(dict(profile or {}))
+        provider_id = str(effective.get("provider_id") or "").strip().lower()
+        requested = str(model or effective.get("model") or "").strip()
+        selected_provider = provider_id
+        selected_model = requested
+        if "/" in requested:
+            candidate_provider, candidate_model = [part.strip() for part in requested.split("/", 1)]
+            if candidate_provider and provider_id and candidate_provider.lower() != provider_id:
+                raise ValueError(
+                    "Selected model provider does not match the selected runtime profile. "
+                    "Choose that provider's profile before starting a turn."
+                )
+            selected_provider = candidate_provider.lower() or provider_id
+            selected_model = candidate_model
+        if not selected_model:
+            raise ValueError("model is required for runtime route admission.")
+        if selected_provider:
+            effective["provider_id"] = selected_provider
+        previous_model = str(effective.get("model") or "").strip()
+        effective["model"] = selected_model
+        configured_model = self._configured_runtime_model(selected_provider, selected_model)
+        if configured_model is not None:
+            for key, value in configured_model.items():
+                if key in {"id", "provider", "provider_id", "native_model", "display_name", "displayName"}:
+                    continue
+                effective[key] = deepcopy(value)
+            effective["runtime_model_contract_status"] = "configured"
+            effective["runtime_model_contract_id"] = str(configured_model.get("id") or "").strip() or None
+            return effective, True
+
+        # A profile may carry an exact custom-model proof.  It remains usable
+        # only when the caller did not switch away from that profiled model.
+        # Otherwise clear all cached/derived route fields before re-resolving,
+        # so a sibling model cannot inherit a stronger route.
+        if previous_model and previous_model != selected_model:
+            for field in (
+                "execution_route",
+                "execution_route_status",
+                "execution_route_driver",
+                "execution_route_configured_driver",
+                "execution_route_authority_tier",
+                "execution_route_declared_authority_tier",
+                "execution_route_evidence_state",
+                "execution_route_verification_status",
+                "execution_route_blockers",
+                "execution_route_warning",
+                "execution_route_default_eligible",
+                "execution_route_evidence",
+            ):
+                effective.pop(field, None)
+        effective["runtime_model_contract_status"] = "profile_only" if previous_model == selected_model else "missing"
+        return effective, previous_model == selected_model
+
+    def _configured_runtime_model(self, provider_id: str, model_id: str) -> dict[str, Any] | None:
+        if self._router_config is None or not provider_id or not model_id:
+            return None
+        try:
+            models = self._router_config.models()
+        except Exception:  # noqa: BLE001 - missing catalog data must fail closed in the resolver
+            return None
+        for item in list(models or []):
+            if not isinstance(item, dict):
+                continue
+            candidate_provider = str(item.get("provider") or item.get("provider_id") or "").strip().lower()
+            candidate_model = str(item.get("native_model") or "").strip()
+            candidate_id = str(item.get("id") or "").strip()
+            if candidate_id == f"{provider_id}/{model_id}" or (candidate_provider == provider_id and candidate_model == model_id):
+                return deepcopy(item)
+        return None
+
+    def _source_provider_for_route_admission(self, thread_id: str | None) -> str | None:
+        clean_thread_id = str(thread_id or "").strip()
+        if not clean_thread_id:
+            return None
+        settings = self._task_thread_entry(clean_thread_id)
+        if not settings:
+            try:
+                settings = self._thread_settings_for(clean_thread_id)
+            except Exception:  # noqa: BLE001 - missing source metadata just avoids an unwarranted continuity claim
+                settings = {}
+        return str(settings.get("provider_id") or "").strip() or None
+
+    def _assert_runtime_route_admitted(
+        self,
+        admission: dict[str, Any],
+        *,
+        operation: str,
+        thread_id: str | None = None,
+    ) -> None:
+        status = str(admission.get("status") or "blocked").strip()
+        if status == "admitted":
+            return
+        self._record_event(
+            {
+                "type": "runtime_route_admission_not_admitted",
+                "operation": operation,
+                "thread_id": str(thread_id or "").strip() or None,
+                "route_admission": deepcopy(admission),
+            }
+        )
+        raise RuntimeRouteAdmissionError(admission, operation=operation)
+
+    @staticmethod
+    def _admission_for_operation(
+        admission: dict[str, Any],
+        *,
+        operation: str | None,
+    ) -> dict[str, Any]:
+        """Add an exact task-start constraint without changing model intent.
+
+        A verified native-provider route can execute an existing native thread,
+        but this desktop flow cannot create or fork an App Server thread for
+        it.  Returning that distinction from preflight avoids an ``admitted``
+        status that would immediately fail during thread setup.
+        """
+
+        normalized_operation = str(operation or "").strip().lower()
+        if normalized_operation not in {"thread_create", "thread_create_receipt", "thread_fork", "graph_worker_start"}:
+            return admission
+        execution_backend = str(dict(admission.get("effective") or {}).get("execution_backend") or "app_server").strip()
+        if execution_backend == "app_server":
+            return admission
+        blocked = deepcopy(admission)
+        blocked["status"] = "blocked"
+        blocked["presentation_state"] = "blocked"
+        degradation = dict(blocked.get("degradation") or {})
+        reasons = list(degradation.get("reasons") or [])
+        if not any(str(item.get("code") or "") == "thread_setup_driver_not_supported" for item in reasons if isinstance(item, dict)):
+            reasons.append(
+                {
+                    "code": "thread_setup_driver_not_supported",
+                    "message": "This route cannot create or fork an App Server thread; start it through its verified native runtime instead.",
+                }
+            )
+        degradation["active"] = True
+        degradation["requires_confirmation"] = False
+        degradation["reasons"] = reasons
+        blocked["degradation"] = degradation
+        return blocked
+
     def _thread_execution_backend(self, thread_id: str, profile: dict[str, Any]) -> str:
         settings = self._thread_settings_for(thread_id) if thread_id else {}
+        route_admission = dict(profile.get("_runtime_route_admission") or {})
+        effective_route = dict(route_admission.get("effective") or {})
+        admitted_backend = str(effective_route.get("execution_backend") or "").strip()
+        if admitted_backend:
+            return self._normalize_execution_backend(admitted_backend)
         profile_backend = profile.get("execution_backend")
         return self._normalize_execution_backend(settings.get("execution_backend") or profile_backend)
 
@@ -9993,27 +10787,69 @@ class RuntimeService:
         permission_mode: str,
         collaboration_mode: str | None,
         context_mode: str,
+        turn_transition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self._native_kernel_enabled():
             raise RuntimeError("Native kernel execution is disabled. Set ASTRABRIDGE_ENABLE_NATIVE_KERNEL=1 to enable it.")
         if self._native_turn_loop is None:
             raise RuntimeError("Native kernel dependencies are not attached.")
-        result = self._native_turn_loop.run_turn(
+        prepared_inputs = self._build_user_inputs(
+            text,
+            attachments,
             thread_id=thread_id,
-            profile=profile,
-            text=text,
-            attachments=attachments,
-            model=model,
-            effort=effort,
-            permission_mode=permission_mode,
-            collaboration_mode=collaboration_mode,
             context_mode=context_mode,
+            profile_id=str(profile.get("profile_id") or ""),
+            provider_id=str(profile.get("provider_id") or ""),
+            model_id=str(model or profile.get("model") or ""),
+        )
+        prepared_inputs, context_budget_report = self._apply_context_budget_preflight(
+            prepared_inputs,
+            profile=profile,
+            runtime_status=None,
+            model=model,
+            thread_id=thread_id,
+            attachments=attachments,
+            context_mode=context_mode,
+        )
+        run_turn_kwargs: dict[str, Any] = {
+            "thread_id": thread_id,
+            "profile": profile,
+            "text": text,
+            "attachments": attachments,
+            "model": model,
+            "effort": effort,
+            "permission_mode": permission_mode,
+            "collaboration_mode": collaboration_mode,
+            "context_mode": context_mode,
+        }
+        try:
+            import inspect
+
+            if "prepared_inputs" in inspect.signature(self._native_turn_loop.run_turn).parameters:
+                run_turn_kwargs["prepared_inputs"] = prepared_inputs
+        except (TypeError, ValueError):
+            # Test doubles and legacy native-loop shims may not expose a
+            # Python signature; production NativeCodingTurnLoop does.
+            pass
+        result = self._native_turn_loop.run_turn(
+            **run_turn_kwargs,
+        )
+        completed_transition = self._complete_turn_transition(
+            turn_transition,
+            target_thread_id=thread_id,
+            reused_existing=True,
+            completion_status="native_turn_started",
         )
         self._cache_thread_entry(thread_id, result.thread_cache_patch)
         self._projects.switch_thread(thread_id)
         if self._tasks is not None:
             self._tasks.force_visible_provider_thread(thread_id)
-        self._update_project_runtime_defaults(profile, model, effort)
+        self._update_project_runtime_defaults(
+            profile,
+            model,
+            effort,
+            route_admission=dict(profile.get("_runtime_route_admission") or {}) or None,
+        )
         self._record_task_thread_snapshot(result.thread)
         self._record_event(
             {
@@ -10024,9 +10860,17 @@ class RuntimeService:
                 "provider_id": profile.get("provider_id"),
                 "model": model or profile.get("model"),
                 "context_mode": context_mode,
+                "context_budget_report": context_budget_report,
+                "turn_transition": compact_turn_transition(completed_transition),
             }
         )
-        return {"turn": result.turn, "thread_id": thread_id, "handoff": result.handoff}
+        return {
+            "turn": result.turn,
+            "thread_id": thread_id,
+            "handoff": result.handoff,
+            "context_budget_report": context_budget_report,
+            "turn_transition": compact_turn_transition(completed_transition),
+        }
 
     def _turn_start_background_pending_response(
         self,
@@ -10043,6 +10887,9 @@ class RuntimeService:
         execution_policy: str,
         runtime_status: dict[str, Any],
         attachments: list[dict[str, Any]],
+        context_budget_report: dict[str, Any] | None = None,
+        turn_transition: dict[str, Any] | None = None,
+        route_admission: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         synthetic_turn = {
             "id": new_id("pending-turn"),
@@ -10067,7 +10914,7 @@ class RuntimeService:
                 "collaboration_mode": collaboration_mode or "default",
             },
         )
-        self._update_project_runtime_defaults(profile, model, effort)
+        self._update_project_runtime_defaults(profile, model, effort, route_admission=route_admission)
         self._record_event(
             {
                 "type": "turn_start_background_pending",
@@ -10083,8 +10930,11 @@ class RuntimeService:
                     model_id=str(model or profile.get("model") or ""),
                     context_mode=context_mode,
                 ),
+                "context_budget_report": dict(context_budget_report or {}) or None,
                 "collaboration_mode": collaboration_mode or "default",
                 "context_mode": context_mode,
+                "turn_transition": compact_turn_transition(turn_transition),
+                "route_admission": deepcopy(dict(route_admission or {})),
                 "warning": (
                     "app-server did not answer turn/start before the sidecar timeout; "
                     "the turn may still be running and should be tracked through runtime events."
@@ -10103,6 +10953,9 @@ class RuntimeService:
                 model_id=str(model or profile.get("model") or ""),
                 context_mode=context_mode,
             ),
+            "context_budget_report": dict(context_budget_report or {}) or None,
+            "turn_transition": compact_turn_transition(turn_transition),
+            "route_admission": dict(route_admission or {}),
         }
 
     def compact_thread(self, profile: dict[str, Any], thread_id: str) -> dict[str, Any]:
@@ -10507,7 +11360,26 @@ class RuntimeService:
             return int(actual)
         return 0
 
-    def _update_project_runtime_defaults(self, profile: dict[str, Any], model: str | None, effort: str | None) -> None:
+    def _update_project_runtime_defaults(
+        self,
+        profile: dict[str, Any],
+        model: str | None,
+        effort: str | None,
+        *,
+        route_admission: dict[str, Any] | None = None,
+    ) -> None:
+        route = dict(dict(route_admission or {}).get("route") or {})
+        if route_admission is not None and not bool(route.get("default_route_eligible")):
+            self._record_event(
+                {
+                    "type": "runtime_default_route_not_promoted",
+                    "profile_id": profile.get("profile_id"),
+                    "provider_id": profile.get("provider_id"),
+                    "model": model or profile.get("model"),
+                    "route_admission": deepcopy(route_admission),
+                }
+            )
+            return
         self._projects.update_project(
             {
                 "default_profile_id": profile.get("profile_id"),
@@ -10527,6 +11399,8 @@ class RuntimeService:
         execution_backend: str | None = None,
         name: str | None = None,
     ) -> dict[str, Any]:
+        route_admission = dict(profile.get("_runtime_route_admission") or {})
+        effective_route = dict(route_admission.get("effective") or {})
         settings = {
             "name": name,
             "profile_id": profile.get("profile_id"),
@@ -10534,8 +11408,20 @@ class RuntimeService:
             "model": model or profile.get("model"),
             "reasoning_effort": effort or profile.get("reasoning_effort"),
             "permission_mode": permission_mode,
-            "execution_backend": self._normalize_execution_backend(execution_backend or profile.get("execution_backend")),
+            "execution_backend": self._normalize_execution_backend(
+                execution_backend or effective_route.get("execution_backend") or profile.get("execution_backend")
+            ),
         }
+        if route_admission:
+            settings.update(
+                {
+                    "execution_route_status": route_admission.get("status"),
+                    "execution_route_driver": effective_route.get("execution_driver"),
+                    "execution_route_authority_tier": effective_route.get("authority_tier"),
+                    "execution_route_presentation": route_admission.get("presentation_state"),
+                    "execution_route_default_eligible": bool(dict(route_admission.get("route") or {}).get("default_route_eligible")),
+                }
+            )
         if collaboration_mode is not None:
             settings["collaboration_mode"] = collaboration_mode or "default"
         return settings
@@ -10554,7 +11440,21 @@ class RuntimeService:
         include_dynamic_tools: bool = True,
         allowed_mcp_tool_names: set[str] | None = None,
         allow_browser_smoke: bool = True,
+        turn_transition: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any] | None]:
+        turn_transition = turn_transition or self._build_turn_transition_for_start(
+            source_thread_id=source_thread_id,
+            profile=profile,
+            model=model,
+            effort=effort,
+            execution_backend=profile.get("execution_backend"),
+            context_mode=context_mode,
+        )
+        self._assert_turn_transition_admitted(
+            turn_transition,
+            source_thread_id=source_thread_id,
+            phase="provider_thread_admission",
+        )
         if self._tasks is None:
             return source_thread_id, None
         desired = self._task_thread_settings(profile, model, effort, permission_mode, collaboration_mode=collaboration_mode)
@@ -10591,6 +11491,7 @@ class RuntimeService:
                 include_dynamic_tools=include_dynamic_tools,
                 allowed_mcp_tool_names=allowed_mcp_tool_names,
                 allow_browser_smoke=allow_browser_smoke,
+                turn_transition=turn_transition,
             )
 
         reusable = self._tasks.find_provider_thread(
@@ -10615,6 +11516,7 @@ class RuntimeService:
                     target_provider_id=str(desired.get("provider_id") or ""),
                     target_model_id=str(desired.get("model") or ""),
                     projection_mode="reused_provider_thread",
+                    target_context_budget_report=context_budget_report,
                 )
                 handoff_event = self._tasks.record_provider_handoff(
                     from_thread_id=source_thread_id,
@@ -10623,9 +11525,16 @@ class RuntimeService:
                     reused_existing=True,
                     context_budget_report=context_budget_report,
                     neutral_handoff_bundle=handoff_bundle,
+                    turn_transition=self._complete_turn_transition(
+                        turn_transition,
+                        target_thread_id=reusable_thread_id,
+                        reused_existing=True,
+                        completion_status="reused_target_lane_selected",
+                    ),
                     **self._handoff_projection_kwargs(
                         source_thread_id=source_thread_id,
                         target_provider_id=str(desired.get("provider_id") or ""),
+                        target_model_id=str(desired.get("model") or "") or None,
                     ),
                 )
                 self._projects.switch_thread(reusable_thread_id)
@@ -10657,6 +11566,7 @@ class RuntimeService:
                 include_dynamic_tools=include_dynamic_tools,
                 allowed_mcp_tool_names=allowed_mcp_tool_names,
                 allow_browser_smoke=allow_browser_smoke,
+                turn_transition=turn_transition,
             )
 
         if not source_thread_id:
@@ -10672,6 +11582,7 @@ class RuntimeService:
                 include_dynamic_tools=include_dynamic_tools,
                 allowed_mcp_tool_names=allowed_mcp_tool_names,
                 allow_browser_smoke=allow_browser_smoke,
+                turn_transition=turn_transition,
             )
 
         if handoff_needed:
@@ -10692,6 +11603,7 @@ class RuntimeService:
                 include_dynamic_tools=include_dynamic_tools,
                 allowed_mcp_tool_names=allowed_mcp_tool_names,
                 allow_browser_smoke=allow_browser_smoke,
+                turn_transition=turn_transition,
             )
 
         params = {
@@ -10735,6 +11647,7 @@ class RuntimeService:
                 include_dynamic_tools=include_dynamic_tools,
                 allowed_mcp_tool_names=allowed_mcp_tool_names,
                 allow_browser_smoke=allow_browser_smoke,
+                turn_transition=turn_transition,
             )
         thread = dict(result.get("thread") or {})
         target_thread_id = str(thread.get("id") or "")
@@ -10755,6 +11668,7 @@ class RuntimeService:
             target_provider_id=str(desired.get("provider_id") or ""),
             target_model_id=str(desired.get("model") or ""),
             projection_mode="task_context_fresh_thread",
+            target_context_budget_report=context_budget_report,
         )
         handoff_event = self._tasks.record_provider_handoff(
             from_thread_id=source_thread_id,
@@ -10763,9 +11677,16 @@ class RuntimeService:
             reused_existing=False,
             context_budget_report=context_budget_report,
             neutral_handoff_bundle=handoff_bundle,
+            turn_transition=self._complete_turn_transition(
+                turn_transition,
+                target_thread_id=target_thread_id,
+                reused_existing=False,
+                completion_status="forked_target_lane_started",
+            ),
             **self._handoff_projection_kwargs(
                 source_thread_id=source_thread_id,
                 target_provider_id=str(desired.get("provider_id") or ""),
+                target_model_id=str(desired.get("model") or "") or None,
             ),
         )
         self._record_event(
@@ -10795,7 +11716,22 @@ class RuntimeService:
         include_dynamic_tools: bool = True,
         allowed_mcp_tool_names: set[str] | None = None,
         allow_browser_smoke: bool = True,
+        turn_transition: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any] | None]:
+        turn_transition = turn_transition or self._build_turn_transition_for_start(
+            source_thread_id=source_thread_id,
+            profile=profile,
+            model=model,
+            effort=effort,
+            execution_backend=desired.get("execution_backend") or profile.get("execution_backend"),
+            context_mode="no_context" if "fresh_thread" in reason else "default",
+            transition_context={"trigger": reason},
+        )
+        self._assert_turn_transition_admitted(
+            turn_transition,
+            source_thread_id=source_thread_id,
+            phase="fresh_provider_thread_start",
+        )
         params = self._thread_start_params(
             profile=profile,
             model=model,
@@ -10811,7 +11747,12 @@ class RuntimeService:
             raise RuntimeError("thread/start did not return a target thread id.")
         desired["name"] = thread.get("name") or desired.get("name")
         self._cache_thread_entry(target_thread_id, desired)
-        self._prime_handoff_projection_source_thread(client, source_thread_id=source_thread_id)
+        # A health/no-context retry deliberately starts with a reduced
+        # projection.  Reading the source provider thread here both defeats
+        # that contract and can pull provider-private state into a lane that
+        # was explicitly selected to avoid it.
+        if reason not in {"minimal_text_fresh_thread", "no_context_fresh_thread"}:
+            self._prime_handoff_projection_source_thread(client, source_thread_id=source_thread_id)
         context_budget_report = self._project_context_budget_report(
             thread_id=source_thread_id or target_thread_id,
             profile_id=str(desired.get("profile_id") or ""),
@@ -10824,6 +11765,7 @@ class RuntimeService:
             target_provider_id=str(desired.get("provider_id") or ""),
             target_model_id=str(desired.get("model") or ""),
             projection_mode="task_context_fresh_thread",
+            target_context_budget_report=context_budget_report,
         )
         handoff_event = self._tasks.record_provider_handoff(
             from_thread_id=source_thread_id,
@@ -10832,9 +11774,16 @@ class RuntimeService:
             reused_existing=False,
             context_budget_report=context_budget_report,
             neutral_handoff_bundle=handoff_bundle,
+            turn_transition=self._complete_turn_transition(
+                turn_transition,
+                target_thread_id=target_thread_id,
+                reused_existing=False,
+                completion_status="fresh_target_lane_started",
+            ),
             **self._handoff_projection_kwargs(
                 source_thread_id=source_thread_id,
                 target_provider_id=str(desired.get("provider_id") or ""),
+                target_model_id=str(desired.get("model") or "") or None,
             ),
         )
         self._projects.switch_thread(target_thread_id)
@@ -10867,6 +11816,7 @@ class RuntimeService:
         include_dynamic_tools: bool = True,
         allowed_mcp_tool_names: set[str] | None = None,
         allow_browser_smoke: bool = True,
+        turn_transition: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any] | None]:
         desired = self._task_thread_settings(
             profile,
@@ -10875,6 +11825,27 @@ class RuntimeService:
             permission_mode,
             collaboration_mode=collaboration_mode,
             name="Recovered provider thread",
+        )
+        turn_transition = turn_transition or self._build_turn_transition_for_start(
+            source_thread_id=missing_thread_id,
+            profile=profile,
+            model=model,
+            effort=effort,
+            execution_backend=desired.get("execution_backend") or profile.get("execution_backend"),
+            context_mode="no_context",
+            transition_context={
+                "trigger": reason,
+                "failure_notice": classify_runtime_failure(
+                    "provider thread missing",
+                    current_provider=str(profile.get("provider_id") or ""),
+                    current_model=str(model or profile.get("model") or ""),
+                ).to_payload(),
+            },
+        )
+        self._assert_turn_transition_admitted(
+            turn_transition,
+            source_thread_id=missing_thread_id,
+            phase="missing_provider_thread_recovery",
         )
         params = self._thread_start_params(
             profile=profile,
@@ -10906,6 +11877,7 @@ class RuntimeService:
                 target_provider_id=str(desired.get("provider_id") or ""),
                 target_model_id=str(desired.get("model") or ""),
                 projection_mode="task_context_fresh_thread",
+                target_context_budget_report=context_budget_report,
             )
             handoff_event = self._tasks.record_provider_handoff(
                 from_thread_id=missing_thread_id,
@@ -10914,9 +11886,16 @@ class RuntimeService:
                 reused_existing=False,
                 context_budget_report=context_budget_report,
                 neutral_handoff_bundle=handoff_bundle,
+                turn_transition=self._complete_turn_transition(
+                    turn_transition,
+                    target_thread_id=target_thread_id,
+                    reused_existing=False,
+                    completion_status="missing_thread_recovery_lane_started",
+                ),
                 **self._handoff_projection_kwargs(
                     source_thread_id=missing_thread_id,
                     target_provider_id=str(desired.get("provider_id") or ""),
+                    target_model_id=str(desired.get("model") or "") or None,
                 ),
             )
         self._projects.switch_thread(target_thread_id)
@@ -12767,20 +13746,15 @@ class RuntimeService:
         asset_context_items = self._asset_context_inputs() if include_context else []
         asset_context_text = "\n\n".join(str(item.get("text") or "") for item in asset_context_items if item.get("type") == "text").strip()
         asset_mentions = [item for item in asset_context_items if item.get("type") == "mention"]
-        if project_context_text:
-            clean_text = (
-                f"{clean_text}\n\n---\n{project_context_text}"
-                if clean_text
-                else project_context_text
-            )
-        if asset_context_text:
-            clean_text = (
-                f"{clean_text}\n\n---\n{asset_context_text}"
-                if clean_text
-                else asset_context_text
-            )
         if clean_text or not attachments:
             items.append({"type": "text", "text": clean_text or "Please inspect the attached files.", "text_elements": []})
+        # Keep user-authored prompt and injected project/asset context as
+        # distinct input items. Endpoint-aware preflight may drop or compact
+        # only injected context; it must never silently alter the user's text.
+        if project_context_text:
+            items.append({"type": "text", "text": project_context_text, "text_elements": []})
+        if asset_context_text:
+            items.append({"type": "text", "text": asset_context_text, "text_elements": []})
         for attachment in attachments:
             staged = self._stage_attachment(str(attachment.get("path") or ""), str(attachment.get("name") or "attachment"))
             runtime_path = self._path_for_runtime(staged)
@@ -12812,6 +13786,222 @@ class RuntimeService:
                 }
             )
         return items
+
+    def _apply_context_budget_preflight(
+        self,
+        inputs: list[dict[str, Any]],
+        *,
+        profile: dict[str, Any],
+        runtime_status: dict[str, Any] | None,
+        model: str | None,
+        thread_id: str | None,
+        attachments: list[dict[str, Any]],
+        context_mode: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Preflight prepared inputs and compact only injected context.
+
+        The first text item is always the user-authored turn prompt. It is
+        essential and causes a deterministic block if it cannot fit. Later
+        text items are AstraBridge-injected project/asset packs and may be
+        compacted with a visible report before any provider request starts.
+        """
+
+        text_items = [
+            (index, item)
+            for index, item in enumerate(inputs)
+            if isinstance(item, dict) and str(item.get("type") or "") == "text"
+        ]
+        if not text_items:
+            return list(inputs), {
+                "schema_version": "astrabridge-context-budget-v2",
+                "preflight_admission": "downgrade_required",
+                "recommended_action": "reduce_context_or_compact",
+                "preflight_reasons": ["turn_input_text_missing"],
+                "safe_context_budget_established": False,
+            }
+        sections: list[ContextSection] = []
+        section_for_index: dict[int, str] = {}
+        for position, (index, item) in enumerate(text_items):
+            section_id = "turn_prompt" if position == 0 else f"injected_context_{position}"
+            section_for_index[index] = section_id
+            sections.append(
+                ContextSection(
+                    section_id=section_id,
+                    label="Turn Prompt" if position == 0 else f"Injected Context {position}",
+                    priority=position,
+                    text=str(item.get("text") or ""),
+                    essential=position == 0,
+                )
+            )
+        route = self._context_budget_route_settings(profile=profile, runtime_status=runtime_status, model=model)
+        safe_attachment_inputs = [
+            {
+                "kind": item.get("kind"),
+                "mime_type": item.get("mime_type") or item.get("mimeType"),
+                "size": item.get("size"),
+            }
+            for item in attachments
+            if isinstance(item, dict)
+        ]
+        # Mentions generated by the task/project pack may be dereferenced by a
+        # provider runtime. Reserve a bounded metadata envelope without storing
+        # their names or paths in the durable budget report.
+        safe_attachment_inputs.extend(
+            {"kind": "referenced_file"}
+            for item in inputs
+            if isinstance(item, dict) and str(item.get("type") or "") == "mention"
+        )
+        observed = self._latest_context_token_usage(str(thread_id or "")) or {}
+        _selected_text, budget = build_context_budget(
+            sections=sections,
+            provider_id=route.get("provider_id"),
+            model_id=route.get("model_id"),
+            context_window=route.get("context_window"),
+            effective_context_window_percent=route.get("effective_context_window_percent") or 80,
+            auto_compact_token_limit=route.get("auto_compact_token_limit"),
+            tool_output_token_limit=route.get("tool_output_token_limit"),
+            manual_compact_status=route.get("manual_compact_status") or "app_server_native",
+            auto_compact_status=route.get("auto_compact_status") or "configured_unverified",
+            compact_summary_quality_status=route.get("compact_summary_quality_status") or "untested",
+            tool_schema_token_estimate=route.get("tool_schema_token_estimate") or 0,
+            endpoint_protocol=route.get("wire_api"),
+            endpoint_fingerprint=route.get("endpoint_fingerprint"),
+            endpoint_protocol_overhead_tokens=route.get("endpoint_protocol_overhead_tokens"),
+            endpoint_overhead_status=route.get("endpoint_overhead_status"),
+            advertised_context_window_status=route.get("advertised_context_window_status") or "advertised",
+            attachments=safe_attachment_inputs,
+            supported_modalities=route.get("input_modalities"),
+            output_reserve_tokens=route.get("output_reserve_tokens"),
+            output_reserve_status=route.get("output_reserve_status"),
+            reasoning_artifact_policy=route.get("reasoning_artifact_policy") or "neutral_summary_only",
+            reasoning_artifact_reserve_tokens=route.get("reasoning_artifact_reserve_tokens"),
+            existing_thread_context_tokens=observed.get("context_estimate_tokens") or 0,
+        )
+        report = budget.to_dict()
+        admission = str(report.get("preflight_admission") or "downgrade_required")
+        essential_estimate = next(
+            (item for item in list(report.get("section_estimates") or []) if str(item.get("section_id") or "") == "turn_prompt"),
+            {},
+        )
+        essential_is_safe = bool(essential_estimate.get("included")) and not bool(essential_estimate.get("truncated"))
+        if admission in {"blocked", "downgrade_required"} or not essential_is_safe:
+            reasons = [str(item).strip() for item in list(report.get("preflight_reasons") or []) if str(item).strip()]
+            if not essential_is_safe and "essential_context_section_exceeds_safe_budget" not in reasons:
+                reasons.append("essential_context_section_exceeds_safe_budget")
+                report["preflight_reasons"] = reasons
+            message = (
+                "AstraBridge blocked this turn before the provider call because it could not establish a safe usable coding-context budget"
+                + (f" ({', '.join(reasons[:4])})" if reasons else "")
+                + ". Compact or reduce context, or choose a route with a known endpoint budget."
+            )
+            self._record_event(
+                {
+                    "type": "context_budget_preflight_blocked",
+                    "thread_id": thread_id,
+                    "provider_id": route.get("provider_id"),
+                    "model": route.get("model_id"),
+                    "context_mode": context_mode,
+                    "context_budget_report": report,
+                }
+            )
+            raise ContextBudgetPreflightError(report, message)
+
+        selected = selected_text_by_section(sections, budget)
+        prepared: list[dict[str, Any]] = []
+        for index, item in enumerate(inputs):
+            section_id = section_for_index.get(index)
+            if section_id is None:
+                prepared.append(dict(item) if isinstance(item, dict) else item)
+                continue
+            selected_text = selected.get(section_id)
+            if selected_text is None:
+                continue
+            updated = dict(item)
+            updated["text"] = selected_text
+            prepared.append(updated)
+        if admission == "admitted_after_compaction":
+            self._record_event(
+                {
+                    "type": "context_budget_preflight_compacted",
+                    "thread_id": thread_id,
+                    "provider_id": route.get("provider_id"),
+                    "model": route.get("model_id"),
+                    "context_mode": context_mode,
+                    "context_budget_report": report,
+                }
+            )
+        elif admission == "admitted_with_conservative_budget":
+            self._record_event(
+                {
+                    "type": "context_budget_preflight_conservative",
+                    "thread_id": thread_id,
+                    "provider_id": route.get("provider_id"),
+                    "model": route.get("model_id"),
+                    "context_mode": context_mode,
+                    "context_budget_report": report,
+                }
+            )
+        return prepared, report
+
+    def _context_budget_route_settings(
+        self,
+        *,
+        profile: dict[str, Any],
+        runtime_status: dict[str, Any] | None,
+        model: str | None,
+    ) -> dict[str, Any]:
+        merged = {**dict(profile or {}), **dict(runtime_status or {})}
+        provider_id = str(merged.get("provider_id") or "").strip().lower()
+        model_id = str(model or merged.get("model") or "").strip()
+        provider_profile = None
+        if provider_id:
+            try:
+                provider_profile = get_provider_profile(provider_id)
+            except ValueError:
+                provider_profile = None
+        context_window = (
+            merged.get("context_window")
+            or merged.get("max_context_window")
+            or merged.get("advertised_context_window")
+            or (provider_profile.context_window() if provider_profile is not None else None)
+        )
+        wire_api = str(
+            merged.get("wire_api")
+            or (provider_profile.adapter_type() if provider_profile is not None else "")
+            or ""
+        ).strip().lower() or None
+        route_identity = self._projection_route_identity(
+            provider_id=provider_id,
+            model_id=model_id or None,
+            profile=merged,
+        )
+        context_support = dict(merged.get("context_compaction_support") or {})
+        policy = normalize_context_budget_policy(dict(merged.get("context_budget_policy") or {}))
+        modalities = [str(item).strip().lower() for item in list(merged.get("input_modalities") or []) if str(item).strip()]
+        if not modalities and provider_profile is not None:
+            modalities = [str(item).strip().lower() for item in provider_profile.context_policy.default_input_modalities]
+        return {
+            "provider_id": provider_id or None,
+            "model_id": model_id or None,
+            "context_window": context_window,
+            "effective_context_window_percent": merged.get("effective_context_window_percent") or 80,
+            "auto_compact_token_limit": merged.get("auto_compact_token_limit"),
+            "tool_output_token_limit": merged.get("tool_output_token_limit"),
+            "manual_compact_status": context_support.get("manual_compact") or "app_server_native",
+            "auto_compact_status": context_support.get("auto_compact") or "configured_unverified",
+            "compact_summary_quality_status": context_support.get("structured_summary_quality") or "untested",
+            "tool_schema_token_estimate": estimate_tool_schema_tokens(merged),
+            "wire_api": wire_api,
+            "endpoint_fingerprint": route_identity.get("endpoint_fingerprint"),
+            "input_modalities": modalities,
+            "advertised_context_window_status": policy.get("advertised_context_window_status"),
+            "endpoint_protocol_overhead_tokens": policy.get("endpoint_protocol_overhead_tokens"),
+            "endpoint_overhead_status": policy.get("endpoint_overhead_status"),
+            "output_reserve_tokens": policy.get("output_reserve_tokens"),
+            "output_reserve_status": policy.get("output_reserve_status"),
+            "reasoning_artifact_policy": policy.get("reasoning_artifact_policy"),
+            "reasoning_artifact_reserve_tokens": policy.get("reasoning_artifact_reserve_tokens"),
+        }
 
     def _assert_attachment_route_supported(
         self,
@@ -13060,8 +14250,18 @@ class RuntimeService:
         report = dict(pack.get("budget_report") or {})
         return report or None
 
-    def _handoff_projection_kwargs(self, *, source_thread_id: str | None, target_provider_id: str) -> dict[str, Any]:
-        summary = self._handoff_projection_summary(source_thread_id=source_thread_id, target_provider_id=target_provider_id)
+    def _handoff_projection_kwargs(
+        self,
+        *,
+        source_thread_id: str | None,
+        target_provider_id: str,
+        target_model_id: str | None = None,
+    ) -> dict[str, Any]:
+        summary = self._handoff_projection_summary(
+            source_thread_id=source_thread_id,
+            target_provider_id=target_provider_id,
+            target_model_id=target_model_id,
+        )
         if not summary:
             return {}
         return {
@@ -13085,10 +14285,12 @@ class RuntimeService:
         target_provider_id: str,
         target_model_id: str | None,
         projection_mode: str,
+        target_context_budget_report: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         detail = self._handoff_projection_detail(
             source_thread_id=source_thread_id,
             target_provider_id=target_provider_id,
+            target_model_id=target_model_id,
         )
         if not detail:
             return None
@@ -13115,6 +14317,42 @@ class RuntimeService:
             "target_model_id": target_model,
             "projection_mode": str(projection_mode or "").strip() or None,
         }
+        neutral_transcript = build_neutral_transcript(
+            transcript_entries=[deepcopy(item) for item in list(detail.get("transcript_entries") or []) if isinstance(item, dict)],
+            projected_messages=[deepcopy(item) for item in list(detail.get("messages") or []) if isinstance(item, dict)],
+            replayable_artifacts=[deepcopy(item) for item in list(detail.get("replayable_artifacts") or []) if isinstance(item, dict)],
+            artifact_drop_records=[deepcopy(item) for item in list(detail.get("artifact_drop_records") or []) if isinstance(item, dict)],
+            lineage={
+                "task_id": lineage["task_id"],
+                "source_thread_id": lineage["source_thread_id"],
+                "target_thread_id": lineage["target_thread_id"],
+            },
+            task_state=self._neutral_task_state(task),
+            checkpoint_refs=list(dict(task).get("checkpoint_refs") or []),
+        )
+        source_route = dict(detail.get("source_route") or {})
+        target_route = dict(detail.get("target_route") or {})
+        source_context_budget_report = None
+        if source_thread_id and source_provider_id and source_model_id:
+            source_context_budget_report = self._project_context_budget_report(
+                thread_id=source_thread_id,
+                profile_id=str(source_settings.get("profile_id") or ""),
+                provider_id=source_provider_id,
+                model_id=source_model_id,
+            )
+        if target_context_budget_report is None:
+            target_context_budget_report = self._project_context_budget_report(
+                thread_id=target_thread_id,
+                profile_id=str(target_settings.get("profile_id") or ""),
+                provider_id=str(target_provider_id or ""),
+                model_id=target_model,
+            )
+        context_compaction = build_context_compaction_handoff_contract(
+            source_route=source_route,
+            target_route=target_route,
+            source_budget_report=source_context_budget_report,
+            target_budget_report=target_context_budget_report,
+        )
         projection_payload = {
             "source_provider": source_provider_id,
             "target_provider": str(target_provider_id or "").strip() or None,
@@ -13130,9 +14368,14 @@ class RuntimeService:
                 for item in list(detail.get("replayable_artifacts") or [])
                 if isinstance(item, dict)
             ],
+            "artifact_drop_records": [
+                deepcopy(item)
+                for item in list(detail.get("artifact_drop_records") or [])
+                if isinstance(item, dict)
+            ],
         }
         bundle = {
-            "schema_version": "astrabridge-provider-handoff-context-v1",
+            "schema_version": "astrabridge-provider-handoff-context-v2",
             "generated_at": now_iso(),
             "lineage": lineage,
             "provider_private_state_removed": any(
@@ -13140,16 +14383,22 @@ class RuntimeService:
                 for item in list(projection_payload.get("warnings") or [])
             ),
             "projection": projection_payload,
+            "neutral_transcript": neutral_transcript,
+            "context_compaction": context_compaction,
             "projection_digest": self._stable_json_digest(projection_payload),
+            "neutral_transcript_digest": self._stable_json_digest(neutral_transcript),
             "lineage_digest": self._stable_json_digest(lineage),
         }
         bundle["bundle_digest"] = self._stable_json_digest(bundle)
         write_json(bundle_path, bundle)
+        context_compaction_summary = compact_context_compaction_handoff_contract(context_compaction)
         return {
             "schema_version": str(bundle.get("schema_version") or ""),
             "path": bundle_path.relative_to(workspace_root).as_posix(),
             "bundle_digest": str(bundle.get("bundle_digest") or ""),
             "projection_digest": str(bundle.get("projection_digest") or ""),
+            "neutral_transcript_schema_version": str(neutral_transcript.get("schema_version") or ""),
+            "neutral_transcript_digest": str(bundle.get("neutral_transcript_digest") or ""),
             "lineage_digest": str(bundle.get("lineage_digest") or ""),
             "source_thread_id": lineage["source_thread_id"],
             "target_thread_id": lineage["target_thread_id"],
@@ -13162,7 +14411,27 @@ class RuntimeService:
             "dropped_artifacts": int(projection_payload.get("dropped_artifacts") or 0),
             "repaired_tool_pairs": int(projection_payload.get("repaired_tool_pairs") or 0),
             "replayable_artifact_count": int(projection_payload.get("replayable_artifact_count") or 0),
+            "artifact_drop_count": len(list(projection_payload.get("artifact_drop_records") or [])),
             "warning_count": len(list(projection_payload.get("warnings") or [])),
+            "context_compaction": context_compaction_summary,
+        }
+
+    @staticmethod
+    def _neutral_task_state(task: dict[str, Any] | None) -> dict[str, Any]:
+        current = dict(task or {})
+        plan = dict(current.get("plan") or {})
+        goal = current.get("goal")
+        if isinstance(goal, dict):
+            goal_summary = str(goal.get("description") or goal.get("objective") or goal.get("title") or "").strip()
+        else:
+            goal_summary = str(goal or "").strip()
+        return {
+            "task_id": str(current.get("task_id") or "").strip() or None,
+            "title": str(current.get("title") or current.get("name") or "").strip() or None,
+            "goal_summary": goal_summary or None,
+            "status": str(current.get("status") or "").strip() or None,
+            "plan_status": str(plan.get("status") or "").strip() or None,
+            "active_provider_thread_id": str(current.get("active_provider_thread_id") or "").strip() or None,
         }
 
     def _prime_handoff_projection_source_thread(
@@ -13223,7 +14492,13 @@ class RuntimeService:
                 merged["turns"] = existing_turns
         return merged
 
-    def _handoff_projection_detail(self, *, source_thread_id: str | None, target_provider_id: str) -> dict[str, Any] | None:
+    def _handoff_projection_detail(
+        self,
+        *,
+        source_thread_id: str | None,
+        target_provider_id: str,
+        target_model_id: str | None = None,
+    ) -> dict[str, Any] | None:
         source_thread = self._thread_for_handoff_projection(source_thread_id)
         target_provider = str(target_provider_id or "").strip().lower()
         if not source_thread or not target_provider:
@@ -13232,15 +14507,28 @@ class RuntimeService:
         neutral_messages, artifacts = self._thread_projection_inputs(source_thread)
         if not neutral_messages and not artifacts:
             return None
+        source_route = self._thread_route_identity_for_projection(source_thread, provider_id=source_provider)
+        target_route = self._projection_route_identity(
+            provider_id=target_provider,
+            model_id=target_model_id,
+        )
         projected = HistoryProjector().project(
             neutral_messages=neutral_messages,
             artifacts=artifacts,
             source_provider=source_provider,
             target_provider=target_provider,
+            source_model_id=source_route.get("model_id"),
+            target_model_id=target_route.get("model_id"),
+            source_endpoint_fingerprint=source_route.get("endpoint_fingerprint"),
+            target_endpoint_fingerprint=target_route.get("endpoint_fingerprint"),
+            source_adapter_signature=source_route.get("adapter_signature"),
+            target_adapter_signature=target_route.get("adapter_signature"),
         )
         return {
             "source_provider": source_provider,
             "target_provider": target_provider,
+            "source_route": source_route,
+            "target_route": target_route,
             "dropped_artifacts": projected.dropped_artifacts,
             "repaired_tool_pairs": projected.repaired_tool_pairs,
             "warnings": projected.warnings,
@@ -13249,10 +14537,22 @@ class RuntimeService:
             "projection_preview": projected.projection_preview,
             "messages": deepcopy(projected.messages),
             "replayable_artifacts": deepcopy(projected.replayable_artifacts),
+            "artifact_drop_records": deepcopy(projected.artifact_drop_records),
+            "transcript_entries": deepcopy(projected.transcript_entries),
         }
 
-    def _handoff_projection_summary(self, *, source_thread_id: str | None, target_provider_id: str) -> dict[str, Any] | None:
-        detail = self._handoff_projection_detail(source_thread_id=source_thread_id, target_provider_id=target_provider_id)
+    def _handoff_projection_summary(
+        self,
+        *,
+        source_thread_id: str | None,
+        target_provider_id: str,
+        target_model_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        detail = self._handoff_projection_detail(
+            source_thread_id=source_thread_id,
+            target_provider_id=target_provider_id,
+            target_model_id=target_model_id,
+        )
         if not detail:
             return None
         return {
@@ -13263,7 +14563,60 @@ class RuntimeService:
             "warnings": list(detail.get("warnings") or []),
             "projected_message_count": int(detail.get("projected_message_count") or 0),
             "replayable_artifact_count": int(detail.get("replayable_artifact_count") or 0),
+            "artifact_drop_count": len(list(detail.get("artifact_drop_records") or [])),
             "projection_preview": detail.get("projection_preview"),
+        }
+
+    def _thread_route_identity_for_projection(self, thread: dict[str, Any], *, provider_id: str | None) -> dict[str, str | None]:
+        settings = dict(thread.get("shellSettings") or {})
+        profile_id = str(settings.get("profile_id") or "").strip()
+        resolved_profile = self._resolve_shell_profile(profile_id) if profile_id else {}
+        return self._projection_route_identity(
+            provider_id=provider_id,
+            model_id=str(settings.get("model") or resolved_profile.get("model") or "").strip() or None,
+            profile={**resolved_profile, **settings},
+        )
+
+    def _projection_route_identity(
+        self,
+        *,
+        provider_id: str | None,
+        model_id: str | None,
+        profile: dict[str, Any] | None = None,
+    ) -> dict[str, str | None]:
+        provider = str(provider_id or "").strip().lower()
+        configured = dict(profile or {})
+        built_in = None
+        if provider:
+            try:
+                built_in = get_provider_profile(provider)
+            except ValueError:
+                built_in = None
+        model = str(model_id or configured.get("model") or (built_in.default_model if built_in else "") or "").strip() or None
+        base_url = str(configured.get("base_url") or (built_in.base_url if built_in else "") or "").strip()
+        endpoint_fingerprint: str | None = None
+        if provider and base_url:
+            try:
+                endpoint_fingerprint = str(normalize_endpoint_identity(base_url, provider_id=provider).get("fingerprint") or "").strip() or None
+            except ValueError:
+                endpoint_fingerprint = None
+        provider_family = str(configured.get("provider_family") or configured.get("adapter_profile") or provider or "").strip().lower()
+        wire_api = str(configured.get("wire_api") or (built_in.protocol if built_in else "") or "").strip().lower()
+        adapter_signature: str | None = None
+        if provider:
+            try:
+                transport_class = transport_class_for_profile(
+                    {"provider_id": provider, "provider_family": provider_family, "wire_api": wire_api},
+                    provider_family=provider_family,
+                )
+                adapter_signature = transport_signature_for_class(transport_class)
+            except Exception:
+                adapter_signature = None
+        return {
+            "provider_id": provider or None,
+            "model_id": model,
+            "endpoint_fingerprint": endpoint_fingerprint,
+            "adapter_signature": adapter_signature,
         }
 
     def _thread_for_handoff_projection(self, source_thread_id: str | None) -> dict[str, Any] | None:
@@ -13303,28 +14656,82 @@ class RuntimeService:
     def _thread_projection_inputs(self, thread: dict[str, Any]) -> tuple[list[NeutralMessage], list[ReasoningArtifact]]:
         neutral_messages: list[NeutralMessage] = []
         artifacts: list[ReasoningArtifact] = []
+        thread_id = str(thread.get("id") or thread.get("thread_id") or "").strip()
+        source_provider = self._thread_provider_id_for_projection(thread)
+        route_identity = self._thread_route_identity_for_projection(thread, provider_id=source_provider)
+        task_id: str | None = None
+        if self._tasks is not None:
+            try:
+                task_id = str((self._tasks.current_task() or {}).get("task_id") or "").strip() or None
+            except Exception:
+                task_id = None
         for turn in list(thread.get("turns") or []):
             if not isinstance(turn, dict):
                 continue
+            turn_id = str(turn.get("id") or turn.get("turn_id") or "").strip()
             for item in list(turn.get("items") or []):
                 if not isinstance(item, dict):
                     continue
-                neutral_messages.extend(self._projection_messages_from_item(item))
-                artifacts.extend(self._projection_artifacts_from_item(item))
+                lineage = self._projection_item_lineage(
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item=item,
+                    task_id=task_id,
+                )
+                neutral_messages.extend(self._projection_messages_from_item(item, lineage=lineage))
+                artifacts.extend(
+                    self._projection_artifacts_from_item(
+                        item,
+                        lineage=lineage,
+                        route_identity=route_identity,
+                    )
+                )
         return neutral_messages, artifacts
 
-    def _projection_messages_from_item(self, item: dict[str, Any]) -> list[NeutralMessage]:
+    @staticmethod
+    def _projection_item_lineage(
+        *,
+        thread_id: str,
+        turn_id: str,
+        item: dict[str, Any],
+        task_id: str | None,
+    ) -> dict[str, Any]:
+        provider_data = dict(item.get("providerData") or item.get("provider_data") or {})
+        normalized = dict(provider_data.get("normalized") or {})
+        checkpoint_values = (
+            item.get("checkpoint_ids")
+            or normalized.get("checkpoint_ids")
+            or [
+                item.get("checkpoint_id") or item.get("checkpointId"),
+                normalized.get("checkpoint_id") or normalized.get("checkpointId"),
+            ]
+        )
+        checkpoint_ids = [
+            str(value).strip()
+            for value in (checkpoint_values if isinstance(checkpoint_values, list) else [checkpoint_values])
+            if str(value or "").strip()
+        ]
+        return {
+            "task_id": task_id,
+            "thread_id": thread_id or None,
+            "turn_id": turn_id or None,
+            "item_id": str(item.get("id") or item.get("item_id") or "").strip() or None,
+            "checkpoint_ids": checkpoint_ids[:20],
+        }
+
+    def _projection_messages_from_item(self, item: dict[str, Any], *, lineage: dict[str, Any] | None = None) -> list[NeutralMessage]:
         item_type = str(item.get("type") or "").strip()
         provider_data = dict(item.get("providerData") or item.get("provider_data") or {})
         normalized = dict(provider_data.get("normalized") or {})
         text = self._projection_item_text(item, normalized)
+        base_lineage = dict(lineage or {})
         messages: list[NeutralMessage] = []
         if item_type in {"userMessage", "inputMessage", "user_message"} and text:
-            messages.append(NeutralMessage(role="user", text=text))
+            messages.append(NeutralMessage(role="user", text=text, lineage=base_lineage))
             return messages
         if item_type in {"agentMessage", "assistantMessage", "agent_message", "assistant_message"}:
             if text:
-                messages.append(NeutralMessage(role="assistant", text=text))
+                messages.append(NeutralMessage(role="assistant", text=text, lineage=base_lineage))
             for call in list(normalized.get("tool_calls") or []):
                 if not isinstance(call, dict):
                     continue
@@ -13339,11 +14746,41 @@ class RuntimeService:
                             tool_call_id=tool_id,
                             tool_name=tool_name,
                             provider_data={"arguments_json": arguments_json},
+                            lineage={**base_lineage, "tool_call_id": tool_id},
                         )
                     )
+            return messages
+        if item_type in {"toolResult", "tool_result", "functionCallOutput", "function_call_output", "toolMessage", "tool_message"}:
+            tool_call_id = str(
+                normalized.get("tool_call_id")
+                or normalized.get("call_id")
+                or normalized.get("callId")
+                or item.get("tool_call_id")
+                or item.get("call_id")
+                or item.get("callId")
+                or ""
+            ).strip()
+            if tool_call_id:
+                content_parts = list(normalized.get("content_parts") or item.get("content_parts") or [])
+                messages.append(
+                    NeutralMessage(
+                        role="tool",
+                        text=text,
+                        tool_call_id=tool_call_id,
+                        provider_data={"content_parts": content_parts},
+                        content_parts=content_parts,
+                        lineage={**base_lineage, "tool_call_id": tool_call_id},
+                    )
+                )
         return messages
 
-    def _projection_artifacts_from_item(self, item: dict[str, Any]) -> list[ReasoningArtifact]:
+    def _projection_artifacts_from_item(
+        self,
+        item: dict[str, Any],
+        *,
+        lineage: dict[str, Any] | None = None,
+        route_identity: dict[str, str | None] | None = None,
+    ) -> list[ReasoningArtifact]:
         provider_data = dict(item.get("providerData") or item.get("provider_data") or {})
         normalized = dict(provider_data.get("normalized") or {})
         reasoning_state = dict(normalized.get("reasoning_state") or {})
@@ -13353,6 +14790,28 @@ class RuntimeService:
         model_id = str(reasoning_state.get("model_id") or "").strip()
         if not provider_id or not model_id:
             return []
+        raw_provenance = reasoning_state.get("provenance") or reasoning_state.get("artifact_provenance")
+        if isinstance(raw_provenance, dict):
+            provenance = dict(raw_provenance)
+        else:
+            route = dict(route_identity or {})
+            provenance = {
+                "schema_version": REASONING_ARTIFACT_PROVENANCE_SCHEMA_VERSION,
+                "issuer": {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "endpoint_fingerprint": route.get("endpoint_fingerprint"),
+                    "adapter_signature": route.get("adapter_signature"),
+                },
+                "lineage": dict(lineage or {}),
+                "replay": {
+                    "eligible": False,
+                    "scope": REASONING_ARTIFACT_REPLAY_SCOPE,
+                    "retention": REASONING_ARTIFACT_RETENTION,
+                    "issued_at": None,
+                    "expires_at": None,
+                },
+            }
         return [
             ReasoningArtifact(
                 provider_id=provider_id,
@@ -13360,6 +14819,7 @@ class RuntimeService:
                 kind="reasoning_state",
                 replayable=bool(reasoning_state.get("replayable")),
                 payload=reasoning_state,
+                provenance=provenance,
             )
         ]
 

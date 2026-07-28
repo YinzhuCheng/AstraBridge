@@ -10,6 +10,13 @@ from .capabilities.capability_routes import (
     normalize_capability_route_record,
 )
 from .common import app_data_dir, now_iso, read_json, write_json
+from .kimi_platforms import (
+    KIMI_PLATFORM_CHINA,
+    kimi_endpoint_variants,
+    kimi_platform_binding,
+    kimi_platform_for_base_url,
+    normalize_kimi_platform_id,
+)
 from .model_catalog import current_generated_catalog, resolved_web_capability_fields
 from .provider_capability_snapshot import (
     build_verified_capability_snapshot,
@@ -23,7 +30,9 @@ from .providers import (
     default_context_compaction_support,
     default_goal_support,
     default_planner_support,
+    execution_route_evidence_for_storage,
     get_provider_profile,
+    resolve_execution_route,
     resolve_provider_id,
 )
 from .providers.transports import transport_class_for_profile
@@ -75,6 +84,32 @@ PROFILE_MODEL_SEED_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
         },
     },
     "kimi": {
+        "kimi-k3": {
+            "display_name": "Kimi K3",
+            "advertised_context_window": 1_048_576,
+            "supported_reasoning_levels": ["low", "high", "xhigh"],
+            "default_reasoning_level": "xhigh",
+            "native_supported_reasoning_levels": ["low", "high", "max"],
+            "native_default_reasoning_level": "max",
+            "input_modalities": ["text", "image", "video"],
+            "modality_limits": {
+                "image_transport": "chat_completions_base64_image_url_or_ms_uri",
+                "remote_image_url_supported": False,
+                "supported_image_formats": ["png", "jpeg", "webp", "gif"],
+                "request_body_limit_mb": 100,
+                "video_input": "provider_supported_unverified_in_astrabridge",
+            },
+            "source_urls": [
+                "https://platform.kimi.com/docs/guide/kimi-k3-quickstart",
+                "https://platform.kimi.com/docs/guide/use-reasoning-effort",
+                "https://platform.kimi.com/docs/api/chat",
+                "https://platform.kimi.com/docs/models",
+                "https://platform.kimi.ai/docs/guide/kimi-k3-quickstart",
+                "https://platform.kimi.ai/docs/guide/use-reasoning-effort",
+                "https://platform.kimi.ai/docs/api/chat",
+                "https://platform.kimi.ai/docs/models",
+            ],
+        },
         "kimi-k2.7-code": {
             "display_name": "Kimi K2.7 Code",
             "input_modalities": ["text", "image"],
@@ -169,6 +204,11 @@ PROVIDER_METADATA_FIELDS = (
     "fallback_models",
     "downgrade_reasoning_levels",
     "drop_unsupported_modalities",
+    "platform_id",
+    "credential_scope",
+    "endpoint_variants",
+    "models_url",
+    "docs_base_url",
 )
 
 CATALOG_MANAGED_MODEL_SOURCE_STATUSES = {"official_docs", "screenshot_seed", "seeded"}
@@ -177,6 +217,19 @@ CATALOG_MANAGED_MODALITY_SYNC_FIELDS = (
     "supports_image_detail_original",
     "modality_limits",
     "ui_warnings",
+)
+EXECUTION_ROUTE_DERIVED_MODEL_FIELDS = (
+    "execution_route",
+    "execution_route_status",
+    "execution_route_driver",
+    "execution_route_configured_driver",
+    "execution_route_authority_tier",
+    "execution_route_declared_authority_tier",
+    "execution_route_evidence_state",
+    "execution_route_verification_status",
+    "execution_route_blockers",
+    "execution_route_warning",
+    "execution_route_default_eligible",
 )
 
 
@@ -354,7 +407,7 @@ class RouterConfigService:
         base_url = str(provider.get("base_url") or (registry_profile.base_url if registry_profile else "")).strip()
         env_key = str(provider.get("env_key") or ((registry_profile.auth.env_vars[0]) if registry_profile and registry_profile.auth.env_vars else "OPENAI_API_KEY")).strip()
         auth_mode = str(provider.get("auth_mode") or "os_keychain").strip()
-        merged = {
+        merged = self._refresh_builtin_provider_defaults({
             **registry_defaults,
             "id": provider_id,
             "provider_id": provider_id,
@@ -364,6 +417,11 @@ class RouterConfigService:
             "adapter_type": str(provider.get("adapter_type") or provider.get("wire_api") or ("responses" if registry_profile and registry_profile.protocol in {"responses", "qwen_responses"} else "responses")),
             "runtime_backend": str(provider.get("runtime_backend") or provider.get("execution_backend") or (registry_profile.runtime_backend if registry_profile else "app_server")),
             "base_url": base_url,
+            "platform_id": provider.get("platform_id"),
+            "credential_scope": provider.get("credential_scope"),
+            "endpoint_variants": list(provider.get("endpoint_variants") or []),
+            "models_url": provider.get("models_url") or registry_defaults.get("models_url"),
+            "docs_base_url": provider.get("docs_base_url"),
             "auth_key_ref": provider.get("auth_key_ref"),
             "default_model": str(provider.get("default_model") or provider.get("model") or (registry_profile.default_model if registry_profile else "")).strip(),
             "request_timeout_ms": int(provider.get("request_timeout_ms") or 300000),
@@ -378,7 +436,7 @@ class RouterConfigService:
             "accent_color": str(provider.get("accent_color") or ""),
             "created_at": provider.get("created_at") or now_iso(),
             "updated_at": now_iso(),
-        }
+        })
         existing = {str(item.get("id")): item for item in payload["providers"]}
         if provider_id in existing:
             merged["created_at"] = existing[provider_id].get("created_at") or merged["created_at"]
@@ -421,6 +479,17 @@ class RouterConfigService:
             "created_at": merged_model.get("created_at") or now_iso(),
             "updated_at": now_iso(),
         }
+        if isinstance(merged_model.get("execution_route_evidence"), dict):
+            merged["execution_route_evidence"] = dict(merged_model["execution_route_evidence"])
+        provider_record = next(
+            (
+                dict(item)
+                for item in payload["providers"]
+                if str(item.get("id") or item.get("provider_id") or "").strip() == provider
+            ),
+            {},
+        )
+        merged = self._sanitize_model_execution_route_evidence(merged, provider=provider_record)
         existing = {str(item.get("id")): item for item in payload["models"]}
         if model_id in existing:
             merged["created_at"] = existing[model_id].get("created_at") or merged["created_at"]
@@ -486,7 +555,13 @@ class RouterConfigService:
                 or provider.get("model")
                 or (registry_profile.default_model if registry_profile else "")
             ).strip()
-            merged_provider = {
+            incoming_base_url = str(provider.get("base_url") or (registry_profile.base_url if registry_profile else "")).strip()
+            selected_base_url = (
+                str(existing.get("base_url") or "").strip()
+                if provider_id == "kimi" and str(existing.get("base_url") or "").strip()
+                else incoming_base_url
+            )
+            merged_provider = self._refresh_builtin_provider_defaults({
                 **registry_defaults,
                 "id": provider_id,
                 "provider_id": provider_id,
@@ -503,7 +578,19 @@ class RouterConfigService:
                     or provider.get("execution_backend")
                     or (registry_profile.runtime_backend if registry_profile else "app_server")
                 ),
-                "base_url": str(provider.get("base_url") or (registry_profile.base_url if registry_profile else "")).strip(),
+                # Kimi's China and international API keys are independent.
+                # A catalog refresh must never move an existing credential to
+                # the other official endpoint merely because seed order changed.
+                "base_url": selected_base_url,
+                "platform_id": (
+                    existing.get("platform_id")
+                    if provider_id == "kimi" and str(existing.get("base_url") or "").strip()
+                    else provider.get("platform_id")
+                ),
+                "credential_scope": existing.get("credential_scope") or provider.get("credential_scope"),
+                "endpoint_variants": list(provider.get("endpoint_variants") or existing.get("endpoint_variants") or []),
+                "models_url": provider.get("models_url") or existing.get("models_url") or registry_defaults.get("models_url"),
+                "docs_base_url": existing.get("docs_base_url") or provider.get("docs_base_url"),
                 # Catalog seeds are sanitized and omit credentials. Preserve a
                 # configured reference instead of accidentally disconnecting a
                 # provider during a metadata refresh.
@@ -526,7 +613,7 @@ class RouterConfigService:
                 "accent_color": str(provider.get("accent_color") or ""),
                 "created_at": existing.get("created_at") or provider.get("created_at") or now_iso(),
                 "updated_at": now_iso(),
-            }
+            })
             provider_map[provider_id] = merged_provider
             incoming_provider_ids.add(provider_id)
             applied_providers.append(merged_provider)
@@ -550,7 +637,7 @@ class RouterConfigService:
             base_defaults = _profile_model_defaults(provider_family)
             merged_model = {**base_defaults, **model}
             existing = model_map.get(model_id) or {}
-            model_map[model_id] = {
+            candidate = {
                 "id": model_id,
                 "provider": provider_id,
                 "native_model": native_model,
@@ -563,6 +650,14 @@ class RouterConfigService:
                 "created_at": existing.get("created_at") or merged_model.get("created_at") or now_iso(),
                 "updated_at": now_iso(),
             }
+            incoming_evidence = model.get("execution_route_evidence")
+            retained_evidence = incoming_evidence if isinstance(incoming_evidence, dict) else existing.get("execution_route_evidence")
+            if isinstance(retained_evidence, dict):
+                candidate["execution_route_evidence"] = dict(retained_evidence)
+            model_map[model_id] = self._sanitize_model_execution_route_evidence(
+                candidate,
+                provider=dict(provider_map.get(provider_id) or {}),
+            )
             incoming_model_ids.add(model_id)
 
         # Keep user/custom models, but remove stale entries owned by the
@@ -606,7 +701,7 @@ class RouterConfigService:
 
     def record_test_result(self, result: dict[str, Any]) -> None:
         payload = self._load()
-        payload["latest_test"] = {"timestamp": now_iso(), **result}
+        payload["latest_test"] = _redact_reasoning_for_persistence({"timestamp": now_iso(), **result})
         write_json(self.store_path, payload)
 
     def record_app_server_image_transport_verification(self, model_id: str, verification: dict[str, Any] | None) -> dict[str, Any]:
@@ -675,6 +770,55 @@ class RouterConfigService:
             updated_model,
         )
 
+    def record_execution_route_evidence(
+        self,
+        model_id: str,
+        evidence: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Store only a canonical, secret-free route proof for one model.
+
+        This deliberately does not infer evidence from capability snapshots,
+        documentation, or provider defaults.  A later verifier may call this
+        boundary after it has produced an exact route proof.
+        """
+
+        payload = self._load()
+        provider_map = {
+            str(item.get("id") or item.get("provider_id") or ""): dict(item)
+            for item in payload["providers"]
+            if isinstance(item, dict)
+        }
+        models: list[dict[str, Any]] = []
+        updated_model: dict[str, Any] | None = None
+        for item in payload["models"]:
+            if not isinstance(item, dict):
+                models.append(item)
+                continue
+            if str(item.get("id") or "") != str(model_id or "").strip():
+                models.append(item)
+                continue
+            updated = dict(item)
+            if evidence is None:
+                updated.pop("execution_route_evidence", None)
+            else:
+                updated["execution_route_evidence"] = dict(evidence)
+                provider_id = str(updated.get("provider") or "").strip()
+                sanitized = self._sanitize_model_execution_route_evidence(
+                    updated,
+                    provider=dict(provider_map.get(provider_id) or {}),
+                )
+                if "execution_route_evidence" not in sanitized:
+                    raise ValueError("Execution-route evidence is not a complete secret-free model/endpoint proof.")
+                updated = sanitized
+            updated["updated_at"] = now_iso()
+            updated_model = updated
+            models.append(updated)
+        if updated_model is None:
+            raise ValueError(f"Unknown model id: {model_id}")
+        payload["models"] = models
+        write_json(self.store_path, payload)
+        return self._refresh_model(provider_map, updated_model)
+
     def record_provider_compatibility_matrix(self, matrix: dict[str, Any]) -> dict[str, Any]:
         payload = self._load()
         provider_map = {
@@ -720,7 +864,7 @@ class RouterConfigService:
 
     def import_sanitized(self, payload: dict[str, Any]) -> dict[str, Any]:
         current = self._load()
-        current["providers"] = [dict(item) for item in list(payload.get("providers") or [])]
+        current["providers"] = [self._refresh_builtin_provider_defaults(dict(item)) for item in list(payload.get("providers") or [])]
         current["models"] = [dict(item) for item in list(payload.get("models") or [])]
         current["reasoning"] = dict(payload.get("reasoning") or current["reasoning"])
         current["capability_routes"] = dict(payload.get("capability_routes") or current.get("capability_routes") or {})
@@ -742,6 +886,7 @@ class RouterConfigService:
             providers = [self._provider_from_profile(profile) for profile in profiles if profile.get("base_url")]
         if not providers:
             providers = [dict(item) for item in generated.providers]
+        providers = [self._refresh_builtin_provider_defaults(item) for item in providers]
         if not models:
             generated_models = [dict(item) for item in generated.models if isinstance(item, dict)]
             models = generated_models or []
@@ -751,6 +896,7 @@ class RouterConfigService:
                     if default_model:
                         models.append(self._default_model(provider, default_model))
         models = self._merge_known_models(providers, models)
+        models = self._sanitize_execution_route_evidence_records(providers, models)
         reasoning = payload.get("reasoning")
         if not isinstance(reasoning, dict):
             reasoning = {
@@ -769,6 +915,26 @@ class RouterConfigService:
         }
         write_json(self.store_path, loaded)
         return loaded
+
+    def _refresh_builtin_provider_defaults(self, provider: dict[str, Any]) -> dict[str, Any]:
+        refreshed = dict(provider)
+        provider_id = str(refreshed.get("id") or refreshed.get("provider_id") or "").strip()
+        if provider_id != "kimi":
+            return refreshed
+        current_base_url = str(refreshed.get("base_url") or "").strip().rstrip("/")
+        explicit_platform = normalize_kimi_platform_id(refreshed.get("platform_id"))
+        base_platform = kimi_platform_for_base_url(current_base_url)
+        platform_id = explicit_platform or base_platform or (KIMI_PLATFORM_CHINA if not current_base_url else None)
+        binding = kimi_platform_binding(platform_id)
+        if binding:
+            if not current_base_url or (explicit_platform and base_platform != explicit_platform):
+                refreshed["base_url"] = binding["api_base_url"]
+            refreshed["platform_id"] = binding["platform_id"]
+            refreshed["credential_scope"] = binding["credential_scope"]
+            refreshed["models_url"] = binding["models_url"]
+            refreshed["docs_base_url"] = binding["docs_base_url"]
+        refreshed["endpoint_variants"] = kimi_endpoint_variants()
+        return refreshed
 
     def _provider_from_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
         provider_id = str(profile.get("provider_id") or "openai")
@@ -882,6 +1048,18 @@ class RouterConfigService:
             for item in generated.models
             if isinstance(item, dict) and str(item.get("id") or "").strip()
         }
+        configured_provider_ids = {
+            str(item.get("id") or item.get("provider_id") or "").strip()
+            for item in providers
+            if isinstance(item, dict)
+        }
+        for model_id, generated_model in generated_by_id.items():
+            provider_id = str(generated_model.get("provider") or "").strip()
+            if model_id in merged or provider_id not in configured_provider_ids:
+                continue
+            if not bool(generated_model.get("recommended") or generated_model.get("default_for_provider")):
+                continue
+            merged[model_id] = dict(generated_model)
         for model_id, existing in list(merged.items()):
             generated_model = generated_by_id.get(model_id)
             if not generated_model or not _should_sync_catalog_managed_modalities(existing, generated.catalog_version):
@@ -955,6 +1133,55 @@ class RouterConfigService:
                 }
         return sorted(merged.values(), key=lambda item: str(item.get("id")))
 
+    def _sanitize_execution_route_evidence_records(
+        self,
+        providers: list[dict[str, Any]],
+        models: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        provider_map = {
+            str(item.get("id") or item.get("provider_id") or "").strip(): dict(item)
+            for item in providers
+            if isinstance(item, dict)
+        }
+        sanitized: list[dict[str, Any]] = []
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            model = dict(item)
+            for field in EXECUTION_ROUTE_DERIVED_MODEL_FIELDS:
+                model.pop(field, None)
+            provider_id = str(model.get("provider") or "").strip()
+            sanitized.append(
+                self._sanitize_model_execution_route_evidence(
+                    model,
+                    provider=dict(provider_map.get(provider_id) or {}),
+                )
+            )
+        return sanitized
+
+    def _sanitize_model_execution_route_evidence(
+        self,
+        model: dict[str, Any],
+        *,
+        provider: dict[str, Any],
+    ) -> dict[str, Any]:
+        sanitized = dict(model)
+        evidence = sanitized.get("execution_route_evidence")
+        if not isinstance(evidence, dict):
+            sanitized.pop("execution_route_evidence", None)
+            return sanitized
+        try:
+            route = resolve_execution_route(sanitized, provider=provider, evidence=evidence)
+        except (TypeError, ValueError):
+            sanitized.pop("execution_route_evidence", None)
+            return sanitized
+        persisted = execution_route_evidence_for_storage(dict(route.get("evidence") or {}))
+        if persisted is None:
+            sanitized.pop("execution_route_evidence", None)
+        else:
+            sanitized["execution_route_evidence"] = persisted
+        return sanitized
+
     def _refresh_models(self, providers: list[dict[str, Any]], models: list[dict[str, Any]]) -> list[dict[str, Any]]:
         provider_map = {
             str(item.get("id") or item.get("provider_id") or ""): dict(item)
@@ -986,6 +1213,8 @@ class RouterConfigService:
             "provider_family": provider_family or model.get("provider_family"),
             **_model_capability_fields(merged),
         }
+        refreshed = self._sanitize_model_execution_route_evidence(refreshed, provider=provider)
+        refreshed = _apply_execution_route_status(refreshed, provider=provider)
         refreshed = _apply_app_server_image_transport_status(refreshed, provider=provider)
         return _apply_verified_capability_snapshot_status(refreshed, provider=provider)
 
@@ -1126,6 +1355,92 @@ def _model_capability_fields(model: dict[str, Any]) -> dict[str, Any]:
         "app_server_image_transport_verification": dict(model.get("app_server_image_transport_verification") or {}),
         "verified_capability_snapshot": dict(model.get("verified_capability_snapshot") or {}),
     }
+
+
+def _apply_execution_route_status(model: dict[str, Any], *, provider: dict[str, Any]) -> dict[str, Any]:
+    refreshed = dict(model)
+    evidence = refreshed.get("execution_route_evidence")
+    route = resolve_execution_route(
+        refreshed,
+        provider=provider,
+        evidence=dict(evidence) if isinstance(evidence, dict) else None,
+    )
+    driver = dict(route.get("driver") or {})
+    authority = dict(route.get("authority") or {})
+    route_evidence = dict(route.get("evidence") or {})
+    admission = str(driver.get("admission") or "review_only")
+    route_default_eligible = bool(route.get("default_route_eligible"))
+    evidence_reasons = [str(item).strip() for item in list(route_evidence.get("reasons") or []) if str(item or "").strip()]
+    route_blockers = _unique_strings(
+        [
+            *(evidence_reasons or []),
+            *([] if route_default_eligible else ["execution_route_not_default_eligible"]),
+        ]
+    )
+    ui_warnings = list(refreshed.get("ui_warnings") or [])
+    route_warning = _execution_route_warning(admission, evidence_state=str(route_evidence.get("effective_state") or "documented"))
+    if route_warning and route_warning not in ui_warnings:
+        ui_warnings.append(route_warning)
+
+    legacy_default_route_verified = bool(refreshed.get("default_route_verified", False))
+    legacy_default_multimodal_route_verified = bool(refreshed.get("default_multimodal_route_verified", False))
+    effective_default_route_verified = legacy_default_route_verified and route_default_eligible
+    effective_default_multimodal_route_verified = legacy_default_multimodal_route_verified and route_default_eligible
+    default_route_blockers = _unique_strings(
+        [
+            *[str(item).strip() for item in list(refreshed.get("default_route_blockers") or []) if str(item or "").strip()],
+            *route_blockers,
+        ]
+    )
+    default_multimodal_route_blockers = _unique_strings(
+        [
+            *[str(item).strip() for item in list(refreshed.get("default_multimodal_route_blockers") or []) if str(item or "").strip()],
+            *route_blockers,
+        ]
+    )
+    return {
+        **refreshed,
+        "ui_warnings": ui_warnings,
+        "execution_route": route,
+        "execution_route_status": admission,
+        "execution_route_driver": str(driver.get("execution_id") or "preview_review"),
+        "execution_route_configured_driver": str(driver.get("configured_id") or "app_server"),
+        "execution_route_authority_tier": str(authority.get("effective_tier") or "C"),
+        "execution_route_declared_authority_tier": str(authority.get("declared_tier") or refreshed.get("authority_tier") or "C"),
+        "execution_route_evidence_state": str(route_evidence.get("effective_state") or "documented"),
+        "execution_route_verification_status": str(route_evidence.get("verification_status") or "missing"),
+        "execution_route_blockers": route_blockers,
+        "execution_route_warning": route_warning or None,
+        "execution_route_default_eligible": route_default_eligible,
+        "default_route_verified": effective_default_route_verified,
+        "default_route_status": "verified" if effective_default_route_verified else "warning_gated",
+        "default_route_blockers": default_route_blockers,
+        "default_multimodal_route_verified": effective_default_multimodal_route_verified,
+        "default_multimodal_route_status": "verified" if effective_default_multimodal_route_verified else "warning_gated",
+        "default_multimodal_route_blockers": default_multimodal_route_blockers,
+        "recommended": bool(refreshed.get("recommended", False)) and effective_default_route_verified,
+        "default_for_provider": bool(refreshed.get("default_for_provider", False)) and effective_default_route_verified,
+    }
+
+
+def _execution_route_warning(admission: str, *, evidence_state: str) -> str:
+    if admission == "default_eligible":
+        return ""
+    if admission == "verified_non_default":
+        return "This model's coding route is verified but is not eligible as a default route."
+    if admission == "tool_contract_only":
+        return "This model has only tool-contract evidence and remains proposal/review-only until coding-route verification."
+    if evidence_state == "documented":
+        return "This model is documented but has no current model-and-endpoint execution evidence; it remains review-only."
+    return "This model's execution route is not admitted for autonomous coding and remains review-only."
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return result
 
 
 def _apply_app_server_image_transport_status(model: dict[str, Any], *, provider: dict[str, Any]) -> dict[str, Any]:
@@ -1277,6 +1592,20 @@ def _optional_float(value: Any, fallback: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _redact_reasoning_for_persistence(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key).lower() in {"reasoning_content", "reasoning_summary", "visible_summary"}:
+                redacted[key] = "[redacted]" if item else item
+            else:
+                redacted[key] = _redact_reasoning_for_persistence(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_reasoning_for_persistence(item) for item in value]
+    return value
 
 
 def _provider_family(

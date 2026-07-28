@@ -10,6 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from astrabridge_sidecar.agentic_updates import (
     AGENTIC_UPDATE_PARSER_OUTPUT_SCHEMA_VERSION,
+    DEEPSEEK_OFFICIAL_DOCS_PARSER_ID,
+    GLM_OFFICIAL_DOCS_PARSER_ID,
+    KIMI_OFFICIAL_DOCS_PARSER_ID,
     QWEN_OFFICIAL_DOCS_PARSER_ID,
     SUPPORTED_PROVIDER_PARSER_IDS,
     parse_agentic_update_source_pack,
@@ -161,12 +164,275 @@ class AgenticUpdateParserTests(unittest.TestCase):
         self.assertEqual(set(stubs), set(SUPPORTED_PROVIDER_PARSER_IDS))
         for provider_id, stub in stubs.items():
             self.assertEqual(stub["provider_id"], provider_id)
-            if provider_id == "qwen":
-                self.assertEqual(stub["implementation"], QWEN_OFFICIAL_DOCS_PARSER_ID)
+            if provider_id in {"qwen", "deepseek", "kimi", "glm"}:
+                expected = {
+                    "qwen": QWEN_OFFICIAL_DOCS_PARSER_ID,
+                    "deepseek": DEEPSEEK_OFFICIAL_DOCS_PARSER_ID,
+                    "kimi": KIMI_OFFICIAL_DOCS_PARSER_ID,
+                    "glm": GLM_OFFICIAL_DOCS_PARSER_ID,
+                }[provider_id]
+                self.assertEqual(stub["implementation"], expected)
                 self.assertEqual(stub["status"], "provider_specific_parser")
             else:
                 self.assertEqual(stub["implementation"], "generic_conservative_v1")
                 self.assertEqual(stub["status"], "stub_uses_generic_parser")
+
+    def test_kimi_official_markdown_sources_merge_model_metadata_and_adapter_mapping(self) -> None:
+        source_records = [
+            {
+                "ok": True,
+                "provider_id": "kimi",
+                "platform_id": "platform.kimi.ai",
+                "source_id": "kimi-models-markdown",
+                "url": "https://platform.kimi.ai/docs/models.md",
+                "content_hash": "sha256:kimi-models",
+                "excerpt_chars": 600,
+                "parser_strategy": "markdown_table",
+                "source_type": "models_catalog",
+                "trust_level": "official",
+                "parser_excerpt": """
+                    # Model List
+                    | Model Name | Description |
+                    | --- | --- |
+                    | `kimi-k3` | Kimi's flagship model with native visual understanding and a 1M-token context window. |
+                """,
+            },
+            {
+                "ok": True,
+                "provider_id": "kimi",
+                "platform_id": "platform.kimi.ai",
+                "source_id": "kimi-k3-guide",
+                "url": "https://platform.kimi.ai/docs/guide/kimi-k3-quickstart.md",
+                "content_hash": "sha256:kimi-k3-guide",
+                "excerpt_chars": 700,
+                "parser_strategy": "markdown_document",
+                "source_type": "guide",
+                "trust_level": "official",
+                "discovered_from_source_id": "kimi-llms-index",
+                "parser_excerpt": """
+                    # Kimi K3
+                    Kimi K3 supports text, image, and video input plus ToolCalls for agent workflows.
+                    completion = client.chat.completions.create(model="kimi-k3", messages=[])
+                """,
+            },
+            {
+                "ok": True,
+                "provider_id": "kimi",
+                "platform_id": "platform.kimi.ai",
+                "source_id": "kimi-reasoning-effort",
+                "url": "https://platform.kimi.ai/docs/guide/use-reasoning-effort.md",
+                "content_hash": "sha256:kimi-reasoning",
+                "excerpt_chars": 700,
+                "parser_strategy": "markdown_document",
+                "source_type": "guide",
+                "trust_level": "official",
+                "discovered_from_source_id": "kimi-llms-index",
+                "parser_excerpt": """
+                    # Reasoning Effort
+                    Kimi K3 configures reasoning with the top-level `reasoning_effort` field.
+                    The model `kimi-k3` supports "low", "high", and "max", with "max" as the default.
+                """,
+            },
+            {
+                "ok": True,
+                "provider_id": "kimi",
+                "platform_id": "platform.kimi.ai",
+                "source_id": "kimi-k3-pricing",
+                "url": "https://platform.kimi.ai/docs/pricing/chat-k3.md",
+                "content_hash": "sha256:kimi-k3-pricing",
+                "excerpt_chars": 700,
+                "parser_strategy": "markdown_table",
+                "source_type": "pricing",
+                "trust_level": "official",
+                "discovered_from_source_id": "kimi-llms-index",
+                "parser_excerpt": """
+                    | Model | Unit | Cache Hit | Cache Miss | Output | Context Window |
+                    | --- | --- | --- | --- | --- | --- |
+                    | `kimi-k3` | 1M tokens | $0.30 | $3.00 | $15.00 | 1,048,576 tokens |
+                    Kimi K3 supports internet search, but every capability claim still requires validation.
+                """,
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parsed = parse_agentic_update_source_pack(
+                workspace_root=Path(temp_dir),
+                run_id="kimi-official-markdown",
+                source_records=source_records,
+            )
+
+        self.assertEqual(parsed["summary"]["parsed_model_count"], 1)
+        proposal = parsed["proposals"][0]
+        metadata = proposal["candidate_metadata"]
+        self.assertEqual(proposal["model_id"], "kimi/kimi-k3")
+        self.assertEqual(metadata["advertised_context_window"], 1_048_576)
+        self.assertEqual(metadata["input_modalities"], ["text", "image", "video"])
+        self.assertEqual(metadata["native_supported_reasoning_levels"], ["low", "high", "max"])
+        self.assertEqual(metadata["native_default_reasoning_level"], "max")
+        self.assertEqual(metadata["supported_reasoning_levels"], ["low", "high", "xhigh"])
+        self.assertEqual(metadata["default_reasoning_level"], "xhigh")
+        self.assertEqual(metadata["reasoning_effort_mapping"], {"low": "low", "high": "high", "xhigh": "max"})
+        self.assertEqual(metadata["pricing"]["cached_input_per_mtok"], 0.3)
+        self.assertEqual(metadata["pricing"]["input_per_mtok"], 3.0)
+        self.assertEqual(metadata["pricing"]["output_per_mtok"], 15.0)
+        self.assertFalse(metadata["deprecated"])
+        self.assertEqual(len(proposal["source_refs"]), 4)
+        self.assertEqual({item["platform_id"] for item in proposal["source_refs"]}, {"platform.kimi.ai"})
+        self.assertTrue(proposal["capability_claims"]["tool_calls"]["declared"])
+        self.assertTrue(proposal["capability_claims"]["web_search"]["declared"])
+        self.assertFalse(proposal["capability_claims"]["tool_calls"]["verified"])
+        self.assertEqual(proposal["adapter_requirements"]["reasoning_parameter"], "reasoning_effort")
+        self.assertEqual(proposal["adapter_requirements"]["review_status"], "requires_adapter_review")
+        self.assertIn("provider_reasoning_transport_mapping_requires_adapter_review", proposal["warnings"])
+        self.assertNotIn("missing_context_window_defaulted_unknown", proposal["warnings"])
+        self.assertNotIn("missing_reasoning_modes_defaulted_empty", proposal["warnings"])
+        self.assertNotIn("missing_modalities_defaulted_text_only", proposal["warnings"])
+        self.assertEqual(provider_parser_stubs()["kimi"]["implementation"], KIMI_OFFICIAL_DOCS_PARSER_ID)
+
+    def test_deepseek_official_html_sources_merge_current_model_contract(self) -> None:
+        source_records = [
+            {
+                "ok": True,
+                "provider_id": "deepseek",
+                "source_id": "deepseek-pricing",
+                "url": "https://api-docs.deepseek.com/quick_start/pricing/",
+                "content_hash": "sha256:deepseek-pricing",
+                "parser_strategy": "html_table",
+                "source_type": "pricing",
+                "trust_level": "official",
+                "parser_excerpt": """
+                    <table>
+                    <tr><td>MODEL</td><td>deepseek-v4-flash</td><td>deepseek-v4-pro</td></tr>
+                    <tr><td>CONTEXT LENGTH</td><td colspan="2">1M tokens</td></tr>
+                    <tr><td>1M INPUT TOKENS (CACHE HIT)</td><td>$0.0028</td><td>$0.003625</td></tr>
+                    <tr><td>1M INPUT TOKENS (CACHE MISS)</td><td>$0.14</td><td>$0.435</td></tr>
+                    <tr><td>1M OUTPUT TOKENS</td><td>$0.28</td><td>$0.87</td></tr>
+                    </table>
+                    <p>Both models support tool calls.</p>
+                """,
+            },
+            {
+                "ok": True,
+                "provider_id": "deepseek",
+                "source_id": "deepseek-thinking",
+                "url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+                "content_hash": "sha256:deepseek-thinking",
+                "parser_strategy": "html_document",
+                "source_type": "guide",
+                "trust_level": "official",
+                "parser_excerpt": """
+                    <h1>Thinking mode</h1><p>deepseek-v4-pro enables thinking by default.</p>
+                    <p>Set <code>reasoning_effort</code> to "high" or "max". Low and medium compatibility levels map to high.</p>
+                """,
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parsed = parse_agentic_update_source_pack(
+                workspace_root=Path(temp_dir),
+                run_id="deepseek-official-html",
+                source_records=source_records,
+            )
+
+        self.assertEqual(parsed["summary"]["parsed_model_count"], 2)
+        proposal = next(item for item in parsed["proposals"] if item["model_id"] == "deepseek/deepseek-v4-pro")
+        metadata = proposal["candidate_metadata"]
+        self.assertEqual(proposal["model_id"], "deepseek/deepseek-v4-pro")
+        self.assertEqual(metadata["advertised_context_window"], 1_000_000)
+        self.assertEqual(metadata["native_supported_reasoning_levels"], ["high", "max"])
+        self.assertEqual(metadata["reasoning_effort_mapping"], {"low": "high", "medium": "high", "high": "high", "xhigh": "max"})
+        self.assertEqual(metadata["pricing"]["cached_input_per_mtok"], 0.003625)
+        self.assertEqual(metadata["pricing"]["input_per_mtok"], 0.435)
+        self.assertEqual(metadata["pricing"]["output_per_mtok"], 0.87)
+        self.assertTrue(proposal["capability_claims"]["tool_calls"]["declared"])
+        self.assertEqual(proposal["adapter_requirements"]["reasoning_parameter"], "reasoning_effort")
+
+    def test_glm_official_markdown_sources_merge_reasoning_mapping(self) -> None:
+        source_records = [
+            {
+                "ok": True,
+                "provider_id": "glm",
+                "source_id": "glm-5-2",
+                "url": "https://docs.z.ai/guides/llm/glm-5.2.md",
+                "content_hash": "sha256:glm-model",
+                "parser_strategy": "markdown_document",
+                "source_type": "models_catalog",
+                "trust_level": "official",
+                "parser_excerpt": """
+                    # GLM-5.2
+                    `glm-5.2` is the flagship 1,000,000-token text model and supports function calling.
+                    See /openclaw#switching-to-glm-5-turbo-model for integration notes.
+                    The unrelated encoder architecture is GLM-0.5B.
+                """,
+            },
+            {
+                "ok": True,
+                "provider_id": "glm",
+                "source_id": "glm-reasoning",
+                "url": "https://docs.z.ai/api-reference/llm/chat-completion.md",
+                "content_hash": "sha256:glm-reasoning",
+                "parser_strategy": "markdown_document",
+                "source_type": "api_reference",
+                "trust_level": "official",
+                "parser_excerpt": """
+                    For `glm-5.2`, `reasoning_effort` accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+                    `low` and `medium` map to `high`; `xhigh` maps to `max`; the default is `max`.
+                """,
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parsed = parse_agentic_update_source_pack(
+                workspace_root=Path(temp_dir),
+                run_id="glm-official-markdown",
+                source_records=source_records,
+            )
+
+        self.assertEqual(parsed["summary"]["parsed_model_count"], 1)
+        proposal = parsed["proposals"][0]
+        metadata = proposal["candidate_metadata"]
+        self.assertEqual(proposal["model_id"], "glm/glm-5.2")
+        self.assertEqual(metadata["advertised_context_window"], 1_000_000)
+        self.assertEqual(metadata["native_default_reasoning_level"], "max")
+        self.assertEqual(metadata["default_reasoning_level"], "xhigh")
+        self.assertEqual(
+            metadata["reasoning_effort_mapping"],
+            {"off": "none", "minimal": "minimal", "low": "high", "medium": "high", "high": "high", "xhigh": "max"},
+        )
+        self.assertTrue(proposal["capability_claims"]["tool_calls"]["declared"])
+        self.assertEqual(provider_parser_stubs()["glm"]["implementation"], GLM_OFFICIAL_DOCS_PARSER_ID)
+
+    def test_kimi_tool_message_json_is_not_promoted_as_unknown_model(self) -> None:
+        source_records = [
+            {
+                "ok": True,
+                "provider_id": "kimi",
+                "source_id": "kimi-tool-guide",
+                "url": "https://platform.kimi.ai/docs/guide/kimi-k3-tool-calling.md",
+                "content_hash": "sha256:kimi-tool-guide",
+                "excerpt_chars": 500,
+                "parser_strategy": "markdown_document",
+                "source_type": "guide",
+                "trust_level": "official",
+                "parser_excerpt": """
+                    ```json
+                    [{"role": "assistant", "content": "", "tool_calls": [{"type": "function"}]}]
+                    ```
+                    completion = client.chat.completions.create(model="kimi-k3", messages=[])
+                """,
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parsed = parse_agentic_update_source_pack(
+                workspace_root=Path(temp_dir),
+                run_id="kimi-tool-json",
+                source_records=source_records,
+            )
+
+        self.assertEqual(parsed["proposals"], [])
+        self.assertNotIn("kimi/unknown-model", [item["model_id"] for item in parsed["proposals"]])
+        self.assertIn("weak_model_candidate_dropped:kimi:kimi-k3", parsed["warnings"])
 
     def test_no_parsed_capability_is_marked_verified_without_validation_evidence(self) -> None:
         source_records = [
@@ -281,7 +547,7 @@ class AgenticUpdateParserTests(unittest.TestCase):
             )
 
         self.assertEqual(parsed["summary"]["parsed_model_count"], 0)
-        self.assertIn("html_source_requires_provider_parser:deepseek:deepseek-html-head", parsed["warnings"])
+        self.assertIn("no_models_parsed:deepseek:deepseek-html-head", parsed["warnings"])
 
     def test_discovery_parser_excerpt_allows_qwen_models_beyond_short_excerpt(self) -> None:
         long_head = "<!DOCTYPE html><html><head>" + ("<meta name=\"nav-config\" content=\"footer=default\">" * 80) + "</head><body>"

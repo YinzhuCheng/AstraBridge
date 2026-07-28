@@ -6,9 +6,9 @@ import re
 from typing import Any
 
 from .common import WORKSPACE_STATE_DIRNAME, now_iso, read_json, write_json
-from .coding_kernel import ContextSection, build_context_budget, estimate_tool_schema_tokens
+from .coding_kernel import ContextSection, build_context_budget, estimate_tool_schema_tokens, normalize_context_budget_policy
 from .model_catalog import compact_limit, tool_output_truncation_limit
-from .providers import get_provider_profile
+from .providers import get_provider_profile, normalize_endpoint_identity
 from .security import SECRET_RE, SecurityError, redact_sensitive
 from .task_service import _display_thread_name
 
@@ -327,6 +327,16 @@ class ProjectContextService:
             auto_compact_status=target.get("auto_compact_status") or "configured_unverified",
             compact_summary_quality_status=target.get("compact_summary_quality_status") or "untested",
             tool_schema_token_estimate=target.get("tool_schema_token_estimate") or 0,
+            endpoint_protocol=target.get("wire_api"),
+            endpoint_fingerprint=target.get("endpoint_fingerprint"),
+            endpoint_protocol_overhead_tokens=target.get("endpoint_protocol_overhead_tokens"),
+            endpoint_overhead_status=target.get("endpoint_overhead_status"),
+            advertised_context_window_status=target.get("advertised_context_window_status") or "advertised",
+            supported_modalities=target.get("input_modalities"),
+            output_reserve_tokens=target.get("output_reserve_tokens"),
+            output_reserve_status=target.get("output_reserve_status"),
+            reasoning_artifact_policy=target.get("reasoning_artifact_policy") or "neutral_summary_only",
+            reasoning_artifact_reserve_tokens=target.get("reasoning_artifact_reserve_tokens"),
         )
         pack = {
             "schema_version": PROJECT_CONTEXT_SCHEMA_VERSION,
@@ -658,6 +668,34 @@ class ProjectContextService:
             auto_compact_limit = compact_limit(context_window)
         if context_window and not tool_output_limit:
             tool_output_limit = tool_output_truncation_limit(context_window)
+        resolved_profile: dict[str, Any] = {}
+        if resolved_profile_id and self._profiles is not None:
+            try:
+                resolved_profile = dict(self._profiles.resolve_runtime_profile(resolved_profile_id))
+            except Exception:
+                resolved_profile = {}
+        provider_profile = None
+        if resolved_provider_id:
+            try:
+                provider_profile = get_provider_profile(resolved_provider_id)
+            except ValueError:
+                provider_profile = None
+        wire_api = str(
+            resolved_profile.get("wire_api")
+            or model_record.get("wire_api")
+            or (provider_profile.adapter_type() if provider_profile is not None else "")
+            or ""
+        ).strip().lower() or None
+        endpoint_fingerprint = None
+        base_url = str(resolved_profile.get("base_url") or (provider_profile.base_url if provider_profile is not None else "")).strip()
+        if base_url and resolved_provider_id:
+            try:
+                endpoint_fingerprint = str(
+                    normalize_endpoint_identity(base_url, provider_id=resolved_provider_id).get("fingerprint") or ""
+                ).strip() or None
+            except ValueError:
+                endpoint_fingerprint = None
+        context_policy = normalize_context_budget_policy(dict(model_record.get("context_budget_policy") or {}))
         return {
             "profile_id": resolved_profile_id or None,
             "provider_id": resolved_provider_id or None,
@@ -670,6 +708,18 @@ class ProjectContextService:
             "auto_compact_status": str(compaction_support.get("auto_compact") or "configured_unverified"),
             "compact_summary_quality_status": str(compaction_support.get("structured_summary_quality") or "untested"),
             "tool_schema_token_estimate": estimate_tool_schema_tokens(model_record),
+            "wire_api": wire_api,
+            "endpoint_fingerprint": endpoint_fingerprint,
+            "input_modalities": [str(item).strip().lower() for item in list(model_record.get("input_modalities") or []) if str(item).strip()],
+            "modality_limits": dict(model_record.get("modality_limits") or {}),
+            "context_budget_policy": context_policy,
+            "advertised_context_window_status": str(context_policy.get("advertised_context_window_status") or "advertised"),
+            "endpoint_protocol_overhead_tokens": context_policy.get("endpoint_protocol_overhead_tokens"),
+            "endpoint_overhead_status": str(context_policy.get("endpoint_overhead_status") or "conservative"),
+            "output_reserve_tokens": context_policy.get("output_reserve_tokens"),
+            "output_reserve_status": str(context_policy.get("output_reserve_status") or "derived_conservative"),
+            "reasoning_artifact_policy": str(context_policy.get("reasoning_artifact_policy") or "neutral_summary_only"),
+            "reasoning_artifact_reserve_tokens": context_policy.get("reasoning_artifact_reserve_tokens"),
         }
 
     def _resolve_model_record(self, *, profile_id: str | None, provider_id: str | None, model_id: str | None) -> dict[str, Any]:

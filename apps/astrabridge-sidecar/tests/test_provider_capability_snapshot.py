@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 import sys
 import tempfile
@@ -39,9 +40,10 @@ class ProviderCapabilitySnapshotTests(unittest.TestCase):
             model = self._model_record(router_config, "qwen/qwen3-vl-plus")
             provider = next(item for item in router_config.providers() if str(item.get("id") or "") == "qwen")
             contract = current_model_provider_contract(model, provider=provider)
+            observed_at = datetime.now(timezone.utc).isoformat()
             matrix = {
                 "schema_version": "astrabridge-provider-model-compatibility-matrix-v1",
-                "generated_at": "2026-07-17T10:00:00+09:00",
+                "generated_at": observed_at,
                 "entries": [
                     {
                         "entry_id": "qwen/qwen3-vl-plus:vision.analyze",
@@ -68,7 +70,7 @@ class ProviderCapabilitySnapshotTests(unittest.TestCase):
                             "validation_status": "pass",
                             "validation_scope": ["capability:vision.analyze", "exposure:verified_runnable"],
                             "evidence_paths": ["PRIVATE/provider-matrix/qwen-vl-summary.json"],
-                            "last_verified_at": "2026-07-17T10:00:00+09:00",
+                            "last_verified_at": observed_at,
                             "known_failures": [],
                             "known_pitfalls": [],
                         },

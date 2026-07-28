@@ -1,6 +1,6 @@
 # Agentic Update Pipeline Runbook
 
-Last updated: 2026-07-19
+Last updated: 2026-07-26
 
 This runbook defines the controlled AstraBridge workflow for provider/model metadata updates, provider adapter review, capability route drift checks, plugin/skill surface checks, Codex kernel candidate validation, and supervised auto-upgrade control for the tracks that are currently justified for unattended apply.
 
@@ -106,6 +106,16 @@ Use these endpoints for controlled runs:
 Agent handoff skill:
 
 - `apps/astrabridge-sidecar/skills/agentic-update-pipeline/SKILL.md`
+- `apps/astrabridge-sidecar/skills/agentic-update-pipeline/orchestration-manifest.json`
+
+The manifest resolves to the built-in `provider_update_smoke_gate` graph. Before any live run, resolve, lint, compile, and dry-run it; the default is provider-free proposal generation, and the manual gate remains mandatory for provider calls or promotion.
+
+Deterministic four-provider parser coverage:
+
+```powershell
+cd D:\AstraBridge\apps\astrabridge-sidecar
+.\.venv\Scripts\python.exe skills\agentic-update-pipeline\scripts\run_four_provider_fixture_coverage.py --workspace-root D:\AstraBridge --run-id <run-id>
+```
 
 Reusable offline dogfood:
 
@@ -165,6 +175,12 @@ Use for model lists, context windows, output limits, pricing, deprecation, sourc
 4. Diff against current catalog/profile state.
 5. Validate with schema, metadata, model catalog, diff, and secret-scan gates.
 6. Apply only if the proposal is `metadata_only` or lower risk, the run has manual approval, and rollback evidence exists.
+
+When an official provider publishes `llms.txt`, discovery may expand it by one level into a bounded set of same-origin Markdown documents. It must not follow external/private links or bypass redirect, content-type, decompression, response-size, and redaction guards. Kimi and GLM use this path. Kimi registers both official documentation origins and preserves `platform_id` from source record through parsed proposal provenance. DeepSeek uses canonical official HTML URLs with a provider-specific parser. Qwen keeps its bounded official Alibaba Cloud HTML path because no machine-readable index is registered for that upstream surface.
+
+The accepted live Kimi proposal-only run `mechanism-repaired-kimi-20260726-r5` discovered Kimi K3 before runtime promotion. Step 22 then added the K3 built-in profile/catalog/transport contract: 1,048,576-token context, text/image/video input, native `low/high/max`, Codex `low/high/xhigh`, top-level `reasoning_effort`, and no K2 `thinking` object. Step 23 corrected the earlier single-platform assumption: `platform.kimi.com` credentials bind only to `https://api.moonshot.cn/v1`, while `platform.kimi.ai` credentials bind only to `https://api.moonshot.ai/v1`. Catalog refresh must preserve an existing binding and must never migrate a credential across these scopes. The accepted DeepSeek run is `step22-live-deepseek-proposal-20260726-r4`: it preserves the provider's column-oriented HTML pricing table, retains metadata signals that are separated from model ids, and emits V4 Flash/Pro context, pricing, tool, and reasoning-effort contracts. Earlier DeepSeek runs are preserved as diagnostics for fragmented table and reasoning evidence. The accepted GLM run is `step22-live-glm-proposal-20260726-r2`, while the first GLM run is preserved as diagnostic evidence for rejected link/architecture false positives.
+
+Managed provider smoke should resume the encrypted user vault through the platform credential manager. If the user explicitly authorizes a named plaintext source for the current task, it may be used only in memory and must never be copied to an artifact. `LlmApiManagerService.test_key()` aligns a bound Kimi credential to its matching regional endpoint and persists a sanitized health record containing the credential platform id, provider base URL, request preview, structural response diagnostics or failure notice, response excerpt, and usage signal; reasoning text is redacted while token counts and non-replayable state are retained. It must not retry a failed Kimi credential on the other platform. The first authorized K3 smoke in Step 22 returned `fail` because a `platform.kimi.com` credential was sent to the international endpoint; no retry occurred. The Step 23 matching-endpoint run `step23-kimi-com-managed-20260726` then made exactly one non-stream K3 text call to `api.moonshot.cn`, returned HTTP 200 with `ok`, and made no retry or cross-region fallback. This verifies managed China-credential connectivity and the bounded K3 text transport only; image/video, tools, and long-context behavior retain their separate validation status.
 
 Capability-route apply inside this lane must stay track-separated from provider metadata: it may write only isolated router-config state plus explicit apply-journal and rollback evidence, and it must fail closed on ambiguous route records.
 

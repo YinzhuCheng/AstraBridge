@@ -4,7 +4,7 @@ from datetime import datetime
 import json
 from typing import Any
 
-from .coding_kernel import ContextSection, build_context_budget, estimate_tool_schema_tokens
+from .coding_kernel import ContextSection, build_context_budget, estimate_tool_schema_tokens, normalize_context_budget_policy
 from .providers import classify_runtime_failure
 from .provider_compatibility_smoke import compatibility_matrix_updates_from_smoke_report
 
@@ -73,6 +73,7 @@ def build_compact_validation_case(model: dict[str, Any], *, repeat_blocks: int |
     auto_compact_token_limit = _optional_int(model.get("auto_compact_token_limit"))
     tool_output_token_limit = _optional_int(model.get("tool_output_token_limit"))
     context_support = dict(model.get("context_compaction_support") or {})
+    context_policy = normalize_context_budget_policy(dict(model.get("context_budget_policy") or {}))
     tool_schema_token_estimate = estimate_tool_schema_tokens(model)
     sections = synthetic_long_context_sections(
         provider_id=provider_id,
@@ -96,6 +97,16 @@ def build_compact_validation_case(model: dict[str, Any], *, repeat_blocks: int |
         auto_compact_status=str(context_support.get("auto_compact") or "configured_unverified"),
         compact_summary_quality_status=str(context_support.get("structured_summary_quality") or "untested"),
         tool_schema_token_estimate=tool_schema_token_estimate,
+        endpoint_protocol=str(model.get("wire_api") or "chat").strip().lower() or "chat",
+        endpoint_fingerprint=f"dryrun-{provider_id or 'provider'}-{native_model or 'model'}".replace("/", "-"),
+        endpoint_protocol_overhead_tokens=context_policy.get("endpoint_protocol_overhead_tokens"),
+        endpoint_overhead_status=str(context_policy.get("endpoint_overhead_status") or "conservative"),
+        advertised_context_window_status=str(context_policy.get("advertised_context_window_status") or "advertised"),
+        supported_modalities=list(model.get("input_modalities") or ["text"]),
+        output_reserve_tokens=context_policy.get("output_reserve_tokens"),
+        output_reserve_status=str(context_policy.get("output_reserve_status") or "derived_conservative"),
+        reasoning_artifact_policy=str(context_policy.get("reasoning_artifact_policy") or "neutral_summary_only"),
+        reasoning_artifact_reserve_tokens=context_policy.get("reasoning_artifact_reserve_tokens"),
     )
     failure = classify_runtime_failure(
         json.dumps({"error": {"message": "context length exceeded", "provider": provider_id, "model": native_model}})
@@ -107,6 +118,9 @@ def build_compact_validation_case(model: dict[str, Any], *, repeat_blocks: int |
     budget_payload = budget.to_dict()
     usage_signal = {
         "declared_context_window": context_window,
+        "advertised_context_window_tokens": budget_payload.get("advertised_context_window_tokens"),
+        "verified_usable_coding_context_tokens": budget_payload.get("verified_usable_coding_context_tokens"),
+        "usable_coding_context_status": budget_payload.get("usable_coding_context_status"),
         "effective_context_budget_tokens": budget_payload.get("effective_context_budget_tokens"),
         "compact_threshold_tokens": budget_payload.get("usable_prompt_budget_tokens"),
         "full_text_tokens": budget_payload.get("full_text_tokens"),
@@ -137,12 +151,18 @@ def build_compact_validation_case(model: dict[str, Any], *, repeat_blocks: int |
         "status": "pass",
         "context_window_summary": {
             "declared_context_window": context_window,
+            "advertised_context_window_tokens": budget_payload.get("advertised_context_window_tokens"),
+            "verified_usable_coding_context_tokens": budget_payload.get("verified_usable_coding_context_tokens"),
+            "usable_coding_context_status": budget_payload.get("usable_coding_context_status"),
+            "preflight_admission": budget_payload.get("preflight_admission"),
+            "recommended_action": budget_payload.get("recommended_action"),
             "effective_context_budget_tokens": budget_payload.get("effective_context_budget_tokens"),
             "compact_threshold_tokens": budget_payload.get("usable_prompt_budget_tokens"),
             "full_text_tokens": budget_payload.get("full_text_tokens"),
             "selected_text_tokens": budget_payload.get("selected_text_tokens"),
             "selected_text_chars": budget_payload.get("selected_text_chars"),
             "dropped_section_ids": list(budget_payload.get("dropped_section_ids") or []),
+            "truncated_section_ids": list(budget_payload.get("truncated_section_ids") or []),
             "compact_recommended": bool(budget_payload.get("compact_recommended")),
         },
         "budget_report": budget_payload,

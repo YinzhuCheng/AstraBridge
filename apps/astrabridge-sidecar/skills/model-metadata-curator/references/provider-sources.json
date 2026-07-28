@@ -37,10 +37,12 @@
       "display_name": "Kimi",
       "source_status": "official_docs",
       "urls": [
-        "https://platform.moonshot.ai/docs/overview",
-        "https://platform.moonshot.ai/docs/guide/start-using-kimi-api",
+        "https://platform.kimi.com/docs/llms.txt",
         "https://platform.kimi.com/docs/api/overview",
-        "https://platform.kimi.com/docs/pricing/chat"
+        "https://platform.kimi.com/docs/pricing/chat",
+        "https://platform.kimi.ai/docs/llms.txt",
+        "https://platform.kimi.ai/docs/api/overview",
+        "https://platform.kimi.ai/docs/pricing/chat"
       ]
     },
     {

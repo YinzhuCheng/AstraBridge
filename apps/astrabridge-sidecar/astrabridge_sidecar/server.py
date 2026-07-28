@@ -50,7 +50,7 @@ from .provider_compatibility_smoke import run_provider_compatibility_smoke
 from .router_config_service import RouterConfigService
 from .router_service import RouterService
 from .runtime_supervisor_service import RuntimeSupervisorService
-from .runtime_service import RuntimeService
+from .runtime_service import RuntimeRouteAdmissionError, RuntimeService
 from .secret_service import SecretService
 from .release_identity import (
     desktop_update_status,
@@ -383,6 +383,22 @@ class AppContext:
         chosen = str(profile_id or "").strip() or active_profile_id or str(current.get("default_profile_id") or "").strip()
         profile = self.profiles.resolve_runtime_profile(chosen or None)
         self.llm_manager.inject_profile_key(profile)
+        return self.profile_with_model_capabilities(profile)
+
+    def resolve_runtime_profile_metadata(self, profile_id: Any) -> dict[str, Any]:
+        """Resolve a profile for a read-only route-admission preflight.
+
+        This follows the same active-thread/project-default selection rule as
+        ``resolve_runtime_profile`` but deliberately does not inject a key.
+        Route admission must be explainable before a user authorizes a
+        provider runtime or a secret-owning execution lane.
+        """
+
+        current = self.projects.current_project or {}
+        active_provider_thread = self.tasks.active_provider_thread() or {}
+        active_profile_id = str(active_provider_thread.get("profile_id") or "").strip()
+        chosen = str(profile_id or "").strip() or active_profile_id or str(current.get("default_profile_id") or "").strip()
+        profile = self.profiles.resolve_runtime_profile(chosen or None)
         return self.profile_with_model_capabilities(profile)
 
     def get_profile_with_capabilities(self, profile_id: Any) -> dict[str, Any]:
@@ -1363,6 +1379,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/llm-manager/keys/save":
                 self.send_json(self.context.llm_manager.save_key(payload))
                 return
+            if path == "/api/llm-manager/keys/platform":
+                self.send_json(self.context.llm_manager.bind_key_platform(payload))
+                return
             if path == "/api/llm-manager/keys/delete":
                 self.send_json(self.context.llm_manager.delete_key(payload))
                 return
@@ -1404,6 +1423,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/agentic-updates/apply":
                 self.send_json(self.context.agentic_updates.apply(payload))
+                return
+            if path == "/api/agentic-updates/route-promotion/apply":
+                self.send_json(self.context.agentic_updates.apply_route_promotion(payload))
                 return
             if path == "/api/agentic-updates/rollback":
                 self.send_json(self.context.agentic_updates.rollback(payload))
@@ -1973,6 +1995,28 @@ class Handler(BaseHTTPRequestHandler):
                 profile = self._resolve_runtime_profile(payload.get("profile_id"))
                 self.send_json(self.context.supervisor.decision(payload, profile))
                 return
+            if path == "/api/runtime/route-admission":
+                # This is intentionally a metadata-only preflight. It must not
+                # load a credential, start an App Server lane, or mutate task
+                # state just to explain a selected model's authority.
+                profile = self.context.resolve_runtime_profile_metadata(
+                    self._optional_string(payload, "profile_id")
+                )
+                self.send_json(
+                    self.context.runtime.route_admission(
+                        profile,
+                        thread_id=self._optional_string(payload, "thread_id"),
+                        model=self._optional_string(payload, "model"),
+                        effort=self._optional_string(payload, "effort"),
+                        permission_mode=self._optional_string(payload, "permission_mode"),
+                        execution_policy=self._optional_string(payload, "execution_policy"),
+                        context_mode=self._optional_string(payload, "context_mode"),
+                        attachments=list(payload.get("attachments") or []),
+                        confirm_degradation=bool(payload.get("confirm_route_degradation", False)),
+                        operation=self._optional_string(payload, "operation"),
+                    )
+                )
+                return
             if path == "/api/runtime/threads/create":
                 profile = self._profile(payload.get("profile_id"))
                 response = self.context.runtime.create_thread(
@@ -1983,6 +2027,7 @@ class Handler(BaseHTTPRequestHandler):
                     task_id=self._optional_string(payload, "task_id"),
                     name=self._optional_string(payload, "name"),
                     operation_id=self._optional_string(payload, "operation_id"),
+                    confirm_route_degradation=bool(payload.get("confirm_route_degradation", False)),
                 )
                 self.send_json({**response, "project": self.context.projects.current_project, "task": self._task_view(self.context.tasks.current_task())})
                 return
@@ -2000,6 +2045,7 @@ class Handler(BaseHTTPRequestHandler):
                     permission_mode=str(payload.get("permission_mode") or "auto"),
                     name=self._optional_string(payload, "name"),
                     operation_id=self._optional_string(payload, "operation_id"),
+                    confirm_route_degradation=bool(payload.get("confirm_route_degradation", False)),
                 )
                 # This endpoint is deliberately an operation receipt. Reading the
                 # active task here can contend with the worker that is creating
@@ -2030,6 +2076,7 @@ class Handler(BaseHTTPRequestHandler):
                     effort=self._optional_string(payload, "effort"),
                     permission_mode=str(payload.get("permission_mode") or "auto"),
                     name=self._optional_string(payload, "name"),
+                    confirm_route_degradation=bool(payload.get("confirm_route_degradation", False)),
                 )
                 self.send_json({**response, "project": self.context.projects.current_project, "task": self._task_view(self.context.tasks.current_task())})
                 return
@@ -2109,6 +2156,7 @@ class Handler(BaseHTTPRequestHandler):
                     collaboration_mode=self._optional_string(payload, "collaboration_mode"),
                     context_mode=self._optional_string(payload, "context_mode"),
                     execution_policy=self._optional_string(payload, "execution_policy"),
+                    confirm_route_degradation=bool(payload.get("confirm_route_degradation", False)),
                 )
                 if bool(payload.get("include_full_state")):
                     self.send_json({**response, "project": self.context.projects.current_project, "task": self._task_view(self.context.tasks.current_task())})
@@ -2146,6 +2194,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(exc.response_payload(), status=409)
         except GraphSourceOwnershipError as exc:
             self.send_json(exc.response_payload(), status=409)
+        except RuntimeRouteAdmissionError as exc:
+            status = 409 if str(exc.admission.get("status") or "") == "confirmation_required" else 422
+            self.send_json(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "route_admission": exc.admission,
+                },
+                status=status,
+            )
         except ExternalA2ARequestRejectedError as exc:
             self.send_json(exc.response_payload(), status=exc.status_code)
         except Exception as exc:  # noqa: BLE001

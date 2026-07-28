@@ -17,7 +17,7 @@ class ProviderTransportConformanceTests(unittest.TestCase):
         "yunwu": "yunwu/gpt-5.5",
         "qwen": "qwen/qwen3.7-plus",
         "deepseek": "deepseek/deepseek-v4-pro",
-        "kimi": "kimi/kimi-k2.6",
+        "kimi": "kimi/kimi-k3",
         "glm": "glm/glm-5.2",
     }
 

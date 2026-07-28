@@ -12,6 +12,7 @@ SOURCE_REGISTRY_SCHEMA_VERSION = "astrabridge-provider-source-registry-v2"
 MANAGED_PROVIDER_IDS = ("yunwu", "openai", "deepseek", "kimi", "qwen", "glm")
 REFERENCE_PROVIDER_IDS = ("openrouter",)
 SOURCE_TYPES = (
+    "documentation_index",
     "api_reference",
     "models_catalog",
     "pricing",
@@ -30,6 +31,9 @@ CHANNELS = (
     "manual_seed",
 )
 PARSER_STRATEGIES = (
+    "llms_index",
+    "markdown_document",
+    "markdown_table",
     "html_document",
     "html_table",
     "json_api",
@@ -249,6 +253,7 @@ def _normalize_source_record(provider_id: str, item: dict[str, Any], *, index: i
     retrieved_on = _iso_date_string(item.get("retrieved_on"), default=DEFAULT_SOURCE_RETRIEVED_ON)
     promotable = bool(item.get("promotable", trust_level == "official"))
     requires_manual_review = bool(item.get("requires_manual_review", trust_level in NON_PROMOTABLE_TRUST_LEVELS))
+    platform_id = str(item.get("platform_id") or "").strip()
     if trust_level in NON_PROMOTABLE_TRUST_LEVELS:
         promotable = False
         requires_manual_review = True
@@ -270,6 +275,8 @@ def _normalize_source_record(provider_id: str, item: dict[str, Any], *, index: i
         "requires_manual_review": requires_manual_review,
         "notes": str(item.get("notes") or "").strip(),
     }
+    if platform_id:
+        normalized["platform_id"] = platform_id
     if not normalized["source_id"]:
         raise ValueError("source_id must not be empty.")
     _reject_secret_like(normalized, path=f"provider_source_registry.{provider_id}.source_records[{index}]")
@@ -481,8 +488,9 @@ def _source_record(
     source_role: str | None = None,
     retrieved_on: str = DEFAULT_SOURCE_RETRIEVED_ON,
     notes: str = "",
+    platform_id: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    record = {
         "source_id": source_id,
         "url": url,
         "source_type": source_type,
@@ -496,6 +504,9 @@ def _source_record(
         "retrieved_on": retrieved_on,
         "notes": notes,
     }
+    if platform_id:
+        record["platform_id"] = platform_id
+    return record
 
 
 _DEFAULT_PROVIDER_SOURCE_REGISTRY: list[dict[str, Any]] = [
@@ -667,7 +678,7 @@ _DEFAULT_PROVIDER_SOURCE_REGISTRY: list[dict[str, Any]] = [
         "source_records": [
             _source_record(
                 "deepseek-list-models",
-                "https://api-docs.deepseek.com/api/list-models",
+                "https://api-docs.deepseek.com/api/list-models/",
                 source_type="models_catalog",
                 channel="api_reference",
                 capability_categories=["models_catalog"],
@@ -675,7 +686,7 @@ _DEFAULT_PROVIDER_SOURCE_REGISTRY: list[dict[str, Any]] = [
             ),
             _source_record(
                 "deepseek-models-pricing",
-                "https://api-docs.deepseek.com/quick_start/pricing",
+                "https://api-docs.deepseek.com/quick_start/pricing/",
                 source_type="pricing",
                 channel="pricing",
                 parser_strategy="html_table",
@@ -684,32 +695,32 @@ _DEFAULT_PROVIDER_SOURCE_REGISTRY: list[dict[str, Any]] = [
             ),
             _source_record(
                 "deepseek-chat-completion",
-                "https://api-docs.deepseek.com/api/create-chat-completion",
+                "https://api-docs.deepseek.com/api/create-chat-completion/",
                 source_type="api_reference",
                 channel="api_reference",
                 capability_categories=["protocol_reference", "streaming", "tool_calling"],
             ),
             _source_record(
                 "deepseek-thinking-mode",
-                "https://api-docs.deepseek.com/guides/thinking_mode",
+                "https://api-docs.deepseek.com/guides/thinking_mode/",
                 source_type="guide",
                 capability_categories=["reasoning", "tool_calling", "streaming"],
             ),
             _source_record(
                 "deepseek-tool-calls",
-                "https://api-docs.deepseek.com/guides/tool_calls",
+                "https://api-docs.deepseek.com/guides/tool_calls/",
                 source_type="guide",
                 capability_categories=["tool_calling", "protocol_reference"],
             ),
             _source_record(
                 "deepseek-rate-limit",
-                "https://api-docs.deepseek.com/quick_start/rate_limit",
+                "https://api-docs.deepseek.com/quick_start/rate_limit/",
                 source_type="guide",
                 capability_categories=["errors_limits", "output_limit"],
             ),
             _source_record(
                 "deepseek-error-codes",
-                "https://api-docs.deepseek.com/quick_start/error_codes",
+                "https://api-docs.deepseek.com/quick_start/error_codes/",
                 source_type="guide",
                 capability_categories=["errors_limits"],
             ),
@@ -722,77 +733,123 @@ _DEFAULT_PROVIDER_SOURCE_REGISTRY: list[dict[str, Any]] = [
         "source_type": "models_catalog",
         "trust_level": "official",
         "channel": "stable_docs",
-        "parser_strategy": "html_document",
+        "parser_strategy": "llms_index",
         "stale_after_days": 7,
-        "notes": "Use platform.kimi.ai docs as the primary source for Kimi model availability, multimodal support, tool calls, streaming, and pricing.",
+        "notes": "Use both official Kimi platform documentation scopes. platform.kimi.com maps to api.moonshot.cn and platform.kimi.ai maps to api.moonshot.ai; credentials must never be moved across those independent scopes.",
         "source_records": [
             _source_record(
-                "kimi-overview",
-                "https://platform.kimi.ai/docs/overview",
-                source_type="models_catalog",
-                capability_categories=["models_catalog", "context_window"],
-                stale_after_days=7,
+                "kimi-llms-index",
+                "https://platform.kimi.com/docs/llms.txt",
+                platform_id="platform.kimi.com",
+                source_type="documentation_index",
+                parser_strategy="llms_index",
+                capability_categories=[
+                    "models_catalog",
+                    "context_window",
+                    "reasoning",
+                    "tool_calling",
+                    "image_input",
+                    "video_input",
+                    "pricing",
+                    "release_notes",
+                ],
+                stale_after_days=1,
+                source_stability="likely_to_change",
+                notes="Official machine-readable documentation index. Discovery may follow only bounded same-origin Markdown links selected by update relevance.",
             ),
             _source_record(
-                "kimi-chat-api",
-                "https://platform.kimi.ai/docs/api-reference/chat",
+                "kimi-models-markdown",
+                "https://platform.kimi.com/docs/models.md",
+                platform_id="platform.kimi.com",
+                source_type="models_catalog",
+                parser_strategy="markdown_table",
+                capability_categories=["models_catalog", "context_window", "image_input", "video_input", "reasoning"],
+                stale_after_days=1,
+            ),
+            _source_record(
+                "kimi-chat-api-markdown",
+                "https://platform.kimi.com/docs/api/chat.md",
+                platform_id="platform.kimi.com",
                 source_type="api_reference",
                 channel="api_reference",
+                parser_strategy="markdown_document",
                 capability_categories=["protocol_reference", "tool_calling", "streaming"],
             ),
             _source_record(
-                "kimi-k2-7-code",
-                "https://platform.kimi.ai/docs/guide/kimi-k2.7-code-quickstart",
-                source_type="guide",
-                capability_categories=["models_catalog", "reasoning", "tool_calling", "context_window"],
-                source_stability="versioned",
+                "kimi-model-parameters-markdown",
+                "https://platform.kimi.com/docs/api/models-overview.md",
+                platform_id="platform.kimi.com",
+                source_type="api_reference",
+                channel="api_reference",
+                parser_strategy="markdown_table",
+                capability_categories=["models_catalog", "protocol_reference", "reasoning", "output_limit"],
             ),
             _source_record(
-                "kimi-k2-6",
-                "https://platform.kimi.ai/docs/guide/kimi-k2.6-quickstart",
-                source_type="guide",
-                capability_categories=["models_catalog", "image_input", "video_input", "context_window"],
-                source_stability="versioned",
-            ),
-            _source_record(
-                "kimi-vision",
-                "https://platform.kimi.ai/docs/abilities/vision",
-                source_type="guide",
-                capability_categories=["image_input", "video_input"],
-            ),
-            _source_record(
-                "kimi-thinking-models",
-                "https://platform.kimi.ai/docs/abilities/thinking-models",
-                source_type="guide",
-                capability_categories=["reasoning", "tool_calling"],
-            ),
-            _source_record(
-                "kimi-tools-call",
-                "https://platform.kimi.ai/docs/abilities/tools-call",
-                source_type="guide",
-                capability_categories=["tool_calling"],
-            ),
-            _source_record(
-                "kimi-streaming-output",
-                "https://platform.kimi.ai/docs/abilities/streaming-output",
-                source_type="guide",
-                capability_categories=["streaming"],
-            ),
-            _source_record(
-                "kimi-rate-limit",
-                "https://platform.kimi.ai/docs/faq/rate-limit",
-                source_type="guide",
-                capability_categories=["errors_limits", "output_limit"],
-                source_stability="likely_to_change",
-            ),
-            _source_record(
-                "kimi-pricing-chat",
-                "https://platform.kimi.ai/docs/pricing/chat",
+                "kimi-pricing-index-markdown",
+                "https://platform.kimi.com/docs/pricing/chat.md",
+                platform_id="platform.kimi.com",
                 source_type="pricing",
                 channel="pricing",
-                parser_strategy="html_table",
+                parser_strategy="markdown_document",
                 stale_after_days=7,
-                capability_categories=["pricing"],
+                capability_categories=["pricing", "models_catalog"],
+            ),
+            _source_record(
+                "kimi-ai-llms-index",
+                "https://platform.kimi.ai/docs/llms.txt",
+                platform_id="platform.kimi.ai",
+                source_type="documentation_index",
+                parser_strategy="llms_index",
+                capability_categories=[
+                    "models_catalog",
+                    "context_window",
+                    "reasoning",
+                    "tool_calling",
+                    "image_input",
+                    "video_input",
+                    "pricing",
+                    "release_notes",
+                ],
+                stale_after_days=1,
+                source_stability="likely_to_change",
+                notes="Official international-platform documentation index; credentials are scoped to platform.kimi.ai.",
+            ),
+            _source_record(
+                "kimi-ai-models-markdown",
+                "https://platform.kimi.ai/docs/models.md",
+                platform_id="platform.kimi.ai",
+                source_type="models_catalog",
+                parser_strategy="markdown_table",
+                capability_categories=["models_catalog", "context_window", "image_input", "video_input", "reasoning"],
+                stale_after_days=1,
+            ),
+            _source_record(
+                "kimi-ai-chat-api-markdown",
+                "https://platform.kimi.ai/docs/api/chat.md",
+                platform_id="platform.kimi.ai",
+                source_type="api_reference",
+                channel="api_reference",
+                parser_strategy="markdown_document",
+                capability_categories=["protocol_reference", "tool_calling", "streaming"],
+            ),
+            _source_record(
+                "kimi-ai-model-parameters-markdown",
+                "https://platform.kimi.ai/docs/api/models-overview.md",
+                platform_id="platform.kimi.ai",
+                source_type="api_reference",
+                channel="api_reference",
+                parser_strategy="markdown_table",
+                capability_categories=["models_catalog", "protocol_reference", "reasoning", "output_limit"],
+            ),
+            _source_record(
+                "kimi-ai-pricing-index-markdown",
+                "https://platform.kimi.ai/docs/pricing/chat.md",
+                platform_id="platform.kimi.ai",
+                source_type="pricing",
+                channel="pricing",
+                parser_strategy="markdown_document",
+                stale_after_days=7,
+                capability_categories=["pricing", "models_catalog"],
             ),
         ],
     },
@@ -948,67 +1005,85 @@ _DEFAULT_PROVIDER_SOURCE_REGISTRY: list[dict[str, Any]] = [
         "source_type": "models_catalog",
         "trust_level": "official",
         "channel": "stable_docs",
-        "parser_strategy": "html_document",
+        "parser_strategy": "llms_index",
         "stale_after_days": 7,
         "notes": "Use Z.AI docs as the primary source for GLM 5.x model behavior, reasoning controls, tool calls, streaming, and pricing.",
         "source_records": [
             _source_record(
+                "glm-llms-index",
+                "https://docs.z.ai/llms.txt",
+                source_type="documentation_index",
+                parser_strategy="llms_index",
+                capability_categories=["models_catalog", "context_window", "reasoning", "tool_calling", "pricing"],
+                stale_after_days=1,
+                source_stability="likely_to_change",
+                notes="Official machine-readable Z.AI documentation index. Follow only bounded same-origin Markdown links.",
+            ),
+            _source_record(
                 "glm-5-2",
-                "https://docs.z.ai/guides/llm/glm-5.2",
+                "https://docs.z.ai/guides/llm/glm-5.2.md",
                 source_type="models_catalog",
+                parser_strategy="markdown_document",
                 capability_categories=["models_catalog", "context_window", "reasoning", "tool_calling", "streaming"],
                 stale_after_days=7,
                 source_stability="versioned",
             ),
             _source_record(
                 "glm-chat-completion",
-                "https://docs.z.ai/api-reference/llm/chat-completion",
+                "https://docs.z.ai/api-reference/llm/chat-completion.md",
                 source_type="api_reference",
                 channel="api_reference",
+                parser_strategy="markdown_document",
                 capability_categories=["protocol_reference", "tool_calling", "streaming", "image_input", "audio_input", "video_input", "output_limit"],
             ),
             _source_record(
                 "glm-core-parameters",
-                "https://docs.z.ai/guides/overview/concept-param",
+                "https://docs.z.ai/guides/overview/concept-param.md",
                 source_type="guide",
+                parser_strategy="markdown_document",
                 capability_categories=["reasoning", "streaming", "output_limit", "context_window"],
             ),
             _source_record(
                 "glm-function-calling",
-                "https://docs.z.ai/guides/capabilities/function-calling",
+                "https://docs.z.ai/guides/capabilities/function-calling.md",
                 source_type="guide",
+                parser_strategy="markdown_document",
                 capability_categories=["tool_calling"],
             ),
             _source_record(
                 "glm-streaming",
-                "https://docs.z.ai/guides/capabilities/streaming",
+                "https://docs.z.ai/guides/capabilities/streaming.md",
                 source_type="guide",
+                parser_strategy="markdown_document",
                 capability_categories=["streaming"],
             ),
             _source_record(
                 "glm-stream-tool",
-                "https://docs.z.ai/guides/tools/stream-tool",
+                "https://docs.z.ai/guides/tools/stream-tool.md",
                 source_type="guide",
+                parser_strategy="markdown_document",
                 capability_categories=["tool_calling", "streaming"],
             ),
             _source_record(
                 "glm-thinking-mode",
-                "https://docs.z.ai/guides/capabilities/thinking-mode",
+                "https://docs.z.ai/guides/capabilities/thinking-mode.md",
                 source_type="guide",
+                parser_strategy="markdown_document",
                 capability_categories=["reasoning", "tool_calling"],
             ),
             _source_record(
                 "glm-api-code",
-                "https://docs.z.ai/api-reference/api-code",
+                "https://docs.z.ai/api-reference/api-code.md",
                 source_type="guide",
+                parser_strategy="markdown_document",
                 capability_categories=["errors_limits"],
             ),
             _source_record(
                 "glm-pricing",
-                "https://docs.z.ai/guides/overview/pricing",
+                "https://docs.z.ai/guides/overview/pricing.md",
                 source_type="pricing",
                 channel="pricing",
-                parser_strategy="html_table",
+                parser_strategy="markdown_table",
                 stale_after_days=7,
                 capability_categories=["pricing"],
             ),

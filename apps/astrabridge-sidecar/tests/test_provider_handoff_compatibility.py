@@ -118,7 +118,13 @@ class ProviderHandoffCompatibilityTests(unittest.TestCase):
                     "permission_mode": "auto",
                 },
             )
-            runtime = RuntimeService(projects, ModalService(projects.require_shell_state_root), task_service=tasks)
+            project_context = ProjectContextService(projects, task_service=tasks)
+            runtime = RuntimeService(
+                projects,
+                ModalService(projects.require_shell_state_root),
+                project_context=project_context,
+                task_service=tasks,
+            )
             runtime._cache_thread_entry(  # noqa: SLF001
                 "thread-openai",
                 {
@@ -192,6 +198,8 @@ class ProviderHandoffCompatibilityTests(unittest.TestCase):
             handoff_bundle = dict(handoff.get("neutral_handoff_bundle") or {})
             self.assertEqual(handoff_bundle["projection_mode"], "task_context_fresh_thread")
             self.assertTrue(str(handoff_bundle.get("projection_digest") or ""))
+            self.assertEqual(handoff_bundle["neutral_transcript_schema_version"], "astrabridge-neutral-transcript-v1")
+            self.assertTrue(str(handoff_bundle.get("neutral_transcript_digest") or ""))
             self.assertTrue(str(handoff_bundle.get("lineage_digest") or ""))
             bundle_path = workspace / str(handoff_bundle.get("path") or "")
             self.assertTrue(bundle_path.is_file())
@@ -200,6 +208,14 @@ class ProviderHandoffCompatibilityTests(unittest.TestCase):
             self.assertEqual(bundle_payload["lineage"]["target_thread_id"], "thread-deepseek-fresh")
             self.assertEqual(bundle_payload["lineage"]["target_provider_id"], "deepseek")
             self.assertEqual(bundle_payload["projection_digest"], handoff_bundle["projection_digest"])
+            context_compaction = dict(bundle_payload.get("context_compaction") or {})
+            self.assertEqual(context_compaction.get("schema_version"), "astrabridge-context-compaction-handoff-v1")
+            self.assertTrue(context_compaction.get("target_compatible"))
+            self.assertEqual(context_compaction.get("summary_provenance", {}).get("cross_route_reasoning_replay"), "forbidden")
+            transcript = dict(bundle_payload.get("neutral_transcript") or {})
+            self.assertEqual(transcript.get("schema_version"), "astrabridge-neutral-transcript-v1")
+            self.assertEqual(transcript.get("lineage", {}).get("source_thread_id"), "thread-openai")
+            self.assertTrue(list(dict(transcript.get("reasoning_artifacts") or {}).get("drop_records") or []))
             self.assertNotIn("opaque-secret", json.dumps(bundle_payload, ensure_ascii=False))
             self.assertNotIn("resp_123", json.dumps(bundle_payload, ensure_ascii=False))
             self.assertNotIn("private-signature", json.dumps(bundle_payload, ensure_ascii=False))
@@ -210,6 +226,13 @@ class ProviderHandoffCompatibilityTests(unittest.TestCase):
             self.assertGreaterEqual(((compact_handoff.get("transition_summary") or {}).get("warning_count")), 2)
             self.assertIn("requested tool call(s): read_file", str((compact_handoff.get("transition_summary") or {}).get("projection_preview") or ""))
             self.assertEqual(str(dict(compact_handoff.get("neutral_handoff_bundle") or {}).get("projection_digest") or ""), handoff_bundle["projection_digest"])
+            self.assertTrue(
+                bool(
+                    dict(dict(compact_handoff.get("neutral_handoff_bundle") or {}).get("context_compaction") or {}).get(
+                        "target_compatible"
+                    )
+                )
+            )
 
             handler = Handler.__new__(Handler)
             handler.context = SimpleNamespace(tasks=tasks)

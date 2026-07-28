@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from .common import app_data_dir, new_id, now_iso, read_json, write_json
+from .kimi_platforms import (
+    KIMI_PLATFORM_CHINA,
+    kimi_platform_binding,
+    kimi_platform_for_base_url,
+    normalize_kimi_platform_id,
+)
 from .model_catalog import (
     current_generated_catalog,
     effective_model_records,
@@ -178,6 +184,12 @@ class LlmApiManagerService:
         keys = [dict(item) for item in list(vault.get("keys") or []) if isinstance(item, dict)]
         existing = next((item for item in keys if str(item.get("key_id")) == key_id), None)
         label = str(payload.get("label") or (existing.get("label") if existing else "") or f"{provider_id} key").strip()
+        platform_id = self._resolve_managed_key_platform(
+            provider_id,
+            payload.get("platform_id"),
+            existing=existing,
+            explicit="platform_id" in payload,
+        )
         record = {
             "key_id": key_id,
             "provider_id": provider_id,
@@ -191,6 +203,8 @@ class LlmApiManagerService:
             "updated_at": now,
             "secret": secret,
         }
+        if platform_id:
+            record["platform_id"] = platform_id
         keys = [item for item in keys if str(item.get("key_id")) != key_id]
         keys.append(record)
         vault["keys"] = sorted(keys, key=lambda item: (str(item.get("provider_id")), str(item.get("label"))))
@@ -199,7 +213,30 @@ class LlmApiManagerService:
             active[provider_id] = key_id
         vault["active_key_ids"] = active
         self._save_current_vault()
-        return {"key": self._redact_key_record(record), "keys": self.list_keys()["keys"]}
+        platform = self._align_managed_key_platform(record)
+        return {"key": self._redact_key_record(record), "keys": self.list_keys()["keys"], "platform": platform}
+
+    def bind_key_platform(self, payload: dict[str, Any]) -> dict[str, Any]:
+        vault = self._require_vault()
+        provider_id = str(payload.get("provider_id") or "").strip()
+        key_id = str(payload.get("key_id") or "").strip()
+        record = self._find_key(provider_id=provider_id, key_id=key_id or None)
+        if not record:
+            raise ValueError("No matching managed key is available.")
+        if provider_id != "kimi":
+            raise ValueError("Explicit credential-platform binding is currently supported only for Kimi.")
+        platform_id = normalize_kimi_platform_id(payload.get("platform_id"))
+        if not platform_id:
+            raise ValueError("Kimi platform_id must identify platform.kimi.com or platform.kimi.ai.")
+        record["platform_id"] = platform_id
+        record["updated_at"] = now_iso()
+        self._save_current_vault()
+        platform = self._align_managed_key_platform(record)
+        return {
+            "key": self._redact_key_record(record),
+            "keys": [self._redact_key_record(item) for item in list(vault.get("keys") or []) if isinstance(item, dict)],
+            "platform": platform,
+        }
 
     def delete_key(self, payload: dict[str, Any]) -> dict[str, Any]:
         vault = self._require_vault()
@@ -227,6 +264,7 @@ class LlmApiManagerService:
         record = self._find_key(provider_id=provider_id, key_id=key_id or None)
         if not record:
             raise ValueError("No matching managed key is available.")
+        platform = self._align_managed_key_platform(record)
         model_id = str(payload.get("model_id") or "").strip() or None
         stream = bool(payload.get("stream"))
         env_key = str(record.get("env_key") or self._provider_env_key(str(record.get("provider_id") or "")))
@@ -239,12 +277,20 @@ class LlmApiManagerService:
                 os.environ.pop(env_key, None)
             else:
                 os.environ[env_key] = original
+        if platform:
+            result = {
+                **result,
+                "credential_platform_id": platform["platform_id"],
+                "provider_base_url": platform["base_url"],
+            }
         status = "pass" if result.get("ok") else "fail"
         record["last_test_status"] = status
         record["last_test_at"] = now_iso()
         record["updated_at"] = now_iso()
         self._save_current_vault()
-        return {"ok": result.get("ok"), "result": self._sanitize_result(result), "key": self._redact_key_record(record), "keys": [self._redact_key_record(item) for item in vault.get("keys", [])]}
+        sanitized_result = self._sanitize_result(result)
+        self._persist_managed_key_test_result(sanitized_result)
+        return {"ok": result.get("ok"), "result": sanitized_result, "key": self._redact_key_record(record), "keys": [self._redact_key_record(item) for item in vault.get("keys", [])]}
 
     def effective_catalog(self) -> dict[str, Any]:
         mode = str(self._session.get("mode") or "anonymous")
@@ -319,6 +365,49 @@ class LlmApiManagerService:
             "results": list(payload.get("results") or []),
             "model_health": dict(payload.get("model_health") or {}),
         }
+
+    def _persist_managed_key_test_result(self, result: dict[str, Any]) -> None:
+        stored = self.health_results()
+        results = list(stored.get("results") or [])
+        model_health = dict(stored.get("model_health") or {})
+        model_id = str(result.get("model") or "").strip()
+        record = {
+            "run_id": new_id("KEYTEST"),
+            "kind": "managed_key_test",
+            "ok": bool(result.get("ok")),
+            "provider": str(result.get("provider") or ""),
+            "model": model_id,
+            "credential_platform_id": result.get("credential_platform_id"),
+            "provider_base_url": result.get("provider_base_url"),
+            "stream": bool(result.get("stream")),
+            "status": result.get("status"),
+            "connectivity": "pass" if result.get("ok") else "fail",
+            "request_preview": dict(result.get("preview") or {}),
+            "preview_warnings": list(result.get("preview_warnings") or result.get("warnings") or []),
+            "response_diagnostics": self._redact_reasoning_for_persistence(dict(result.get("response_diagnostics") or {})),
+            "failure_notice": dict(result.get("failure_notice") or {}),
+            "response_excerpt": str(result.get("response_excerpt") or "")[:300],
+            "usage_signal": dict(result.get("usage_signal") or {}),
+            "last_verified_at": now_iso(),
+        }
+        sanitized = self._sanitize_result(record)
+        results.append(sanitized)
+        if model_id:
+            model_health[model_id] = {
+                "status": "pass" if sanitized.get("ok") else "fail",
+                "connectivity": sanitized.get("connectivity"),
+                "last_verified_at": sanitized.get("last_verified_at"),
+                "latest_run_id": sanitized.get("run_id"),
+                "source": "managed_key_test",
+            }
+        write_json(
+            self.health_path,
+            {
+                "updated_at": now_iso(),
+                "results": results[-200:],
+                "model_health": model_health,
+            },
+        )
 
     def run_health(self, payload: dict[str, Any]) -> dict[str, Any]:
         effective_models = {str(item.get("id") or item.get("native_model") or ""): item for item in effective_model_records(self._router_config.models(), include_disabled=False)}
@@ -699,12 +788,68 @@ class LlmApiManagerService:
             "provider_id": item.get("provider_id"),
             "label": item.get("label"),
             "env_key": item.get("env_key"),
+            "platform_id": item.get("platform_id"),
             "fingerprint": item.get("fingerprint"),
             "enabled": bool(item.get("enabled", True)),
             "last_test_status": item.get("last_test_status"),
             "last_test_at": item.get("last_test_at"),
             "created_at": item.get("created_at"),
             "updated_at": item.get("updated_at"),
+        }
+
+    def _resolve_managed_key_platform(
+        self,
+        provider_id: str,
+        value: Any,
+        *,
+        existing: dict[str, Any] | None,
+        explicit: bool,
+    ) -> str | None:
+        if provider_id != "kimi":
+            return None
+        if explicit:
+            platform_id = normalize_kimi_platform_id(value)
+            if not platform_id:
+                raise ValueError("Kimi platform_id must identify platform.kimi.com or platform.kimi.ai.")
+            return platform_id
+        existing_platform = normalize_kimi_platform_id((existing or {}).get("platform_id"))
+        if existing_platform:
+            return existing_platform
+        provider = next(
+            (item for item in self._router_config.providers() if str(item.get("id") or item.get("provider_id") or "") == provider_id),
+            None,
+        )
+        return kimi_platform_for_base_url((provider or {}).get("base_url")) or KIMI_PLATFORM_CHINA
+
+    def _align_managed_key_platform(self, record: dict[str, Any]) -> dict[str, str] | None:
+        provider_id = str(record.get("provider_id") or "").strip()
+        if provider_id != "kimi":
+            return None
+        binding = kimi_platform_binding(record.get("platform_id"))
+        if not binding:
+            return None
+        provider = next(
+            (item for item in self._router_config.providers() if str(item.get("id") or item.get("provider_id") or "") == provider_id),
+            None,
+        )
+        if not provider:
+            raise ValueError("Kimi provider configuration is unavailable.")
+        aligned = self._router_config.upsert_provider(
+            {
+                **provider,
+                "base_url": binding["api_base_url"],
+                "models_url": binding["models_url"],
+                "docs_base_url": binding["docs_base_url"],
+                "platform_id": binding["platform_id"],
+                "credential_scope": binding["credential_scope"],
+            }
+        )
+        return {
+            "platform_id": str(aligned.get("platform_id") or binding["platform_id"]),
+            "credential_scope": str(aligned.get("credential_scope") or binding["credential_scope"]),
+            "base_url": str(aligned.get("base_url") or binding["api_base_url"]),
+            "models_url": str(aligned.get("models_url") or binding["models_url"]),
+            "docs_base_url": str(aligned.get("docs_base_url") or binding["docs_base_url"]),
         }
 
     def _redact_provider(
@@ -863,6 +1008,19 @@ class LlmApiManagerService:
             return [self._sanitize_result(item) for item in value]
         if isinstance(value, str):
             return _redact_secret_like(value)
+        return value
+
+    def _redact_reasoning_for_persistence(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            redacted: dict[str, Any] = {}
+            for key, item in value.items():
+                if str(key).lower() in {"reasoning_content", "reasoning_summary", "visible_summary"}:
+                    redacted[key] = "[redacted]" if item else item
+                else:
+                    redacted[key] = self._redact_reasoning_for_persistence(item)
+            return redacted
+        if isinstance(value, list):
+            return [self._redact_reasoning_for_persistence(item) for item in value]
         return value
 
     def _provider_env_key(self, provider_id: str) -> str:

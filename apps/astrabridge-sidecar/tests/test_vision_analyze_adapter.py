@@ -217,7 +217,7 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
             )
 
             content = request_body["messages"][0]["content"]
-            self.assertEqual(request_body["model"], "kimi-k2.6")
+            self.assertEqual(request_body["model"], "kimi-k3")
             self.assertTrue(content[0]["image_url"]["url"].startswith("data:image/png;base64,"))
             self.assertEqual(content[1]["text"], "What is the title?")
 
@@ -227,7 +227,7 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inline/base64 image inputs or local file paths") as captured:
             adapter.build_request(
                 {
-                    "model": "kimi-k2.6",
+                    "model": "kimi-k3",
                     "prompt": "What is the title?",
                     "image_inputs": [{"url": "https://example.com/vision.png?sig=secret-token"}],
                 }
@@ -236,13 +236,16 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
         self.assertNotIn("secret-token", str(captured.exception))
 
     def test_kimi_analyze_normalizes_smoke_response(self) -> None:
+        captured: dict[str, object] = {}
+
         def fake_post(url: str, *, headers: dict[str, str], json: dict[str, object], timeout: int) -> _FakeResponse:
+            captured["url"] = url
             return _FakeResponse(
                 {
                     "id": "chatcmpl-kimi-test",
                     "object": "chat.completion",
                     "created": 1782305183,
-                    "model": "kimi-k2.6",
+                    "model": "kimi-k3",
                     "choices": [
                         {
                             "index": 0,
@@ -273,7 +276,8 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(result["provider_id"], "kimi")
-        self.assertEqual(result["model"], "kimi-k2.6")
+        self.assertEqual(captured["url"], "https://api.moonshot.cn/v1/chat/completions")
+        self.assertEqual(result["model"], "kimi-k3")
         self.assertIn("AstraBridge", result["text"])
         self.assertEqual(result["finish_reason"], "stop")
         self.assertEqual(result["annotations"][0]["type"], "reasoning_content")
@@ -289,7 +293,7 @@ class VisionAnalyzeAdapterTests(unittest.TestCase):
                     "id": "chatcmpl-kimi-env",
                     "object": "chat.completion",
                     "created": 1782305183,
-                    "model": "kimi-k2.6",
+                    "model": "kimi-k3",
                     "choices": [{"message": {"role": "assistant", "content": "red square"}, "finish_reason": "stop"}],
                     "usage": {"total_tokens": 9},
                 }

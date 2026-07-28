@@ -1,6 +1,6 @@
 # Provider Capability And Reasoning Runbook
 
-Last updated: 2026-07-06
+Last updated: 2026-07-27
 
 This runbook is the maintenance contract for AstraBridge provider, model, capability, and reasoning-effort updates. Use it when a model is upgraded, a new provider is added, a modality claim changes, or reasoning normalization needs adjustment.
 
@@ -96,6 +96,54 @@ Current exact exhaustive totals:
 - official OpenAI direct provider-backed verification remains explicitly deferred by scope
 
 Use the Step 12 exhaustive matrix summary and final readiness report before creating new provider-backed compatibility claims or re-running broad live validation.
+
+## Current Route-Admission Reference Cohort
+
+The provider-capability matrix and an execution-route admission are different
+evidence layers. On 2026-07-27, AstraBridge re-ran a provider-free,
+route-level reference cohort for the current coding-route subjects below. The
+cohort proves deterministic adapter, handoff, receipt, fallback, and context
+contracts; it does not replace an exact route's adapter dry-run or authorized
+provider smoke.
+
+| Route | Current route state | Operator-visible posture | Exact next gate |
+| --- | --- | --- | --- |
+| `qwen/qwen3.7-plus` | `documented` / `review_only` / `reduced_authority` | explicit confirmation, `no_tools`, `ask` | `execution_route_adapter_dry_run` |
+| `deepseek/deepseek-v4-pro` | `documented` / `review_only` / `reduced_authority` | explicit confirmation, `no_tools`, `ask` | `execution_route_adapter_dry_run` |
+| `kimi/kimi-k3` | `documented` / `review_only` / `reduced_authority` | explicit confirmation, `no_tools`, `ask` | `execution_route_adapter_dry_run` |
+| `glm/glm-5.2` | `documented` / `review_only` / `reduced_authority` | explicit confirmation, `no_tools`, `ask` | `execution_route_adapter_dry_run` |
+
+For this reference cohort, `verified`, `partial`, and `blocked` route counts
+are all zero; all four external routes are intentionally
+`reduced_authority`. Provider-backed smoke for each route is a deferred action,
+not a route-promotion result: it needs explicit current-turn authorization and
+a secret-owning runner after the adapter dry-run. The `openai/gpt-5.5`
+Codex/App Server control receives no external-provider promotion bypass.
+
+Evidence:
+
+- `PRIVATE/agentic-update-pipeline/runs/step13-four-provider-reference-cohort-closure-20260727-r1/validation/reference-cohort.json`
+- `PRIVATE/provider-compatibility/reports/step12-controlled-four-provider-kimi-k3-reference-cohort-20260727.md`
+- `PRIVATE/provider-compatibility/reports/step13-adaptation-upgrade-closure-20260727.md`
+
+### Operator Route-Admission Procedure
+
+1. Run the deterministic reference cohort first. It must write a normalized
+   contract with `allow_network: false` and `allow_provider_calls: false`.
+2. Keep a `review_only` route at `no_tools` / `ask` until its exact model,
+   endpoint fingerprint, and adapter signature pass the next evidence gate.
+3. Only after a user explicitly authorizes the current provider-call turn,
+   perform that exact route's adapter dry-run and then bounded provider smoke.
+   Do not reuse a sibling model's smoke or a provider-wide result.
+4. Before tool or coding-route promotion, require the common lifecycle:
+   `adapter_dry_run_passed`, `provider_smoke_passed`,
+   `tool_contract_passed`, `coding_route_verified`, and
+   `default_route_eligible`. Kimi K3 has no exception to this sequence.
+5. If a gate fails, drifts, expires, or lacks authorization, preserve the
+   artifact, keep the route downgraded, and do not automatically retry through
+   another endpoint, provider, fallback model, or credential scope. Follow the
+   rollback and containment procedure in
+   `docs/AGENTIC_UPDATE_PIPELINE_RUNBOOK.md` for any stateful apply attempt.
 
 ## Artifact And Evidence Conventions
 

@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import urldefrag, urljoin, urlsplit
 
 from ..common import now_iso, write_json
 from ..model_catalog import default_catalog_sources, normalize_provider_source_record
@@ -40,6 +40,15 @@ ALLOWED_DISCOVERY_TEXT_CONTENT_TYPES = (
     "application/openapi+json",
     "application/openapi+xml",
 )
+DOCUMENT_INDEX_PARSER_STRATEGY = "llms_index"
+DOCUMENT_INDEX_MAX_DEPTH = 1
+_MARKDOWN_LINK_RE = re.compile(r"\[(?P<title>[^\]\r\n]{1,240})\]\((?P<href>[^)\s]+)\)")
+_PROVIDER_DOCUMENT_ALIASES = {
+    "deepseek": ("deepseek",),
+    "glm": ("glm", "z.ai", "zhipu"),
+    "kimi": ("kimi", "moonshot"),
+    "qwen": ("qwen", "dashscope"),
+}
 FetchResult = dict[str, Any]
 FetchFunction = Callable[[str, int, int], FetchResult]
 
@@ -77,10 +86,13 @@ def run_agentic_update_discovery(
     warnings: list[str] = []
     if limit_warning:
         warnings.append(limit_warning)
+    source_queue = list(source_records)
+    known_urls = {str(source.get("url") or "").strip() for source in source_queue if str(source.get("url") or "").strip()}
     seen_urls: set[str] = set()
     seen_source_identity_hashes: set[str] = set()
     active_fetcher = fetcher or _default_fetch
-    for source in source_records:
+    while source_queue and len(pack_records) < limits["max_sources"]:
+        source = source_queue.pop(0)
         url = str(source.get("url") or "").strip()
         if url in seen_urls:
             pack_records.append(_discovery_skip_record(source, classification="duplicate", reason="Duplicate source URL in run."))
@@ -110,14 +122,26 @@ def run_agentic_update_discovery(
                 mode=mode,
                 limits=limits,
             )
-            pack_records.append(_dedupe_source_identity(record, seen_source_identity_hashes))
-            continue
-        try:
-            fetched = active_fetcher(url, limits["timeout_sec"], limits["max_bytes_per_source"])
-            record = _result_record_from_fetch(source, fetched, mode=mode, limits=limits)
-            pack_records.append(_dedupe_source_identity(record, seen_source_identity_hashes))
-        except Exception as exc:  # noqa: BLE001
-            pack_records.append(_discovery_error_record(source, exc))
+            record = _dedupe_source_identity(record, seen_source_identity_hashes)
+        else:
+            try:
+                fetched = active_fetcher(url, limits["timeout_sec"], limits["max_bytes_per_source"])
+                record = _result_record_from_fetch(source, fetched, mode=mode, limits=limits)
+                record = _dedupe_source_identity(record, seen_source_identity_hashes)
+            except Exception as exc:  # noqa: BLE001
+                record = _discovery_error_record(source, exc)
+        pack_records.append(record)
+        if bool(record.get("ok")) and str(source.get("parser_strategy") or "") == DOCUMENT_INDEX_PARSER_STRATEGY:
+            remaining = max(0, limits["max_sources"] - len(pack_records) - len(source_queue))
+            discovered, truncated = _discover_document_index_sources(source, record, limit=remaining, excluded_urls=known_urls)
+            for discovered_source in discovered:
+                discovered_url = str(discovered_source.get("url") or "").strip()
+                if not discovered_url or discovered_url in known_urls:
+                    continue
+                source_queue.append(discovered_source)
+                known_urls.add(discovered_url)
+            if truncated:
+                warnings.append(f"document_index_source_limit_reached:{source.get('source_id') or 'unknown_source'}")
     summary = _discovery_summary(pack_records)
     generated_at = now_iso()
     index_payload = {
@@ -184,6 +208,139 @@ def _select_source_records(
     return selected, warning
 
 
+def _discover_document_index_sources(
+    source: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    limit: int,
+    excluded_urls: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    if int(source.get("discovery_depth") or 0) >= DOCUMENT_INDEX_MAX_DEPTH:
+        return [], False
+    text = str(record.get("parser_excerpt") or "")
+    base_url = str(record.get("final_url") or source.get("url") or "").strip()
+    if not text or not base_url:
+        return [], False
+    provider_id = str(source.get("provider_id") or "").strip().lower()
+    candidates: dict[str, tuple[int, dict[str, Any]]] = {}
+    for match in _MARKDOWN_LINK_RE.finditer(text):
+        title = " ".join(match.group("title").split())
+        href = match.group("href").strip().strip("<>")
+        candidate_url = urldefrag(urljoin(base_url, href))[0]
+        if candidate_url in (excluded_urls or set()):
+            continue
+        if not _same_origin_document_url(base_url, candidate_url):
+            continue
+        metadata = _document_index_link_metadata(provider_id, title=title, url=candidate_url)
+        if metadata is None:
+            continue
+        score, source_type, channel, parser_strategy, capability_categories, source_stability = metadata
+        discovered = {
+            "source_id": _document_index_source_id(str(source.get("source_id") or provider_id or "provider"), candidate_url),
+            "url": candidate_url,
+            "provider_id": provider_id,
+            "platform_id": source.get("platform_id"),
+            "display_name": source.get("display_name"),
+            "source_type": source_type,
+            "trust_level": source.get("trust_level"),
+            "channel": channel,
+            "parser_strategy": parser_strategy,
+            "stale_after_days": int(source.get("stale_after_days") or 7),
+            "capability_categories": capability_categories,
+            "source_stability": source_stability,
+            "source_role": source.get("source_role"),
+            "retrieved_on": source.get("retrieved_on"),
+            "promotable": bool(source.get("promotable", False)),
+            "requires_manual_review": bool(source.get("requires_manual_review", False)),
+            "provider_trust_level": source.get("provider_trust_level"),
+            "provider_promotion_policy": dict(source.get("provider_promotion_policy") or {}),
+            "discovered_from_source_id": source.get("source_id"),
+            "discovery_depth": int(source.get("discovery_depth") or 0) + 1,
+            "document_link_title": title,
+        }
+        current = candidates.get(candidate_url)
+        if current is None or score > current[0]:
+            candidates[candidate_url] = (score, discovered)
+    ordered = [item for _, item in sorted(candidates.values(), key=lambda pair: (-pair[0], str(pair[1].get("url") or "")))]
+    bounded_limit = max(0, int(limit))
+    return ordered[:bounded_limit], len(ordered) > bounded_limit
+
+
+def _same_origin_document_url(base_url: str, candidate_url: str) -> bool:
+    try:
+        base = urlsplit(base_url)
+        candidate = urlsplit(candidate_url)
+    except ValueError:
+        return False
+    if base.scheme.lower() not in ALLOWED_DISCOVERY_SCHEMES or candidate.scheme.lower() != base.scheme.lower():
+        return False
+    if candidate.username or candidate.password or candidate.query:
+        return False
+    if not base.hostname or not candidate.hostname or base.hostname.lower() != candidate.hostname.lower():
+        return False
+    if base.port != candidate.port or _is_private_or_local_host(candidate.hostname):
+        return False
+    path = candidate.path.lower()
+    return path.endswith(".md") and not path.endswith("/llms.md")
+
+
+def _document_index_link_metadata(
+    provider_id: str,
+    *,
+    title: str,
+    url: str,
+) -> tuple[int, str, str, str, list[str], str] | None:
+    path = urlsplit(url).path.lower()
+    text = f"{title} {path}".lower()
+    aliases = _PROVIDER_DOCUMENT_ALIASES.get(provider_id, (provider_id,))
+    provider_specific = any(alias and alias in text for alias in aliases)
+    version_specific = bool(re.search(r"(?:^|[-_/])(?:k|v)\d(?:[.\d-]*)(?:[-_/]|\.md|$)", text))
+    modelish = provider_specific or version_specific
+
+    if path.endswith("/models.md") or "list-models" in path or "models-overview" in path or "model list" in text:
+        return (1000, "models_catalog", "stable_docs", "markdown_table", ["models_catalog", "context_window", "reasoning"], "stable")
+    if provider_specific and "/guides/llm/" in path and path.endswith(".md"):
+        return (
+            1000,
+            "models_catalog",
+            "stable_docs",
+            "markdown_document",
+            ["models_catalog", "context_window", "reasoning", "tool_calling", "image_input", "video_input"],
+            "versioned",
+        )
+    if ("/pricing/chat" in path or ("model" in text and "pricing" in text)) and (modelish or path.endswith("/pricing/chat.md")):
+        return (800 + (100 if version_specific else 0), "pricing", "pricing", "markdown_table", ["pricing", "models_catalog", "context_window"], "likely_to_change")
+    if ("quickstart" in text or "model guide" in text) and modelish:
+        return (
+            900 + (100 if version_specific else 0),
+            "guide",
+            "stable_docs",
+            "markdown_document",
+            ["models_catalog", "context_window", "reasoning", "tool_calling", "image_input", "video_input"],
+            "versioned",
+        )
+    if "reasoning" in text or "thinking" in text:
+        return (750, "guide", "stable_docs", "markdown_document", ["reasoning", "tool_calling"], "likely_to_change")
+    if path.endswith("/pricing.md"):
+        return (700, "pricing", "pricing", "markdown_table", ["pricing", "models_catalog"], "likely_to_change")
+    if ("tool" in text or "function-calling" in text) and modelish:
+        return (650 + (100 if version_specific else 0), "guide", "stable_docs", "markdown_document", ["tool_calling", "reasoning"], "likely_to_change")
+    if "changelog" in text or "release" in text:
+        return (600, "release_notes", "release_notes", "markdown_document", ["release_notes", "models_catalog"], "likely_to_change")
+    if any(term in text for term in ("vision", "image", "video", "multimodal")) and (modelish or "vision" in text):
+        return (550, "guide", "stable_docs", "markdown_document", ["image_input", "video_input", "models_catalog"], "likely_to_change")
+    if path.endswith("/api/chat.md") or "chat completion" in text:
+        return (450, "api_reference", "api_reference", "markdown_document", ["protocol_reference", "tool_calling", "streaming", "reasoning"], "stable")
+    return None
+
+
+def _document_index_source_id(parent_source_id: str, url: str) -> str:
+    path = urlsplit(url).path.strip("/")
+    slug = re.sub(r"[^a-z0-9]+", "-", path.lower()).strip("-") or "document"
+    prefix = re.sub(r"[^a-z0-9]+", "-", parent_source_id.lower()).strip("-") or "provider-index"
+    return f"{prefix}-linked-{slug}"[:120].rstrip("-")
+
+
 def _default_fetch(url: str, timeout_sec: int, max_bytes: int) -> FetchResult:
     started = now_iso()
     started_monotonic = time.monotonic()
@@ -227,13 +384,18 @@ def _result_record_from_fetch(source: dict[str, Any], fetched: FetchResult, *, m
     body = _coerce_body(fetched.get("body"))
     text = _decode_body(body, str(fetched.get("content_type") or ""))
     excerpt = _safe_excerpt(text, limits["max_excerpt_chars"])
-    parser_excerpt = _safe_parser_excerpt(text, limits["max_parser_excerpt_chars"])
+    parser_excerpt = _safe_parser_excerpt(
+        text,
+        limits["max_parser_excerpt_chars"],
+        preserve_document=str(source.get("parser_strategy") or "") in {"llms_index", "markdown_document", "markdown_table", "html_table"},
+    )
     status_code = _optional_int(fetched.get("status_code"))
     ok = bool(status_code is None or 200 <= status_code < 400) and not bool(fetched.get("http_error"))
     classification = "ok" if ok else "http_error"
     record = {
         "schema_version": AGENTIC_UPDATE_DISCOVERY_SCHEMA_VERSION,
         "provider_id": source.get("provider_id"),
+        "platform_id": source.get("platform_id"),
         "source_id": source.get("source_id"),
         "url": source.get("url"),
         "final_url": _safe_url(str(fetched.get("url") or source.get("url") or "")),
@@ -260,6 +422,13 @@ def _result_record_from_fetch(source: dict[str, Any], fetched: FetchResult, *, m
         "trust_level": source.get("trust_level"),
         "channel": source.get("channel"),
         "parser_strategy": source.get("parser_strategy"),
+        "capability_categories": list(source.get("capability_categories") or []),
+        "source_stability": source.get("source_stability"),
+        "source_role": source.get("source_role"),
+        "retrieved_on": source.get("retrieved_on"),
+        "discovered_from_source_id": source.get("discovered_from_source_id"),
+        "discovery_depth": int(source.get("discovery_depth") or 0),
+        "document_link_title": source.get("document_link_title"),
         "promotable": bool(source.get("promotable", False)),
         "requires_manual_review": bool(source.get("requires_manual_review", False)),
         "warnings": [],
@@ -278,6 +447,7 @@ def _discovery_skip_record(source: dict[str, Any], *, classification: str, reaso
     return {
         "schema_version": AGENTIC_UPDATE_DISCOVERY_SCHEMA_VERSION,
         "provider_id": source.get("provider_id"),
+        "platform_id": source.get("platform_id"),
         "source_id": source.get("source_id"),
         "url": source.get("url"),
         "final_url": source.get("url"),
@@ -304,6 +474,13 @@ def _discovery_skip_record(source: dict[str, Any], *, classification: str, reaso
         "trust_level": source.get("trust_level"),
         "channel": source.get("channel"),
         "parser_strategy": source.get("parser_strategy"),
+        "capability_categories": list(source.get("capability_categories") or []),
+        "source_stability": source.get("source_stability"),
+        "source_role": source.get("source_role"),
+        "retrieved_on": source.get("retrieved_on"),
+        "discovered_from_source_id": source.get("discovered_from_source_id"),
+        "discovery_depth": int(source.get("discovery_depth") or 0),
+        "document_link_title": source.get("document_link_title"),
         "promotable": False,
         "requires_manual_review": True,
         "warnings": [reason],
@@ -469,17 +646,22 @@ def _safe_excerpt(text: str, max_chars: int) -> str:
     return value
 
 
-def _safe_parser_excerpt(text: str, max_chars: int) -> str:
+def _safe_parser_excerpt(text: str, max_chars: int, *, preserve_document: bool = False) -> str:
     value = _sanitize_text_for_artifact(text)
     stripped = value.lstrip()
-    if stripped.startswith(("{", "[")):
+    if preserve_document or stripped.startswith(("{", "[")):
         return value[:max_chars].rstrip() + ("\n[truncated]" if len(value) > max_chars else "")
-    modelish = re.compile(
-        r"(?i)\b(?:qwen|deepseek|kimi|moonshot|glm|gpt|o[0-9])[-a-z0-9._]*\b"
+    parser_signal = re.compile(
+        r"(?i)(?:"
+        r"\b(?:qwen|deepseek|kimi|moonshot|glm|gpt|o[0-9])[-a-z0-9._]*\b"
+        r"|\breasoning[_ -]?effort\b"
+        r"|\bcontext\s+(?:length|window)\b"
+        r"|\b(?:cache\s+(?:hit|miss)|tool\s+calls?|input\s+modalit(?:y|ies))\b"
+        r")"
     )
     snippets: list[str] = []
     seen: set[str] = set()
-    for match in modelish.finditer(value):
+    for match in parser_signal.finditer(value):
         start = max(0, match.start() - 180)
         end = min(len(value), match.end() + 180)
         snippet = value[start:end].strip()
@@ -565,6 +747,7 @@ def _index_record(record: dict[str, Any]) -> dict[str, Any]:
         key: record.get(key)
         for key in (
             "provider_id",
+            "platform_id",
             "source_id",
             "url",
             "final_url",
@@ -586,6 +769,13 @@ def _index_record(record: dict[str, Any]) -> dict[str, Any]:
             "trust_level",
             "channel",
             "parser_strategy",
+            "capability_categories",
+            "source_stability",
+            "source_role",
+            "retrieved_on",
+            "discovered_from_source_id",
+            "discovery_depth",
+            "document_link_title",
             "promotable",
             "requires_manual_review",
             "warnings",

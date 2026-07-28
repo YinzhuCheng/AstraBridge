@@ -48,6 +48,47 @@ class AgenticUpdateServiceTests(unittest.TestCase):
             self.assertFalse((workspace / ".codex").exists())
             self.assertFalse((workspace / "codex-locator.json").exists())
 
+    def test_kimi_official_index_fixture_produces_adapter_gated_proposal_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            current_models = [
+                {
+                    "id": "kimi/kimi-k2.7-code",
+                    "provider": "kimi",
+                    "native_model": "kimi-k2.7-code",
+                    "display_name": "Kimi K2.7 Code",
+                    "advertised_context_window": 262144,
+                    "input_modalities": ["text"],
+                    "supported_reasoning_levels": ["low", "high", "xhigh"],
+                    "default_reasoning_level": "high",
+                }
+            ]
+            router_config = _ReadOnlyRouterConfig(current_models)
+            service = AgenticUpdateService(workspace_root=workspace, router_config=router_config)
+
+            started = service.start(_kimi_provider_fixture_payload(run_id="kimi-k3-proposal"))
+            result = service.result(started["job_id"])
+            findings = list(result["proposal"]["discovery_result"]["findings"])
+            kimi_k3 = next(item for item in findings if item.get("model_id") == "kimi/kimi-k3")
+            added_change = next(
+                item
+                for item in result["diff"]["changes"]
+                if item.get("change_type") == "added_model" and item.get("model_id") == "kimi/kimi-k3"
+            )
+
+            self.assertEqual(started["status"], "success")
+            self.assertEqual(result["diff"]["risk_class"], "requires_adapter_review")
+            self.assertEqual(added_change["risk_class"], "requires_adapter_review")
+            self.assertIn("provider_reasoning_parameter_requires_transport_mapping", added_change["reasons"])
+            self.assertEqual(kimi_k3["candidate_metadata"]["native_supported_reasoning_levels"], ["low", "high", "max"])
+            self.assertEqual(kimi_k3["adapter_requirements"]["reasoning_parameter"], "reasoning_effort")
+            self.assertEqual(result["proposal"]["apply_manifest"]["changed_paths"], [])
+            self.assertFalse(result["summary"]["provider_calls_attempted"])
+            self.assertFalse(result["summary"]["applied"])
+            self.assertEqual(result["mutations"]["changed_paths"], [])
+            self.assertEqual(router_config.models(), current_models)
+            self.assertFalse((workspace / ".astrabridge").exists())
+
     def test_failed_job_status_is_exposed_and_result_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = AgenticUpdateService(workspace_root=Path(temp_dir), router_config=_ReadOnlyRouterConfig([]))
@@ -848,6 +889,90 @@ def _provider_fixture_payload(*, run_id: str) -> dict[str, Any]:
             }
         },
         "current_models": [],
+    }
+
+
+def _kimi_provider_fixture_payload(*, run_id: str) -> dict[str, Any]:
+    index_url = "https://platform.kimi.ai/docs/llms.txt"
+    models_url = "https://platform.kimi.ai/docs/models.md"
+    guide_url = "https://platform.kimi.ai/docs/guide/kimi-k3-quickstart.md"
+    reasoning_url = "https://platform.kimi.ai/docs/guide/use-reasoning-effort.md"
+    pricing_url = "https://platform.kimi.ai/docs/pricing/chat-k3.md"
+    return {
+        "run_id": run_id,
+        "run_contract": {
+            "scope": ["provider_metadata", "provider_adapter"],
+            "providers": ["kimi"],
+            "version_policy": "latest",
+            "allow_network": False,
+            "apply_mode": "proposal_only",
+        },
+        "provider_sources": [
+            {
+                "provider_id": "kimi",
+                "display_name": "Kimi",
+                "source_status": "official_docs",
+                "source_type": "documentation_index",
+                "trust_level": "official",
+                "channel": "stable_docs",
+                "parser_strategy": "llms_index",
+                "stale_after_days": 1,
+                "source_records": [
+                    {
+                        "source_id": "kimi-llms-index",
+                        "url": index_url,
+                        "source_type": "documentation_index",
+                        "trust_level": "official",
+                        "channel": "stable_docs",
+                        "parser_strategy": "llms_index",
+                        "stale_after_days": 1,
+                        "capability_categories": ["models_catalog", "context_window", "reasoning", "pricing"],
+                    }
+                ],
+            }
+        ],
+        "fixture_sources": {
+            "kimi-llms-index": {
+                "content_type": "text/plain; charset=utf-8",
+                "body": "\n".join(
+                    [
+                        "# Kimi API Platform",
+                        f"- [Model List]({models_url})",
+                        f"- [Kimi K3]({guide_url})",
+                        f"- [Reasoning Effort]({reasoning_url})",
+                        f"- [Kimi K3 Pricing]({pricing_url})",
+                    ]
+                ),
+            },
+            models_url: {
+                "content_type": "text/markdown; charset=utf-8",
+                "body": "| Model Name | Description |\n| --- | --- |\n| `kimi-k3` | Native visual understanding and a 1M-token context window. |",
+            },
+            guide_url: {
+                "content_type": "text/markdown; charset=utf-8",
+                "body": "# Kimi K3\nKimi K3 supports text, image, and video input plus ToolCalls.\nmodel=\"kimi-k3\"",
+            },
+            reasoning_url: {
+                "content_type": "text/markdown; charset=utf-8",
+                "body": "# Reasoning Effort\n`kimi-k3` uses top-level `reasoning_effort`; supports \"low\", \"high\", and \"max\", with \"max\" as the default.",
+            },
+            pricing_url: {
+                "content_type": "text/markdown; charset=utf-8",
+                "body": "| Model | Unit | Cache Hit | Cache Miss | Output | Context |\n| --- | --- | --- | --- | --- | --- |\n| `kimi-k3` | 1M tokens | $0.30 | $3.00 | $15.00 | 1,048,576 tokens |",
+            },
+        },
+        "current_models": [
+            {
+                "id": "kimi/kimi-k2.7-code",
+                "provider": "kimi",
+                "native_model": "kimi-k2.7-code",
+                "display_name": "Kimi K2.7 Code",
+                "advertised_context_window": 262144,
+                "input_modalities": ["text"],
+                "supported_reasoning_levels": ["low", "high", "xhigh"],
+                "default_reasoning_level": "high",
+            }
+        ],
     }
 
 

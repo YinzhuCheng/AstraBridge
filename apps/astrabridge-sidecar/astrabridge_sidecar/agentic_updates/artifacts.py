@@ -24,6 +24,7 @@ RUN_SUBDIRECTORIES = (
     "proposals",
     "diffs",
     "validation",
+    "route-promotion",
     "screenshots",
     "apply",
     "rollback",
@@ -41,6 +42,10 @@ RUN_FILE_RELATIVE_PATHS = {
     "proposal_diff": "diffs/proposal-diff.json",
     "validation_report": "validation/validation-report.json",
     "validation_markdown": "validation/validation-report.md",
+    "route_promotion_proposal": "route-promotion/route-promotion-proposal.json",
+    "route_promotion_validation": "route-promotion/route-promotion-validation.json",
+    "route_promotion_apply_ledger": "route-promotion/route-promotion-apply-ledger.json",
+    "route_promotion_rollback": "route-promotion/route-promotion-rollback.json",
     "screenshot_index": "screenshots/screenshot-index.json",
     "apply_journal": "apply/apply-journal.json",
     "apply_manifest": "apply/apply-manifest.json",
@@ -50,6 +55,7 @@ RUN_FILE_RELATIVE_PATHS = {
 }
 ROLLBACK_TARGET_KINDS = (
     "router_config",
+    "execution_routes",
     "metadata_sources",
     "generated_catalog_locks",
     "changed_source_files",

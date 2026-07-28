@@ -8,6 +8,11 @@ from ..common import now_iso, read_json, write_json
 from ..model_catalog import effective_model_records
 from .artifacts import ensure_agentic_update_run_layout, validate_agentic_update_artifact_path
 from .contracts import assert_secret_free_agentic_update_payload, normalize_update_scope_contract, validate_update_proposal
+from .route_promotion import (
+    deprovision_route_record,
+    documented_route_record_for_candidate,
+    normalize_route_promotion_section,
+)
 
 
 AGENTIC_UPDATE_DIFF_SCHEMA_VERSION = "astrabridge-agentic-update-diff-v1"
@@ -33,6 +38,7 @@ def build_agentic_update_diff(
     kernel_candidate_output: dict[str, Any] | None = None,
     current_models: list[dict[str, Any]] | None = None,
     complete_provider_snapshot: bool = False,
+    route_promotion_events: list[dict[str, Any]] | None = None,
     update_proposal: bool = True,
 ) -> dict[str, Any]:
     contract = normalize_update_scope_contract(run_contract)
@@ -61,11 +67,21 @@ def build_agentic_update_diff(
     for candidate in kernel_candidates:
         changes.append(_kernel_candidate_change(candidate))
 
+    route_promotion = _build_route_promotion_section(
+        provider_candidates=provider_candidates,
+        current=current,
+        explicit_events=route_promotion_events,
+    )
+    for record in list(route_promotion.get("records") or []):
+        if str(record.get("action") or "") != "document":
+            changes.append(_route_lifecycle_change(record, current.get(str(record.get("model_id") or ""))))
+
     merged_changes = _merge_change_sources(changes)
     risk_class = _highest_risk([change["risk_class"] for change in merged_changes]) or "docs_only"
     generated_at = now_iso()
     diff_path = Path(layout["files"]["proposal_diff"])
     markdown_path = validate_agentic_update_artifact_path(workspace_root, run_id, AGENTIC_UPDATE_PROPOSAL_MARKDOWN_FILENAME)
+    route_promotion_path = Path(layout["files"]["route_promotion_proposal"])
     diff = {
         "schema_version": AGENTIC_UPDATE_DIFF_SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -78,19 +94,23 @@ def build_agentic_update_diff(
             "risk_counts": _risk_counts(merged_changes),
             "provider_model_candidate_count": len(provider_candidates),
             "kernel_candidate_count": len(kernel_candidates),
+            "route_promotion_record_count": len(list(route_promotion.get("records") or [])),
             "complete_provider_snapshot": bool(complete_provider_snapshot),
         },
         "changes": merged_changes,
         "artifact_paths": {
             "proposal_diff": str(diff_path),
             "proposal_markdown": str(markdown_path),
+            "route_promotion_proposal": str(route_promotion_path),
         },
+        "route_promotion": route_promotion,
         "warnings": warnings,
     }
     markdown = render_agentic_update_proposal_markdown(diff)
     assert_secret_free_agentic_update_payload(diff, label="agentic_update_diff")
     assert_secret_free_agentic_update_payload(markdown, label="agentic_update_diff_markdown")
     write_json(diff_path, diff)
+    write_json(route_promotion_path, route_promotion)
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
     markdown_path.write_text(markdown, encoding="utf-8")
     if update_proposal:
@@ -128,6 +148,32 @@ def render_agentic_update_proposal_markdown(diff: dict[str, Any]) -> str:
             )
             + " |"
         )
+    route_promotion = dict(diff.get("route_promotion") or {})
+    route_records = [item for item in list(route_promotion.get("records") or []) if isinstance(item, dict)]
+    if route_records:
+        lines.extend(
+            [
+                "",
+                "## Execution-Route Lifecycle",
+                "",
+                "| Action | Model | From | To | Required gates |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for record in route_records:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _md_cell(str(record.get("action") or "")),
+                        _md_cell(str(record.get("model_id") or "")),
+                        _md_cell(str(record.get("previous_state") or "documented")),
+                        _md_cell(str(record.get("target_state") or "documented")),
+                        _md_cell(", ".join(str(item) for item in list(record.get("required_gates") or [])) or "none"),
+                    ]
+                )
+                + " |"
+            )
     if diff.get("warnings"):
         lines.extend(["", "## Warnings", ""])
         for warning in diff["warnings"]:
@@ -184,6 +230,9 @@ def _normalize_provider_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
             "input_modalities": _string_list(metadata.get("input_modalities")) or ["text"],
             "supported_reasoning_levels": _string_list(metadata.get("supported_reasoning_levels")),
             "default_reasoning_level": _optional_string(metadata.get("default_reasoning_level")),
+            "native_supported_reasoning_levels": _string_list(metadata.get("native_supported_reasoning_levels")),
+            "native_default_reasoning_level": _optional_string(metadata.get("native_default_reasoning_level")),
+            "reasoning_effort_mapping": dict(metadata.get("reasoning_effort_mapping") or {}),
             "pricing": _normalize_pricing(metadata.get("pricing")),
             "deprecated": bool(metadata.get("deprecated", False)),
             "deprecated_after": _optional_string(metadata.get("deprecated_after")),
@@ -191,6 +240,7 @@ def _normalize_provider_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
             "recommended": bool(metadata.get("recommended", False)),
             "confidence": _optional_string(metadata.get("confidence")) or "low",
         },
+        "adapter_requirements": dict(candidate.get("adapter_requirements") or {}),
         "capability_claims": dict(candidate.get("capability_claims") or {}),
         "source_refs": list(candidate.get("source_refs") or []),
         "warnings": list(candidate.get("warnings") or []),
@@ -213,12 +263,21 @@ def _normalize_current_model(model: dict[str, Any]) -> dict[str, Any]:
             "input_modalities": _string_list(model.get("input_modalities") or model.get("modalities")) or ["text"],
             "supported_reasoning_levels": _string_list(model.get("supported_reasoning_levels") or model.get("reasoning_modes")),
             "default_reasoning_level": _optional_string(model.get("default_reasoning_level")),
+            "native_supported_reasoning_levels": _string_list(model.get("native_supported_reasoning_levels")),
+            "native_default_reasoning_level": _optional_string(model.get("native_default_reasoning_level")),
+            "reasoning_effort_mapping": dict(model.get("reasoning_effort_mapping") or {}),
             "pricing": _normalize_pricing(model),
             "deprecated": bool(model.get("deprecated", False)),
             "deprecated_after": _optional_string(model.get("deprecated_after")),
             "default_for_provider": bool(model.get("default_for_provider", False)),
             "recommended": bool(model.get("recommended", False)),
         },
+        "adapter_requirements": {
+            "reasoning_parameter": _optional_string(model.get("reasoning_parameter")),
+            "codex_to_provider_reasoning_effort": dict(model.get("reasoning_effort_mapping") or {}),
+        },
+        "execution_route_evidence": deepcopy(model.get("execution_route_evidence") or {}),
+        "execution_route": deepcopy(model.get("execution_route") or {}),
         "capability_claims": _current_capability_claims(model),
         "current_state_refs": _current_state_refs(model, model_id),
     }
@@ -239,15 +298,21 @@ def _diff_provider_candidate(candidate: dict[str, Any], current: dict[str, Any] 
         ]
     if current is None:
         reasons = _new_model_risk_reasons(candidate)
+        documented_metadata_risk = _risk_for_reasons(reasons, base="metadata_only")
         return [
             _change(
-                _risk_for_reasons(reasons, base="metadata_only"),
+                documented_metadata_risk,
                 "added_model",
                 candidate["model_id"],
                 candidate,
                 current,
                 reasons=reasons,
-                details={"candidate_metadata": deepcopy(candidate["metadata"])},
+                details={
+                    "candidate_metadata": deepcopy(candidate["metadata"]),
+                    "adapter_requirements": deepcopy(candidate.get("adapter_requirements") or {}),
+                    "documented_metadata_apply_eligible": True,
+                    "documented_metadata_apply_risk": documented_metadata_risk,
+                },
             )
         ]
 
@@ -326,7 +391,7 @@ def _diff_provider_candidate(candidate: dict[str, Any], current: dict[str, Any] 
                 )
             )
 
-    adapter_reasons = _adapter_review_reasons(candidate)
+    adapter_reasons = _adapter_review_reasons(candidate, current)
     if adapter_reasons:
         changes.append(
             _change(
@@ -340,6 +405,119 @@ def _diff_provider_candidate(candidate: dict[str, Any], current: dict[str, Any] 
             )
         )
     return changes
+
+
+def _build_route_promotion_section(
+    *,
+    provider_candidates: list[dict[str, Any]],
+    current: dict[str, dict[str, Any]],
+    explicit_events: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    raw_records = [dict(item) for item in list(explicit_events or []) if isinstance(item, dict)]
+    explicit_section = normalize_route_promotion_section({"records": raw_records})
+    records = [dict(item) for item in list(explicit_section.get("records") or [])]
+    explicit_models = {str(item.get("model_id") or "") for item in records}
+
+    for candidate in provider_candidates:
+        model_id = str(candidate.get("model_id") or "")
+        model = current.get(model_id)
+        if model is None and model_id not in explicit_models:
+            records.append(documented_route_record_for_candidate(candidate))
+            continue
+        if model is None or model_id in explicit_models:
+            continue
+        if _adapter_review_reasons(candidate, model):
+            record = deprovision_route_record(
+                model,
+                action="downgrade",
+                reason="adapter_contract_changed_requires_route_depromotion",
+            )
+            if record:
+                records.append(record)
+
+    for model_id, model in current.items():
+        if model_id in explicit_models:
+            continue
+        evidence = dict(model.get("execution_route_evidence") or {})
+        if not evidence:
+            continue
+        expired = deprovision_route_record(model, action="expire", reason="route_evidence_expired")
+        if expired:
+            records.append(expired)
+            continue
+        route = dict(model.get("execution_route") or {})
+        previous_subject = dict(evidence.get("subject") or {})
+        endpoint_fingerprint = str(dict(route.get("endpoint") or {}).get("fingerprint") or "")
+        adapter_signature = str(dict(route.get("adapter") or {}).get("signature") or "")
+        if endpoint_fingerprint and endpoint_fingerprint != str(previous_subject.get("endpoint_fingerprint") or ""):
+            record = deprovision_route_record(
+                model,
+                action="downgrade",
+                reason="endpoint_fingerprint_changed_requires_route_depromotion",
+            )
+        elif adapter_signature and adapter_signature != str(previous_subject.get("adapter_signature") or ""):
+            record = deprovision_route_record(
+                model,
+                action="downgrade",
+                reason="adapter_signature_changed_requires_route_depromotion",
+            )
+        else:
+            record = None
+        if record:
+            records.append(record)
+
+    unique: dict[str, dict[str, Any]] = {}
+    for record in records:
+        unique[str(record.get("record_id") or "")] = record
+    return normalize_route_promotion_section({"records": list(unique.values())})
+
+
+def _route_lifecycle_change(record: dict[str, Any], current: dict[str, Any] | None) -> dict[str, Any]:
+    action = str(record.get("action") or "")
+    target_state = str(record.get("target_state") or "documented")
+    if action == "promote":
+        change_type = "route_promoted"
+        risk = "requires_adapter_review" if target_state in {"tool_contract_passed", "coding_route_verified", "default_route_eligible"} else (
+            "requires_provider_smoke" if target_state == "provider_smoke_passed" else "metadata_only"
+        )
+    elif action == "expire":
+        change_type = "route_evidence_expired"
+        risk = "metadata_only"
+    elif action == "rollback":
+        change_type = "route_rollback_requested"
+        risk = "metadata_only"
+    else:
+        change_type = "route_downgraded"
+        risk = "metadata_only"
+    provenance = dict(record.get("source_provenance") or {})
+    source_refs = [
+        {
+            "source_id": provenance.get("record_id"),
+            "source_url": ref,
+        }
+        for ref in list(record.get("evidence_refs") or [])
+    ]
+    return {
+        "change_id": f"{change_type}-{_slug(str(record.get('record_id') or record.get('model_id') or 'route'))}",
+        "change_type": change_type,
+        "risk_class": risk,
+        "target": record.get("model_id"),
+        "model_id": record.get("model_id"),
+        "provider_id": record.get("provider_id"),
+        "reasons": [record.get("reason")],
+        "details": {
+            "route_promotion_record_id": record.get("record_id"),
+            "action": action,
+            "previous_state": record.get("previous_state"),
+            "target_state": target_state,
+            "route_subject": deepcopy(record.get("route_subject") or {}),
+        },
+        "source_refs": source_refs,
+        "current_state_refs": deepcopy((current or {}).get("current_state_refs") or []),
+        "validation_requirements": _dedupe(
+            [*_validation_requirements(risk), *list(record.get("required_gates") or [])]
+        ),
+    }
 
 
 def _removed_model_change(model: dict[str, Any]) -> dict[str, Any]:
@@ -432,7 +610,7 @@ def _new_model_risk_reasons(candidate: dict[str, Any]) -> list[str]:
     for capability, claim in sorted(candidate.get("capability_claims", {}).items()):
         if bool(dict(claim or {}).get("declared", False)):
             reasons.append(f"unverified_{capability}_claim")
-    reasons.extend(_adapter_review_reasons(candidate))
+    reasons.extend(_adapter_review_reasons(candidate, None))
     return _dedupe(reasons)
 
 
@@ -489,16 +667,28 @@ def _risk_for_reasons(reasons: list[str], *, base: str) -> str:
     risk = base
     if any(reason.startswith("unknown_field:") or reason == "missing_provider_id" for reason in reasons):
         risk = _highest_risk([risk, "requires_adapter_review"]) or risk
+    if any("transport_mapping" in reason or "transport_review" in reason for reason in reasons):
+        risk = _highest_risk([risk, "requires_adapter_review"]) or risk
     if any("modality_requires_provider_smoke" in reason or "claim" in reason or "long_context" in reason or "reasoning_modes" in reason for reason in reasons):
         risk = _highest_risk([risk, "requires_provider_smoke"]) or risk
     return risk
 
 
-def _adapter_review_reasons(candidate: dict[str, Any]) -> list[str]:
+def _adapter_review_reasons(candidate: dict[str, Any], current: dict[str, Any] | None) -> list[str]:
     warnings = [str(item) for item in candidate.get("warnings") or []]
     reasons = [item for item in warnings if item.startswith("unknown_field:")]
     if candidate.get("provider_id") in {"", "unknown"}:
         reasons.append("missing_provider_id")
+    requested_adapter = dict(candidate.get("adapter_requirements") or {})
+    current_adapter = dict((current or {}).get("adapter_requirements") or {})
+    reasoning_parameter = _optional_string(requested_adapter.get("reasoning_parameter"))
+    current_reasoning_parameter = _optional_string(current_adapter.get("reasoning_parameter"))
+    if reasoning_parameter and reasoning_parameter != current_reasoning_parameter:
+        reasons.append("provider_reasoning_parameter_requires_transport_mapping")
+    requested_mapping = dict(requested_adapter.get("codex_to_provider_reasoning_effort") or {})
+    current_mapping = dict(current_adapter.get("codex_to_provider_reasoning_effort") or {})
+    if requested_mapping and requested_mapping != current_mapping:
+        reasons.append("codex_to_provider_reasoning_effort_mapping_requires_transport_review")
     return _dedupe(reasons)
 
 
@@ -559,7 +749,9 @@ def _update_existing_proposal(proposal_path: str, diff: dict[str, Any]) -> None:
         "changes": deepcopy(diff["changes"]),
         "warnings": deepcopy(diff["warnings"]),
         "artifact_paths": deepcopy(diff["artifact_paths"]),
+        "route_promotion": deepcopy(diff.get("route_promotion") or {}),
     }
+    proposal["route_promotion"] = deepcopy(diff.get("route_promotion") or {})
     proposal["validation_result"]["status"] = "not_run"
     proposal["validation_result"]["warnings"] = _dedupe(
         list(proposal["validation_result"].get("warnings") or []) + ["validation_required_after_diff"]
@@ -592,6 +784,11 @@ def _normalize_pricing(value: Any) -> dict[str, Any]:
         "input_per_mtok": _float_or_none(raw.get("input_per_mtok") if raw.get("input_per_mtok") is not None else raw.get("pricing_input_per_mtok")),
         "output_per_mtok": _float_or_none(
             raw.get("output_per_mtok") if raw.get("output_per_mtok") is not None else raw.get("pricing_output_per_mtok")
+        ),
+        "cached_input_per_mtok": _float_or_none(
+            raw.get("cached_input_per_mtok")
+            if raw.get("cached_input_per_mtok") is not None
+            else raw.get("pricing_cached_input_per_mtok")
         ),
         "currency": _optional_string(raw.get("currency") or raw.get("pricing_currency")),
     }

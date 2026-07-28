@@ -71,7 +71,13 @@ from astrabridge_sidecar.model_catalog import (
 )
 from astrabridge_sidecar.official_login_guard import OFFICIAL_CODEX_DISABLED_ERROR, disabled_status
 from astrabridge_sidecar.profile_service import ProfileService
-from astrabridge_sidecar.providers import classify_runtime_failure, get_provider_profile, summarize_response_diagnostics
+from astrabridge_sidecar.providers import (
+    EXECUTION_ROUTE_EVIDENCE_SCHEMA_VERSION,
+    classify_runtime_failure,
+    get_provider_profile,
+    resolve_execution_route,
+    summarize_response_diagnostics,
+)
 from astrabridge_sidecar.providers.history_projector import (
     HistoryProjector,
     NeutralMessage,
@@ -162,14 +168,6 @@ class DummyRouter:
             "response_excerpt": "ok",
         }
 
-
-class _UpdateRouteProjects:
-    def __init__(self, current_project: dict[str, object] | None = None) -> None:
-        self.current_project = current_project or {
-            "project_id": "project-1",
-            "ui_preferences": {"update_channel": "beta"},
-        }
-
     def test_model_case(self, *, provider_id: str, model_id: str, effort: str | None = None, temperature: float | None = None, stream: bool = False) -> dict[str, object]:
         self.model_tests.append({"provider_id": provider_id, "model_id": model_id, "effort": effort, "temperature": temperature, "stream": stream})
         return {
@@ -183,6 +181,14 @@ class _UpdateRouteProjects:
             "warnings": [],
             "preview": {"model": model_id},
             "response_excerpt": "ok",
+        }
+
+
+class _UpdateRouteProjects:
+    def __init__(self, current_project: dict[str, object] | None = None) -> None:
+        self.current_project = current_project or {
+            "project_id": "project-1",
+            "ui_preferences": {"update_channel": "beta"},
         }
 
 
@@ -231,6 +237,60 @@ def _seed_verified_agent_model(router_config: RouterConfigService, provider_id: 
             "command_execution_status": "verified",
         }
     )
+
+
+def _profile_with_coding_route_evidence(profile: dict[str, object]) -> dict[str, object]:
+    """Build a secret-free exact proof for local protocol-adapter fixtures."""
+
+    provider_id = str(profile.get("provider_id") or "").strip()
+    native_model = str(profile.get("model") or "").strip()
+    verified_profile = {
+        **profile,
+        "authority_tier": "A",
+        "tool_mode": "native",
+        "apply_patch_tool_type": "json",
+        "supports_mcp_tools": True,
+        "mcp_tool_call_policy": "verified",
+        "mcp_smoke_status": "verified",
+        "command_execution_status": "verified",
+    }
+    model = {
+        "id": f"{provider_id}/{native_model}",
+        "provider": provider_id,
+        "native_model": native_model,
+        "authority_tier": "A",
+        "tool_mode": "native",
+        "apply_patch_tool_type": "json",
+        "supports_mcp_tools": True,
+        "mcp_tool_call_policy": "verified",
+        "mcp_smoke_status": "verified",
+        "command_execution_status": "verified",
+    }
+    route = resolve_execution_route(model, provider=verified_profile)
+    subject = dict(route["subject"])
+    endpoint = dict(route["endpoint"])
+    adapter = dict(route["adapter"])
+    return {
+        **verified_profile,
+        "execution_route_evidence": {
+            "schema_version": EXECUTION_ROUTE_EVIDENCE_SCHEMA_VERSION,
+            "state": "coding_route_verified",
+            "subject": {
+                **subject,
+                "endpoint_fingerprint": endpoint["fingerprint"],
+                "adapter_signature": adapter["signature"],
+            },
+            "source_provenance": {
+                "kind": "deterministic_adapter_fixture",
+                "issuer": "astrabridge-tests",
+                "record_id": "sidecar-provider-transport-conformance",
+            },
+            "evidence_refs": ["tests/fixtures/provider_semantic_conformance_v1.json"],
+            "validation_scope": ["coding_route", "tools", "streaming"],
+            "verified_at": "2026-07-27T00:00:00+00:00",
+            "expires_at": "2030-01-01T00:00:00+00:00",
+        },
+    }
 
 
 class _LiveProcessStub:
@@ -9188,7 +9248,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
             report = pack["budget_report"]
 
             self.assertEqual(section_ids, ["intro", "project", "file_map", "task", "selected_thread", "recent_threads", "rules"])
-            self.assertEqual(report["schema_version"], "astrabridge-context-budget-v1")
+            self.assertEqual(report["schema_version"], "astrabridge-context-budget-v2")
             self.assertEqual(report["provider_id"], "openai")
             self.assertEqual(report["model_id"], "gpt-5.5")
             self.assertGreater(report["usable_prompt_budget_tokens"], 0)
@@ -9258,7 +9318,12 @@ class AstraBridgeServiceTests(unittest.TestCase):
 
             self.assertEqual(openai_report["model_id"], "gpt-5.5")
             self.assertEqual(deepseek_report["model_id"], "deepseek-v4-pro")
-            self.assertGreater(openai_report["usable_prompt_budget_tokens"], deepseek_report["usable_prompt_budget_tokens"])
+            self.assertGreater(
+                openai_report["calculated_usable_coding_context_tokens"],
+                deepseek_report["calculated_usable_coding_context_tokens"],
+            )
+            self.assertIsNone(deepseek_report["usable_prompt_budget_tokens"])
+            self.assertEqual(deepseek_report["preflight_admission"], "blocked")
             self.assertTrue(deepseek_report["compact_recommended"])
 
     def test_task_provider_handoff_carries_context_budget_report_into_transition_plan(self) -> None:
@@ -10930,6 +10995,93 @@ class AstraBridgeServiceTests(unittest.TestCase):
                 os.environ.pop("DEEPSEEK_API_KEY", None)
             else:
                 os.environ["DEEPSEEK_API_KEY"] = original
+
+    def test_llm_api_manager_key_test_persists_sanitized_recoverable_health_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService(root / "profiles.json")
+            config = RouterConfigService(profiles, root / "router.json")
+            router = DummyRouter()
+            original_test_provider = router.test_provider
+
+            def test_provider_with_reasoning(provider_id: str, model_id: str | None = None, *, stream: bool = False) -> dict[str, object]:
+                result = original_test_provider(provider_id, model_id, stream=stream)
+                result["response_diagnostics"] = {
+                    "reasoning_summary": "synthetic private reasoning text",
+                    "reasoning_state": {"visible_summary": "synthetic private reasoning text", "replayable": False},
+                    "usage": {"reasoning_tokens": 4},
+                }
+                return result
+
+            router.test_provider = test_provider_with_reasoning  # type: ignore[method-assign]
+            manager = LlmApiManagerService(config, router, root / "manager")
+            manager.create_user({"username": "astra", "password": "vault-password-123"})
+            manager.save_key(
+                {
+                    "provider_id": "kimi",
+                    "label": "Kimi",
+                    "env_key": "KIMI_API_KEY",
+                    "secret": "unit_secret_kimi_managed_health",
+                }
+            )
+
+            result = manager.test_key({"provider_id": "kimi", "model_id": "kimi-k3", "stream": False})
+            health = manager.health_results()
+            persisted = health["results"][-1]
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(persisted["kind"], "managed_key_test")
+            self.assertEqual(persisted["provider"], "kimi")
+            self.assertEqual(persisted["model"], "kimi-k3")
+            self.assertEqual(persisted["credential_platform_id"], "platform.kimi.com")
+            self.assertEqual(persisted["provider_base_url"], "https://api.moonshot.cn/v1")
+            self.assertEqual(persisted["connectivity"], "pass")
+            self.assertEqual(persisted["request_preview"], {"model": "kimi-k3"})
+            self.assertEqual(persisted["response_diagnostics"]["reasoning_summary"], "[redacted]")
+            self.assertEqual(persisted["response_diagnostics"]["reasoning_state"]["visible_summary"], "[redacted]")
+            self.assertEqual(persisted["response_diagnostics"]["usage"]["reasoning_tokens"], 4)
+            self.assertNotIn("synthetic private reasoning text", (root / "manager" / "health_results.json").read_text(encoding="utf-8"))
+            self.assertNotIn("unit_secret_kimi_managed_health", (root / "manager" / "health_results.json").read_text(encoding="utf-8"))
+
+    def test_llm_api_manager_binds_kimi_key_platform_without_exposing_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService(root / "profiles.json")
+            config = RouterConfigService(profiles, root / "router.json")
+            kimi = next(item for item in config.providers() if item["id"] == "kimi")
+            config.upsert_provider(
+                {
+                    **kimi,
+                    "base_url": "https://api.moonshot.ai/v1",
+                    "platform_id": "platform.kimi.ai",
+                }
+            )
+            manager = LlmApiManagerService(config, DummyRouter(), root / "manager")
+            manager.create_user({"username": "astra", "password": "vault-password-123"})
+            saved = manager.save_key(
+                {
+                    "provider_id": "kimi",
+                    "label": "Kimi",
+                    "env_key": "KIMI_API_KEY",
+                    "platform_id": "platform.kimi.ai",
+                    "secret": "unit_secret_kimi_platform_binding",
+                }
+            )
+
+            self.assertEqual(saved["key"]["platform_id"], "platform.kimi.ai")
+            self.assertEqual(saved["platform"]["base_url"], "https://api.moonshot.ai/v1")
+            bound = manager.bind_key_platform({"provider_id": "kimi", "platform_id": "platform.kimi.com"})
+            provider = next(item for item in config.providers() if item["id"] == "kimi")
+
+            self.assertEqual(bound["key"]["platform_id"], "platform.kimi.com")
+            self.assertEqual(bound["platform"]["base_url"], "https://api.moonshot.cn/v1")
+            self.assertEqual(provider["platform_id"], "platform.kimi.com")
+            self.assertEqual(provider["base_url"], "https://api.moonshot.cn/v1")
+            self.assertNotIn("unit_secret_kimi_platform_binding", json.dumps(bound))
+            self.assertNotIn(
+                "unit_secret_kimi_platform_binding",
+                (root / "manager" / "users" / "astra" / "vault.abvault").read_text(encoding="utf-8"),
+            )
 
     def test_llm_api_manager_user_profile_is_public_and_secret_guarded(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -12930,7 +13082,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as temp:
                 profiles = ProfileService(Path(temp) / "profiles.json")
-                profiles.upsert_profile(
+                saved_profile = profiles.upsert_profile(
                     {
                         "profile_id": "deepseek-router",
                         "label": "DeepSeek Router",
@@ -12946,6 +13098,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "proxy_url": "",
                     }
                 )
+                profiles.upsert_profile(_profile_with_coding_route_evidence(saved_profile))
                 os.environ["TEST_DEEPSEEK_PROVIDER_KEY"] = "unit_secret_deepseek_test"
                 router = RouterService(profiles, port=0)
                 router.start()
@@ -14254,7 +14407,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as temp:
                 profiles = ProfileService(Path(temp) / "profiles.json")
-                profiles.upsert_profile(
+                saved_profile = profiles.upsert_profile(
                     {
                         "profile_id": "deepseek-stream",
                         "label": "DeepSeek Stream",
@@ -14270,6 +14423,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "proxy_url": "",
                     }
                 )
+                profiles.upsert_profile(_profile_with_coding_route_evidence(saved_profile))
                 os.environ["TEST_DEEPSEEK_STREAM_KEY"] = "unit_secret_deepseek_test"
                 router = RouterService(profiles, port=0)
                 router.start()
@@ -14423,7 +14577,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as temp:
                 profiles = ProfileService(Path(temp) / "profiles.json")
-                profiles.upsert_profile(
+                saved_profile = profiles.upsert_profile(
                     {
                         "profile_id": "kimi-router",
                         "label": "Kimi Router",
@@ -14439,6 +14593,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         "proxy_url": "",
                     }
                 )
+                profiles.upsert_profile(_profile_with_coding_route_evidence(saved_profile))
                 os.environ["TEST_KIMI_PROVIDER_KEY"] = "unit_secret_kimi_test"
                 router = RouterService(profiles, port=0)
                 router.start()
@@ -14726,10 +14881,34 @@ class AstraBridgeServiceTests(unittest.TestCase):
             capabilities=SimpleNamespace(supports_reasoning_replay=True, supports_tool_result_images=False),
             reasoning_policy=SimpleNamespace(allow_cross_provider_replay=False),
         )
+        provenance = {
+            "schema_version": "astrabridge-reasoning-artifact-provenance-v1",
+            "issuer": {
+                "provider_id": "qwen",
+                "model_id": "qwen3.7-plus",
+                "endpoint_fingerprint": "a" * 64,
+                "adapter_signature": "b" * 64,
+            },
+            "lineage": {"thread_id": "thread-qwen", "turn_id": "turn-1", "item_id": "item-1"},
+            "replay": {
+                "eligible": True,
+                "scope": "same_issuer_endpoint_model",
+                "retention": "ephemeral",
+                "issued_at": "2026-07-27T00:00:00+00:00",
+                "expires_at": "2026-07-28T00:00:00+00:00",
+            },
+        }
         with patch("astrabridge_sidecar.providers.history_projector.get_provider_profile", return_value=replayable_profile):
             projected = HistoryProjector().project(
                 source_provider="qwen",
                 target_provider="qwen",
+                source_model_id="qwen3.7-plus",
+                target_model_id="qwen3.7-plus",
+                source_endpoint_fingerprint="a" * 64,
+                target_endpoint_fingerprint="a" * 64,
+                source_adapter_signature="b" * 64,
+                target_adapter_signature="b" * 64,
+                now=datetime.fromisoformat("2026-07-27T12:00:00+00:00"),
                 neutral_messages=[NeutralMessage(role="assistant", text="Continue the same task.")],
                 artifacts=[
                     ReasoningArtifact(
@@ -14738,6 +14917,7 @@ class AstraBridgeServiceTests(unittest.TestCase):
                         kind="reasoning_state",
                         replayable=True,
                         payload={"visible_summary": "Preserve the same reasoning lane.", "thought_signature": "private"},
+                        provenance=provenance,
                     )
                 ],
             )
@@ -14745,7 +14925,8 @@ class AstraBridgeServiceTests(unittest.TestCase):
         self.assertEqual(projected.dropped_artifacts, 0)
         self.assertEqual(len(projected.replayable_artifacts), 1)
         self.assertEqual(projected.replayable_artifact_count, 1)
-        self.assertNotIn("thought_signature", projected.replayable_artifacts[0]["payload"])
+        self.assertEqual(projected.replayable_artifacts[0]["visible_summary"], "reasoning_state: Preserve the same reasoning lane.")
+        self.assertNotIn("thought_signature", json.dumps(projected.replayable_artifacts[0], ensure_ascii=False))
         self.assertIn("Assistant: Continue the same task.", projected.projection_preview or "")
         self.assertTrue(any("provider-private fields" in warning for warning in projected.warnings))
 
@@ -14754,10 +14935,34 @@ class AstraBridgeServiceTests(unittest.TestCase):
             capabilities=SimpleNamespace(supports_reasoning_replay=True, supports_tool_result_images=False),
             reasoning_policy=SimpleNamespace(allow_cross_provider_replay=False),
         )
+        provenance = {
+            "schema_version": "astrabridge-reasoning-artifact-provenance-v1",
+            "issuer": {
+                "provider_id": "qwen",
+                "model_id": "qwen3.7-plus",
+                "endpoint_fingerprint": "a" * 64,
+                "adapter_signature": "b" * 64,
+            },
+            "lineage": {"thread_id": "thread-qwen", "turn_id": "turn-1", "item_id": "item-1"},
+            "replay": {
+                "eligible": True,
+                "scope": "same_issuer_endpoint_model",
+                "retention": "ephemeral",
+                "issued_at": "2026-07-27T00:00:00+00:00",
+                "expires_at": "2026-07-28T00:00:00+00:00",
+            },
+        }
         with patch("astrabridge_sidecar.providers.history_projector.get_provider_profile", return_value=replayable_profile):
             projected = HistoryProjector().project(
                 source_provider="qwen",
                 target_provider="qwen",
+                source_model_id="qwen3.7-plus",
+                target_model_id="qwen3.7-plus",
+                source_endpoint_fingerprint="a" * 64,
+                target_endpoint_fingerprint="a" * 64,
+                source_adapter_signature="b" * 64,
+                target_adapter_signature="b" * 64,
+                now=datetime.fromisoformat("2026-07-27T12:00:00+00:00"),
                 neutral_messages=[NeutralMessage(role="assistant", text="Continue the same task.")],
                 artifacts=[
                     ReasoningArtifact(
@@ -14772,12 +14977,14 @@ class AstraBridgeServiceTests(unittest.TestCase):
                                 "segments": [{"response_id": "resp-1", "keep": "retained"}],
                             },
                         },
+                        provenance=provenance,
                     )
                 ],
             )
 
-        replayed = projected.replayable_artifacts[0]["payload"]
-        self.assertEqual(replayed["state"]["segments"], [{"keep": "retained"}])
+        replayed = projected.replayable_artifacts[0]
+        self.assertEqual(replayed["visible_summary"], "reasoning_state: Preserve the same reasoning lane.")
+        self.assertNotIn("state", replayed)
         self.assertNotIn("thought_signature", json.dumps(replayed, ensure_ascii=False))
         self.assertNotIn("response_id", json.dumps(replayed, ensure_ascii=False))
         self.assertTrue(any("provider-private fields" in warning for warning in projected.warnings))

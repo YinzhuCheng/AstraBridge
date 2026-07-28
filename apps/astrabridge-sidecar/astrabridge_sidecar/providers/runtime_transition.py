@@ -186,6 +186,16 @@ def summarize_transition(
     compact_before_send = bool((context_budget_report or {}).get("compact_recommended"))
     if compact_before_send:
         extra_warnings.append("Target model context budget is tight; compacted project context should be preferred before the next long turn.")
+    preflight_admission = str((context_budget_report or {}).get("preflight_admission") or "")
+    usable_context_status = str((context_budget_report or {}).get("usable_coding_context_status") or "")
+    if preflight_admission in {"blocked", "downgrade_required"}:
+        extra_warnings.append(
+            "Target route has no safe endpoint-aware context budget yet; AstraBridge must reduce context or choose another route before a long turn."
+        )
+    elif usable_context_status == "conservative_estimate":
+        extra_warnings.append(
+            "Target context capacity is an advertised/conservative estimate, not verified usable coding context."
+        )
     transition_plan = build_transition_plan(
         action="provider_handoff",
         reason="Continue the same visible task on a provider-isolated execution lane.",

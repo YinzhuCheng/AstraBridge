@@ -646,7 +646,7 @@ def _provider_update_smoke_example() -> dict[str, Any]:
             machine_result_schema_ref="schema.provider_gate_decision",
             artifact_specs=[{"kind": "approval_record", "id": "promotion_decision"}],
             spawn_mode="manual_only",
-            timeout_ms=0,
+            timeout_ms=86400000,
             risk_class="high",
             allow_provider_calls=False,
             allow_code_changes=False,

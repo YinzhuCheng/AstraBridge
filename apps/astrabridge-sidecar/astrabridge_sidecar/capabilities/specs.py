@@ -516,7 +516,7 @@ def default_adapter_contracts() -> list[AdapterContract]:
                 "adapter_id": "kimi.vision.chat.v1",
                 "capability_id": "vision.analyze",
                 "provider_id": "kimi",
-                "model_match": ["kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"],
+                "model_match": ["kimi-k3", "kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"],
                 "normalization_rules": ["image_url_or_data_uri", "chat_completion_text_extraction"],
                 "request_builder": "chat completions image_url content builder",
                 "response_parser": "chat completion visible text parser",

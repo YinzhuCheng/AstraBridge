@@ -53,6 +53,23 @@ class ProviderSourceRegistryTests(unittest.TestCase):
         openrouter = by_provider["openrouter"]
         self.assertEqual(openrouter["source_role"], "secondary_context")
         self.assertFalse(openrouter["promotion_policy"]["promotable"])
+        kimi = by_provider["kimi"]
+        self.assertEqual(kimi["source_records"][0]["source_id"], "kimi-llms-index")
+        self.assertEqual(kimi["source_records"][0]["parser_strategy"], "llms_index")
+        self.assertTrue(all(record["url"].endswith((".md", "llms.txt")) for record in kimi["source_records"]))
+        self.assertEqual(
+            {record["platform_id"] for record in kimi["source_records"]},
+            {"platform.kimi.com", "platform.kimi.ai"},
+        )
+        self.assertTrue(kimi["source_records"][0]["url"].startswith("https://platform.kimi.com/"))
+        glm = by_provider["glm"]
+        self.assertEqual(glm["source_records"][0]["source_id"], "glm-llms-index")
+        self.assertEqual(glm["source_records"][0]["parser_strategy"], "llms_index")
+        self.assertTrue(all(record["url"].endswith((".md", "llms.txt")) for record in glm["source_records"]))
+        deepseek = by_provider["deepseek"]
+        self.assertTrue(all(record["url"].endswith("/") for record in deepseek["source_records"]))
+        qwen = by_provider["qwen"]
+        self.assertTrue(all(record["parser_strategy"] != "llms_index" for record in qwen["source_records"]))
 
     def test_screenshot_and_untrusted_sources_are_non_promotable(self) -> None:
         yunwu = next(item for item in default_catalog_sources() if item["provider_id"] == "yunwu")
@@ -101,6 +118,11 @@ class ProviderSourceRegistryTests(unittest.TestCase):
             self.assertEqual(kimi["source_provenance"]["trust_level"], "official")
             self.assertTrue(kimi["source_provenance"]["promotable"])
             self.assertIn("tool_calling", kimi["source_provenance"]["capability_categories"])
+            kimi_k3 = next(item for item in catalog.models if item["id"] == "kimi/kimi-k3")
+            self.assertTrue(kimi_k3["recommended"])
+            self.assertTrue(kimi_k3["default_for_provider"])
+            self.assertEqual(kimi_k3["advertised_context_window"], 1_048_576)
+            self.assertEqual(kimi_k3["reasoning_effort_mapping"], {"low": "low", "high": "high", "xhigh": "max"})
 
             yunwu = next(item for item in catalog.models if item["id"] == "yunwu/gpt-5.5")
             self.assertEqual(yunwu["source_provenance"]["trust_level"], "screenshot_seed")

@@ -88,6 +88,39 @@ class AgenticUpdateDiscoveryTests(unittest.TestCase):
             self.assertNotIn("abcdefghijklmnopqrstuvwxyz", text)
             self.assertNotIn("Visible source text." * 30, text)
 
+    def test_html_parser_excerpt_retains_metadata_signals_away_from_model_ids(self) -> None:
+        body = (
+            "<html><body><code>deepseek-v4-pro</code>"
+            + (" unrelated-navigation" * 300)
+            + '<section><code>reasoning_effort</code> accepts "high" or "max".</section>'
+            + "</body></html>"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = run_agentic_update_discovery(
+                workspace_root=Path(temp_dir),
+                run_id="metadata-signal-excerpt",
+                run_contract={"scope": "provider_metadata", "providers": ["qwen"], "allow_network": False},
+                provider_sources=[
+                    _provider_source(
+                        [
+                            {
+                                "source_id": "deepseek-thinking",
+                                "url": "https://example.test/deepseek-thinking",
+                                "parser_strategy": "html_document",
+                            }
+                        ]
+                    )
+                ],
+                fixture_sources={"deepseek-thinking": {"body": body, "content_type": "text/html"}},
+                max_parser_excerpt_chars=2_000,
+            )
+
+            record = _read_jsonl(Path(result["artifact_paths"]["source_pack"]))[0]
+
+        self.assertIn("deepseek-v4-pro", record["parser_excerpt"])
+        self.assertIn("reasoning_effort", record["parser_excerpt"])
+        self.assertIn('"high" or "max"', record["parser_excerpt"])
+
     def test_timeout_and_failed_fetch_are_classified(self) -> None:
         def fake_fetch(url: str, timeout_sec: int, max_bytes: int) -> dict[str, object]:
             if "timeout" in url:
@@ -170,6 +203,82 @@ class AgenticUpdateDiscoveryTests(unittest.TestCase):
             self.assertIn("source_limit_reached", result["warnings"])
             self.assertEqual(result["summary"]["total_sources"], 2)
             self.assertEqual(len(_read_jsonl(Path(result["artifact_paths"]["source_pack"]))), 2)
+
+    def test_llms_index_expansion_is_same_origin_bounded_and_deterministic(self) -> None:
+        index_url = "https://official.example.test/docs/llms.txt"
+        index_body = """
+            # Provider Docs
+            - [Model List](https://official.example.test/docs/models.md)
+            - [Qwen4 Quickstart](https://official.example.test/docs/guide/qwen4-quickstart.md)
+            - [Qwen4 Pricing](https://official.example.test/docs/pricing/chat-qwen4.md)
+            - [Reasoning Effort](https://official.example.test/docs/guide/reasoning-effort.md)
+            - [External Qwen4 Quickstart](https://attacker.example.test/docs/guide/qwen4-quickstart.md)
+            - [Private Qwen4 Quickstart](http://127.0.0.1/docs/guide/qwen4-quickstart.md)
+            - [Account Help](https://official.example.test/docs/account.md)
+        """
+        fetch_calls: list[str] = []
+
+        def fake_fetch(url: str, timeout_sec: int, max_bytes: int) -> dict[str, object]:
+            fetch_calls.append(url)
+            body = index_body if url == index_url else f"# Fixture\nmodel: `{url.rsplit('/', 1)[-1]}`"
+            encoded = body.encode("utf-8")
+            return {
+                "url": url,
+                "status_code": 200,
+                "content_type": "text/plain; charset=utf-8" if url == index_url else "text/markdown; charset=utf-8",
+                "content_length": len(encoded),
+                "body": encoded[:max_bytes],
+                "body_truncated": False,
+                "started_at": "2026-07-26T00:00:00+00:00",
+                "finished_at": "2026-07-26T00:00:01+00:00",
+                "duration_ms": 1,
+            }
+
+        source = _provider_source(
+            [
+                {
+                    "source_id": "qwen-llms-index",
+                    "url": index_url,
+                    "platform_id": "platform.example.test",
+                    "source_type": "documentation_index",
+                    "parser_strategy": "llms_index",
+                }
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first = run_agentic_update_discovery(
+                workspace_root=Path(temp_dir),
+                run_id="llms-index-first",
+                run_contract={"scope": "provider_metadata", "providers": ["qwen"], "allow_network": True},
+                provider_sources=[source],
+                fetcher=fake_fetch,
+                max_sources=4,
+            )
+            first_urls = [str(item["url"]) for item in first["sources"]]
+            first_calls = list(fetch_calls)
+            fetch_calls.clear()
+            second = run_agentic_update_discovery(
+                workspace_root=Path(temp_dir),
+                run_id="llms-index-second",
+                run_contract={"scope": "provider_metadata", "providers": ["qwen"], "allow_network": True},
+                provider_sources=[source],
+                fetcher=fake_fetch,
+                max_sources=4,
+            )
+            second_urls = [str(item["url"]) for item in second["sources"]]
+
+        self.assertEqual(first["status"], "pass")
+        self.assertEqual(first["summary"]["total_sources"], 4)
+        self.assertEqual(first_urls, second_urls)
+        self.assertEqual(first_calls, fetch_calls)
+        self.assertIn("document_index_source_limit_reached:qwen-llms-index", first["warnings"])
+        self.assertNotIn("https://attacker.example.test/docs/guide/qwen4-quickstart.md", first_calls)
+        self.assertNotIn("http://127.0.0.1/docs/guide/qwen4-quickstart.md", first_calls)
+        self.assertTrue(all(url == index_url or (url.startswith("https://official.example.test/") and url.endswith(".md")) for url in first_calls))
+        derived = [item for item in first["sources"] if item.get("discovered_from_source_id")]
+        self.assertEqual(len(derived), 3)
+        self.assertTrue(all(item["discovery_depth"] == 1 for item in derived))
+        self.assertTrue(all(item["platform_id"] == "platform.example.test" for item in first["sources"]))
 
     def test_private_redirect_wrong_host_wrong_type_oversized_decompression_and_replay_sources_reject(self) -> None:
         def fake_fetch(url: str, timeout_sec: int, max_bytes: int) -> dict[str, object]:
@@ -270,6 +379,7 @@ def _provider_source(source_records: list[dict[str, object]]) -> dict[str, objec
             {
                 "source_id": record.get("source_id") or f"source-{index + 1}",
                 "url": record["url"],
+                "platform_id": record.get("platform_id"),
                 "source_type": record.get("source_type") or "models_catalog",
                 "trust_level": record.get("trust_level") or "official",
                 "channel": record.get("channel") or "stable_docs",

@@ -9,6 +9,9 @@ class GlmChatTransport(ChatCompletionsTransport):
     def describe(self) -> str:
         return "glm_chat"
 
+    def reasoning_control_semantics(self) -> str:
+        return "reasoning_effort"
+
     def build_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         upstream_payload = super().build_request(payload)
         effort = self._resolved_reasoning_effort(payload)

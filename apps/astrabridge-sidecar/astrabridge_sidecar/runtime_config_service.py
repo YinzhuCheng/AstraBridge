@@ -43,6 +43,7 @@ EXACT_MODEL_RUNTIME_FALLBACK_FIELDS = (
     "effective_context_window_percent",
     "auto_compact_token_limit",
     "tool_output_token_limit",
+    "context_budget_policy",
     "input_modalities",
     "apply_patch_tool_type",
     "web_search_tool_type",
@@ -187,6 +188,10 @@ class RuntimeConfigService:
             "effective_context_window_percent": None,
             "auto_compact_token_limit": None,
             "tool_output_token_limit": None,
+            "context_budget_policy": None,
+            "advertised_context_window_status": "unknown",
+            "verified_usable_coding_context_tokens": None,
+            "usable_coding_context_status": "requires_endpoint_preflight",
             "apply_patch_tool_type": None,
             "codex_apply_patch_tool_type": None,
             "apply_patch_mapping_status": None,
@@ -216,6 +221,10 @@ class RuntimeConfigService:
             "effective_context_window_percent": runtime.get("effective_context_window_percent"),
             "auto_compact_token_limit": runtime.get("auto_compact_token_limit"),
             "tool_output_token_limit": runtime.get("tool_output_token_limit"),
+            "context_budget_policy": runtime.get("context_budget_policy"),
+            "advertised_context_window_status": runtime.get("advertised_context_window_status") or "advertised",
+            "verified_usable_coding_context_tokens": runtime.get("verified_usable_coding_context_tokens"),
+            "usable_coding_context_status": runtime.get("usable_coding_context_status") or "requires_endpoint_preflight",
             "apply_patch_tool_type": runtime.get("apply_patch_tool_type"),
             "codex_apply_patch_tool_type": runtime.get("codex_apply_patch_tool_type"),
             "apply_patch_mapping_status": runtime.get("apply_patch_mapping_status"),
@@ -264,6 +273,7 @@ class RuntimeConfigService:
             runtime_status.get("effective_context_window_percent"),
             runtime_status.get("auto_compact_token_limit"),
             runtime_status.get("tool_output_token_limit"),
+            json_context_budget_policy_signature(runtime_status.get("context_budget_policy")),
             runtime_status.get("apply_patch_tool_type"),
             runtime_status.get("codex_apply_patch_tool_type"),
             runtime_status.get("apply_patch_mapping_status"),
@@ -338,6 +348,7 @@ class RuntimeConfigService:
                     if key in exact_configured_model:
                         merged_profile[key] = exact_configured_model.get(key)
         modality_limits = dict(merged_profile.get("modality_limits") or {})
+        context_budget_policy = _context_budget_policy_metadata(merged_profile.get("context_budget_policy"))
         known_input_modalities = normalize_input_modalities(None, provider_id, model)
         configured_input_modalities = normalize_input_modalities(merged_profile.get("input_modalities"), provider_id, model)
         normalized_input_modalities = list(dict.fromkeys([*known_input_modalities, *configured_input_modalities]))
@@ -374,6 +385,10 @@ class RuntimeConfigService:
             "effective_context_window_percent": effective_context_window_percent,
             "auto_compact_token_limit": auto_compact_token_limit,
             "tool_output_token_limit": tool_output_token_limit,
+            "context_budget_policy": context_budget_policy,
+            "advertised_context_window_status": str(context_budget_policy.get("advertised_context_window_status") or "advertised"),
+            "verified_usable_coding_context_tokens": None,
+            "usable_coding_context_status": "requires_endpoint_preflight",
             "input_modalities": normalized_input_modalities,
             "apply_patch_tool_type": apply_patch_tool_type,
             "codex_apply_patch_tool_type": codex_apply_patch_tool_type,
@@ -594,6 +609,7 @@ class RuntimeConfigService:
             "planner_support": runtime.get("planner_support"),
             "goal_support": runtime.get("goal_support"),
             "context_compaction_support": runtime.get("context_compaction_support"),
+            "context_budget_policy": runtime.get("context_budget_policy"),
             "modality_limits": runtime.get("modality_limits"),
             "ui_warnings": runtime.get("ui_warnings"),
         }
@@ -637,6 +653,36 @@ def _optional_positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _context_budget_policy_metadata(value: Any) -> dict[str, Any]:
+    raw = dict(value or {}) if isinstance(value, dict) else {}
+    advertised_status = str(raw.get("advertised_context_window_status") or "advertised").strip().lower()
+    if advertised_status not in {"advertised", "verified", "unknown"}:
+        advertised_status = "advertised"
+    overhead_status = str(raw.get("endpoint_overhead_status") or "conservative").strip().lower()
+    if overhead_status not in {"verified", "conservative", "unknown"}:
+        overhead_status = "conservative"
+    reasoning_policy = str(raw.get("reasoning_artifact_policy") or "neutral_summary_only").strip().lower()
+    if reasoning_policy not in {"drop_opaque_reasoning_artifacts", "neutral_summary_only", "same_route_native_replay_only"}:
+        reasoning_policy = "drop_opaque_reasoning_artifacts"
+    return {
+        "schema_version": "astrabridge-context-budget-policy-v1",
+        "advertised_context_window_status": advertised_status,
+        "endpoint_protocol_overhead_tokens": _optional_nonnegative_int(raw.get("endpoint_protocol_overhead_tokens")),
+        "endpoint_overhead_status": overhead_status,
+        "output_reserve_tokens": _optional_nonnegative_int(raw.get("output_reserve_tokens")),
+        "reasoning_artifact_policy": reasoning_policy,
+        "reasoning_artifact_reserve_tokens": _optional_nonnegative_int(raw.get("reasoning_artifact_reserve_tokens")),
+    }
 
 
 def _exact_configured_model(configured_models: list[dict[str, Any]] | None, provider_id: str, model: str) -> dict[str, Any] | None:
@@ -683,6 +729,12 @@ def apply_patch_mapping_status_for_runtime(provider_value: Any, codex_value: str
 
 
 def json_compaction_support_signature(value: Any) -> tuple[tuple[str, Any], ...]:
+    if not isinstance(value, dict):
+        return ()
+    return tuple(sorted((str(key), item) for key, item in value.items()))
+
+
+def json_context_budget_policy_signature(value: Any) -> tuple[tuple[str, Any], ...]:
     if not isinstance(value, dict):
         return ()
     return tuple(sorted((str(key), item) for key, item in value.items()))

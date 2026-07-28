@@ -35,14 +35,20 @@ class ContextGateCompatibilityTests(unittest.TestCase):
             auto_compact_status="configured_unverified",
             compact_summary_quality_status="untested",
             tool_schema_token_estimate=300,
+            endpoint_protocol="chat",
         )
 
         payload = report.to_dict()
 
-        self.assertEqual(payload["schema_version"], "astrabridge-context-budget-v1")
+        self.assertEqual(payload["schema_version"], "astrabridge-context-budget-v2")
         self.assertEqual(payload["provider_id"], "deepseek")
         self.assertEqual(payload["model_id"], "deepseek-v4-pro")
         self.assertEqual(payload["effective_context_budget_tokens"], 1638)
+        self.assertEqual(payload["advertised_context_window_tokens"], 4096)
+        self.assertEqual(payload["endpoint_protocol_overhead_tokens"], 128)
+        self.assertEqual(payload["output_reserve_tokens"], 128)
+        self.assertEqual(payload["usable_coding_context_status"], "conservative_estimate")
+        self.assertIsNone(payload["verified_usable_coding_context_tokens"])
         self.assertEqual(payload["auto_compact_token_limit"], 900)
         self.assertEqual(payload["tool_output_token_limit"], 16000)
         self.assertEqual(payload["manual_compact_status"], "app_server_native")
@@ -68,6 +74,13 @@ class ContextGateCompatibilityTests(unittest.TestCase):
                     "auto_compact": "configured_unverified",
                     "structured_summary_quality": "untested",
                 },
+                "context_budget_policy": {
+                    "advertised_context_window_status": "verified",
+                    "endpoint_protocol_overhead_tokens": 192,
+                    "endpoint_overhead_status": "verified",
+                    "output_reserve_tokens": 512,
+                    "reasoning_artifact_policy": "neutral_summary_only",
+                },
             }
         )
 
@@ -76,6 +89,10 @@ class ContextGateCompatibilityTests(unittest.TestCase):
         self.assertEqual(contract["codex_runtime_metadata"]["context_window"], 4096)
         self.assertEqual(contract["codex_runtime_metadata"]["effective_context_budget_tokens"], 1638)
         self.assertEqual(context_gate["declared_context_window"], 4096)
+        self.assertEqual(context_gate["advertised_context_window_tokens"], 4096)
+        self.assertEqual(context_gate["usable_coding_context_status"], "requires_endpoint_preflight")
+        self.assertIsNone(context_gate["verified_usable_coding_context_tokens"])
+        self.assertEqual(context_gate["context_budget_policy"]["endpoint_protocol_overhead_tokens"], 192)
         self.assertEqual(context_gate["effective_context_window_percent"], 40)
         self.assertEqual(context_gate["effective_context_budget_tokens"], 1638)
         self.assertEqual(context_gate["auto_compact_token_limit"], 900)
@@ -109,6 +126,12 @@ class ContextGateCompatibilityTests(unittest.TestCase):
                             "auto_compact": "configured_unverified",
                             "structured_summary_quality": "untested",
                         },
+                        "context_budget_policy": {
+                            "advertised_context_window_status": "verified",
+                            "endpoint_protocol_overhead_tokens": 176,
+                            "endpoint_overhead_status": "verified",
+                            "output_reserve_tokens": 384,
+                        },
                     }
                 ],
             )
@@ -134,6 +157,10 @@ class ContextGateCompatibilityTests(unittest.TestCase):
             self.assertEqual(status["effective_context_window_percent"], 55)
             self.assertEqual(status["auto_compact_token_limit"], 12000)
             self.assertEqual(status["tool_output_token_limit"], 6000)
+            self.assertEqual(status["usable_coding_context_status"], "requires_endpoint_preflight")
+            self.assertIsNone(status["verified_usable_coding_context_tokens"])
+            self.assertEqual(status["advertised_context_window_status"], "verified")
+            self.assertEqual(status["context_budget_policy"]["endpoint_protocol_overhead_tokens"], 176)
             self.assertEqual(status["context_compaction_support"]["auto_compact"], "configured_unverified")
             self.assertEqual(status["context_compaction_support"]["structured_summary_quality"], "untested")
 
@@ -145,6 +172,7 @@ class ContextGateCompatibilityTests(unittest.TestCase):
             context_window=8192,
             effective_context_window_percent=80,
             auto_compact_token_limit=4096,
+            endpoint_protocol="chat",
         )
         failure = classify_runtime_failure(
             '{"error":{"message":"context length exceeded","provider":"qwen","model":"qwen3.7-plus"}}'

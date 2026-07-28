@@ -10,6 +10,7 @@ from typing import Any, Callable
 from .agentic_updates import (
     AGENTIC_UPDATE_DIFF_SCHEMA_VERSION,
     agentic_update_proposal_template,
+    apply_execution_route_promotion_proposal,
     apply_metadata_only_proposal,
     assert_secret_free_agentic_update_payload,
     build_agentic_update_diff,
@@ -31,10 +32,11 @@ from .common import new_id, now_iso, read_json, write_json
 
 AGENTIC_UPDATE_JOB_SCHEMA_VERSION = "astrabridge-agentic-update-job-v1"
 PROPOSAL_ONLY_ALLOWED_APPLY_MODES = {"discover_only", "proposal_only"}
-PROVIDER_DISCOVERY_SCOPES = {"provider_metadata", "provider_adapter", "capability_routes", "docs_only", "plugin_skill_surface"}
+PROVIDER_DISCOVERY_SCOPES = {"provider_metadata", "provider_adapter", "execution_routes", "capability_routes", "docs_only", "plugin_skill_surface"}
 AGENTIC_UPDATE_SUPERVISED_POLICY_SCHEMA_VERSION = "astrabridge-agentic-update-supervised-policy-v1"
 AGENTIC_UPDATE_SUPERVISED_RUN_SCHEMA_VERSION = "astrabridge-agentic-update-supervised-run-v1"
 SUPERVISED_TRACK_PROVIDER_METADATA = "provider_metadata"
+SUPERVISED_TRACK_EXECUTION_ROUTES = "execution_routes"
 SUPERVISED_TRACK_CAPABILITY_ROUTES = "capability_routes"
 SUPERVISED_TRACK_CODEX_KERNEL = "codex_kernel"
 SUPERVISED_TRACK_PLUGIN_SKILL_SURFACE = "plugin_skill_surface"
@@ -42,6 +44,7 @@ SUPERVISED_TRACK_NODE_EXECUTORS = "node_executors"
 SUPERVISED_TRACK_DESKTOP_APPLICATION = "desktop_application"
 SUPERVISED_TRACK_SEQUENCE = (
     SUPERVISED_TRACK_PROVIDER_METADATA,
+    SUPERVISED_TRACK_EXECUTION_ROUTES,
     SUPERVISED_TRACK_CAPABILITY_ROUTES,
     SUPERVISED_TRACK_CODEX_KERNEL,
     SUPERVISED_TRACK_PLUGIN_SKILL_SURFACE,
@@ -63,6 +66,16 @@ SUPERVISED_TRACK_POLICY_DEFAULTS = {
         "depends_on": [],
         "max_failures_before_pause": 1,
         "supported": True,
+    },
+    SUPERVISED_TRACK_EXECUTION_ROUTES: {
+        "automation_mode": "off",
+        "cohort": "manual_only",
+        "cohort_size": 0,
+        "paused": False,
+        "kill_switch": False,
+        "depends_on": [SUPERVISED_TRACK_PROVIDER_METADATA],
+        "max_failures_before_pause": 1,
+        "supported": False,
     },
     SUPERVISED_TRACK_CAPABILITY_ROUTES: {
         "automation_mode": "supervised_apply",
@@ -117,6 +130,7 @@ SUPERVISED_TRACK_POLICY_DEFAULTS = {
 }
 SUPERVISED_TRACK_SCOPE_MAP = {
     "provider_metadata": SUPERVISED_TRACK_PROVIDER_METADATA,
+    "execution_routes": SUPERVISED_TRACK_EXECUTION_ROUTES,
     "capability_routes": SUPERVISED_TRACK_CAPABILITY_ROUTES,
     "codex_kernel": SUPERVISED_TRACK_CODEX_KERNEL,
     "plugin_skill_surface": SUPERVISED_TRACK_PLUGIN_SKILL_SURFACE,
@@ -135,6 +149,12 @@ SUPERVISED_CAPABILITY_ROUTE_CHANGE_TYPES = {
     "set_capability_route",
     "remove_capability_route",
 }
+SUPERVISED_EXECUTION_ROUTE_CHANGE_TYPES = {
+    "route_promoted",
+    "route_downgraded",
+    "route_evidence_expired",
+    "route_rollback_requested",
+}
 SUPERVISED_KERNEL_CHANGE_TYPES = {"codex_kernel_candidate"}
 
 
@@ -146,6 +166,7 @@ class AgenticUpdateService:
         workspace_root_resolver: Callable[[], str | Path] | None = None,
         runtime_root_resolver: Callable[[], str | Path] | None = None,
         provider_smoke_runtime_resolver: Callable[[], Any] | None = None,
+        route_promotion_smoke_runner: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         router_config: Any | None = None,
     ) -> None:
         if workspace_root is None and workspace_root_resolver is None:
@@ -154,6 +175,7 @@ class AgenticUpdateService:
         self._workspace_root_resolver = workspace_root_resolver
         self._runtime_root_resolver = runtime_root_resolver
         self._provider_smoke_runtime_resolver = provider_smoke_runtime_resolver
+        self._route_promotion_smoke_runner = route_promotion_smoke_runner
         self._router_config = router_config
         self._job_lock = threading.Lock()
         self._jobs: dict[str, dict[str, Any]] = {}
@@ -264,6 +286,25 @@ class AgenticUpdateService:
         )
         self._write_apply_summary(run_id=run_id, status="rolled_back", manifest=result)
         return result
+
+    def apply_route_promotion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise TypeError("Agentic update route-promotion apply payload must be a dict.")
+        proposal = self._proposal_from_payload(payload)
+        run_id = str(payload.get("run_id") or proposal.get("run_id") or "").strip()
+        if not run_id:
+            raise ValueError("run_id is required for execution-route promotion apply.")
+        manifest = apply_execution_route_promotion_proposal(
+            workspace_root=self._workspace(),
+            run_id=run_id,
+            proposal=proposal,
+            approval=dict(payload.get("approval") or {}),
+            router_config_snapshot=_optional_dict(payload.get("router_config_snapshot")) or self._router_config_snapshot(),
+            generated_catalog_snapshot=_optional_dict(payload.get("generated_catalog_snapshot")) or self._generated_catalog_snapshot(),
+            isolated_state_root=payload.get("isolated_state_root"),
+        )
+        self._write_apply_summary(run_id=run_id, status="applied_route_promotion", manifest=manifest)
+        return manifest
 
     def supervised_run(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
@@ -441,6 +482,7 @@ class AgenticUpdateService:
             capability_route_records=self._capability_route_records(),
             provider_runtime=self._provider_smoke_runtime(),
             credential_status=_optional_dict(payload.get("credential_status")) or self._provider_credential_status(),
+            route_smoke_runner=self._route_promotion_smoke_runner,
         )
         self._write_validation_summary(run_id=run_id, report=report)
         return report
@@ -549,6 +591,7 @@ class AgenticUpdateService:
             kernel_candidate_output=kernel_output,
             current_models=current_models,
             complete_provider_snapshot=bool(payload.get("complete_provider_snapshot")),
+            route_promotion_events=_optional_list_of_dicts(payload.get("route_promotion_events")),
             update_proposal=False,
         )
         proposal = self._write_proposal(
@@ -642,7 +685,9 @@ class AgenticUpdateService:
             "changes": list(diff.get("changes") or []),
             "warnings": list(diff.get("warnings") or []),
             "artifact_paths": dict(diff.get("artifact_paths") or {}),
+            "route_promotion": dict(diff.get("route_promotion") or {}),
         }
+        proposal["route_promotion"] = dict(diff.get("route_promotion") or {})
         proposal["validation_result"]["status"] = "not_run"
         proposal["validation_result"]["warnings"] = _dedupe(
             list(proposal["validation_result"].get("warnings") or []) + ["proposal_only_service_does_not_run_validation"]
@@ -1172,6 +1217,8 @@ def _track_id_for_change(change: dict[str, Any]) -> str | None:
         return SUPERVISED_TRACK_PROVIDER_METADATA
     if change_type in SUPERVISED_CAPABILITY_ROUTE_CHANGE_TYPES:
         return SUPERVISED_TRACK_CAPABILITY_ROUTES
+    if change_type in SUPERVISED_EXECUTION_ROUTE_CHANGE_TYPES:
+        return SUPERVISED_TRACK_EXECUTION_ROUTES
     if change_type in SUPERVISED_KERNEL_CHANGE_TYPES:
         return SUPERVISED_TRACK_CODEX_KERNEL
     return None

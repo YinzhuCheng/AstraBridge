@@ -26,6 +26,7 @@ from ..tooling import (
 
 
 LOCAL_IMAGE_MAX_BYTES = 100 * 1024 * 1024
+SEMANTIC_CONFORMANCE_SCHEMA_VERSION = "astrabridge-provider-semantic-conformance-v1"
 EMBEDDED_INPUT_IMAGE_BLOCK_RE = re.compile(
     r'\{[^{}]*"type"\s*:\s*"input_image"[^{}]*"image_url"\s*:\s*"(data:image/[^"]+)"[^{}]*\}',
     re.DOTALL,
@@ -160,6 +161,113 @@ class ProviderTransport(ABC):
             "transport_stateful_cancel": False,
         }
 
+    def reasoning_control_semantics(self) -> str:
+        """Name the adapter-owned reasoning-control mapping.
+
+        This is descriptive rather than an authority grant.  An adapter can
+        faithfully map a provider's reasoning field while the selected route
+        still remains review-only under the execution-route contract.
+        """
+
+        return "normalized_reasoning_effort"
+
+    def semantic_conformance_contract(self) -> dict[str, Any]:
+        """Expose the bounded protocol semantics shared with the router.
+
+        The contract deliberately distinguishes transport normalization from
+        coding-agent admission.  Tool definitions may be wire-compatible but
+        still require model-and-endpoint route evidence before the router can
+        expose an executable tool surface.
+        """
+
+        image_supported = self.supports_local_image_input()
+        stream_mode = "provider_passthrough" if self.supports_passthrough_stream() else "normalized_chat_sse"
+        unsupported: list[dict[str, str]] = []
+        if not image_supported:
+            unsupported.append(
+                {
+                    "feature": "image_attachment",
+                    "status": "blocked",
+                    "action": "Remove the image attachment or select a Qwen/Kimi image-capable route.",
+                }
+            )
+        return {
+            "schema_version": SEMANTIC_CONFORMANCE_SCHEMA_VERSION,
+            "adapter": self.describe(),
+            "wire_api": self.wire_api(),
+            "request": {
+                "messages": "normalized",
+                "system_instructions": "normalized",
+                "tool_definitions": "requires_execution_route_evidence",
+                "tool_result_turns": "normalized",
+                "reasoning_controls": self.reasoning_control_semantics(),
+                "image_attachments": "supported" if image_supported else "blocked",
+            },
+            "response": {
+                "visible_text": "normalized",
+                "tool_calls": "normalized",
+                "reasoning_artifacts": "summary_only_non_replayable",
+                "malformed_output": "blocked_with_actionable_downgrade",
+            },
+            "streaming": {
+                "mode": stream_mode,
+                "normalized_response_events": True,
+            },
+            "cancellation": self.cancellation_contract(),
+            "coding_agent": {
+                "status": "requires_execution_route_evidence",
+                "action": "Keep the route in review/proposal mode until exact model-and-endpoint coding-route evidence is recorded.",
+            },
+            "unsupported_features": unsupported,
+        }
+
+    def validate_semantic_request(self, payload: dict[str, Any]) -> None:
+        """Reject a known-unsupported protocol feature before a provider call."""
+
+        if self.supports_local_image_input() or not _contains_image_attachment(payload.get("input")):
+            return
+        raise ValueError(
+            f"{self.describe()} does not support image attachments on this protocol route. "
+            "Remove the image attachment or select a Qwen/Kimi image-capable route."
+        )
+
+    def response_semantic_status(self, response: NormalizedResponse) -> dict[str, Any]:
+        """Classify normalized output without treating text transport as tool authority."""
+
+        warning_codes = {str(item.code or "") for item in list(response.warnings or [])}
+        has_text = bool(str(response.text or "").strip())
+        has_tool_calls = bool(response.tool_calls)
+        reasoning_only = bool(
+            warning_codes & {"reasoning_only_response", "reasoning_only_notice_emitted"}
+        )
+        if "malformed_provider_response" in warning_codes:
+            return {
+                "status": "blocked",
+                "text_semantics": "invalid",
+                "tool_call_semantics": "not_admitted",
+                "action": "Treat the provider payload as a protocol failure; retry a simpler fixture or switch to another provider route.",
+            }
+        if not has_text and not has_tool_calls:
+            return {
+                "status": "blocked",
+                "text_semantics": "missing",
+                "tool_call_semantics": "not_admitted",
+                "action": "Mark this route semantically unverified and retry with a simpler request or another provider route.",
+            }
+        if reasoning_only:
+            return {
+                "status": "degraded",
+                "text_semantics": "reasoning_only_notice",
+                "tool_call_semantics": "not_admitted",
+                "action": "Retry with an explicit final-answer instruction before treating the response as a usable completion.",
+            }
+        return {
+            "status": "normalized",
+            "text_semantics": "visible" if has_text else "not_present",
+            "tool_call_semantics": "normalized_but_route_gated" if has_tool_calls else "not_present",
+            "action": "Execution-route evidence still controls whether normalized tool calls may become coding-agent actions.",
+        }
+
     def _local_image_data_url(self, raw_path: str) -> str:
         path = self._local_image_path(raw_path)
         if not path.is_file():
@@ -244,13 +352,29 @@ class ProviderTransport(ABC):
         return self.build_request(payload)
 
     def client_response_from_upstream_json(self, upstream: dict[str, Any], original_payload: dict[str, Any]) -> dict[str, Any]:
-        return upstream
+        if isinstance(upstream, dict) and isinstance(upstream.get("output"), list):
+            return upstream
+        return {
+            "id": "response_router_invalid",
+            "object": "response",
+            "status": "invalid_response",
+            "output": [],
+        }
 
     def client_stream_events_from_upstream_json(self, upstream: dict[str, Any], original_payload: dict[str, Any]) -> list[dict[str, Any]]:
         response = self.client_response_from_upstream_json(upstream, original_payload)
+        if not isinstance(response, dict):
+            response = {
+                "id": "response_router_invalid",
+                "object": "response",
+                "status": "invalid_response",
+                "output": [],
+            }
         response_id = str(response.get("id") or "response_router")
         events = [{"type": "response.created", "response": {"id": response_id, "object": "response", "status": "in_progress"}}]
         for output_index, item in enumerate(list(response.get("output") or [])):
+            if not isinstance(item, dict):
+                continue
             if item.get("type") == "message":
                 item_id = item.get("id") or f"msg_{output_index}"
                 events.append(
@@ -359,13 +483,33 @@ class ResponsesTransport(ProviderTransport):
         return sanitized if isinstance(tools, list) else []
 
     def normalize_response(self, raw: Any, original_payload: dict[str, Any]) -> NormalizedResponse:
-        output = list((raw or {}).get("output") or [])
+        raw_payload = raw if isinstance(raw, dict) else {}
+        raw_output = raw_payload.get("output")
+        malformed = not isinstance(raw, dict) or not isinstance(raw_output, list)
+        output = list(raw_output) if isinstance(raw_output, list) else []
         text_parts: list[str] = []
         reasoning_summary: str | None = None
         reasoning_items: list[dict[str, Any]] = []
         tool_calls: list[ToolCall] = []
         warnings: list[ProviderWarning] = []
+        if malformed:
+            warnings.append(
+                self._warning(
+                    "malformed_provider_response",
+                    "Provider response did not contain a valid Responses output list; the route is not semantically usable.",
+                    "error",
+                )
+            )
         for item in output:
+            if not isinstance(item, dict):
+                warnings.append(
+                    self._warning(
+                        "malformed_provider_response",
+                        "Provider Responses output contained a non-object item; the route is not semantically usable.",
+                        "error",
+                    )
+                )
+                continue
             item_type = str(item.get("type") or "")
             if item_type == "reasoning":
                 reasoning_items.append(dict(item))
@@ -396,7 +540,7 @@ class ResponsesTransport(ProviderTransport):
                             provider_data={"response_item_id": item.get("id")},
                         )
                     )
-        usage = dict((raw or {}).get("usage") or {})
+        usage = dict(raw_payload.get("usage") or {})
         normalized_usage = None
         if usage:
             token_details = dict(usage.get("output_tokens_details") or {})
@@ -427,16 +571,16 @@ class ResponsesTransport(ProviderTransport):
             reasoning_state=reasoning_state,
             tool_calls=tool_calls,
             usage=normalized_usage,
-            finish_reason=str((raw or {}).get("status") or "completed"),
+            finish_reason=str(raw_payload.get("status") or ("invalid_response" if malformed else "completed")),
             provider_data={
                 "model": self._model_id(original_payload),
-                "response_id": (raw or {}).get("id"),
-                "status": (raw or {}).get("status"),
-                "output_types": [str(item.get("type") or "") for item in output],
+                "response_id": raw_payload.get("id"),
+                "status": raw_payload.get("status"),
+                "output_types": [str(item.get("type") or "") for item in output if isinstance(item, dict)],
                 "tool_call_count": len(tool_calls),
             },
             warnings=warnings,
-            raw_ref=self._raw_ref(kind="responses_output", locator=(raw or {}).get("id"), summary=f"{len(output)} output item(s)"),
+            raw_ref=self._raw_ref(kind="responses_output", locator=raw_payload.get("id"), summary=f"{len(output)} output item(s)"),
         )
 
     def _convert_responses_input_item(self, item: Any) -> list[dict[str, Any]]:
@@ -499,11 +643,22 @@ class ChatCompletionsTransport(ProviderTransport):
         return upstream_payload
 
     def normalize_response(self, raw: Any, original_payload: dict[str, Any]) -> NormalizedResponse:
-        choice = ((raw.get("choices") or [{}])[0]) if isinstance(raw.get("choices"), list) else {}
+        raw_payload = raw if isinstance(raw, dict) else {}
+        choices = raw_payload.get("choices")
+        malformed = not isinstance(raw, dict) or not isinstance(choices, list) or not choices or not isinstance(choices[0], dict)
+        choice = dict(choices[0]) if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
         message = dict(choice.get("message") or {})
         reasoning_content = str(message.get("reasoning_content") or "")
         text = self._visible_text_or_reasoning_only_notice(str(message.get("content") or ""), reasoning_content, bool(message.get("tool_calls")))
         warnings: list[ProviderWarning] = []
+        if malformed:
+            warnings.append(
+                self._warning(
+                    "malformed_provider_response",
+                    "Provider response did not contain a valid Chat Completions choice; the route is not semantically usable.",
+                    "error",
+                )
+            )
         repaired_calls, repair_warnings = normalize_tool_calls(
             list(message.get("tool_calls") or []),
             allow_parallel=bool(self.profile.get("supports_parallel_tool_calls", False)),
@@ -518,7 +673,7 @@ class ChatCompletionsTransport(ProviderTransport):
             )
             for call in repaired_calls
         ]
-        usage = dict(raw.get("usage") or {})
+        usage = dict(raw_payload.get("usage") or {})
         normalized_usage = None
         if usage:
             token_details = dict(usage.get("completion_tokens_details") or {})
@@ -541,15 +696,15 @@ class ChatCompletionsTransport(ProviderTransport):
             ),
             tool_calls=tool_calls,
             usage=normalized_usage,
-            finish_reason=str(choice.get("finish_reason") or "stop"),
+            finish_reason=str(choice.get("finish_reason") or ("invalid_response" if malformed else "stop")),
             provider_data={
                 "model": self._model_id(original_payload),
-                "response_id": raw.get("id"),
-                "choice_count": len(list(raw.get("choices") or [])),
+                "response_id": raw_payload.get("id"),
+                "choice_count": len(choices) if isinstance(choices, list) else 0,
                 "tool_call_count": len(tool_calls),
             },
             warnings=warnings,
-            raw_ref=self._raw_ref(kind="chat_completion_choice", locator=raw.get("id"), summary="First choice normalized from chat completions."),
+            raw_ref=self._raw_ref(kind="chat_completion_choice", locator=raw_payload.get("id"), summary="First choice normalized from chat completions."),
         )
 
     def convert_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -578,18 +733,21 @@ class ChatCompletionsTransport(ProviderTransport):
         return converted
 
     def client_response_from_upstream_json(self, upstream: dict[str, Any], original_payload: dict[str, Any]) -> dict[str, Any]:
-        choice = ((upstream.get("choices") or [{}])[0]) if isinstance(upstream.get("choices"), list) else {}
+        raw_payload = upstream if isinstance(upstream, dict) else {}
+        choices = raw_payload.get("choices")
+        malformed = not isinstance(upstream, dict) or not isinstance(choices, list) or not choices or not isinstance(choices[0], dict)
+        choice = dict(choices[0]) if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
         message = dict(choice.get("message") or {})
         output: list[dict[str, Any]] = []
         text = str(message.get("content") or "")
         reasoning_content = str(message.get("reasoning_content") or "")
         tool_calls = list(message.get("tool_calls") or [])
         text = self._visible_text_or_reasoning_only_notice(text, reasoning_content, bool(tool_calls))
-        message_item_id = f"msg_{upstream.get('id') or int(time.time())}"
+        message_item_id = f"msg_{raw_payload.get('id') or int(time.time())}"
         if reasoning_content:
             output.append(
                 {
-                    "id": f"reasoning_{upstream.get('id') or int(time.time())}",
+                    "id": f"reasoning_{raw_payload.get('id') or int(time.time())}",
                     "type": "reasoning",
                     "summary": [reasoning_content],
                     "content": [reasoning_content],
@@ -616,13 +774,13 @@ class ChatCompletionsTransport(ProviderTransport):
                     "arguments": self._safe_tool_arguments(function.get("arguments")),
                 }
             )
-        usage = dict(upstream.get("usage") or {})
+        usage = dict(raw_payload.get("usage") or {})
         response = {
-            "id": upstream.get("id") or f"resp_router_{int(time.time())}",
+            "id": raw_payload.get("id") or f"resp_router_{int(time.time())}",
             "object": "response",
-            "created_at": upstream.get("created") or int(time.time()),
+            "created_at": raw_payload.get("created") or int(time.time()),
             "model": original_payload.get("model") or f"{self.profile.get('provider_id')}/{self.profile.get('model')}",
-            "status": "completed",
+            "status": "invalid_response" if malformed else "completed",
             "output": output,
             "output_text": text,
         }
@@ -946,6 +1104,26 @@ class ChatCompletionsTransport(ProviderTransport):
         if pending_reasoning:
             merged.append({"role": "assistant", "content": "", "reasoning_content": pending_reasoning})
         return merged
+
+
+def _contains_image_attachment(value: Any) -> bool:
+    """Recognize concrete image-input shapes without treating prose as media."""
+
+    if isinstance(value, dict):
+        item_type = str(value.get("type") or "").strip().lower()
+        if item_type in {"localimage", "input_image", "image_url", "image"}:
+            return True
+        return any(_contains_image_attachment(child) for child in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_image_attachment(item) for item in value)
+    if isinstance(value, str):
+        return bool(
+            re.search(
+                r'(?is)"type"\s*:\s*"(?:localImage|input_image|image_url|image)"',
+                value,
+            )
+        )
+    return False
 
 
 @lru_cache(maxsize=None)

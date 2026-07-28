@@ -12,6 +12,9 @@ class QwenResponsesTransport(ResponsesTransport):
     def supports_local_image_input(self) -> bool:
         return True
 
+    def reasoning_control_semantics(self) -> str:
+        return "enable_thinking"
+
     def convert_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         """Keep App Server text plus an adjacent local image in one user turn.
 

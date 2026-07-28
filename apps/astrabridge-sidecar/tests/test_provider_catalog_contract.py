@@ -21,7 +21,29 @@ class DummyRouter:
 
 
 class ProviderCatalogContractTests(unittest.TestCase):
-    def test_seed_catalog_includes_qwen_and_kimi_capability_models(self) -> None:
+    def test_router_test_evidence_redacts_reasoning_text_but_keeps_structure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService(root / "profiles.json")
+            config = RouterConfigService(profiles, root / "router.json")
+            config.record_test_result(
+                {
+                    "ok": True,
+                    "response_diagnostics": {
+                        "reasoning_summary": "synthetic private reasoning text",
+                        "reasoning_state": {"visible_summary": "synthetic private reasoning text", "replayable": False},
+                        "usage": {"reasoning_tokens": 4},
+                    },
+                }
+            )
+
+            latest = config.snapshot()["latest_test"]
+            self.assertEqual(latest["response_diagnostics"]["reasoning_summary"], "[redacted]")
+            self.assertEqual(latest["response_diagnostics"]["reasoning_state"]["visible_summary"], "[redacted]")
+            self.assertEqual(latest["response_diagnostics"]["usage"]["reasoning_tokens"], 4)
+            self.assertNotIn("synthetic private reasoning text", (root / "router.json").read_text(encoding="utf-8"))
+
+    def test_seed_catalog_includes_qwen_and_current_kimi_capability_models(self) -> None:
         seeded = {str(item["id"]): item for item in default_seed_models()}
 
         self.assertIn("qwen/qwen3-vl-plus", seeded)
@@ -32,6 +54,7 @@ class ProviderCatalogContractTests(unittest.TestCase):
         self.assertIn("qwen/cosyvoice-v3-plus", seeded)
         self.assertIn("qwen/cosyvoice-v3.5-plus", seeded)
         self.assertIn("kimi/kimi-k2.7-code-highspeed", seeded)
+        self.assertIn("kimi/kimi-k3", seeded)
         self.assertEqual(seeded["qwen/qwen3-vl-plus"]["input_modalities"], ["text", "image"])
         self.assertEqual(seeded["qwen/qwen3-vl-plus"]["modality_limits"]["remote_image_url_supported"], True)
         self.assertEqual(seeded["qwen/qwen3-asr-flash"]["input_modalities"], ["text", "audio"])
@@ -40,6 +63,9 @@ class ProviderCatalogContractTests(unittest.TestCase):
         self.assertEqual(seeded["qwen/cosyvoice-v3-plus"]["modality_limits"]["tts_instruction_field"], "instruction")
         self.assertEqual(seeded["qwen/cosyvoice-v3.5-plus"]["modality_limits"]["tts_system_voice_support"], "unsupported")
         self.assertEqual(seeded["kimi/kimi-k2.7-code-highspeed"]["input_modalities"], ["text", "image"])
+        self.assertEqual(seeded["kimi/kimi-k3"]["input_modalities"], ["text", "image", "video"])
+        self.assertEqual(seeded["kimi/kimi-k3"]["advertised_context_window"], 1_048_576)
+        self.assertEqual(seeded["kimi/kimi-k3"]["native_supported_reasoning_levels"], ["low", "high", "max"])
 
     def test_provider_source_of_truth_prefers_generated_default_model_flags(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -52,12 +78,12 @@ class ProviderCatalogContractTests(unittest.TestCase):
             kimi_provider = next(item for item in config.providers() if item["id"] == "kimi")
             config.upsert_provider({**kimi_provider, "default_model": "kimi-k2.6"})
             kimi_k26 = next(item for item in config.models() if item["id"] == "kimi/kimi-k2.6")
-            kimi_k27 = next(item for item in config.models() if item["id"] == "kimi/kimi-k2.7-code")
+            kimi_k3 = next(item for item in config.models() if item["id"] == "kimi/kimi-k3")
             config.upsert_model({**kimi_k26, "default_for_provider": True, "recommended": False})
             config.upsert_model(
                 {
-                    **kimi_k27,
-                    "default_for_provider": False,
+                    **kimi_k3,
+                    "default_for_provider": True,
                     "recommended": True,
                     "tool_web_search_support": "verified",
                     "web_smoke_status": "pass",
@@ -67,21 +93,21 @@ class ProviderCatalogContractTests(unittest.TestCase):
 
             preferred = preferred_provider_model_record("kimi", config.models(), include_deprecated=False)
             self.assertIsNotNone(preferred)
-            self.assertEqual(preferred["id"], "kimi/kimi-k2.7-code")
+            self.assertEqual(preferred["id"], "kimi/kimi-k3")
 
             kimi_contract = resolved_provider_source_of_truth_fields(
                 next(item for item in config.providers() if item["id"] == "kimi"),
                 config.models(),
             )
             self.assertEqual(kimi_contract["configured_default_model"], "kimi-k2.6")
-            self.assertEqual(kimi_contract["effective_default_model"], "kimi-k2.7-code")
-            self.assertEqual(kimi_contract["effective_default_model_id"], "kimi/kimi-k2.7-code")
+            self.assertEqual(kimi_contract["effective_default_model"], "kimi-k3")
+            self.assertEqual(kimi_contract["effective_default_model_id"], "kimi/kimi-k3")
             self.assertEqual(kimi_contract["default_model_alignment"], "stale_config")
             self.assertIn("configured_default_model_differs_from_catalog_preferred_model", kimi_contract["warnings"])
             self.assertEqual(kimi_contract["reasoning_policy_mode"], "reasoning_content")
             self.assertEqual(kimi_contract["reasoning_state"]["visibility"], "visible_summary_only")
             self.assertFalse(kimi_contract["reasoning_state"]["replayable"])
-            self.assertEqual(kimi_contract["context_window"], 256000)
+            self.assertEqual(kimi_contract["context_window"], 1_048_576)
             self.assertEqual(kimi_contract["context_gate"]["auto_compact_status"], "configured_unverified")
             self.assertEqual(kimi_contract["context_gate"]["compact_summary_quality_status"], "untested")
             self.assertEqual(kimi_contract["workflow_contract"]["auto_compact"], "configured_unverified")
@@ -107,6 +133,60 @@ class ProviderCatalogContractTests(unittest.TestCase):
             self.assertEqual(deepseek_contract["web_capability"]["tool_web_search_support"], "verified")
             self.assertIn("auto_compact_validation_unverified", deepseek_contract["warnings"])
 
+    def test_router_config_preserves_kimi_credential_region_and_adds_preferred_k3(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            profiles = ProfileService(root / "profiles.json")
+            config = RouterConfigService(profiles, root / "router.json")
+            kimi_provider = next(item for item in config.providers() if item["id"] == "kimi")
+            kimi_k26 = next(item for item in config.models() if item["id"] == "kimi/kimi-k2.6")
+            config.import_sanitized(
+                {
+                    "providers": [{**kimi_provider, "base_url": "https://api.moonshot.cn/v1", "default_model": "kimi-k2.6"}],
+                    "models": [kimi_k26],
+                    "reasoning": {"global_effort": "high", "provider_overrides": {}, "model_overrides": {}},
+                }
+            )
+
+            china = config.providers()[0]
+            model_ids = {item["id"] for item in config.models()}
+            self.assertEqual(china["base_url"], "https://api.moonshot.cn/v1")
+            self.assertEqual(china["platform_id"], "platform.kimi.com")
+            self.assertEqual(china["credential_scope"], "platform.kimi.com")
+            self.assertEqual(
+                {item["platform_id"] for item in china["endpoint_variants"]},
+                {"platform.kimi.com", "platform.kimi.ai"},
+            )
+            self.assertEqual(china["default_model"], "kimi-k2.6")
+            self.assertIn("kimi/kimi-k3", model_ids)
+
+            config.import_sanitized(
+                {
+                    "providers": [
+                        {
+                            **china,
+                            "base_url": "https://api.moonshot.ai/v1",
+                            "platform_id": "platform.kimi.ai",
+                        }
+                    ],
+                    "models": config.models(),
+                    "reasoning": config.reasoning(),
+                }
+            )
+            international = config.providers()[0]
+            self.assertEqual(international["base_url"], "https://api.moonshot.ai/v1")
+            self.assertEqual(international["platform_id"], "platform.kimi.ai")
+            self.assertEqual(international["credential_scope"], "platform.kimi.ai")
+
+            config.apply_catalog_seed(
+                [{**china, "base_url": "https://api.moonshot.cn/v1", "platform_id": "platform.kimi.com"}],
+                config.models(),
+                managed_provider_ids={"kimi"},
+            )
+            preserved = config.providers()[0]
+            self.assertEqual(preserved["base_url"], "https://api.moonshot.ai/v1")
+            self.assertEqual(preserved["platform_id"], "platform.kimi.ai")
+
     def test_effective_catalog_provider_redaction_keeps_alignment_and_key_availability_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -118,17 +198,17 @@ class ProviderCatalogContractTests(unittest.TestCase):
             kimi_provider = next(item for item in config.providers() if item["id"] == "kimi")
             config.upsert_provider({**kimi_provider, "default_model": "kimi-k2.6", "auth_key_ref": "vault:kimi"})
             kimi_k26 = next(item for item in config.models() if item["id"] == "kimi/kimi-k2.6")
-            kimi_k27 = next(item for item in config.models() if item["id"] == "kimi/kimi-k2.7-code")
+            kimi_k3 = next(item for item in config.models() if item["id"] == "kimi/kimi-k3")
             config.upsert_model({**kimi_k26, "default_for_provider": True, "recommended": False})
-            config.upsert_model({**kimi_k27, "default_for_provider": False, "recommended": True})
+            config.upsert_model({**kimi_k3, "default_for_provider": True, "recommended": True})
 
             manager = LlmApiManagerService(config, DummyRouter(), root / "manager")
             catalog = manager.effective_catalog()
             provider = next(item for item in catalog["providers"] if item["id"] == "kimi")
 
             self.assertEqual(provider["default_model"], "kimi-k2.6")
-            self.assertEqual(provider["effective_default_model"], "kimi-k2.7-code")
-            self.assertEqual(provider["effective_default_model_id"], "kimi/kimi-k2.7-code")
+            self.assertEqual(provider["effective_default_model"], "kimi-k3")
+            self.assertEqual(provider["effective_default_model_id"], "kimi/kimi-k3")
             self.assertEqual(provider["default_model_alignment"], "stale_config")
             self.assertIn("configured_default_model_differs_from_catalog_preferred_model", provider["provider_contract_warnings"])
             self.assertEqual(provider["auth_key_ref"], None)

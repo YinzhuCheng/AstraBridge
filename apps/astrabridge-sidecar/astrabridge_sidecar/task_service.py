@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from jsonschema import Draft202012Validator
 
-from .coding_kernel import task_refs_from_coding_events
+from .coding_kernel import compact_context_compaction_handoff_contract, task_refs_from_coding_events
 from .common import WORKSPACE_STATE_DIRNAME, new_id, now_iso, read_json, write_json
 from .durable_run_store import DurableRunEventStore
 from .agent_orchestration_contract import (
@@ -56,6 +56,7 @@ from .protocol.generated.v1 import (
     validate_protocol_payload,
 )
 from .providers.runtime_transition import summarize_transition
+from .providers.turn_transition import compact_turn_transition
 from .providers.tooling import assess_default_route_verification
 from .security import DESKTOP_KEY_PATH_RE, SECRET_RE, SecurityError, redact_sensitive, resolve_under
 from .task_graph_contract import (
@@ -745,6 +746,7 @@ class TaskService:
         projection_preview: str | None = None,
         warnings: list[str] | None = None,
         neutral_handoff_bundle: dict[str, Any] | None = None,
+        turn_transition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         task = self.bind_thread(thread_id=to_thread_id, settings=settings, role="provider", make_active=True)
         source_settings = self._provider_thread_settings(task, from_thread_id)
@@ -788,6 +790,8 @@ class TaskService:
                     "path": str(dict(neutral_handoff_bundle).get("path") or "").strip(),
                     "bundle_digest": str(dict(neutral_handoff_bundle).get("bundle_digest") or "").strip(),
                     "projection_digest": str(dict(neutral_handoff_bundle).get("projection_digest") or "").strip(),
+                    "neutral_transcript_schema_version": str(dict(neutral_handoff_bundle).get("neutral_transcript_schema_version") or "").strip(),
+                    "neutral_transcript_digest": str(dict(neutral_handoff_bundle).get("neutral_transcript_digest") or "").strip(),
                     "lineage_digest": str(dict(neutral_handoff_bundle).get("lineage_digest") or "").strip(),
                     "source_thread_id": str(dict(neutral_handoff_bundle).get("source_thread_id") or "").strip() or None,
                     "target_thread_id": str(dict(neutral_handoff_bundle).get("target_thread_id") or "").strip() or None,
@@ -800,11 +804,16 @@ class TaskService:
                     "dropped_artifacts": int(dict(neutral_handoff_bundle).get("dropped_artifacts") or 0),
                     "repaired_tool_pairs": int(dict(neutral_handoff_bundle).get("repaired_tool_pairs") or 0),
                     "replayable_artifact_count": int(dict(neutral_handoff_bundle).get("replayable_artifact_count") or 0),
+                    "artifact_drop_count": int(dict(neutral_handoff_bundle).get("artifact_drop_count") or 0),
                     "warning_count": int(dict(neutral_handoff_bundle).get("warning_count") or 0),
+                    "context_compaction": compact_context_compaction_handoff_contract(
+                        dict(neutral_handoff_bundle).get("context_compaction")
+                    ),
                 }
                 if isinstance(neutral_handoff_bundle, dict) and str(dict(neutral_handoff_bundle).get("path") or "").strip()
                 else None
             ),
+            "turn_transition": compact_turn_transition(turn_transition),
             "created_at": now_iso(),
         }
         handoff_events = list(task.get("handoff_events") or [])
@@ -822,6 +831,7 @@ class TaskService:
     def compact_handoff_event(self, event: dict[str, Any]) -> dict[str, Any]:
         transition = dict(event.get("transition_summary") or {})
         neutral_handoff_bundle = dict(event.get("neutral_handoff_bundle") or {})
+        turn_transition = dict(event.get("turn_transition") or {})
         warnings = [str(item).strip() for item in list(transition.get("warnings") or []) if str(item or "").strip()]
         return {
             "event_id": str(event.get("event_id") or ""),
@@ -858,6 +868,8 @@ class TaskService:
                     "path": str(neutral_handoff_bundle.get("path") or ""),
                     "bundle_digest": str(neutral_handoff_bundle.get("bundle_digest") or ""),
                     "projection_digest": str(neutral_handoff_bundle.get("projection_digest") or ""),
+                    "neutral_transcript_schema_version": str(neutral_handoff_bundle.get("neutral_transcript_schema_version") or ""),
+                    "neutral_transcript_digest": str(neutral_handoff_bundle.get("neutral_transcript_digest") or ""),
                     "lineage_digest": str(neutral_handoff_bundle.get("lineage_digest") or ""),
                     "source_thread_id": str(neutral_handoff_bundle.get("source_thread_id") or ""),
                     "target_thread_id": str(neutral_handoff_bundle.get("target_thread_id") or ""),
@@ -870,11 +882,16 @@ class TaskService:
                     "dropped_artifacts": int(neutral_handoff_bundle.get("dropped_artifacts") or 0),
                     "repaired_tool_pairs": int(neutral_handoff_bundle.get("repaired_tool_pairs") or 0),
                     "replayable_artifact_count": int(neutral_handoff_bundle.get("replayable_artifact_count") or 0),
+                    "artifact_drop_count": int(neutral_handoff_bundle.get("artifact_drop_count") or 0),
                     "warning_count": int(neutral_handoff_bundle.get("warning_count") or 0),
+                    "context_compaction": compact_context_compaction_handoff_contract(
+                        neutral_handoff_bundle.get("context_compaction")
+                    ),
                 }
                 if str(neutral_handoff_bundle.get("path") or "").strip()
                 else None
             ),
+            "turn_transition": turn_transition or None,
         }
 
     def lane_state(self, task: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -10100,7 +10117,14 @@ class TaskService:
                 ]
             machine_schema = task_output_contract.get("machine_result_schema")
             if isinstance(machine_schema, dict) and machine_schema:
-                schema_ref = f"schema.{task_node['node_id']}.machine_result"
+                existing_schema_ref = str(output_contract.get("machine_result_schema_ref") or "").strip()
+                existing_schema = schema_registry.get(existing_schema_ref)
+                schema_ref = (
+                    existing_schema_ref
+                    if existing_schema_ref
+                    and self._schema_contract_matches_task_schema(existing_schema, machine_schema)
+                    else f"schema.{task_node['node_id']}.machine_result"
+                )
                 schema_registry[schema_ref] = deepcopy(machine_schema)
                 output_contract["machine_result_schema_ref"] = schema_ref
                 node_schema_refs[str(task_node["node_id"])] = schema_ref
@@ -10274,6 +10298,16 @@ class TaskService:
             )
         synced["edges"] = synced_edges
         return synced
+
+    @staticmethod
+    def _schema_contract_matches_task_schema(canonical_schema: Any, task_schema: Any) -> bool:
+        if not isinstance(canonical_schema, dict) or not isinstance(task_schema, dict):
+            return False
+        return json.dumps(canonical_schema, ensure_ascii=False, sort_keys=True) == json.dumps(
+            task_schema,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
     @staticmethod
     def _reachable_task_graph_projection(task_graph: dict[str, Any]) -> dict[str, Any]:

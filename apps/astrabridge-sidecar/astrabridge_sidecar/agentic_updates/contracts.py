@@ -6,6 +6,7 @@ from typing import Any
 
 from ..common import new_id, now_iso
 from ..security import DESKTOP_KEY_PATH_RE, SECRET_QUERY_RE, SECRET_RE, SecurityError
+from .route_promotion import normalize_route_promotion_section, route_promotion_section_template
 
 
 AGENTIC_UPDATE_CONTRACT_SCHEMA_VERSION = "astrabridge-agentic-update-contract-v1"
@@ -15,6 +16,7 @@ AGENTIC_UPDATE_SCHEMA_DEFINITIONS_VERSION = "astrabridge-agentic-update-schema-d
 UPDATE_SCOPES = (
     "provider_metadata",
     "provider_adapter",
+    "execution_routes",
     "capability_routes",
     "codex_kernel",
     "plugin_skill_surface",
@@ -169,6 +171,14 @@ def agentic_update_schema_definitions() -> dict[str, Any]:
                 "required": ["schema_version", "reversible", "steps"],
                 "notes": ["Rollback instructions must be reviewable and must not delete preserved evidence."],
             },
+            "route_promotion": {
+                "type": "object",
+                "required": ["schema_version", "status", "records"],
+                "notes": [
+                    "Documentation records are not route proof; each promotion binds one model, endpoint fingerprint, and adapter signature.",
+                    "Provider-backed gate evidence is required before tool, coding-route, or default-route promotion."
+                ],
+            },
             "proposal": {
                 "type": "object",
                 "schema_version": AGENTIC_UPDATE_PROPOSAL_SCHEMA_VERSION,
@@ -249,6 +259,7 @@ def agentic_update_proposal_template(
             "evidence_paths": [],
             "warnings": [],
         },
+        "route_promotion": route_promotion_section_template(generated_at=now),
     }
     return validate_update_proposal(proposal)
 
@@ -274,6 +285,9 @@ def validate_update_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
 
     normalized = deepcopy(proposal)
     normalized["run_contract"] = normalize_update_scope_contract(dict(proposal["run_contract"]))
+    normalized["route_promotion"] = normalize_route_promotion_section(
+        dict(proposal.get("route_promotion") or {}),
+    )
     _validate_discovery_result(normalized["discovery_result"])
     _validate_diff(normalized["diff"])
     _validate_validation_result(normalized["validation_result"])

@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from .common import app_data_dir, now_iso, read_json, write_json
-from .providers import default_profiles, get_provider_profile, resolve_provider_id
+from .providers import (
+    default_profiles,
+    execution_route_evidence_for_storage,
+    get_provider_profile,
+    resolve_execution_route,
+    resolve_provider_id,
+)
 
 
 PROFILE_TYPES = {"openai_api_key", "custom_provider"}
@@ -99,6 +105,7 @@ class ProfileService:
                 changed = True
         for profile_id, profile in list(existing.items()):
             normalized_profile, normalized_changed = self._apply_provider_defaults(dict(profile))
+            normalized_profile = self._sanitize_execution_route_evidence(normalized_profile)
             if normalized_changed or normalized_profile != profile:
                 existing[profile_id] = normalized_profile
                 changed = True
@@ -148,6 +155,7 @@ class ProfileService:
         }
         merged.setdefault("created_at", now_iso())
         merged, _ = self._apply_provider_defaults(merged)
+        merged = self._sanitize_execution_route_evidence(merged)
         merged.setdefault("secret_ref", None)
         existing[profile_id] = merged
         payload["profiles"] = sorted(existing.values(), key=lambda item: item["profile_id"])
@@ -225,6 +233,41 @@ class ProfileService:
         elif isinstance(value, list):
             for item in value:
                 self._assert_no_secret(item)
+
+    @staticmethod
+    def _sanitize_execution_route_evidence(profile: dict[str, Any]) -> dict[str, Any]:
+        """Persist profile-scoped proof only when it is exact and secret-free.
+
+        A profile can carry an exact proof for its selected model as a saved
+        compatibility path.  The proof is still model/endpoint/adapter-bound;
+        selecting a different model from the same profile makes it fail closed
+        in the route resolver.
+        """
+
+        sanitized = dict(profile)
+        evidence = sanitized.get("execution_route_evidence")
+        if not isinstance(evidence, dict):
+            sanitized.pop("execution_route_evidence", None)
+            return sanitized
+        provider_id = str(sanitized.get("provider_id") or "").strip()
+        native_model = str(sanitized.get("model") or "").strip()
+        model = {
+            **sanitized,
+            "id": f"{provider_id}/{native_model}" if provider_id and native_model else "",
+            "provider": provider_id,
+            "native_model": native_model,
+        }
+        try:
+            route = resolve_execution_route(model, provider=sanitized, evidence=evidence)
+        except (TypeError, ValueError):
+            sanitized.pop("execution_route_evidence", None)
+            return sanitized
+        persisted = execution_route_evidence_for_storage(dict(route.get("evidence") or {}))
+        if persisted is None:
+            sanitized.pop("execution_route_evidence", None)
+        else:
+            sanitized["execution_route_evidence"] = persisted
+        return sanitized
 
     def _default_profiles(self) -> list[dict[str, Any]]:
         created_at = now_iso()

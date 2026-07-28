@@ -71,14 +71,18 @@ class ReasoningPolicyNormalizationTests(unittest.TestCase):
 
             kimi = router.preview_payload(
                 {
-                    "model": "kimi/kimi-k2.7-code",
+                    "model": "kimi/kimi-k3",
                     "input": "hello",
                     "stream": False,
                     "reasoning": {"effort": "max"},
+                    "tool_choice": "required",
+                    "max_output_tokens": 4096,
                 }
             )
-            self.assertEqual(kimi["upstream_payload"]["thinking"], {"type": "enabled", "keep": "all"})
-            self.assertGreaterEqual(int(kimi["upstream_payload"]["max_tokens"]), 32768)
+            self.assertEqual(kimi["upstream_payload"]["reasoning_effort"], "max")
+            self.assertNotIn("thinking", kimi["upstream_payload"])
+            self.assertEqual(kimi["upstream_payload"]["tool_choice"], "required")
+            self.assertEqual(kimi["upstream_payload"]["max_completion_tokens"], 4096)
             self.assertTrue(any("normalized to 'xhigh'" in item for item in kimi["warnings"]))
 
             glm = router.preview_payload(
@@ -222,6 +226,46 @@ class ReasoningPolicyNormalizationTests(unittest.TestCase):
             )
             self.assertEqual(preview["upstream_payload"]["thinking"], {"type": "enabled"})
             self.assertEqual(preview["upstream_payload"]["tool_choice"], "auto")
+
+    def test_kimi_k3_maps_codex_effort_and_keeps_k2_thinking_fields_out(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            profiles = ProfileService(Path(temp) / "profiles.json")
+            router = RouterService(profiles, port=0)
+
+            low = router.preview_payload(
+                {
+                    "model": "kimi/kimi-k3",
+                    "input": "hello",
+                    "stream": False,
+                    "reasoning": {"effort": "low"},
+                    "temperature": 1.0,
+                    "top_p": 0.95,
+                    "n": 1,
+                }
+            )
+            self.assertEqual(low["upstream_payload"]["reasoning_effort"], "low")
+            self.assertNotIn("thinking", low["upstream_payload"])
+            self.assertNotIn("temperature", low["upstream_payload"])
+            self.assertNotIn("top_p", low["upstream_payload"])
+
+            with self.assertRaisesRegex(ValueError, "always-thinking"):
+                router.preview_payload(
+                    {
+                        "model": "kimi/kimi-k3",
+                        "input": "hello",
+                        "stream": False,
+                        "reasoning": {"effort": "off"},
+                    }
+                )
+            with self.assertRaisesRegex(ValueError, "top_p=0.95"):
+                router.preview_payload(
+                    {
+                        "model": "kimi/kimi-k3",
+                        "input": "hello",
+                        "stream": False,
+                        "top_p": 0.8,
+                    }
+                )
 
 
 if __name__ == "__main__":

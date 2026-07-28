@@ -18,6 +18,14 @@ from .artifacts import (
     validate_rollback_manifest,
 )
 from .contracts import assert_secret_free_agentic_update_payload, validate_update_proposal
+from .route_promotion import (
+    ROUTE_PROMOTION_CHANGE_TYPES,
+    route_promotion_apply_ledger,
+    route_promotion_records_from_proposal,
+    route_promotion_rollback_record,
+    route_promotion_storage_for_model,
+    validate_route_promotion_apply,
+)
 
 
 AGENTIC_UPDATE_APPLY_MANIFEST_SCHEMA_VERSION = "astrabridge-agentic-update-apply-manifest-v1"
@@ -26,6 +34,7 @@ AGENTIC_UPDATE_ROLLBACK_RESULT_SCHEMA_VERSION = "astrabridge-agentic-update-roll
 SAFE_APPLY_RISK_CLASSES = {"docs_only", "metadata_only"}
 APPLY_TRACK_PROVIDER_METADATA = "provider_metadata"
 APPLY_TRACK_CAPABILITY_ROUTES = "capability_routes"
+APPLY_TRACK_EXECUTION_ROUTES = "execution_routes"
 SUPPORTED_METADATA_CHANGE_TYPES = {
     "added_model",
     "changed_context_window",
@@ -40,6 +49,7 @@ SUPPORTED_CAPABILITY_ROUTE_CHANGE_TYPES = {
     "set_capability_route",
     "remove_capability_route",
 }
+SUPPORTED_EXECUTION_ROUTE_CHANGE_TYPES = set(ROUTE_PROMOTION_CHANGE_TYPES)
 
 
 def apply_journaled_proposal(
@@ -51,13 +61,18 @@ def apply_journaled_proposal(
     router_config_snapshot: dict[str, Any] | None = None,
     generated_catalog_snapshot: dict[str, Any] | None = None,
     isolated_state_root: str | Path | None = None,
+    allow_execution_route_changes: bool = False,
 ) -> dict[str, Any]:
     workspace = Path(workspace_root).resolve()
     layout = ensure_agentic_update_run_layout(workspace, run_id)
     validated_proposal = validate_update_proposal(proposal)
     _validate_manual_approval(approval)
-    track_plan = _plan_supported_apply_tracks(validated_proposal)
-    _validate_track_scoped_risk(validated_proposal, track_plan)
+    track_plan = _plan_supported_apply_tracks(validated_proposal, allow_execution_route_changes=allow_execution_route_changes)
+    _validate_track_scoped_risk(
+        validated_proposal,
+        track_plan,
+        allow_execution_route_changes=allow_execution_route_changes,
+    )
     _validate_proposal_rollback_contract(validated_proposal)
 
     state_root = _resolve_isolated_state_root(workspace, run_id, isolated_state_root)
@@ -96,6 +111,7 @@ def apply_journaled_proposal(
     router_after = deepcopy(router_before)
     models_lock_after = deepcopy(models_lock_before)
     applied_changes: list[dict[str, Any]] = []
+    route_applied_events: list[dict[str, Any]] = []
     try:
         if track_plan[APPLY_TRACK_PROVIDER_METADATA]:
             metadata_changes = _apply_metadata_changes(router_after, models_lock_after, validated_proposal)
@@ -117,6 +133,17 @@ def apply_journaled_proposal(
                 journal,
                 journal_path,
                 track_id=APPLY_TRACK_CAPABILITY_ROUTES,
+                stage="applied",
+            )
+        if track_plan[APPLY_TRACK_EXECUTION_ROUTES]:
+            route_changes, route_applied_events = _apply_execution_route_changes(router_after, validated_proposal)
+            for change in route_changes:
+                change["track_id"] = APPLY_TRACK_EXECUTION_ROUTES
+            applied_changes.extend(route_changes)
+            _advance_apply_track(
+                journal,
+                journal_path,
+                track_id=APPLY_TRACK_EXECUTION_ROUTES,
                 stage="applied",
             )
         write_json(router_path, router_after)
@@ -173,9 +200,21 @@ def apply_journaled_proposal(
         router_backup=router_backup,
         models_backup=models_backup,
         sources_backup=sources_backup,
+        has_execution_route_changes=bool(track_plan[APPLY_TRACK_EXECUTION_ROUTES]),
     )
     rollback_manifest_path = Path(layout["files"]["rollback_manifest"])
     write_json(rollback_manifest_path, rollback_manifest)
+
+    route_apply_ledger_path: Path | None = None
+    if track_plan[APPLY_TRACK_EXECUTION_ROUTES]:
+        route_apply_ledger_path = Path(layout["files"]["route_promotion_apply_ledger"])
+        route_ledger = route_promotion_apply_ledger(
+            run_id=run_id,
+            records=route_promotion_records_from_proposal(validated_proposal, only_diff_changes=True),
+            applied_events=route_applied_events,
+        )
+        assert_secret_free_agentic_update_payload(route_ledger, label="agentic_update_route_promotion_apply_ledger")
+        write_json(route_apply_ledger_path, route_ledger)
 
     for track_id in track_plan:
         if not track_plan[track_id]:
@@ -200,8 +239,26 @@ def apply_journaled_proposal(
 
     manifest_status = (
         "applied_metadata_only"
-        if track_plan[APPLY_TRACK_PROVIDER_METADATA] and not track_plan[APPLY_TRACK_CAPABILITY_ROUTES]
+        if track_plan[APPLY_TRACK_PROVIDER_METADATA]
+        and not track_plan[APPLY_TRACK_CAPABILITY_ROUTES]
+        and not track_plan[APPLY_TRACK_EXECUTION_ROUTES]
+        else "applied_route_promotion"
+        if track_plan[APPLY_TRACK_EXECUTION_ROUTES]
+        and not track_plan[APPLY_TRACK_PROVIDER_METADATA]
+        and not track_plan[APPLY_TRACK_CAPABILITY_ROUTES]
         else "applied_track_updates"
+    )
+    documented_metadata_staged = any(
+        _documented_metadata_change_is_safe(validated_proposal, change)
+        for change in list(dict(validated_proposal.get("diff") or {}).get("changes") or [])
+        if isinstance(change, dict)
+    )
+    documented_record_count = len(
+        [
+            record
+            for record in route_promotion_records_from_proposal(validated_proposal)
+            if str(record.get("action") or "") == "document"
+        ]
     )
     manifest = {
         "schema_version": AGENTIC_UPDATE_APPLY_MANIFEST_SCHEMA_VERSION,
@@ -242,6 +299,17 @@ def apply_journaled_proposal(
                     if track_plan[APPLY_TRACK_CAPABILITY_ROUTES]
                     else []
                 ),
+                *(
+                    _track_changed_paths(
+                        APPLY_TRACK_EXECUTION_ROUTES,
+                        router_path=router_path,
+                        models_lock_path=models_lock_path,
+                        sources_lock_path=sources_lock_path,
+                        workspace=workspace,
+                    )
+                    if track_plan[APPLY_TRACK_EXECUTION_ROUTES]
+                    else []
+                ),
             }
         ),
         "track_ids": [track_id for track_id, changes in track_plan.items() if changes],
@@ -260,12 +328,19 @@ def apply_journaled_proposal(
             if str(track.get("track_id") or "").strip()
         ],
         "rollback_manifest_path": str(rollback_manifest_path),
+        "route_promotion": {
+            "apply_ledger_path": str(route_apply_ledger_path) if route_apply_ledger_path else None,
+            "metadata_preserved": True,
+            "record_count": len(route_applied_events),
+            "documented_record_count": documented_record_count,
+            "authority_changed": bool(route_applied_events),
+        },
         "backup_paths": {
             "router_config": str(router_backup),
             "generated_models_lock": str(models_backup),
             "generated_sources_lock": str(sources_backup),
         },
-        "warnings": [],
+        "warnings": ["documented_metadata_staged_without_execution_route_authority"] if documented_metadata_staged else [],
     }
     assert_secret_free_agentic_update_payload(manifest, label="agentic_update_apply_manifest")
     write_json(Path(layout["files"]["apply_manifest"]), manifest)
@@ -290,6 +365,35 @@ def apply_metadata_only_proposal(
         router_config_snapshot=router_config_snapshot,
         generated_catalog_snapshot=generated_catalog_snapshot,
         isolated_state_root=isolated_state_root,
+    )
+
+
+def apply_execution_route_promotion_proposal(
+    *,
+    workspace_root: str | Path,
+    run_id: str,
+    proposal: dict[str, Any],
+    approval: dict[str, Any],
+    router_config_snapshot: dict[str, Any] | None = None,
+    generated_catalog_snapshot: dict[str, Any] | None = None,
+    isolated_state_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Apply an explicitly gated route lifecycle proposal in isolated state.
+
+    Unlike metadata-only apply, this path verifies the route-promotion gates
+    and then re-binds the proof to the current endpoint and adapter before any
+    evidence is persisted.  It never treats documentation as authority.
+    """
+
+    return apply_journaled_proposal(
+        workspace_root=workspace_root,
+        run_id=run_id,
+        proposal=proposal,
+        approval=approval,
+        router_config_snapshot=router_config_snapshot,
+        generated_catalog_snapshot=generated_catalog_snapshot,
+        isolated_state_root=isolated_state_root,
+        allow_execution_route_changes=True,
     )
 
 
@@ -342,6 +446,22 @@ def rollback_metadata_apply(
             "rollback/rollback-result.json",
         ],
     }
+    if APPLY_TRACK_EXECUTION_ROUTES in set(manifest.get("track_ids") or []):
+        ledger_path = Path(layout["files"]["route_promotion_apply_ledger"])
+        ledger = read_json(ledger_path, {}) if ledger_path.exists() else {}
+        route_rollback = route_promotion_rollback_record(
+            run_id=run_id,
+            apply_id=str(manifest.get("apply_id") or "") or None,
+            ledger=ledger if isinstance(ledger, dict) else None,
+        )
+        rollback_record_path = Path(layout["files"]["route_promotion_rollback"])
+        assert_secret_free_agentic_update_payload(route_rollback, label="agentic_update_route_promotion_rollback")
+        write_json(rollback_record_path, route_rollback)
+        result["route_promotion"] = {
+            "rollback_record_path": str(rollback_record_path),
+            "metadata_preserved": True,
+            "record_ids": list(route_rollback.get("record_ids") or []),
+        }
     assert_secret_free_agentic_update_payload(result, label="agentic_update_rollback_result")
     write_json(result_path, result)
     return result
@@ -357,22 +477,82 @@ def _validate_manual_approval(approval: dict[str, Any] | None) -> None:
 def _validate_track_scoped_risk(
     proposal: dict[str, Any],
     track_plan: dict[str, list[dict[str, Any]]],
+    *,
+    allow_execution_route_changes: bool,
 ) -> None:
     diff = dict(proposal.get("diff") or {})
     risk = str(diff.get("risk_class") or "blocked_manual_review")
-    if risk not in SAFE_APPLY_RISK_CLASSES:
+    non_route_tracks = any(
+        track_plan[track_id]
+        for track_id in (APPLY_TRACK_PROVIDER_METADATA, APPLY_TRACK_CAPABILITY_ROUTES)
+    )
+    non_route_changes = [
+        dict(change)
+        for change in list(diff.get("changes") or [])
+        if isinstance(change, dict) and str(change.get("change_type") or "") not in SUPPORTED_EXECUTION_ROUTE_CHANGE_TYPES
+    ]
+    documented_metadata_only = bool(non_route_changes) and all(
+        _documented_metadata_change_is_safe(proposal, change) for change in non_route_changes
+    )
+    if (
+        non_route_tracks
+        and risk not in SAFE_APPLY_RISK_CLASSES
+        and not track_plan[APPLY_TRACK_EXECUTION_ROUTES]
+        and not documented_metadata_only
+    ):
         raise ValueError(f"Metadata-only apply refuses proposal risk_class={risk}.")
     for change in list(diff.get("changes") or []):
         if not isinstance(change, dict):
             raise ValueError("Proposal diff changes must be objects.")
         change_risk = str(change.get("risk_class") or risk)
         change_type = str(change.get("change_type") or "")
-        if change_risk not in SAFE_APPLY_RISK_CLASSES:
+        if change_type in SUPPORTED_EXECUTION_ROUTE_CHANGE_TYPES:
+            if not allow_execution_route_changes:
+                raise ValueError("Metadata-only apply does not support execution-route lifecycle changes.")
+            continue
+        if change_risk not in SAFE_APPLY_RISK_CLASSES and not _documented_metadata_change_is_safe(proposal, change):
             raise ValueError(f"Metadata-only apply refuses change risk_class={change_risk}.")
         if change_type not in SUPPORTED_METADATA_CHANGE_TYPES and change_type not in SUPPORTED_CAPABILITY_ROUTE_CHANGE_TYPES:
             raise ValueError(f"Metadata-only apply does not support change_type={change_type}.")
+    if track_plan[APPLY_TRACK_EXECUTION_ROUTES]:
+        validate_route_promotion_apply(
+            proposal,
+            run_contract=dict(proposal.get("run_contract") or {}),
+        )
     if not any(track_plan.values()):
-        raise ValueError("No supported provider metadata or capability-route changes are available for apply.")
+        raise ValueError("No supported provider metadata, capability-route, or execution-route changes are available for apply.")
+
+
+def _documented_metadata_change_is_safe(proposal: dict[str, Any], change: dict[str, Any]) -> bool:
+    """Permit factual catalog intake without treating it as route authority.
+
+    New documented models may carry long-context, modality, or reasoning facts
+    that still need provider smoke before use.  The catalog record is safe to
+    stage because the metadata writer never stores route evidence and marks
+    context as a UI hint.  Existing-model behavior remains conservative.
+    """
+
+    if str(change.get("change_type") or "") != "added_model":
+        return False
+    details = dict(change.get("details") or {})
+    if details.get("documented_metadata_apply_eligible") is not True:
+        return False
+    if str(details.get("documented_metadata_apply_risk") or "") != str(change.get("risk_class") or ""):
+        return False
+    model_id = str(change.get("model_id") or change.get("target") or "").strip()
+    if not model_id:
+        return False
+    try:
+        records = route_promotion_records_from_proposal(proposal)
+    except (TypeError, ValueError):
+        return False
+    return any(
+        str(record.get("model_id") or "") == model_id
+        and str(record.get("action") or "") == "document"
+        and str(record.get("target_state") or "") == "documented"
+        and not record.get("route_evidence")
+        for record in records
+    )
 
 
 def _validate_proposal_rollback_contract(proposal: dict[str, Any]) -> None:
@@ -542,6 +722,71 @@ def _apply_capability_route_changes(
     return applied
 
 
+def _apply_execution_route_changes(
+    router_payload: dict[str, Any],
+    proposal: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    records = route_promotion_records_from_proposal(proposal, only_diff_changes=True)
+    models = {
+        str(item.get("id") or ""): dict(item)
+        for item in list(router_payload.get("models") or [])
+        if isinstance(item, dict)
+    }
+    providers = {
+        str(item.get("id") or item.get("provider_id") or ""): dict(item)
+        for item in list(router_payload.get("providers") or [])
+        if isinstance(item, dict)
+    }
+    change_by_record_id = {
+        str(dict(change.get("details") or {}).get("route_promotion_record_id") or ""): dict(change)
+        for change in list(dict(proposal.get("diff") or {}).get("changes") or [])
+        if isinstance(change, dict) and str(change.get("change_type") or "") in SUPPORTED_EXECUTION_ROUTE_CHANGE_TYPES
+    }
+    applied_changes: list[dict[str, Any]] = []
+    applied_events: list[dict[str, Any]] = []
+    for record in records:
+        model_id = str(record.get("model_id") or "").strip()
+        model = dict(models.get(model_id) or {})
+        if not model:
+            raise ValueError(f"Execution-route apply requires an existing model: {model_id}")
+        provider_id = str(record.get("provider_id") or model.get("provider") or "").strip()
+        provider = dict(providers.get(provider_id) or {})
+        if not provider:
+            raise ValueError(f"Execution-route apply requires configured provider: {provider_id}")
+        previous_evidence = deepcopy(model.get("execution_route_evidence")) if isinstance(model.get("execution_route_evidence"), dict) else None
+        stored_evidence = route_promotion_storage_for_model(record, model=model, provider=provider)
+        if stored_evidence is None:
+            model.pop("execution_route_evidence", None)
+        else:
+            model["execution_route_evidence"] = stored_evidence
+        model["updated_at"] = now_iso()
+        models[model_id] = model
+        change = change_by_record_id.get(str(record.get("record_id") or ""), {})
+        applied_changes.append(
+            {
+                "change_id": change.get("change_id"),
+                "change_type": change.get("change_type"),
+                "model_id": model_id,
+                "risk_class": change.get("risk_class"),
+                "route_promotion_record_id": record.get("record_id"),
+            }
+        )
+        applied_events.append(
+            {
+                "record_id": record.get("record_id"),
+                "action": record.get("action"),
+                "model_id": model_id,
+                "previous_state": record.get("previous_state"),
+                "target_state": record.get("target_state"),
+                "route_subject": deepcopy(record.get("route_subject") or {}),
+                "previous_evidence": previous_evidence,
+                "applied_evidence": stored_evidence,
+            }
+        )
+    router_payload["models"] = sorted(models.values(), key=lambda item: str(item.get("id") or ""))
+    return applied_changes, applied_events
+
+
 def _candidate_index(proposal: dict[str, Any]) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
     for item in list((proposal.get("discovery_result") or {}).get("findings") or []):
@@ -648,6 +893,7 @@ def _build_apply_rollback_manifest(
     router_backup: Path,
     models_backup: Path,
     sources_backup: Path,
+    has_execution_route_changes: bool,
 ) -> dict[str, Any]:
     manifest = rollback_manifest_template(run_id, run_contract)
     records = [
@@ -673,6 +919,16 @@ def _build_apply_rollback_manifest(
                 "backup_path": record["backup_path"],
             }
         )
+    if has_execution_route_changes:
+        manifest["rollback_targets"]["execution_routes"].append(
+            {
+                "target_id": "restore-execution-route-evidence",
+                "workspace_path": _workspace_relative(workspace, router_path),
+                "backup_path": _run_relative(workspace, run_id, router_backup),
+                "apply_id": apply_id,
+                "rollback_step_id": "restore-router-config",
+            }
+        )
     manifest["evidence_paths"] = [
         "apply/apply-manifest.json",
         "rollback/rollback-manifest.json",
@@ -680,13 +936,20 @@ def _build_apply_rollback_manifest(
         _run_relative(workspace, run_id, models_backup),
         _run_relative(workspace, run_id, sources_backup),
     ]
+    if has_execution_route_changes:
+        manifest["evidence_paths"].append("route-promotion/route-promotion-apply-ledger.json")
     return validate_rollback_manifest(manifest, workspace_root=workspace)
 
 
-def _plan_supported_apply_tracks(proposal: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+def _plan_supported_apply_tracks(
+    proposal: dict[str, Any],
+    *,
+    allow_execution_route_changes: bool,
+) -> dict[str, list[dict[str, Any]]]:
     tracks = {
         APPLY_TRACK_PROVIDER_METADATA: [],
         APPLY_TRACK_CAPABILITY_ROUTES: [],
+        APPLY_TRACK_EXECUTION_ROUTES: [],
     }
     for change in list(dict(proposal.get("diff") or {}).get("changes") or []):
         if not isinstance(change, dict):
@@ -698,8 +961,13 @@ def _plan_supported_apply_tracks(proposal: dict[str, Any]) -> dict[str, list[dic
         if change_type in SUPPORTED_CAPABILITY_ROUTE_CHANGE_TYPES:
             tracks[APPLY_TRACK_CAPABILITY_ROUTES].append(dict(change))
             continue
+        if change_type in SUPPORTED_EXECUTION_ROUTE_CHANGE_TYPES:
+            if not allow_execution_route_changes:
+                raise ValueError("Apply only supports execution-route changes through apply_execution_route_promotion_proposal.")
+            tracks[APPLY_TRACK_EXECUTION_ROUTES].append(dict(change))
+            continue
         raise ValueError(
-            "Apply only supports provider metadata and capability-route changes; "
+            "Apply only supports provider metadata, capability-route, and explicit execution-route changes; "
             f"unsupported change_type={change_type or '<missing>'}."
         )
     return tracks
@@ -718,6 +986,18 @@ def _track_state_snapshots(
         },
         APPLY_TRACK_CAPABILITY_ROUTES: {
             "capability_routes": dict(router_payload.get("capability_routes") or {}),
+        },
+        APPLY_TRACK_EXECUTION_ROUTES: {
+            "route_evidence": [
+                {
+                    "model_id": item.get("id"),
+                    "execution_route_evidence": deepcopy(item.get("execution_route_evidence"))
+                    if isinstance(item.get("execution_route_evidence"), dict)
+                    else None,
+                }
+                for item in list(router_payload.get("models") or [])
+                if isinstance(item, dict)
+            ],
         },
     }
 
@@ -870,6 +1150,10 @@ def _evaluate_track_health(
         verdicts[APPLY_TRACK_CAPABILITY_ROUTES] = (
             "pass" if _capability_route_changes_match_expected(router_after, proposal) else "fail"
         )
+    if track_plan[APPLY_TRACK_EXECUTION_ROUTES]:
+        verdicts[APPLY_TRACK_EXECUTION_ROUTES] = (
+            "pass" if _execution_route_changes_match_expected(router_after, proposal) else "fail"
+        )
     return verdicts
 
 
@@ -967,6 +1251,47 @@ def _capability_route_changes_match_expected(
     return True
 
 
+def _execution_route_changes_match_expected(
+    router_payload: dict[str, Any],
+    proposal: dict[str, Any],
+) -> bool:
+    models = {
+        str(item.get("id") or ""): dict(item)
+        for item in list(router_payload.get("models") or [])
+        if isinstance(item, dict)
+    }
+    try:
+        records = route_promotion_records_from_proposal(proposal, only_diff_changes=True)
+    except (TypeError, ValueError):
+        return False
+    for record in records:
+        model = models.get(str(record.get("model_id") or ""))
+        if not model:
+            return False
+        target_state = str(record.get("target_state") or "documented")
+        actual = model.get("execution_route_evidence")
+        if target_state == "documented":
+            if isinstance(actual, dict):
+                return False
+            continue
+        expected = dict(record.get("route_evidence") or {})
+        if not isinstance(actual, dict) or not expected:
+            return False
+        for field in (
+            "schema_version",
+            "state",
+            "subject",
+            "source_provenance",
+            "evidence_refs",
+            "validation_scope",
+            "verified_at",
+            "expires_at",
+        ):
+            if actual.get(field) != expected.get(field):
+                return False
+    return True
+
+
 def _track_changed_paths(
     track_id: str,
     *,
@@ -982,6 +1307,8 @@ def _track_changed_paths(
             _workspace_relative(workspace, sources_lock_path),
         ]
     if track_id == APPLY_TRACK_CAPABILITY_ROUTES:
+        return [_workspace_relative(workspace, router_path)]
+    if track_id == APPLY_TRACK_EXECUTION_ROUTES:
         return [_workspace_relative(workspace, router_path)]
     raise ValueError(f"Unsupported apply track: {track_id}")
 
@@ -1005,6 +1332,11 @@ def _track_rollback_target(
     elif track_id == APPLY_TRACK_CAPABILITY_ROUTES:
         backup_paths = {
             "router_config": _run_relative(workspace, run_id, router_backup),
+        }
+    elif track_id == APPLY_TRACK_EXECUTION_ROUTES:
+        backup_paths = {
+            "router_config": _run_relative(workspace, run_id, router_backup),
+            "route_promotion_ledger": "route-promotion/route-promotion-apply-ledger.json",
         }
     else:
         raise ValueError(f"Unsupported apply track: {track_id}")
